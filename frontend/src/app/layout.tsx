@@ -39,21 +39,21 @@ const shouldTrackLocalhost = process.env.NEXT_PUBLIC_DATAFAST_ALLOW_LOCALHOST ==
 const isDataFastEnabled = Boolean(dataFastWebsiteId && dataFastDomain);
 
 export const metadata: Metadata = {
-  title: "SupoClip",
+  title: "ViraClip",
   description: "Turn long videos into viral-ready shorts.",
   metadataBase: getMetadataBase(),
   icons: {
     icon: "/icon.png",
   },
   openGraph: {
-    title: "SupoClip",
+    title: "ViraClip",
     description: "Turn long videos into viral-ready shorts.",
-    siteName: "SupoClip",
+    siteName: "ViraClip",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "SupoClip",
+    title: "ViraClip",
     description: "Turn long videos into viral-ready shorts.",
   },
 };

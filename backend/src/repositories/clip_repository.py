@@ -32,6 +32,18 @@ class ClipRepository:
         value_score: int = 0,
         shareability_score: int = 0,
         hook_type: Optional[str] = None,
+        translated_text: Optional[str] = None,
+        multi_angle_metadata: Optional[Dict[str, Any]] = None,
+        # P3: social copy fields
+        social_title: Optional[str] = None,
+        social_description: Optional[str] = None,
+        suggested_hashtags: Optional[List[str]] = None,
+        # P4: thumbnail
+        thumbnail_filename: Optional[str] = None,
+        # B-3: face detection flag
+        face_detected: Optional[bool] = None,
+        # P2.4: hook preview score
+        hook_preview_score: int = 0,
     ) -> str:
         """Create a new clip record and return its ID."""
         try:
@@ -41,11 +53,21 @@ class ClipRepository:
                     (task_id, filename, file_path, start_time, end_time, duration,
                      text, relevance_score, reasoning, clip_order,
                      virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                     translated_text,
+                     multi_angle_metadata,
+                     social_title, social_description, suggested_hashtags,
+                     thumbnail_filename, face_detected,
+                     hook_preview_score,
                      created_at)
                     VALUES
                     (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
                      :text, :relevance_score, :reasoning, :clip_order,
                      :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
+                     :translated_text,
+                     :multi_angle_metadata,
+                     :social_title, :social_description, :suggested_hashtags,
+                     :thumbnail_filename, :face_detected,
+                     :hook_preview_score,
                      NOW())
                     RETURNING id
                 """),
@@ -66,6 +88,14 @@ class ClipRepository:
                     "value_score": value_score,
                     "shareability_score": shareability_score,
                     "hook_type": hook_type,
+                    "translated_text": translated_text,
+                    "multi_angle_metadata": multi_angle_metadata,
+                    "social_title": social_title,
+                    "social_description": social_description,
+                    "suggested_hashtags": suggested_hashtags,
+                    "thumbnail_filename": thumbnail_filename,
+                    "face_detected": face_detected,
+                    "hook_preview_score": hook_preview_score,
                 },
             )
         except Exception:
@@ -107,7 +137,10 @@ class ClipRepository:
                 sa_text("""
                     SELECT id, filename, file_path, start_time, end_time, duration,
                            text, relevance_score, reasoning, clip_order, created_at,
-                           virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type
+                           virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                           translated_text,
+                           social_title, social_description, suggested_hashtags,
+                           thumbnail_filename, face_detected, hook_preview_score
                     FROM generated_clips
                     WHERE task_id = :task_id
                     ORDER BY clip_order ASC
@@ -129,26 +162,36 @@ class ClipRepository:
 
         clips = []
         for row in result.fetchall():
+            row_dict = row._asdict() if hasattr(row, "_asdict") else dict(row)
+            thumb = row_dict.get("thumbnail_filename")
             clips.append(
                 {
-                    "id": row.id,
-                    "filename": row.filename,
-                    "file_path": row.file_path,
-                    "start_time": row.start_time,
-                    "end_time": row.end_time,
-                    "duration": row.duration,
-                    "text": row.text,
-                    "relevance_score": row.relevance_score,
-                    "reasoning": row.reasoning,
-                    "clip_order": row.clip_order,
-                    "created_at": row.created_at.isoformat(),
-                    "video_url": f"/clips/{row.filename}",
-                    "virality_score": row.virality_score or 0,
-                    "hook_score": row.hook_score or 0,
-                    "engagement_score": row.engagement_score or 0,
-                    "value_score": row.value_score or 0,
-                    "shareability_score": row.shareability_score or 0,
-                    "hook_type": row.hook_type,
+                    "id": row_dict["id"],
+                    "filename": row_dict["filename"],
+                    "file_path": row_dict["file_path"],
+                    "start_time": row_dict["start_time"],
+                    "end_time": row_dict["end_time"],
+                    "duration": row_dict["duration"],
+                    "text": row_dict["text"],
+                    "relevance_score": row_dict["relevance_score"],
+                    "reasoning": row_dict["reasoning"],
+                    "clip_order": row_dict["clip_order"],
+                    "created_at": row_dict["created_at"].isoformat(),
+                    "video_url": f"/clips/{row_dict['filename']}",
+                    "virality_score": row_dict.get("virality_score") or 0,
+                    "hook_score": row_dict.get("hook_score") or 0,
+                    "engagement_score": row_dict.get("engagement_score") or 0,
+                    "value_score": row_dict.get("value_score") or 0,
+                    "shareability_score": row_dict.get("shareability_score") or 0,
+                    "hook_type": row_dict.get("hook_type"),
+                    "translated_text": row_dict.get("translated_text"),
+                    "social_title": row_dict.get("social_title"),
+                    "social_description": row_dict.get("social_description"),
+                    "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
+                    "thumbnail_filename": thumb,
+                    "thumbnail_url": f"/clips/{thumb}" if thumb else None,
+                    "face_detected": row_dict.get("face_detected"),
+                    "hook_preview_score": row_dict.get("hook_preview_score") or 0,
                 }
             )
 
@@ -199,6 +242,9 @@ class ClipRepository:
                     SELECT id, task_id, filename, file_path, start_time, end_time, duration,
                            text, relevance_score, reasoning, clip_order,
                            virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
+                           translated_text,
+                           social_title, social_description, suggested_hashtags,
+                           thumbnail_filename, face_detected, hook_preview_score,
                            created_at
                     FROM generated_clips
                     WHERE id = :clip_id
@@ -223,26 +269,36 @@ class ClipRepository:
         if not row:
             return None
 
+        row_dict = row._asdict() if hasattr(row, "_asdict") else dict(row)
+        thumb = row_dict.get("thumbnail_filename")
         return {
-            "id": row.id,
-            "task_id": row.task_id,
-            "filename": row.filename,
-            "file_path": row.file_path,
-            "start_time": row.start_time,
-            "end_time": row.end_time,
-            "duration": row.duration,
-            "text": row.text,
-            "relevance_score": row.relevance_score,
-            "reasoning": row.reasoning,
-            "clip_order": row.clip_order,
-            "virality_score": row.virality_score or 0,
-            "hook_score": row.hook_score or 0,
-            "engagement_score": row.engagement_score or 0,
-            "value_score": row.value_score or 0,
-            "shareability_score": row.shareability_score or 0,
-            "hook_type": row.hook_type,
-            "created_at": row.created_at.isoformat(),
-            "video_url": f"/clips/{row.filename}",
+            "id": row_dict["id"],
+            "task_id": row_dict["task_id"],
+            "filename": row_dict["filename"],
+            "file_path": row_dict["file_path"],
+            "start_time": row_dict["start_time"],
+            "end_time": row_dict["end_time"],
+            "duration": row_dict["duration"],
+            "text": row_dict["text"],
+            "relevance_score": row_dict["relevance_score"],
+            "reasoning": row_dict["reasoning"],
+            "clip_order": row_dict["clip_order"],
+            "virality_score": row_dict.get("virality_score") or 0,
+            "hook_score": row_dict.get("hook_score") or 0,
+            "engagement_score": row_dict.get("engagement_score") or 0,
+            "value_score": row_dict.get("value_score") or 0,
+            "shareability_score": row_dict.get("shareability_score") or 0,
+            "hook_type": row_dict.get("hook_type"),
+            "translated_text": row_dict.get("translated_text"),
+            "social_title": row_dict.get("social_title"),
+            "social_description": row_dict.get("social_description"),
+            "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
+            "thumbnail_filename": thumb,
+            "thumbnail_url": f"/clips/{thumb}" if thumb else None,
+            "face_detected": row_dict.get("face_detected"),
+            "hook_preview_score": row_dict.get("hook_preview_score") or 0,
+            "created_at": row_dict["created_at"].isoformat(),
+            "video_url": f"/clips/{row_dict['filename']}",
         }
 
     @staticmethod

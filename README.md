@@ -3,16 +3,16 @@
 ... because good video clips shouldn't cost a fortune or come with ugly watermarks.
 
 <p align="center">
-  <a href="https://www.supoclip.com">
-    <img src="assets/banner.png" alt="SupoClip Banner" width="100%" />
+  <a href="https://www.viraclip.com">
+    <img src="assets/banner.png" alt="ViraClip Banner" width="100%" />
   </a>
 </p>
 
-OpusClip charges $15-29/month and slaps watermarks on every free video. SupoClip gives you the same AI-powered video clipping capabilities - completely free, completely open source, and completely watermark-free, while still providing you with a hosted version, that doesn't cost the same amount as your mortgage.
+OpusClip charges $15-29/month and slaps watermarks on every free video. ViraClip gives you the same AI-powered video clipping capabilities - completely free, completely open source, and completely watermark-free, while still providing you with a hosted version, that doesn't cost the same amount as your mortgage.
 
-> For the hosted version, sign up for the waitlist here: [SupoClip Hosted](https://www.supoclip.com)
+> For the hosted version, sign up for the waitlist here: [ViraClip Hosted](https://www.viraclip.com)
 
-## Why SupoClip Exists
+## Why ViraClip Exists
 
 ### The OpusClip Problem
 
@@ -32,9 +32,9 @@ OpusClip is undeniably powerful. It's an AI video clipping tool that can turn lo
 - **Processing limits**: Even paid plans have strict minute limits
 - **Vendor lock-in**: Your content and workflows are tied to their platform
 
-### The SupoClip Solution
+### The ViraClip Solution
 
-SupoClip provides the same core functionality without the financial burden:
+ViraClip provides the same core functionality without the financial burden:
 
 → ✅ **Completely Free** - No monthly fees, no processing limits
 

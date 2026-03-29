@@ -7,3 +7,12 @@ temp/
 .env
 *.m4a
 frontend/e2e/.seed.json
+
+# Internal Claude memory and tooling — not part of the project
+.claude/
+
+# Log files generated at runtime
+worker_logs.txt
+worker_progress.txt
+backend/worker_logs.txt
+backend/worker_progress.txt

@@ -31,7 +31,7 @@ import {
 } from "lucide-react";
 import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
 
-const HOSTED_APP_URL = "https://supoclip.com";
+const HOSTED_APP_URL = "https://viraclip.com";
 
 function ScrollReveal({
   children,
@@ -97,21 +97,15 @@ const FEATURES = [
   },
   {
     icon: Film,
-    title: "B-Roll Overlays",
+    title: "B-Roll Auto-Injection",
     description:
-      "Automatically source and overlay relevant stock footage from Pexels.",
+      "Automatically source and overlay 9:16 portrait stock footage from Pexels based on AI context.",
   },
   {
-    icon: Sparkles,
-    title: "Caption Templates",
+    icon: Zap,
+    title: "Viral Audio Engine",
     description:
-      "Multiple animation styles and font presets to match your brand.",
-  },
-  {
-    icon: MonitorPlay,
-    title: "Platform Export",
-    description:
-      "One-click presets for TikTok, Reels, and Shorts with optimized encoding.",
+      "Auto-ducking background music and subtitle-synced sound effects for maximum impact.",
   },
 ];
 
@@ -137,7 +131,7 @@ function getPlans() {
         "Full source code access",
       ],
       cta: "View on GitHub",
-      ctaHref: "https://github.com/FujiwaraChoki/supoclip",
+      ctaHref: "https://github.com/FujiwaraChoki/viraclip",
       highlighted: false,
       isUnlimited: false,
     },
@@ -212,7 +206,7 @@ export default function LandingPage() {
           <Link href="/" className="flex items-center gap-2.5 group">
             <Image
               src="/logo.png"
-              alt="SupoClip"
+              alt="ViraClip"
               width={24}
               height={24}
               className="rounded-lg transition-transform group-hover:scale-105"
@@ -224,7 +218,7 @@ export default function LandingPage() {
                   "var(--font-syne), var(--font-geist-sans), system-ui",
               }}
             >
-              SupoClip
+              ViraClip
             </span>
           </Link>
 
@@ -382,9 +376,9 @@ export default function LandingPage() {
                   animation: "landing-fade-in-up 0.6s ease-out 0.1s both",
                 }}
               >
-                From long video
+                The Elite Engine
                 <br />
-                to viral clips
+                for Viral Clips
               </h1>
 
               <p
@@ -393,9 +387,8 @@ export default function LandingPage() {
                   animation: "landing-fade-in-up 0.6s ease-out 0.2s both",
                 }}
               >
-                AI-powered clipping that transcribes, scores virality, crops for
-                vertical, adds word-synced captions, and exports platform-ready
-                shorts.
+                Elite-tier clipping that transcribes, scores virality, crops for
+                vertical, adds word-synced captions, and injects AI-driven B-roll & SFX.
               </p>
 
               <div
@@ -420,7 +413,7 @@ export default function LandingPage() {
                   </a>
                 )}
                 <a
-                  href="https://github.com/FujiwaraChoki/supoclip"
+                  href="https://github.com/FujiwaraChoki/viraclip"
                   target="_blank"
                   rel="noopener noreferrer"
                 >
@@ -791,7 +784,7 @@ export default function LandingPage() {
                   <div>
                     <span className="opacity-50">$</span>{" "}
                     cd{" "}
-                    <span className="opacity-40">supoclip</span>
+                    <span className="opacity-40">viraclip</span>
                   </div>
                   <div>
                     <span className="opacity-50">$</span>{" "}
@@ -801,7 +794,7 @@ export default function LandingPage() {
 
                 <div className="flex flex-wrap gap-3 mt-6">
                   <a
-                    href="https://github.com/FujiwaraChoki/supoclip"
+                    href="https://github.com/FujiwaraChoki/viraclip"
                     target="_blank"
                     rel="noopener noreferrer"
                   >
@@ -882,7 +875,7 @@ export default function LandingPage() {
               className="text-sm font-semibold"
               style={{ fontFamily: "var(--font-syne), system-ui" }}
             >
-              SupoClip
+              ViraClip
             </span>
           </div>
           <div className="flex items-center gap-6 text-xs text-muted-foreground">

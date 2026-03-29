@@ -3,9 +3,10 @@ Task service - orchestrates task creation and processing workflow.
 """
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Dict, Any, Optional, Callable
+from typing import Dict, Any, Optional, Callable, List, Tuple
 import logging
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import hashlib
@@ -32,6 +33,49 @@ from ..clip_editor import (
 from ..video_utils import parse_timestamp_to_seconds
 
 logger = logging.getLogger(__name__)
+
+
+def _build_hook_title(segment: Dict[str, Any]) -> Optional[str]:
+    """
+    Generate a concise hook title overlay for a clip.
+
+    Priority order:
+    1. AI-generated suggested_title (if present)
+    2. First 4-6 words of the segment text (short enough to read in 3s)
+    3. None (no overlay) — avoids showing raw hook_type strings like "QUESTION"
+    """
+    # 1. Explicit suggested title from AI (rare but highest quality)
+    if segment.get("suggested_title"):
+        raw = segment["suggested_title"].strip()
+        return raw[:60] if raw else None
+
+    # 2. Derive from segment text — take first punchy phrase
+    text = (segment.get("text") or "").strip()
+    if not text:
+        return None
+
+    # Remove filler words from start
+    filler_starts = {"uh", "um", "like", "so", "and", "but", "well", "okay", "ok", "right", "you know"}
+    words = text.split()
+    while words and words[0].lower().strip(".,!?") in filler_starts:
+        words = words[1:]
+
+    if not words:
+        return None
+
+    # Take first 5 words max, stop at natural punctuation
+    result_words = []
+    for w in words[:6]:
+        result_words.append(w)
+        if any(w.endswith(p) for p in [".", "!", "?", ","]):
+            break
+
+    title = " ".join(result_words).strip(".,")
+    # Only show if it's meaningful (at least 2 words, not too long)
+    if len(result_words) >= 2 and len(title) <= 50:
+        return title
+
+    return None
 
 
 class TaskService:
@@ -62,12 +106,16 @@ class TaskService:
         if not created_at or not updated_at:
             return False
 
-        now = (
-            datetime.now(updated_at.tzinfo)
-            if getattr(updated_at, "tzinfo", None)
-            else datetime.utcnow()
-        )
-        age_seconds = (now - updated_at).total_seconds()
+        # Always compare in UTC to avoid timezone-naive vs timezone-aware issues.
+        # Note: datetime.utcnow() is deprecated in Python 3.12+; use datetime.now(timezone.utc)
+        now_utc = datetime.now(timezone.utc)
+        if getattr(updated_at, "tzinfo", None) is not None:
+            updated_utc = updated_at.astimezone(timezone.utc)
+        else:
+            # Assume naive datetimes are UTC (DB convention)
+            updated_utc = updated_at.replace(tzinfo=timezone.utc)
+
+        age_seconds = (now_utc - updated_utc).total_seconds()
         return age_seconds >= self.config.queued_task_timeout_seconds
 
     async def create_task_with_source(
@@ -81,6 +129,12 @@ class TaskService:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        target_language: str = "eng",
+        auto_center_face: bool = False,
+        eye_contact_correction: bool = False,
+        split_screen: bool = False,
+        url_secondary: Optional[str] = None,
+        batch_id: Optional[str] = None,          # P3.4: batch group identifier
     ) -> str:
         """
         Create a new task with associated source.
@@ -117,10 +171,53 @@ class TaskService:
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            target_language=target_language,
+            auto_center_face=auto_center_face,
+            eye_contact_correction=eye_contact_correction,
+            split_screen=split_screen,
+            batch_id=batch_id,                  # P3.4: batch group
         )
 
         logger.info(f"Created task {task_id} for user {user_id}")
         return task_id
+
+    async def create_task(
+        self,
+        user_id: str,
+        source: str,
+        font_family: str = "TikTokSans-Regular",
+        font_size: int = 24,
+        font_color: str = "#FFFFFF",
+        caption_template: str = "default",
+        include_broll: bool = False,
+        processing_mode: str = "fast",
+        output_format: str = "vertical",
+        add_subtitles: bool = True,
+        target_language: str = "eng",
+        auto_center_face: bool = False,
+        eye_contact_correction: bool = False,
+        split_screen: bool = False,
+        target_platform: str = "all",
+        batch_id: Optional[str] = None,
+    ) -> str:
+        """
+        P3.4: Thin wrapper around create_task_with_source for batch usage.
+        """
+        return await self.create_task_with_source(
+            user_id=user_id,
+            url=source,
+            font_family=font_family,
+            font_size=font_size,
+            font_color=font_color,
+            caption_template=caption_template,
+            include_broll=include_broll,
+            processing_mode=processing_mode,
+            target_language=target_language,
+            auto_center_face=auto_center_face,
+            eye_contact_correction=eye_contact_correction,
+            split_screen=split_screen,
+            batch_id=batch_id,
+        )
 
     async def process_task(
         self,
@@ -134,9 +231,17 @@ class TaskService:
         processing_mode: str = "fast",
         output_format: str = "vertical",
         add_subtitles: bool = True,
+        auto_center_face: bool = False,
+        eye_contact_correction: bool = False,
+        include_broll: bool = False,
+        split_screen: bool = False,
+        target_platform: str = "all",
+        url_secondary: Optional[str] = None,
+        target_language: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
+        generate_ab_variants: bool = False,    # P3.5: also render a B variant per clip
     ) -> Dict[str, Any]:
         """
         Process a task: download video, analyze, create clips.
@@ -144,7 +249,7 @@ class TaskService:
         """
         try:
             logger.info(f"Starting processing for task {task_id}")
-            started_at = datetime.utcnow()
+            started_at = datetime.now(timezone.utc)
             stage_timings: Dict[str, float] = {}
             cache_key = self._build_cache_key(url, source_type, processing_mode)
 
@@ -163,6 +268,9 @@ class TaskService:
                 started_at=started_at,
                 cache_hit=cache_hit,
             )
+
+            # Clear any clips from previous failed/retried runs to avoid duplicates
+            await self.clip_repo.delete_clips_by_task(self.db, task_id)
 
             # Update status to processing
             await self.task_repo.update_task_status(
@@ -200,6 +308,10 @@ class TaskService:
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                include_broll=include_broll,
+                split_screen=split_screen,
+                target_platform=target_platform,
+                url_secondary=url_secondary,
                 cached_transcript=cached_transcript,
                 cached_analysis_json=cached_analysis_json,
                 progress_callback=update_progress,
@@ -225,40 +337,140 @@ class TaskService:
             clips_output_dir = Path(self.config.temp_dir) / "clips"
             clips_output_dir.mkdir(parents=True, exist_ok=True)
 
-            clip_ids = []
+            clip_ids: List[str] = []
             render_start = perf_counter()
+            clip_render_times: Dict[int, float] = {}  # per-clip timing
+            failed_clips: List[Dict[str, Any]] = []   # track failed clips with reason
 
-            for i, segment in enumerate(segments_to_render):
-                # Check cancellation
-                if should_cancel and await should_cancel():
-                    raise Exception("Task cancelled")
+            # ── P1.1 PARALLEL RENDER ────────────────────────────────────────────
+            # Clips are independent (separate thread pool tasks), so we render
+            # them concurrently.  A semaphore of 2 prevents GPU/RAM exhaustion
+            # when multiple workers share the same host.
+            # After all renders complete, results are persisted in clip_order so
+            # DB ordering and SSE notifications are deterministic.
+            _render_sem = asyncio.Semaphore(2)
 
-                # Update progress: 70-95% spread across clips
-                clip_progress = 70 + int(
-                    ((i + 1) / total_clips) * 25
-                ) if total_clips > 0 else 95
-                await update_progress(
-                    clip_progress,
-                    f"Creating clip {i + 1}/{total_clips}...",
-                )
+            def _pick_caption_template(segment: Dict[str, Any]) -> str:
+                """
+                P2.6: Platform-aware caption style auto-selection.
 
-                # Render single clip in thread pool
-                clip_info = await self.video_service.create_single_clip(
-                    video_path,
-                    segment,
-                    i,
-                    clips_output_dir,
-                    font_family,
-                    font_size,
-                    font_color,
-                    caption_template,
-                    output_format,
-                    add_subtitles,
-                )
+                When the user picks "default", we choose the best template for
+                the target platform + virality score combination:
+
+                  TikTok  → big, punchy, fast — viral_pro / hormozi / tiktok
+                  Reels   → polished, readable — viral_pro / tiktok / subtitles
+                  Shorts  → minimal, text-first — subtitles / tiktok
+                  all     → same as before (virality-based)
+
+                If the user explicitly chose a template, honour it.
+                """
+                if caption_template != "default":
+                    return caption_template
+
+                v_score = segment.get("virality_score", 0)
+                intensity = segment.get("intensity", "medium")
+
+                # Platform-specific logic
+                if target_platform == "tiktok":
+                    # TikTok rewards attention-grabbing, high-energy text
+                    if v_score >= 65 or intensity == "high":
+                        return "viral_pro"
+                    if v_score >= 40:
+                        return "hormozi"
+                    return "tiktok"
+
+                elif target_platform == "reels":
+                    # Instagram Reels prefers cleaner, more aesthetic captions
+                    if v_score >= 65:
+                        return "viral_pro"
+                    if v_score >= 40:
+                        return "tiktok"
+                    return "subtitles"
+
+                elif target_platform == "shorts":
+                    # YouTube Shorts audience skews toward educational content —
+                    # cleaner captions work better
+                    if v_score >= 70:
+                        return "tiktok"
+                    return "subtitles"
+
+                else:
+                    # "all" / fallback — original virality-based logic
+                    if v_score >= 70:
+                        return "viral_pro"
+                    if v_score >= 45:
+                        return "hormozi"
+                    return "tiktok"
+
+            async def _render_one(i: int, segment: Dict[str, Any]) -> Tuple[int, Optional[Dict[str, Any]], float]:
+                """Render one clip under the semaphore and return (index, clip_info, elapsed_s)."""
+                async with _render_sem:
+                    t0 = perf_counter()
+                    info = await self.video_service.create_single_clip(
+                        video_path,
+                        segment,
+                        i,
+                        clips_output_dir,
+                        font_family,
+                        font_size,
+                        font_color,
+                        _pick_caption_template(segment),
+                        output_format,
+                        add_subtitles,
+                        broll_suggestions=segment.get("broll_suggestions"),
+                        split_screen=split_screen,
+                        hook_title=_build_hook_title(segment),
+                        auto_center_face=auto_center_face,
+                        eye_contact_correction=eye_contact_correction,
+                        target_language=target_language,
+                        task_id=task_id,
+                        camera_plan=result.get("camera_plan"),
+                        sync_offset=result.get("sync_offset", 0.0),
+                        secondary_video_path=(
+                            Path(result["secondary_video_path"])
+                            if result.get("secondary_video_path")
+                            else None
+                        ),
+                    )
+                    return i, info, round(perf_counter() - t0, 3)
+
+            # Check cancellation before launching parallel renders
+            if should_cancel and await should_cancel():
+                raise Exception("Task cancelled")
+
+            await update_progress(71, f"Rendering {total_clips} clips in parallel...", "processing")
+
+            # Launch all renders concurrently (they run in thread pool workers)
+            render_tasks = [_render_one(i, seg) for i, seg in enumerate(segments_to_render)]
+            render_results: List[Tuple[int, Optional[Dict[str, Any]], float]] = await asyncio.gather(*render_tasks)
+
+            # Sort by original index so clip_order is preserved
+            render_results.sort(key=lambda r: r[0])
+
+            # Persist results sequentially (DB ops must be on the event loop thread)
+            for i, clip_info, elapsed in render_results:
+                segment = segments_to_render[i]
+                clip_render_times[i + 1] = elapsed
+
+                clip_progress = 72 + int(((i + 1) / total_clips) * 23) if total_clips > 0 else 95
+                await update_progress(clip_progress, f"Saving clip {i + 1}/{total_clips}...")
+
                 if clip_info is None:
-                    continue  # Skip failed clip
+                    failed_clips.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "render_time_s": elapsed,
+                    })
+                    logger.warning(
+                        f"Clip {i+1}/{total_clips} failed to render in {elapsed:.1f}s "
+                        f"({segment.get('start_time')} → {segment.get('end_time')})"
+                    )
+                    continue
 
-                # Save to DB immediately
+                translated_text = clip_info.get("translated_text")
+
+                # Save to DB immediately so SSE can deliver it
                 clip_id = await self.clip_repo.create_clip(
                     self.db,
                     task_id=task_id,
@@ -277,23 +489,86 @@ class TaskService:
                     value_score=clip_info.get("value_score", 0),
                     shareability_score=clip_info.get("shareability_score", 0),
                     hook_type=clip_info.get("hook_type"),
+                    translated_text=translated_text,
+                    # P3: social copy
+                    social_title=clip_info.get("social_title"),
+                    social_description=clip_info.get("social_description"),
+                    suggested_hashtags=clip_info.get("suggested_hashtags"),
+                    # P4: thumbnail
+                    thumbnail_filename=clip_info.get("thumbnail_filename"),
+                    # B-3: face detection flag
+                    face_detected=clip_info.get("face_detected"),
+                    # P2.4: hook preview score
+                    hook_preview_score=clip_info.get("hook_preview_score", 0),
                 )
                 await self.db.commit()
                 clip_ids.append(clip_id)
 
-                # Update task's clip IDs array
-                await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
-
-                # Notify frontend via SSE
+                # Notify frontend via SSE immediately
                 if clip_ready_callback:
-                    clip_record = await self.clip_repo.get_clip_by_id(
-                        self.db, clip_id
-                    )
+                    clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
                     if clip_record:
                         await clip_ready_callback(i, total_clips, clip_record)
 
-            stage_timings["render_seconds"] = round(
-                perf_counter() - render_start, 3
+                # P3.5: A/B variant — render a second version with different template/hook
+                if generate_ab_variants:
+                    try:
+                        b_info = await self.video_service.create_ab_variant(
+                            original_clip_info=clip_info,
+                            video_path=video_path,
+                            clips_output_dir=clips_output_dir,
+                            base_segment=segment,
+                            original_template=_pick_caption_template(segment),
+                            clip_index=i,
+                        )
+                        if b_info:
+                            b_clip_id = await self.clip_repo.create_clip(
+                                self.db,
+                                task_id=task_id,
+                                filename=b_info["filename"],
+                                file_path=b_info["path"],
+                                start_time=b_info["start_time"],
+                                end_time=b_info["end_time"],
+                                duration=b_info["duration"],
+                                text=b_info.get("text", ""),
+                                relevance_score=b_info.get("relevance_score", 0.0),
+                                reasoning=b_info.get("reasoning", "") + " [Variant B]",
+                                clip_order=i + 1,
+                                virality_score=b_info.get("virality_score", 0),
+                                hook_score=b_info.get("hook_score", 0),
+                                engagement_score=b_info.get("engagement_score", 0),
+                                value_score=b_info.get("value_score", 0),
+                                shareability_score=b_info.get("shareability_score", 0),
+                                hook_type=b_info.get("hook_type"),
+                                thumbnail_filename=b_info.get("thumbnail_filename"),
+                                hook_preview_score=b_info.get("hook_preview_score", 0),
+                            )
+                            await self.db.commit()
+                            clip_ids.append(b_clip_id)
+                            logger.info(f"✅ A/B variant B saved: clip {b_clip_id}")
+                    except Exception as _ab_e:
+                        logger.warning(f"A/B variant B failed for clip {i+1}: {_ab_e}")
+
+            # ── Single bulk update of task.clip_ids after all clips complete ──
+            if clip_ids:
+                await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
+
+            render_elapsed = round(perf_counter() - render_start, 3)
+            stage_timings["render_seconds"] = render_elapsed
+            stage_timings["clip_render_times"] = clip_render_times
+            if failed_clips:
+                stage_timings["failed_clips"] = failed_clips
+                logger.warning(
+                    f"Task {task_id}: {len(failed_clips)}/{total_clips} clips failed — "
+                    f"{[fc['clip_index'] for fc in failed_clips]}"
+                )
+
+            avg_clip_time = (
+                render_elapsed / len(clip_render_times) if clip_render_times else 0
+            )
+            logger.info(
+                f"Task {task_id} render complete: {len(clip_ids)} clips in "
+                f"{render_elapsed:.1f}s (avg {avg_clip_time:.1f}s/clip)"
             )
 
             # Mark as completed
@@ -311,7 +586,7 @@ class TaskService:
             await self.task_repo.update_task_runtime_metadata(
                 self.db,
                 task_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(timezone.utc),
                 stage_timings_json=json.dumps(stage_timings),
                 error_code="",
             )
@@ -360,7 +635,7 @@ class TaskService:
             await self.task_repo.update_task_runtime_metadata(
                 self.db,
                 task_id,
-                completed_at=datetime.utcnow(),
+                completed_at=datetime.now(timezone.utc),
                 error_code=error_code,
             )
             raise
@@ -424,7 +699,7 @@ class TaskService:
             )
 
     async def get_task_with_clips(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """Get task details with all clips."""
+        """Get task details with all clips and analysis data."""
         task = await self.task_repo.get_task_by_id(self.db, task_id)
 
         if not task:
@@ -453,6 +728,21 @@ class TaskService:
         clips = await self.clip_repo.get_clips_by_task(self.db, task_id)
         task["clips"] = clips
         task["clips_count"] = len(clips)
+
+        # Fetch analysis_json from cache if available
+        source_url = task.get("source_url")
+        source_type = task.get("source_type")
+        processing_mode = task.get("processing_mode", "fast")
+        if source_url and source_type:
+            try:
+                cache_key = self._build_cache_key(source_url, source_type, processing_mode)
+                cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+                if cache_entry and cache_entry.get("analysis_json"):
+                    analysis_json_str = cache_entry.get("analysis_json")
+                    analysis_data = json.loads(analysis_json_str)
+                    task["analysis"] = analysis_data
+            except Exception as e:
+                logger.debug(f"Could not load analysis data for task {task_id}: {e}")
 
         return task
 

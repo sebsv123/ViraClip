@@ -139,6 +139,20 @@ class Task(Base):
     completion_notification_sent_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    
+    # Phase 8 & 9 Flags
+    target_language: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default=sql_text("'eng'")
+    )
+    auto_center_face: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    eye_contact_correction: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    split_screen: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -231,6 +245,8 @@ class GeneratedClip(Base):
         Integer, nullable=True, server_default=sql_text("'0'")
     )
     hook_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    strategic_advice: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    conversion_tips: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

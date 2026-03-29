@@ -32,7 +32,9 @@ from .auth_headers import get_signed_user_id, USER_ID_HEADER
 from .api.routes.tasks import router as tasks_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
+from .api.routes.social import router as social_router
 from .services.video_service import VideoService, UPLOAD_URL_PREFIX
+from .services.llm_service import LLMService
 
 config = Config()
 
@@ -47,8 +49,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="SupoClip API",
-    description="Python-based backend for SupoClip",
+    title="ViraClip API",
+    description="Python-based backend for ViraClip",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -61,9 +63,9 @@ app.add_middleware(
     allow_headers=[
         "Content-Type",
         "Authorization",
-        "x-supoclip-user-id",
-        "x-supoclip-ts",
-        "x-supoclip-signature",
+        "x-viraclip-user-id",
+        "x-viraclip-ts",
+        "x-viraclip-signature",
         "user_id",
     ],
 )
@@ -72,6 +74,7 @@ app.add_middleware(
 app.include_router(tasks_router)
 app.include_router(feedback_router)
 app.include_router(billing_router)
+app.include_router(social_router)
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"
@@ -96,7 +99,7 @@ def _resolve_uploaded_video_path(url: str) -> Path:
 @app.get("/")
 def read_root():
     return {
-        "message": "This is the SupoClip FastAPI-based API. Visit /docs for the API documentation."
+        "message": "This is the ViraClip FastAPI-based API. Visit /docs for the API documentation."
     }
 
 
@@ -319,6 +322,8 @@ async def start_task(request: Request):
                             value_score=clip_info.get("value_score", 0),
                             shareability_score=clip_info.get("shareability_score", 0),
                             hook_type=clip_info.get("hook_type"),
+                            strategic_advice=clip_info.get("strategic_advice"),
+                            conversion_tips=clip_info.get("conversion_tips"),
                         )
                         db.add(clip_record)
                         await db.flush()
@@ -487,7 +492,7 @@ async def process_video_task(
         async with AsyncSessionLocal() as db:
             source_result = await db.execute(
                 text(
-                    "SELECT * FROM sources WHERE id IN (SELECT source_id FROM tasks WHERE id = :task_id)"
+                    "SELECT s.* FROM sources s JOIN tasks t ON t.source_id = s.id WHERE t.id = :task_id"
                 ),
                 {"task_id": task_id},
             )
@@ -593,6 +598,8 @@ async def process_video_task(
                         value_score=clip_info.get("value_score", 0),
                         shareability_score=clip_info.get("shareability_score", 0),
                         hook_type=clip_info.get("hook_type"),
+                        strategic_advice=clip_info.get("strategic_advice"),
+                        conversion_tips=clip_info.get("conversion_tips"),
                     )
                     db.add(clip_record)
                     await db.flush()
@@ -612,9 +619,8 @@ async def process_video_task(
         logger.info(f"🎉 Task {task_id} completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Error processing task {task_id}: {str(e)}")
+        logger.error(f"❌ Error processing task {task_id}: {str(e)}", exc_info=True)
         await update_task_status(task_id, "error")
-        logger.error(f"📊 Task {task_id} marked as error: {str(e)}")
 
 
 @app.get("/tasks/{task_id}/clips")
@@ -635,7 +641,7 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
         SELECT id, filename, file_path, start_time, end_time, duration,
                text, relevance_score, reasoning, clip_order, created_at,
                virality_score, hook_score, engagement_score, value_score,
-               shareability_score, hook_type
+               shareability_score, hook_type, strategic_advice, conversion_tips
         FROM generated_clips
         WHERE task_id = :task_id
         ORDER BY clip_order ASC
@@ -667,6 +673,8 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
                 "value_score": clip.value_score or 0,
                 "shareability_score": clip.shareability_score or 0,
                 "hook_type": clip.hook_type,
+                "strategic_advice": clip.strategic_advice,
+                "conversion_tips": clip.conversion_tips,
             }
             clips_data.append(clip_data)
 
@@ -920,3 +928,54 @@ async def upload_video(request: Request):
     except Exception as e:
         logger.error(f"❌ Error uploading video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading video: {str(e)}")
+
+# ====================== VIRA CLIP BATCH UPLOAD ENDPOINT ======================
+from fastapi import UploadFile, File, HTTPException
+from typing import List
+import shutil
+import uuid
+from pathlib import Path
+
+UPLOAD_DIR = Path(config.temp_dir) / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.post("/api/upload-batch")
+async def upload_batch(files: List[UploadFile] = File(...)):
+    """Subida masiva de videos - ViraClip"""
+    if len(files) == 0:
+        raise HTTPException(status_code=400, detail="No se enviaron archivos")
+    
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Máximo 20 videos por batch")
+
+    uploaded_files = []
+    
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("video/"):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"El archivo {file.filename} no es un video válido"
+            )
+        
+        # Nombre único para evitar sobrescrituras
+        file_extension = Path(file.filename).suffix.lower()
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        file_path = UPLOAD_DIR / unique_filename
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        uploaded_files.append({
+            "filename": unique_filename,
+            "original_name": file.filename,
+            "size": file.size,
+            "path": str(file_path),
+            "url": f"/uploads/{unique_filename}",
+        })
+    
+    return {
+        "uploaded": len(uploaded_files),
+        "files": uploaded_files,
+        "message": f"Se subieron {len(uploaded_files)} video(s) correctamente"
+    }

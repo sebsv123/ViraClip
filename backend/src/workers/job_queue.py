@@ -11,8 +11,8 @@ from ..config import get_config
 logger = logging.getLogger(__name__)
 
 # Queue names
-DEFAULT_QUEUE_NAME = "supoclip_tasks"
-FAST_QUEUE_NAME = "supoclip_fast"
+DEFAULT_QUEUE_NAME = "viraclip_tasks"
+FAST_QUEUE_NAME = "viraclip_fast"
 
 
 def _get_redis_settings() -> RedisSettings:

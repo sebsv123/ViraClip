@@ -9,9 +9,9 @@ from fastapi import HTTPException, Request
 from .config import Config
 
 
-USER_ID_HEADER = "x-supoclip-user-id"
-TIMESTAMP_HEADER = "x-supoclip-ts"
-SIGNATURE_HEADER = "x-supoclip-signature"
+USER_ID_HEADER = "x-viraclip-user-id"
+TIMESTAMP_HEADER = "x-viraclip-ts"
+SIGNATURE_HEADER = "x-viraclip-signature"
 
 
 def _expected_signature(secret: str, user_id: str, timestamp: str) -> str:

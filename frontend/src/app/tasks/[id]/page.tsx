@@ -51,6 +51,12 @@ import {
   Settings2,
   Type,
   Clapperboard,
+  Sparkles,
+  Bot,
+  Send,
+  BrainCircuit,
+  Target,
+  MousePointer2,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
@@ -77,6 +83,26 @@ interface Clip {
   value_score: number;
   shareability_score: number;
   hook_type: string | null;
+  intensity?: number;
+  vfx_trigger?: string;
+  bgm_style?: string;
+  // P3: Social copy
+  social_title?: string | null;
+  social_description?: string | null;
+  suggested_hashtags?: string[];
+  // P4: Thumbnail
+  thumbnail_url?: string | null;
+  thumbnail_filename?: string | null;
+  // B-3: Face detection
+  face_detected?: boolean | null;
+  // P2.4: Hook preview score
+  hook_preview_score?: number;
+  // P3.5: A/B variant
+  variant?: string | null;
+  variant_group?: string | null;
+  // V3 Phase 4: Social Intelligence
+  strategic_advice?: string | null;
+  conversion_tips?: string | null;
 }
 
 interface TaskDetails {
@@ -96,6 +122,15 @@ interface TaskDetails {
   font_color?: string;
   caption_template?: string;
   include_broll?: boolean;
+  analysis?: {
+    summary?: string;
+    key_topics?: string[];
+    most_relevant_segments?: Array<{
+      theme?: string;
+      virality_score?: number;
+      reasoning?: string;
+    }>;
+  };
 }
 
 interface FontOption {
@@ -127,6 +162,12 @@ export default function TaskPage() {
   const [captionPosition, setCaptionPosition] = useState("bottom");
   const [highlightWords, setHighlightWords] = useState("");
   const [exportPreset, setExportPreset] = useState("tiktok");
+  const [activeTopicFilter, setActiveTopicFilter] = useState<string | null>(null);
+  // P3.1: AI refine state
+  const [refiningClipId, setRefiningClipId] = useState<string | null>(null);
+  const [refineInstruction, setRefineInstruction] = useState("");
+  const [isRefining, setIsRefining] = useState(false);
+  const [refineResult, setRefineResult] = useState<{ action: string; reasoning: string } | null>(null);
 
   const [projectFontFamily, setProjectFontFamily] = useState("TikTokSans-Regular");
   const [projectFontSize, setProjectFontSize] = useState("24");
@@ -390,6 +431,20 @@ export default function TaskPage() {
     return labels[hookType || "none"] || hookType || "None";
   };
 
+  const getIntensityColor = (intensity: number) => {
+    if (intensity >= 0.8) return "text-red-600 bg-red-50 border-red-200";
+    if (intensity >= 0.5) return "text-orange-600 bg-orange-50 border-orange-200";
+    return "text-blue-600 bg-blue-50 border-blue-200";
+  };
+
+  // P2.4: Hook preview score color — gradient from low (gray) to high (orange-red)
+  const getHookPreviewColor = (score: number) => {
+    if (score >= 75) return "bg-orange-500 text-white";
+    if (score >= 55) return "bg-amber-400 text-white";
+    if (score >= 35) return "bg-yellow-400 text-gray-800";
+    return "bg-gray-200 text-gray-600";
+  };
+
   const handleEditTitle = async () => {
     if (!editedTitle.trim() || !session?.user?.id || !params.id) return;
 
@@ -573,6 +628,36 @@ export default function TaskPage() {
     }
   };
 
+  // P3.1: AI refine a clip with a natural language instruction
+  const handleRefineClip = async (clipId: string) => {
+    if (!refineInstruction.trim() || !task?.id) return;
+    setIsRefining(true);
+    setRefineResult(null);
+    try {
+      const res = await fetch(`${taskApiUrl}/${task.id}/clips/${clipId}/refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: refineInstruction }),
+      });
+      if (!res.ok) {
+        const msg = await buildSupportError(res, "AI refine failed");
+        setRefineResult({ action: "error", reasoning: msg });
+        return;
+      }
+      const json = await res.json();
+      setRefineResult({ action: json.action ?? "done", reasoning: json.reasoning ?? "" });
+      setRefineInstruction("");
+      // Refresh clips if the action mutated something
+      if (json.action && json.action !== "noop" && json.action !== "error") {
+        await fetchTaskStatus();
+      }
+    } catch (err) {
+      setRefineResult({ action: "error", reasoning: String(err) });
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
   const handleExportClip = async (clipId: string, fallbackFilename: string) => {
     if (!session?.user?.id || !task?.id) return;
 
@@ -679,7 +764,9 @@ export default function TaskPage() {
                   </div>
                 ) : (
                   <>
-                    <h1 className={`text-2xl font-bold text-black ${task.status === "processing" || task.status === "queued" ? "shimmer" : ""}`}>{task.source_title}</h1>
+                    <h1 className={`text-2xl font-bold text-black ${task.status === "processing" || task.status === "queued" ? "shimmer" : ""}`}>
+                      <span className="text-blue-600">ViraClip</span> Studio
+                    </h1>
                     <div className="flex items-center gap-1">
                       <Button
                         size="sm"
@@ -823,13 +910,77 @@ export default function TaskPage() {
               )}
             </div>
 
+            {/* Content Analysis Section */}
+            {task?.analysis && (
+              <div className="mb-8 rounded-lg border border-zinc-700 bg-zinc-900/50 p-6">
+                <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide mb-4">
+                  Content Analysis
+                </h3>
+                {task.analysis.summary && (
+                  <div className="mb-4">
+                    <p className="text-sm text-zinc-300 leading-relaxed">{task.analysis.summary}</p>
+                  </div>
+                )}
+                {task.analysis.key_topics && task.analysis.key_topics.length > 0 && (
+                  <div>
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <span className="text-xs text-zinc-500 mr-1 self-center">Capítulos:</span>
+                      {/* "All" pill */}
+                      <span
+                        onClick={() => setActiveTopicFilter(null)}
+                        className={`px-3 py-1 rounded-full text-xs font-medium border cursor-pointer transition-colors select-none
+                          ${activeTopicFilter === null
+                            ? "bg-blue-600 text-white border-blue-500"
+                            : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700"
+                          }`}
+                      >
+                        Todos ({clips.length})
+                      </span>
+                      {task.analysis.key_topics.map((topic: string) => {
+                        const matchCount = clips.filter(c =>
+                          c.text?.toLowerCase().includes(topic.toLowerCase().split(" ")[0])
+                        ).length;
+                        return (
+                          <span
+                            key={topic}
+                            onClick={() => setActiveTopicFilter(activeTopicFilter === topic ? null : topic)}
+                            className={`px-3 py-1 rounded-full text-xs font-medium border cursor-pointer transition-colors select-none
+                              ${activeTopicFilter === topic
+                                ? "bg-blue-600 text-white border-blue-500"
+                                : "bg-blue-900/40 text-blue-300 border-blue-700/50 hover:bg-blue-900/60"
+                              }`}
+                          >
+                            {topic}{matchCount > 0 && ` (${matchCount})`}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {activeTopicFilter && (
+                      <p className="text-xs text-zinc-500 mt-2">
+                        Mostrando clips relacionados con <span className="text-blue-400">"{activeTopicFilter}"</span>
+                        {" · "}
+                        <button onClick={() => setActiveTopicFilter(null)} className="underline hover:text-zinc-300">Ver todos</button>
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Live clips grid — shows clips as they render */}
             {clips.length > 0 && (
               <div className="grid gap-6">
                 <p className="text-sm text-neutral-500 text-center">
-                  {clips.length} clip{clips.length !== 1 ? "s" : ""} ready
+                  {activeTopicFilter
+                    ? `${clips.filter(c => c.text?.toLowerCase().includes(activeTopicFilter.toLowerCase().split(" ")[0])).length} clip(s) en "${activeTopicFilter}"`
+                    : `${clips.length} clip${clips.length !== 1 ? "s" : ""} ready`
+                  }
                 </p>
-                {clips.map((clip) => (
+                {clips.filter(clip => {
+                  if (!activeTopicFilter) return true;
+                  const keyword = activeTopicFilter.toLowerCase().split(" ")[0];
+                  return clip.text?.toLowerCase().includes(keyword);
+                }).map((clip) => (
                   <Card key={clip.id} className="overflow-hidden">
                     <CardContent className="p-0">
                       <div className="flex flex-col lg:flex-row">
@@ -1041,6 +1192,12 @@ export default function TaskPage() {
                         {availableTemplates.length === 0 && <SelectItem value="default">Default</SelectItem>}
                       </SelectContent>
                     </Select>
+                    {/* P2.6: hint about auto platform selection */}
+                    {projectCaptionTemplate === "default" && (
+                      <p className="text-[10px] text-gray-400 leading-tight">
+                        ✨ Auto-selects per platform: TikTok → Viral Pro / Hormozi, Reels → TikTok / Subtitles, Shorts → Subtitles
+                      </p>
+                    )}
                   </div>
 
                   <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -1070,18 +1227,21 @@ export default function TaskPage() {
             </Sheet>
 
             {clips.map((clip) => (
-              <Card key={clip.id} className="overflow-hidden">
+              <Card key={clip.id} className="overflow-hidden glass-card hover:shadow-xl transition-shadow duration-300">
                 <CardContent className="p-0">
                   <div className="flex flex-col lg:flex-row">
                     {/* Video Player */}
                     <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                      <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                      <DynamicVideoPlayer
+                        src={`${apiUrl}${clip.video_url}`}
+                        poster={clip.thumbnail_url ? `${apiUrl}${clip.thumbnail_url}` : "/placeholder-video.jpg"}
+                      />
                     </div>
 
                     {/* Clip Details */}
                     <div className="p-6 flex-1">
                       <div className="flex items-start justify-between mb-4">
-                        <div>
+                        <div className="flex-1">
                           <label className="flex items-center gap-2 text-xs text-gray-600 mb-2">
                             <input
                               type="checkbox"
@@ -1099,18 +1259,51 @@ export default function TaskPage() {
                             <span>{formatDuration(clip.duration)}</span>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {/* Virality Score Badge */}
-                          {clip.virality_score > 0 && (
-                            <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
-                              <Zap className="w-3 h-3 mr-1" />
-                              {clip.virality_score}
+                        <div className="flex flex-col items-end gap-2">
+                          <div className="flex items-center gap-2">
+                            {clip.virality_score > 0 && (
+                              <Badge className={`${getViralityBgColor(clip.virality_score)} text-white shadow-lg`}>
+                                <Zap className="w-3 h-3 mr-1" />
+                                {clip.virality_score}
+                              </Badge>
+                            )}
+                            {/* V3 Intensity Badge */}
+                            {clip.intensity !== undefined && (
+                              <Badge variant="outline" className={`${getIntensityColor(clip.intensity)} glass-badge shadow-sm`}>
+                                <TrendingUp className="w-3 h-3 mr-1" />
+                                {(clip.intensity * 10).toFixed(1)} Intensity
+                              </Badge>
+                            )}
+                            <Badge className={getScoreColor(clip.relevance_score)}>
+                              <Star className="w-3 h-3 mr-1" />
+                              {(clip.relevance_score * 100).toFixed(0)}%
+                            </Badge>
+                            {/* P2.4: Hook Preview Score badge */}
+                            {clip.hook_preview_score !== undefined && clip.hook_preview_score > 0 && (
+                              <Badge
+                                variant="outline"
+                                className={`${getHookPreviewColor(clip.hook_preview_score)} border-0 shadow-sm`}
+                                title="Hook Preview Score — how likely the opening seconds are to stop scrolling"
+                              >
+                                🎣 {clip.hook_preview_score}
+                              </Badge>
+                            )}
+                            {/* P3.5: A/B variant badge */}
+                            {clip.variant && (
+                              <Badge
+                                variant="outline"
+                                className="bg-blue-50 text-blue-700 border-blue-200 shadow-sm font-semibold"
+                                title={`A/B variant ${clip.variant} — different caption template for split testing`}
+                              >
+                                A/B {clip.variant}
+                              </Badge>
+                            )}
+                          </div>
+                          {clip.bgm_style && (
+                            <Badge variant="secondary" className="text-[10px] h-5 bg-purple-50 text-purple-700 border-purple-100">
+                              🎵 {clip.bgm_style}
                             </Badge>
                           )}
-                          <Badge className={getScoreColor(clip.relevance_score)}>
-                            <Star className="w-3 h-3 mr-1" />
-                            {(clip.relevance_score * 100).toFixed(0)}%
-                          </Badge>
                         </div>
                       </div>
 
@@ -1194,10 +1387,109 @@ export default function TaskPage() {
                         </div>
                       )}
 
+                      {/* ViraClip V3: Viral Intelligence & Tactical Tips */}
+                      {(clip.strategic_advice || clip.conversion_tips) && (
+                        <div className="mb-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg backdrop-blur-sm">
+                          <div className="flex items-center gap-2 mb-3 text-blue-800">
+                            <BrainCircuit className="w-5 h-5 text-blue-600" />
+                            <h4 className="font-bold text-sm tracking-tight uppercase">Viral Intelligence</h4>
+                          </div>
+                          <div className="space-y-3">
+                            {clip.strategic_advice && (
+                              <div className="flex gap-3">
+                                <div className="mt-1 p-1 bg-blue-100 rounded-md">
+                                  <Target className="w-3.5 h-3.5 text-blue-700" />
+                                </div>
+                                <div>
+                                  <span className="text-[10px] font-bold text-blue-400 uppercase leading-none block mb-1">Psychological Hook</span>
+                                  <p className="text-sm text-blue-900 leading-relaxed font-medium">
+                                    {clip.strategic_advice}
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                            {clip.conversion_tips && (
+                              <div className="flex gap-3 pt-2 border-t border-blue-100/50">
+                                <div className="mt-1 p-1 bg-green-100 rounded-md">
+                                  <MousePointer2 className="w-3.5 h-3.5 text-green-700" />
+                                </div>
+                                <div>
+                                  <span className="text-[10px] font-bold text-green-500 uppercase leading-none block mb-1">Conversion Tactic</span>
+                                  <p className="text-sm text-gray-700 leading-relaxed italic">
+                                    {clip.conversion_tips}
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
                       {clip.reasoning && (
                         <div className="mb-4">
                           <h4 className="font-medium text-black mb-2">AI Analysis</h4>
                           <p className="text-sm text-gray-600">{clip.reasoning}</p>
+                        </div>
+                      )}
+
+                      {/* P3: Social Copy Panel */}
+                      {(clip.social_title || clip.social_description || (clip.suggested_hashtags && clip.suggested_hashtags.length > 0)) && (
+                        <div className="mb-4 p-3 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-100 rounded-lg">
+                          <h4 className="font-medium text-purple-800 mb-2 text-sm flex items-center gap-1">
+                            📱 Social Media Copy
+                          </h4>
+                          {clip.social_title && (
+                            <div className="mb-2">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">TITLE</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText(clip.social_title!)}
+                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  title="Copy title"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <p className="text-sm font-semibold text-gray-800 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_title}</p>
+                            </div>
+                          )}
+                          {clip.social_description && (
+                            <div className="mb-2">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">DESCRIPTION</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText(clip.social_description!)}
+                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  title="Copy description"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <p className="text-sm text-gray-700 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_description}</p>
+                            </div>
+                          )}
+                          {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">HASHTAGS</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText((clip.suggested_hashtags || []).join(' '))}
+                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  title="Copy hashtags"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {clip.suggested_hashtags.map((tag, idx) => (
+                                  <span key={idx} className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 cursor-pointer hover:bg-purple-200"
+                                    onClick={() => navigator.clipboard.writeText(tag)}>
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -1305,6 +1597,61 @@ export default function TaskPage() {
                           </Button>
                         </div>
                       )}
+
+                      {/* P3.1: AI Refine panel */}
+                      <div className="mt-3 border border-purple-200 rounded-lg bg-purple-50/50">
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 hover:bg-purple-50 rounded-lg transition-colors"
+                          onClick={() => {
+                            setRefiningClipId(refiningClipId === clip.id ? null : clip.id);
+                            setRefineResult(null);
+                          }}
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          AI Refine
+                          <span className="ml-auto text-xs text-purple-500">
+                            {refiningClipId === clip.id ? "▲" : "▼"}
+                          </span>
+                        </button>
+                        {refiningClipId === clip.id && (
+                          <div className="px-3 pb-3 space-y-2">
+                            <p className="text-xs text-purple-600">
+                              Describe what you want to change: <em>"trim 3 seconds from the start"</em>, <em>"make the hook more energetic"</em>, <em>"use the subtitles template"</em>…
+                            </p>
+                            <div className="flex gap-2">
+                              <Input
+                                value={refineInstruction}
+                                onChange={(e) => setRefineInstruction(e.target.value)}
+                                onKeyDown={(e) => e.key === "Enter" && !isRefining && handleRefineClip(clip.id)}
+                                placeholder="e.g. Remove the first 2 seconds"
+                                className="text-sm"
+                              />
+                              <Button
+                                size="sm"
+                                onClick={() => handleRefineClip(clip.id)}
+                                disabled={isRefining || !refineInstruction.trim()}
+                                className="bg-purple-600 hover:bg-purple-700 text-white shrink-0"
+                              >
+                                {isRefining ? (
+                                  <RefreshCw className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Send className="w-4 h-4" />
+                                )}
+                              </Button>
+                            </div>
+                            {refineResult && (
+                              <div className={`text-xs rounded p-2 ${refineResult.action === "error" ? "bg-red-50 text-red-700 border border-red-200" : "bg-green-50 text-green-700 border border-green-200"}`}>
+                                <span className="font-semibold capitalize">
+                                  {refineResult.action === "noop" ? "No changes needed" : refineResult.action === "error" ? "Error" : `✓ ${refineResult.action.replace("_", " ")}`}
+                                </span>
+                                {refineResult.reasoning && (
+                                  <span className="ml-1 text-current/80">— {refineResult.reasoning}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </CardContent>
@@ -1325,29 +1672,8 @@ export default function TaskPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteTask} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
-              {isDeleting ? "Deleting..." : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Delete Clip Confirmation Dialog */}
-      <AlertDialog open={!!deletingClipId} onOpenChange={(open) => !open && setDeletingClipId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Clip</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete this clip? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => deletingClipId && handleDeleteClip(deletingClipId)}
-              className="bg-red-600 hover:bg-red-700"
-            >
+            <AlertDialogAction onClick={handleDeleteTask} className="bg-red-600 hover:bg-red-700">
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

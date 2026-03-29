@@ -54,7 +54,8 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         """Application lifespan: startup and shutdown events."""
-        logger.info("🚀 Starting SupoClip API...")
+        import asyncio
+        logger.info("🚀 Starting ViraClip API...")
         try:
             await init_db()
             logger.info("✅ Database initialized")
@@ -62,16 +63,33 @@ def create_app(
             await queue_adapter.get_pool()
             logger.info("✅ Job queue initialized")
 
+            # Kick off Ollama vision model pull in background (non-blocking)
+            # Vision is optional — if Ollama isn't running, pipeline continues normally
+            if runtime_config.vision_analysis_enabled:
+                async def _pull_vision_model():
+                    try:
+                        from .services.vision_service import ensure_vision_model_pulled
+                        model = runtime_config.ollama_vision_model
+                        logger.info(f"🔭 Checking Ollama vision model '{model}' in background...")
+                        ok = await ensure_vision_model_pulled(model)
+                        if ok:
+                            logger.info(f"✅ Ollama vision model '{model}' ready")
+                        else:
+                            logger.info(f"⚠️  Ollama vision model not available — visual scoring disabled")
+                    except Exception as e:
+                        logger.debug(f"Vision model pull skipped: {e}")
+                asyncio.create_task(_pull_vision_model())
+
             yield
         finally:
-            logger.info("🛑 Shutting down SupoClip API...")
+            logger.info("🛑 Shutting down ViraClip API...")
             await close_db()
             await queue_adapter.close_pool()
             logger.info("✅ Cleanup complete")
 
     app = FastAPI(
-        title="SupoClip API",
-        description="Refactored Python backend for SupoClip with async job processing",
+        title="ViraClip API",
+        description="Refactored Python backend for ViraClip with async job processing",
         version="0.2.0",
         lifespan=lifespan,
     )
@@ -86,9 +104,9 @@ def create_app(
         allow_headers=[
             "Content-Type",
             "Authorization",
-            "x-supoclip-user-id",
-            "x-supoclip-ts",
-            "x-supoclip-signature",
+            "x-viraclip-user-id",
+            "x-viraclip-ts",
+            "x-viraclip-signature",
             "x-trace-id",
             "user_id",
         ],
@@ -167,16 +185,18 @@ def create_app(
     from .api.routes.media import router as media_router
     from .api.routes.feedback import router as feedback_router
     from .api.routes.billing import router as billing_router
+    from .api.routes.social import router as social_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
     app.include_router(billing_router)
+    app.include_router(social_router)  # P4: Social distribution + campaigns
 
     @app.get("/")
     def read_root():
         """Root endpoint."""
         return {
-            "name": "SupoClip API",
+            "name": "ViraClip API",
             "version": "0.2.0",
             "status": "running",
             "docs": "/docs",
