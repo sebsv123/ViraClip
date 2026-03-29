@@ -3,8 +3,12 @@ Caption template definitions for animated subtitles.
 Each template defines styling and animation properties for different caption styles.
 """
 
+import logging
 from typing import Dict, Any, Literal
 
+logger = logging.getLogger(__name__)
+
+# All animation types that are actually implemented in video_utils.py
 AnimationType = Literal["none", "karaoke", "pop", "fade", "bounce"]
 
 CAPTION_TEMPLATES: Dict[str, Dict[str, Any]] = {
@@ -112,6 +116,81 @@ CAPTION_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "animation": "fade",
         "shadow": False,
         "position_y": 0.78,
+    },
+    "viral_pro": {
+        "name": "Viral Pro",
+        "description": "Ultra-bold, yellow highlights, heavy stroke (Viral top quality)",
+        "font_family": "THEBOLDFONT",
+        "font_size": 40,
+        "font_color": "#FFFFFF",
+        "highlight_color": "#FFFF00",  # Yellow
+        "stroke_color": "#000000",
+        "stroke_width": 4,
+        "background": False,
+        "background_color": None,
+        "animation": "pop",
+        "shadow": True,
+        "position_y": 0.75,
+    },
+    "minimal_box": {
+        "name": "Minimal Box",
+        "description": "Clean text with semi-transparent background box",
+        "font_family": "TikTokSans-Regular",
+        "font_size": 28,
+        "font_color": "#FFFFFF",
+        "highlight_color": "#00FF00",  # Green
+        "stroke_color": None,
+        "stroke_width": 0,
+        "background": True,
+        "background_color": "#000000CC",  # 80% transparent black
+        "animation": "karaoke",
+        "shadow": False,
+        "position_y": 0.82,
+    },
+    "bounce": {
+        "name": "Bounce",
+        "description": "Each word springs in with a fast pop animation — high-energy viral style",
+        "font_family": "THEBOLDFONT",
+        "font_size": 38,
+        "font_color": "#FFFFFF",
+        "highlight_color": "#FFFF00",  # Yellow
+        "stroke_color": "#000000",
+        "stroke_width": 4,
+        "background": False,
+        "background_color": None,
+        "animation": "bounce",
+        "shadow": True,
+        "position_y": 0.75,
+    },
+    "fire": {
+        "name": "Fire",
+        "description": "Intense orange-red bouncing captions for maximum hype content",
+        "font_family": "THEBOLDFONT",
+        "font_size": 42,
+        "font_color": "#FF6600",   # Deep orange
+        "highlight_color": "#FF0000",  # Red for emphasis
+        "stroke_color": "#1A0000",  # Near-black red
+        "stroke_width": 4,
+        "background": False,
+        "background_color": None,
+        "animation": "bounce",
+        "shadow": True,
+        "position_y": 0.73,
+    },
+    "subtitles": {
+        "name": "Subtitles",
+        "description": "Clean, accessible subtitle style with high-contrast background — great for podcasts and interviews",
+        "font_family": "TikTokSans-Regular",
+        "font_size": 26,
+        "font_color": "#FFFFFF",
+        "highlight_color": "#FFFFFF",
+        "stroke_color": None,
+        "stroke_width": 0,
+        "background": True,
+        "background_color": "#000000CC",
+        "animation": "fade",
+        "shadow": False,
+        "position_y": 0.83,
     },
 }
 

@@ -17,6 +17,15 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 
+class CampaignStrategy(BaseModel):
+    """V3 Phase 5: Holistic social media strategy for a collection of clips."""
+    campaign_theme: str = Field(description="The overarching theme or narrative of the campaign")
+    posting_schedule: List[str] = Field(description="Suggested relative timing for each clip (e.g. 'Day 1: Morning')")
+    hashtags: List[str] = Field(description="Recommended trending and niche hashtags")
+    target_audience: str = Field(description="Detailed profile of the viewer most likely to engage")
+    cta_variation: str = Field(description="A specific call-to-action that ties the clips together")
+
+
 class ViralityAnalysis(BaseModel):
     """Detailed virality breakdown for a segment."""
 
@@ -65,6 +74,14 @@ class TranscriptSegment(BaseModel):
         )
     )
     virality: ViralityAnalysis = Field(description="Detailed virality score breakdown")
+    theme: Optional[str] = Field(
+        default="General",
+        description="Thematic category of the clip (e.g. Motivational, Controversy, Edu-tainment)"
+    )
+    suggested_edits: Optional[str] = Field(
+        default="Standard viral zoom and captions",
+        description="Creative suggestions for editing this specific segment to maximize impact"
+    )
 
 
 class BRollOpportunity(BaseModel):
@@ -87,6 +104,7 @@ class TranscriptAnalysis(BaseModel):
     broll_opportunities: Optional[List[BRollOpportunity]] = Field(
         default=None, description="Opportunities to insert B-roll footage"
     )
+    campaign_strategy: Optional[CampaignStrategy] = Field(None, description="Global campaign blueprint (Phase 5)")
 
 
 # Enhanced system prompt with virality scoring and B-roll detection
@@ -190,6 +208,17 @@ SCORING AND OUTPUT RULES:
 - virality_reasoning and reasoning should cite what is actually present in the chosen span
 - summary and key_topics must also stay grounded in the transcript and should not add outside interpretation
 
+THEMATIC IDENTIFICATION:
+Categorize each segment into a viral theme:
+- "motivational": Inspiring, powerful, life-changing
+- "controversial": Debates, hot takes, unpopular opinions
+- "educational": How-to, tips, specific knowledge
+- "entertainment": Humor, surprise, storytelling
+- "pattern_interrupt": Jarring or unexpected starts
+
+EDITING SUGGESTIONS:
+Provide specific cues like "Zoom in on the surprise", "Add fast cuts here", "Use bright yellow captions".
+
 Find 3-7 compelling segments that would work well as standalone clips. Quality over quantity: choose segments that are accurate, self-contained, have proper time ranges, and score high on virality metrics."""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
@@ -236,7 +265,7 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
 
         _transcript_agent = Agent[None, TranscriptAnalysis](
             model=config.llm,
-            result_type=TranscriptAnalysis,
+            output_type=TranscriptAnalysis,
             system_prompt=transcript_analysis_system_prompt,
         )
     return _transcript_agent
@@ -294,7 +323,7 @@ async def get_most_relevant_parts_by_transcript(
             )
         )
 
-        analysis = result.data
+        analysis = result.output
         logger.info(
             f"AI analysis found {len(analysis.most_relevant_segments)} segments"
         )
@@ -383,6 +412,7 @@ async def get_most_relevant_parts_by_transcript(
             summary=analysis.summary,
             key_topics=analysis.key_topics,
             broll_opportunities=analysis.broll_opportunities if include_broll else None,
+            campaign_strategy=analysis.campaign_strategy,
         )
 
         logger.info(f"Selected {len(validated_segments)} segments for processing")

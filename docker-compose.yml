@@ -1,3 +1,4 @@
+name: viraclip
 services:
   frontend:
     build:
@@ -11,7 +12,7 @@ services:
         - NEXT_PUBLIC_PRO_PRICE_MONTHLY=${NEXT_PUBLIC_PRO_PRICE_MONTHLY:-9.99}
         - NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT=${NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT:-10}
         - NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT=${NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT:-200}
-    container_name: supoclip-frontend
+    container_name: viraclip-frontend
     ports:
       - "3000:3000"
     volumes:
@@ -27,8 +28,8 @@ services:
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
       - NEXT_PUBLIC_LANDING_ONLY_MODE=${NEXT_PUBLIC_LANDING_ONLY_MODE:-false}
       - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
-      - DATABASE_URL=postgresql://supoclip:supoclip_password@postgres:5432/supoclip
-      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-supoclip_dev_secret_change_in_production}
+      - DATABASE_URL=postgresql://viraclip:viraclip_password@postgres:5432/viraclip
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-viraclip_dev_secret_change_in_production}
       - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:3000}
       - STRIPE_SECRET_KEY=${STRIPE_SECRET_KEY}
       - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
@@ -56,22 +57,30 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: supoclip-backend
+    container_name: viraclip-backend
     platform: linux/amd64
     command: [".venv/bin/uvicorn", "src.main_refactored:app", "--host", "0.0.0.0", "--port", "8000"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     ports:
       - "8000:8000"
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/uploads
-      - clips:/app/clips
+      - uploads:/app/temp/uploads
+      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@postgres:5432/supoclip
-      - TEMP_DIR=/app/uploads
+      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
+      - TEMP_DIR=/app/temp/uploads
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
@@ -80,13 +89,17 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-google-gla:gemini-3-flash-preview}
+      - LLM=${LLM:-google-gla:gemini-2.0-flash}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
@@ -98,7 +111,7 @@ services:
       - FREE_PLAN_TASK_LIMIT=${FREE_PLAN_TASK_LIMIT:-10}
       - PRO_PLAN_TASK_LIMIT=${PRO_PLAN_TASK_LIMIT:-0}
       - RESEND_API_KEY=${RESEND_API_KEY}
-      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-SupoClip <onboarding@resend.dev>}"
+      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-ViraClip <onboarding@resend.dev>}"
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
     restart: unless-stopped
     depends_on:
@@ -107,31 +120,40 @@ services:
       redis:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/db"]
       interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+      timeout: 15s
+      retries: 6
+      start_period: 120s  # Backend loads MediaPipe + face models on startup — needs more time
 
   # Worker process for background video processing
   worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: supoclip-worker
+    container_name: viraclip-worker
     platform: linux/amd64
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/uploads
-      - clips:/app/clips
+      - uploads:/app/temp/uploads
+      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
+      - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql+asyncpg://supoclip:supoclip_password@postgres:5432/supoclip
-      - TEMP_DIR=/app/uploads
+      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
+      - TEMP_DIR=/app/temp/uploads
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
@@ -140,39 +162,165 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-google-gla:gemini-3-flash-preview}
+      - LLM=${LLM:-google-gla:gemini-2.0-flash}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
-      - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
-      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://sp.localhost:3000}
-      - FREE_PLAN_TASK_LIMIT=${FREE_PLAN_TASK_LIMIT:-10}
-      - PRO_PLAN_TASK_LIMIT=${PRO_PLAN_TASK_LIMIT:-0}
-      - RESEND_API_KEY=${RESEND_API_KEY}
-      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-SupoClip <onboarding@resend.dev>}"
-      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-    restart: unless-stopped
+    restart: always
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
+      # B-1 fix: workers only need postgres+redis, not the backend.
+      # The backend takes 30-120s to load (MediaPipe, face detection, etc.)
+      # and worker connects to DB directly — no need to wait for backend health.
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  worker-2:
+    build: ./backend
+    container_name: viraclip-worker-2
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
+    volumes:
+      - ./backend/src:/app/src
+      - uploads:/app/temp/uploads
+      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - whisper_models:/app/models
+      - ./backend/fonts:/app/fonts
+      - ./backend/transitions:/app/transitions
+      - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
+      - TEMP_DIR=/app/temp/uploads
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
+      - APIFY_API_TOKEN=${APIFY_API_TOKEN}
+      - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
+      - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
+      - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
+      - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
+      - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
+      - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
+      - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
+      - SELF_HOST=${SELF_HOST:-true}
+    restart: always
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+
+  worker-3:
+    build: ./backend
+    container_name: viraclip-worker-3
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
+    volumes:
+      - ./backend/src:/app/src
+      - uploads:/app/temp/uploads
+      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - whisper_models:/app/models
+      - ./backend/fonts:/app/fonts
+      - ./backend/transitions:/app/transitions
+      - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
+    environment:
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
+      - TEMP_DIR=/app/temp/uploads
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
+      - APIFY_API_TOKEN=${APIFY_API_TOKEN}
+      - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
+      - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
+      - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
+      - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-medium}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8_float16}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-180}
+      - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
+      - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-4}
+      - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
+      - SELF_HOST=${SELF_HOST:-true}
+    restart: always
+    depends_on:
+      redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
+
+  # Ollama — local LLM runtime for vision analysis (Qwen3-VL-8B)
+  # Provides 100% free, local visual scoring of clips (no API key required)
+  # GPU passthrough via NVIDIA container toolkit — gracefully skipped if no GPU
+  ollama:
+    image: ollama/ollama:latest
+    container_name: viraclip-ollama
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
 
   # Redis for caching and job queues (useful for video processing)
   redis:
+    container_name: viraclip-redis
     image: redis:7-alpine
-    container_name: supoclip-redis
     ports:
       - "6379:6379"
     environment:
@@ -198,18 +346,18 @@ services:
 
   # PostgreSQL database for storing video metadata, user data, etc.
   postgres:
-    image: postgres:15-alpine
-    container_name: supoclip-postgres
+    container_name: viraclip-postgres
+    image: postgres:16-alpine
     environment:
-      POSTGRES_DB: supoclip
-      POSTGRES_USER: supoclip
-      POSTGRES_PASSWORD: supoclip_password
+      POSTGRES_DB: viraclip
+      POSTGRES_USER: viraclip
+      POSTGRES_PASSWORD: viraclip_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U supoclip -d supoclip"]
+      test: ["CMD-SHELL", "pg_isready -U viraclip -d viraclip"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -217,13 +365,15 @@ services:
 volumes:
   uploads:
     driver: local
-  clips:
+  whisper_models:
     driver: local
   redis_data:
     driver: local
   postgres_data:
     driver: local
+  ollama_models:
+    driver: local
 
 networks:
   default:
-    name: supoclip-network
+    name: viraclip

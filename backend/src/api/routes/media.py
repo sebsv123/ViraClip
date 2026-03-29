@@ -35,7 +35,7 @@ def _get_authenticated_user_id(request: Request) -> str:
     if config.monetization_enabled:
         return get_signed_user_id(request, config)
 
-    # Self-hosted: accept user_id or x-supoclip-user-id (frontend uses buildBackendAuthHeaders)
+    # Self-hosted: accept user_id or x-viraclip-user-id (frontend uses buildBackendAuthHeaders)
     user_id = request.headers.get("user_id") or request.headers.get(USER_ID_HEADER)
     if not user_id:
         raise HTTPException(status_code=401, detail="User authentication required")

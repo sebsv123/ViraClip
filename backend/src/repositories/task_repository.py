@@ -28,6 +28,11 @@ class TaskRepository:
         caption_template: str = "default",
         include_broll: bool = False,
         processing_mode: str = "fast",
+        target_language: str = "eng",
+        auto_center_face: bool = False,
+        eye_contact_correction: bool = False,
+        split_screen: bool = False,
+        batch_id: Optional[str] = None,          # P3.4: batch group identifier
     ) -> str:
         """Create a new task and return its ID."""
         task_id = str(uuid4())
@@ -36,12 +41,16 @@ class TaskRepository:
                 text("""
                     INSERT INTO tasks (
                         id, user_id, source_id, status, font_family, font_size, font_color,
-                        caption_template, include_broll, processing_mode,
+                        caption_template, include_broll, processing_mode, target_language,
+                        auto_center_face, eye_contact_correction, split_screen,
+                        batch_id,
                         created_at, updated_at
                     )
                     VALUES (
                         :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
-                        :caption_template, :include_broll, :processing_mode,
+                        :caption_template, :include_broll, :processing_mode, :target_language,
+                        :auto_center_face, :eye_contact_correction, :split_screen,
+                        :batch_id,
                         NOW(), NOW()
                     )
                     RETURNING id
@@ -57,6 +66,11 @@ class TaskRepository:
                     "caption_template": caption_template,
                     "include_broll": include_broll,
                     "processing_mode": processing_mode,
+                    "target_language": target_language,
+                    "auto_center_face": auto_center_face,
+                    "eye_contact_correction": eye_contact_correction,
+                    "split_screen": split_screen,
+                    "batch_id": batch_id,
                 },
             )
         except Exception:
@@ -142,6 +156,9 @@ class TaskRepository:
             "stage_timings_json": getattr(row, "stage_timings_json", None),
             "started_at": getattr(row, "started_at", None),
             "completed_at": getattr(row, "completed_at", None),
+            "target_language": getattr(row, "target_language", "eng"),
+            "auto_center_face": getattr(row, "auto_center_face", False),
+            "eye_contact_correction": getattr(row, "eye_contact_correction", False),
             "completion_notification_sent_at": getattr(
                 row, "completion_notification_sent_at", None
             ),

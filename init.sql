@@ -1,4 +1,4 @@
--- Database initialization script for SupoClip
+-- Database initialization script for ViraClip
 -- Create database schema with required tables
 
 -- Enable UUID extension for generating UUIDs
@@ -38,6 +38,7 @@ CREATE TABLE sources (
     type VARCHAR(20) CHECK (type IN ('youtube', 'video_url')) NOT NULL,
     title VARCHAR(500) NOT NULL,
     url VARCHAR(1000),
+    url_secondary VARCHAR(1000),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -63,6 +64,13 @@ CREATE TABLE tasks (
     caption_template VARCHAR(50) DEFAULT 'default',
     include_broll BOOLEAN DEFAULT false,
     processing_mode VARCHAR(20) NOT NULL DEFAULT 'fast',
+
+    -- Clip generation options
+    target_language VARCHAR(10) DEFAULT 'eng',
+    auto_center_face BOOLEAN DEFAULT false,
+    eye_contact_correction BOOLEAN DEFAULT false,
+    split_screen BOOLEAN DEFAULT false,
+
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,
     cache_hit BOOLEAN NOT NULL DEFAULT false,
@@ -95,6 +103,10 @@ CREATE TABLE generated_clips (
     value_score INTEGER DEFAULT 0,
     shareability_score INTEGER DEFAULT 0,
     hook_type VARCHAR(50),
+
+    -- Translation and multi-angle metadata
+    translated_text TEXT,
+    multi_angle_metadata TEXT,
 
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

@@ -17,12 +17,13 @@ import { track } from "@/lib/datafast";
 import { formatSupportMessage, parseApiError } from "@/lib/api-error";
 import Link from "next/link";
 import Image from "next/image";
-import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings } from "lucide-react";
+import { ArrowRight, Youtube, CheckCircle, AlertCircle, Loader2, Palette, Type, Paintbrush, Film, Sparkles, Upload, Monitor, Menu, X, LogOut, List, Shield, Settings, Clock, Zap, Layers } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import LandingPage from "@/components/landing-page";
 import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
 
-interface LatestTask {
+interface RecentTask {
   id: string;
   source_title: string;
   source_type: string;
@@ -118,9 +119,21 @@ export default function Home() {
   const [brollAvailable, setBrollAvailable] = useState(false);
   const [outputFormat, setOutputFormat] = useState<"vertical" | "original">("vertical");
   const [addSubtitles, setAddSubtitles] = useState(true);
+  const [targetLanguage, setTargetLanguage] = useState("eng");
+  const [autoCenterFace, setAutoCenterFace] = useState(false);
+  const [eyeContactCorrection, setEyeContactCorrection] = useState(false);
+  const [splitScreen, setSplitScreen] = useState(false);
+  const [targetPlatform, setTargetPlatform] = useState<"tiktok" | "reels" | "shorts" | "all">("all");
+  const [generateAbVariants, setGenerateAbVariants] = useState(false);
 
-  // Latest task state
-  const [latestTask, setLatestTask] = useState<LatestTask | null>(null);
+  // P3.4: Batch processing state
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchUrls, setBatchUrls] = useState("");
+  const [isBatchLoading, setIsBatchLoading] = useState(false);
+  const [batchResult, setBatchResult] = useState<{ batch_id: string; queued: number; skipped: number; task_ids: string[] } | null>(null);
+
+  // Recent tasks state
+  const [recentTasks, setRecentTasks] = useState<RecentTask[]>([]);
   const [isLoadingLatest, setIsLoadingLatest] = useState(false);
   const [billingSummary, setBillingSummary] = useState<BillingSummary | null>(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -239,7 +252,7 @@ export default function Home() {
         if (response.ok) {
           const data = await response.json();
           if (data.tasks && data.tasks.length > 0) {
-            setLatestTask(data.tasks[0]); // Get the first (latest) task
+            setRecentTasks(data.tasks.slice(0, 4)); // Get top 4 latest tasks
           }
         }
       } catch (error) {
@@ -450,7 +463,13 @@ export default function Home() {
           include_broll: includeBroll,
           processing_mode: "fast",
           output_format: outputFormat,
-          add_subtitles: addSubtitles
+          add_subtitles: addSubtitles,
+          target_language: targetLanguage,
+          auto_center_face: autoCenterFace,
+          eye_contact_correction: eyeContactCorrection,
+          split_screen: splitScreen,
+          target_platform: targetPlatform,
+          generate_ab_variants: generateAbVariants,
         }),
       });
 
@@ -492,6 +511,55 @@ export default function Home() {
     }
   };
 
+  // P3.4: Batch submit handler
+  const handleBatchSubmit = async () => {
+    if (!session?.user?.id) return;
+    const sources = batchUrls
+      .split(/\n|,/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 20);
+    if (sources.length === 0) return;
+
+    setIsBatchLoading(true);
+    setBatchResult(null);
+    setError(null);
+
+    const normalizedColor = /^#[0-9A-Fa-f]{6}$/.test(fontColor) ? fontColor : "#FFFFFF";
+
+    try {
+      const res = await fetch("/api/tasks/batch-start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sources,
+          font_options: { font_family: fontFamily, font_size: fontSize, font_color: normalizedColor },
+          caption_template: captionTemplate,
+          include_broll: includeBroll,
+          processing_mode: "fast",
+          output_format: outputFormat,
+          add_subtitles: addSubtitles,
+          target_language: targetLanguage,
+          auto_center_face: autoCenterFace,
+          eye_contact_correction: eyeContactCorrection,
+          split_screen: splitScreen,
+          target_platform: targetPlatform,
+          generate_ab_variants: generateAbVariants,
+        }),
+      });
+      if (!res.ok) {
+        const err = await parseApiError(res, "Batch processing failed");
+        throw new Error(formatSupportMessage(err));
+      }
+      const data = await res.json();
+      setBatchResult(data);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setIsBatchLoading(false);
+    }
+  };
+
   if (isPending) {
     return (
       <div className="min-h-screen bg-white flex items-center justify-center p-4">
@@ -517,12 +585,12 @@ export default function Home() {
             <div className="flex items-center gap-3">
               <Image
                 src="/logo.png"
-                alt="SupoClip"
+                alt="ViraClip"
                 width={24}
                 height={24}
                 className="rounded-lg"
               />
-              <h1 className="text-xl font-bold text-black">SupoClip</h1>
+              <h1 className="text-xl font-bold text-black">ViraClip</h1>
             </div>
 
             {/* Desktop nav */}
@@ -714,45 +782,54 @@ export default function Home() {
 
       {/* Main Content */}
       <div className="max-w-6xl mx-auto px-6 py-10">
-        {/* Latest Generation Banner */}
-        {latestTask && (
-          <Link href={`/tasks/${latestTask.id}`} className="block mb-8">
-            <div className="flex items-center justify-between p-4 rounded-xl border border-stone-200 bg-stone-50/50 hover:bg-stone-50 transition-colors group">
-              <div className="flex items-center gap-4 min-w-0">
-                <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-stone-900 flex items-center justify-center">
-                  <Film className="w-5 h-5 text-white" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium text-stone-900 truncate">
-                    {latestTask.source_title}
-                  </p>
-                  <div className="flex items-center gap-2 text-xs text-stone-500 mt-0.5">
-                    <span className="capitalize">{latestTask.source_type}</span>
-                    <span>&middot;</span>
-                    <span>{new Date(latestTask.created_at).toLocaleDateString()}</span>
-                    <span>&middot;</span>
-                    <span>{latestTask.clips_count} {latestTask.clips_count === 1 ? "clip" : "clips"}</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 flex-shrink-0">
-                {latestTask.status === "completed" ? (
-                  <Badge className="bg-green-100 text-green-800 text-xs">
-                    <CheckCircle className="w-3 h-3 mr-1" />
-                    Completed
-                  </Badge>
-                ) : latestTask.status === "processing" ? (
-                  <Badge className="bg-blue-100 text-blue-800 text-xs">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Processing
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="text-xs">{latestTask.status}</Badge>
-                )}
-                <ArrowRight className="w-4 h-4 text-stone-400 group-hover:text-stone-600 transition-colors" />
-              </div>
+        {/* Recent Generations Section */}
+        {recentTasks.length > 0 && (
+          <div className="mb-12">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                <Clock className="w-5 h-5 text-stone-400" />
+                Recent Generations
+              </h3>
+              <Link href="/list" className="text-sm font-medium text-stone-500 hover:text-stone-900 transition-colors">
+                View All →
+              </Link>
             </div>
-          </Link>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {recentTasks.map((task) => (
+                <Link key={task.id} href={`/tasks/${task.id}`} className="block">
+                  <div className="flex items-center justify-between p-4 rounded-xl border border-stone-200 bg-stone-50/50 hover:bg-stone-50 transition-all group hover:shadow-sm">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-stone-950 flex items-center justify-center">
+                        <Film className="w-5 h-5 text-white" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-stone-900 truncate">
+                          {task.source_title}
+                        </p>
+                        <div className="flex items-center gap-2 text-[11px] text-stone-500 mt-0.5">
+                          <span className="capitalize">{task.source_type}</span>
+                          <span>&middot;</span>
+                          <span>{task.clips_count} {task.clips_count === 1 ? "clip" : "clips"}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      {task.status === "completed" ? (
+                        <CheckCircle className="w-4 h-4 text-emerald-500" />
+                      ) : task.status === "processing" ? (
+                        <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+                      ) : task.status === "queued" ? (
+                        <Clock className="w-4 h-4 text-amber-500" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-red-500" />
+                      )}
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
         )}
 
         {isLoadingLatest && (
@@ -815,10 +892,65 @@ export default function Home() {
                     <Upload className="w-4 h-4" />
                     Upload Video
                   </button>
+                  {/* P3.4: Batch mode tab */}
+                  <button
+                    type="button"
+                    onClick={() => setBatchMode(!batchMode)}
+                    disabled={isLoading}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      batchMode
+                        ? "bg-purple-700 text-white shadow-sm"
+                        : "bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200"
+                    }`}
+                  >
+                    <Layers className="w-4 h-4" />
+                    Batch URLs
+                  </button>
                 </div>
 
                 {/* URL / Upload Input */}
-                {sourceType === "youtube" ? (
+                {batchMode ? (
+                  <div className="space-y-3">
+                    <Textarea
+                      placeholder={"Paste YouTube URLs, one per line (up to 20):\nhttps://youtube.com/watch?v=...\nhttps://youtube.com/watch?v=..."}
+                      value={batchUrls}
+                      onChange={(e) => setBatchUrls(e.target.value)}
+                      disabled={isBatchLoading}
+                      rows={5}
+                      className="text-sm rounded-xl border-stone-300 focus:border-purple-400 placeholder:text-stone-400 font-mono"
+                    />
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs text-stone-500">
+                        {batchUrls.split(/\n|,/).filter(s => s.trim()).length} URL(s) — max 20
+                      </span>
+                      <Button
+                        type="button"
+                        onClick={handleBatchSubmit}
+                        disabled={isBatchLoading || !batchUrls.trim()}
+                        className="bg-purple-700 hover:bg-purple-800 text-white"
+                      >
+                        {isBatchLoading ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Layers className="w-4 h-4 mr-2" />}
+                        {isBatchLoading ? "Queueing…" : "Start Batch"}
+                      </Button>
+                    </div>
+                    {batchResult && (
+                      <div className="p-3 bg-green-50 border border-green-200 rounded-lg text-sm">
+                        <p className="font-semibold text-green-800">
+                          ✓ Batch queued — {batchResult.queued} task(s) created
+                          {batchResult.skipped > 0 && `, ${batchResult.skipped} skipped`}
+                        </p>
+                        <p className="text-green-700 text-xs mt-1">Batch ID: <code className="font-mono">{batchResult.batch_id}</code></p>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {batchResult.task_ids.map((id) => (
+                            <Link key={id} href={`/tasks/${id}`} className="text-xs text-purple-700 underline hover:text-purple-900">
+                              {id.slice(0, 8)}…
+                            </Link>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : sourceType === "youtube" ? (
                   <div className="relative">
                     <Youtube className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-stone-400" />
                     <Input
@@ -940,6 +1072,120 @@ export default function Home() {
                       onCheckedChange={setAddSubtitles}
                       disabled={isLoading}
                     />
+                  </div>
+
+                  {/* Target Language */}
+                  <div className="space-y-2 p-3 border rounded-lg bg-stone-50">
+                    <label className="text-sm font-medium text-stone-900 flex items-center gap-2">
+                      <Settings className="w-4 h-4 text-orange-500" />
+                      Target Language (Dubbing)
+                    </label>
+                    <Select value={targetLanguage} onValueChange={setTargetLanguage} disabled={isLoading}>
+                      <SelectTrigger className="w-full h-10">
+                        <SelectValue placeholder="Select language" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="eng">English (Original)</SelectItem>
+                        <SelectItem value="spa">Spanish</SelectItem>
+                        <SelectItem value="fra">French</SelectItem>
+                        <SelectItem value="deu">German</SelectItem>
+                        <SelectItem value="ita">Italian</SelectItem>
+                        <SelectItem value="jpn">Japanese</SelectItem>
+                        <SelectItem value="cmn">Mandarin</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  {/* Auto-center Face */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3">
+                      <Monitor className="w-4 h-4 text-cyan-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Auto-center Face</h3>
+                        <p className="text-xs text-stone-500">Keep speaker centered in 9:16 frame</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={autoCenterFace}
+                      onCheckedChange={setAutoCenterFace}
+                      disabled={isLoading}
+                    />
+                  </div>
+
+                  {/* Eye Contact Correction */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3">
+                      <Monitor className="w-4 h-4 text-indigo-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Eye Contact Fix</h3>
+                        <p className="text-xs text-stone-500">AI correction to look at camera</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={eyeContactCorrection}
+                      onCheckedChange={setEyeContactCorrection}
+                      disabled={isLoading}
+                    />
+                  </div>
+
+                  {/* Split Screen */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3">
+                      <Film className="w-4 h-4 text-pink-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Split Screen</h3>
+                        <p className="text-xs text-stone-500">Add satisfiying content on bottom half</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={splitScreen}
+                      onCheckedChange={setSplitScreen}
+                      disabled={isLoading}
+                    />
+                  </div>
+
+                  {/* P3.5: A/B Variants */}
+                  <div className="flex items-center justify-between p-3 border rounded-lg bg-purple-50/60">
+                    <div className="flex items-center gap-3">
+                      <Sparkles className="w-4 h-4 text-purple-600" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Generar variantes A/B</h3>
+                        <p className="text-xs text-stone-500">Crea una 2ª versión con caption template distinto para split testing</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={generateAbVariants}
+                      onCheckedChange={setGenerateAbVariants}
+                      disabled={isLoading}
+                    />
+                  </div>
+
+                  {/* Target Platform */}
+                  <div className="p-3 border rounded-lg bg-stone-50">
+                    <div className="flex items-center gap-3 mb-2">
+                      <Zap className="w-4 h-4 text-orange-500" />
+                      <div>
+                        <h3 className="text-sm font-medium text-stone-900">Plataforma objetivo</h3>
+                        <p className="text-xs text-stone-500">Optimiza la selección de clips para tu red</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-2 flex-wrap mt-1">
+                      {(["all", "tiktok", "reels", "shorts"] as const).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          disabled={isLoading}
+                          onClick={() => setTargetPlatform(p)}
+                          className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors select-none
+                            ${targetPlatform === p
+                              ? "bg-orange-500 text-white border-orange-400"
+                              : "bg-white text-stone-600 border-stone-300 hover:bg-stone-100"
+                            }`}
+                        >
+                          {p === "all" ? "Todos" : p === "reels" ? "Reels" : p === "shorts" ? "Shorts" : "TikTok"}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -1169,18 +1415,20 @@ export default function Home() {
                 </Link>.
               </p>
 
-              <Button
-                type="submit"
-                className="w-full h-12 text-base rounded-xl"
-                disabled={
-                  (sourceType === "youtube" && !url.trim()) ||
-                  (sourceType === "upload" && !fileRef.current) ||
-                  (billingSummary?.monetization_enabled && !billingSummary.can_create_task) ||
-                  isLoading
-                }
-              >
-                {isLoading ? "Processing..." : "Process Video"}
-              </Button>
+              {!batchMode && (
+                <Button
+                  type="submit"
+                  className="w-full h-12 text-base rounded-xl"
+                  disabled={
+                    (sourceType === "youtube" && !url.trim()) ||
+                    (sourceType === "upload" && !fileRef.current) ||
+                    (billingSummary?.monetization_enabled && !billingSummary.can_create_task) ||
+                    isLoading
+                  }
+                >
+                  {isLoading ? "Processing..." : "Process Video"}
+                </Button>
+              )}
             </form>
           </div>
 

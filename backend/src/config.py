@@ -12,10 +12,14 @@ class Config:
         self.anthropic_api_key = self._get_optional_env("ANTHROPIC_API_KEY")
         self.google_api_key = self._get_optional_env("GOOGLE_API_KEY")
         self.youtube_data_api_key = self._get_optional_env("YOUTUBE_DATA_API_KEY")
-        self.ollama_base_url = self._get_optional_env("OLLAMA_BASE_URL")
+        self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
         self.ollama_api_key = self._get_optional_env("OLLAMA_API_KEY")
+        # Vision model for local multimodal analysis (Qwen3-VL via Ollama)
+        # Options: qwen3-vl:8b (best), qwen3-vl:4b (lighter), moondream:v2 (CPU fallback)
+        self.ollama_vision_model = os.getenv("OLLAMA_VISION_MODEL", "qwen3-vl:8b")
+        self.vision_analysis_enabled = self._get_bool_env("VISION_ANALYSIS_ENABLED", True)
 
-        self.whisper_model = os.getenv("WHISPER_MODEL", "base")
+        self.whisper_model = os.getenv("WHISPER_MODEL_SIZE", "medium")
         self.llm = self._get_optional_env("LLM") or self._infer_default_llm()
         self.assembly_ai_api_key = os.getenv("ASSEMBLY_AI_API_KEY")
         self.pexels_api_key = os.getenv("PEXELS_API_KEY")
@@ -34,6 +38,12 @@ class Config:
         self.clip_duration = int(os.getenv("CLIP_DURATION", "30"))  # seconds
 
         self.temp_dir = os.getenv("TEMP_DIR", "temp")
+
+        # Database
+        self.database_url = os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip",
+        )
 
         # Redis configuration
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
@@ -62,7 +72,7 @@ class Config:
         )
         self.resend_api_key = self._get_optional_env("RESEND_API_KEY")
         self.resend_from_email = os.getenv(
-            "RESEND_FROM_EMAIL", "SupoClip <onboarding@resend.dev>"
+            "RESEND_FROM_EMAIL", "ViraClip <onboarding@resend.dev>"
         )
         self.app_base_url = (
             self._get_optional_env("NEXT_PUBLIC_APP_URL") or "http://localhost:3000"
@@ -126,12 +136,12 @@ class Config:
         Falls back to Google for backward compatibility.
         """
         if self.google_api_key:
-            return "google-gla:gemini-3-flash-preview"
+            return "google-gla:gemini-2.0-flash"
         if self.openai_api_key:
-            return "openai:gpt-5.2"
+            return "openai:gpt-4o-mini"
         if self.anthropic_api_key:
-            return "anthropic:claude-4-sonnet"
-        return "google-gla:gemini-3-flash-preview"
+            return "anthropic:claude-3-5-haiku-latest"
+        return "google-gla:gemini-2.0-flash"
 
 
 def get_config() -> Config:
