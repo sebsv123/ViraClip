@@ -205,8 +205,64 @@ def create_app(
 
     @app.get("/health")
     async def health_check():
-        """Basic health check."""
-        return {"status": "healthy"}
+        """Endpoint de diagnóstico completo — verifica todos los servicios."""
+        import shutil
+        import httpx
+        import os
+        from sqlalchemy import text
+        
+        status = {}
+        
+        # Redis
+        try:
+            pool = await app.state.queue_adapter.get_pool()
+            await pool.ping()
+            status["redis"] = "✅ OK"
+        except Exception as e:
+            status["redis"] = f"❌ {str(e)}"
+        
+        # PostgreSQL
+        try:
+            async for db in get_db():
+                await db.execute(text("SELECT 1"))
+                status["postgres"] = "✅ OK"
+                break
+        except Exception as e:
+            status["postgres"] = f"❌ {str(e)}"
+        
+        # Ollama + Phi-3 / Qwen
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get("http://ollama:11434/api/tags")
+                models = [m["name"] for m in r.json().get("models", [])]
+                phi3_ok = any("phi3" in m or "qwen" in m for m in models)
+                status["ollama"] = f"✅ OK - modelos: {models}" if phi3_ok else f"⚠️ Sin modelo visión - modelos: {models}"
+        except Exception as e:
+            status["ollama"] = f"❌ {str(e)}"
+        
+        # FFmpeg
+        ffmpeg_path = shutil.which("ffmpeg")
+        status["ffmpeg"] = f"✅ {ffmpeg_path}" if ffmpeg_path else "❌ No encontrado"
+        
+        # Módulos Python críticos
+        modules = ["librosa", "sentence_transformers", "mediapipe", "moviepy", "faster_whisper"]
+        for mod in modules:
+            try:
+                __import__(mod)
+                status[f"module_{mod}"] = "✅"
+            except ImportError:
+                status[f"module_{mod}"] = "❌ No instalado"
+        
+        # Carpetas críticas
+        for folder in ["/app/uploads", "/app/clips", "/app/assets/sounds"]:
+            exists = os.path.isdir(folder)
+            status[f"dir_{folder.split('/')[-1]}"] = "✅" if exists else "❌ No existe"
+        
+        all_ok = all("✅" in v for v in status.values())
+        return {
+            "status": "healthy" if all_ok else "degraded",
+            "checks": status
+        }
 
     @app.get("/health/db")
     async def check_database_health(db: AsyncSession = Depends(get_db)):

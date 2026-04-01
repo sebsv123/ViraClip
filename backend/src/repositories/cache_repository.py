@@ -11,12 +11,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class CacheRepository:
     @staticmethod
     async def get_cache(db: AsyncSession, cache_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Get cached data with automatic TTL of 24 hours.
+        Cache entries older than 24h are ignored and will be overwritten on next save.
+        """
         result = await db.execute(
             text(
                 """
                 SELECT cache_key, source_url, source_type, video_path, transcript_text, analysis_json
                 FROM processing_cache
                 WHERE cache_key = :cache_key
+                  AND updated_at > NOW() - INTERVAL '24 hours'
                 """
             ),
             {"cache_key": cache_key},
@@ -73,3 +78,44 @@ class CacheRepository:
             },
         )
         await db.commit()
+
+    @staticmethod
+    async def cleanup_old_cache(db: AsyncSession, hours: int = 24) -> int:
+        """
+        Delete cache entries older than specified hours.
+        Returns number of deleted entries.
+        Called automatically on worker startup.
+        """
+        result = await db.execute(
+            text(
+                """
+                DELETE FROM processing_cache
+                WHERE updated_at < NOW() - INTERVAL ':hours hours'
+                RETURNING cache_key
+                """
+            ),
+            {"hours": hours},
+        )
+        deleted_count = len(result.fetchall())
+        await db.commit()
+        return deleted_count
+
+    @staticmethod
+    async def delete_cache(db: AsyncSession, cache_key: str) -> bool:
+        """
+        Delete a specific cache entry by key.
+        Returns True if entry was found and deleted, False otherwise.
+        """
+        result = await db.execute(
+            text(
+                """
+                DELETE FROM processing_cache
+                WHERE cache_key = :cache_key
+                RETURNING cache_key
+                """
+            ),
+            {"cache_key": cache_key},
+        )
+        deleted = result.fetchone() is not None
+        await db.commit()
+        return deleted

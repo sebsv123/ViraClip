@@ -1,8 +1,17 @@
 """
 Utility functions for video-related operations.
 Optimized for MoviePy v2, AssemblyAI integration, and high-quality output.
+
+DEPRECATION NOTICE: This module is being phased out. 
+Please use the new modular imports from video_processing package:
+- video_processing.transcription (get_video_transcript)
+- video_processing.subtitles (create_*_subtitles)
+- video_processing.face_detection (detect_faces_in_clip, detect_face_trajectory)
+- video_processing.audio (mix_background_music, get_background_music_for_niche)
+- video_processing.clip_creation (create_optimized_clip)
 """
 
+import warnings
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import os
@@ -14,12 +23,31 @@ import multiprocessing
 import zipfile
 import subprocess
 
-import cv2
+# Optional cv2 import - not required for basic functionality
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    cv2 = None
+
 from moviepy import VideoFileClip, CompositeVideoClip, TextClip, ColorClip
 from moviepy.video.fx import CrossFadeIn, CrossFadeOut, FadeIn, FadeOut
 
-import assemblyai as aai
-import srt
+try:
+    import assemblyai as aai
+    AAI_AVAILABLE = True
+except ImportError:
+    AAI_AVAILABLE = False
+    aai = None
+
+try:
+    import srt
+    SRT_AVAILABLE = True
+except ImportError:
+    SRT_AVAILABLE = False
+    srt = None
+
 from datetime import timedelta
 
 from .config import Config
@@ -32,6 +60,15 @@ from .spacetimedb.schema import broadcast_telemetry
 logger = logging.getLogger(__name__)
 config = Config()
 TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
+
+# DEPRECATION: Functions in this file are being migrated to video_processing package
+# This module will be removed in a future version. Please update your imports.
+warnings.warn(
+    "video_utils.py is deprecated. Use video_processing package instead. "
+    "See: video_processing.transcription, subtitles, face_detection, audio, clip_creation",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 # B-4 fix: shared directory for content-hash-based transcript caches
 # Lets the same video file re-use its transcript even if downloaded to a different path.
@@ -2172,6 +2209,7 @@ def create_optimized_clip(
     secondary_video_path: Optional[Path] = None,
     segment: Optional[Dict[str, Any]] = None,
     elite_metadata: Optional[Dict[str, Any]] = None,
+    gpu_encoding_settings: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """Create a high-quality clip with Senior-level resource management (ResourceGuard)."""
     if segment is None:
@@ -2571,8 +2609,16 @@ def create_optimized_clip(
             except Exception as _fade_e:
                 logger.debug(f"Fade effects skipped: {_fade_e}")
 
+            # 7. Write final clip with GPU acceleration if available
             processor = VideoProcessor(font_family, font_size, font_color)
-            encoding_settings = processor.get_optimal_encoding_settings("high")
+            
+            # Use GPU settings if provided (passed from task_service), else fallback to CPU
+            if gpu_encoding_settings:
+                encoding_settings = gpu_encoding_settings
+                logger.info(f"✨ Using GPU encoding: {encoding_settings.get('codec')}")
+            else:
+                encoding_settings = processor.get_optimal_encoding_settings("high")
+                logger.info("Using CPU encoding (libx264)")
 
             # Diagnostic log with full clip properties
             _has_audio = final_clip.audio is not None
@@ -3146,4 +3192,4 @@ def insert_broll_into_clip(
                     clip.close()
                 except Exception:
                     pass
-
+

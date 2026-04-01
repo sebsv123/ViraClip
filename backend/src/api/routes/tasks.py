@@ -754,7 +754,7 @@ async def compile_clips_into_reel(
     Returns the path to the compiled video file.
     """
     try:
-        from ..video_utils import apply_transition_effect, get_available_transitions
+        from ..video_processing import get_available_transitions, apply_transition_effect
         from moviepy import VideoFileClip, concatenate_videoclips
         import random
 

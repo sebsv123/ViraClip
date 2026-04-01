@@ -7,17 +7,35 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Literal, cast
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent
+try:
+    from pydantic_ai import Agent
+    PYDANTIC_AI_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AI_AVAILABLE = False
+    Agent = None
 
 from ..config import Config, get_config
 from ..ai import ViralityAnalysis, TranscriptSegment
 from ..utils.async_helpers import run_in_thread
 from ..repositories.campaign_repository import CampaignRepository
 
-import cv2
+# Optional imports for visual/audio analysis
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+    cv2 = None
+
+try:
+    import librosa
+    LIBROSA_AVAILABLE = True
+except ImportError:
+    LIBROSA_AVAILABLE = False
+    librosa = None
+
 import numpy as np
 import base64
-import librosa
 
 logger = logging.getLogger(__name__)
 
@@ -73,30 +91,36 @@ Analyze the provided data from multiple perspectives:
 Choose 3-5 'Elite' segments. For each, provide precise VFX and Audio cues.
 If the segment has a 'climax' or 'twist', ensure the VFX and Audio work together to amplify it."""
 
-director_agent = Agent(
-    _get_agent_model(),
-    output_type=EliteCreativePlan,
-    system_prompt=creative_director_prompt,
-)
+# Initialize agents only if pydantic_ai is available
+if PYDANTIC_AI_AVAILABLE and Agent is not None:
+    director_agent = Agent(
+        _get_agent_model(),
+        output_type=EliteCreativePlan,
+        system_prompt=creative_director_prompt,
+    )
 
-trend_researcher_agent = Agent(
-    _get_agent_model(),
-    output_type=Dict[str, Any],
-    system_prompt="""You are the Trend Intelligence Agent at ViraClip.
+    trend_researcher_agent = Agent(
+        _get_agent_model(),
+        output_type=Dict[str, Any],
+        system_prompt="""You are the Trend Intelligence Agent at ViraClip.
 Analyze current cultural shifts and viral aesthetics on TikTok, Reels, and Shorts.
 Identify 3 trending 'Style DNA' presets (e.g., 'Retro VHS', 'Neon Cyberpunk', 'Low-Fi Minimalist') 
 and suggest 5 high-engagement hashtags."""
-)
+    )
 
-community_manager_agent = Agent(
-    _get_agent_model(),
-    output_type=str,
-    system_prompt="""You are the AI Community Manager at ViraClip.
+    community_manager_agent = Agent(
+        _get_agent_model(),
+        output_type=str,
+        system_prompt="""You are the AI Community Manager at ViraClip.
 Your goal is to increase engagement by replying to comments on our clips.
 Analyze the clip's context (transcript/hook) and the user's comment.
 Write a reply that is witty, helpful, and encourages further interaction.
 Be brief, viral-friendly, and maintain the brand DNA."""
-)
+    )
+else:
+    director_agent = None
+    trend_researcher_agent = None
+    community_manager_agent = None
 
 class EliteAIService:
     """Service for high-fidelity multimodal video analysis."""
@@ -173,15 +197,29 @@ class EliteAIService:
         Produce a high-fidelity creative blueprint using agentic reasoning and visual grounding.
         """
         logger.info("🎬 EliteAIService: Starting creative orchestration")
-        
-        # Step 0: Trend Intelligence (Scan the cultural zeitgeist)
-        trend_context = await trend_researcher_agent.run("Provide latest viral aesthetics for video content")
-        logger.info(f"📈 EliteAIService: Trend Data acquired - {trend_context.output.get('presets', []) if hasattr(trend_context.output, 'get') else trend_context.output}")
 
-        # Step 1: Audio Grounding (Extract peaks)
-        # NOTE: Frame extraction is skipped here because director_agent only accepts text.
-        # Visual grounding via multimodal content will be added in a future phase.
-        audio_peaks = await self._extract_audio_peaks(video_path)
+        _fallback = EliteCreativePlan(
+            clips=[],
+            global_vibe="Standard",
+            brand_consistency_plan="Default brand voice",
+            custom_hashtags=["viral", "trending"],
+        )
+
+        try:
+            # Step 0: Trend Intelligence (Scan the cultural zeitgeist)
+            trend_context = await trend_researcher_agent.run("Provide latest viral aesthetics for video content")
+            logger.info(f"📈 EliteAIService: Trend Data acquired - {trend_context.output.get('presets', []) if hasattr(trend_context.output, 'get') else trend_context.output}")
+            trend_output = trend_context.output
+        except Exception as trend_err:
+            logger.warning(f"⚠️ EliteAIService: Trend agent failed ({trend_err}). Continuing without trend data.")
+            trend_output = {"presets": [], "hashtags": []}
+
+        try:
+            # Step 1: Audio Grounding (Extract peaks)
+            audio_peaks = await self._extract_audio_peaks(video_path)
+        except Exception as audio_err:
+            logger.warning(f"⚠️ EliteAIService: Audio peak extraction failed ({audio_err}). Continuing without audio data.")
+            audio_peaks = []
 
         # Truncate transcript for prompt if it's very long (keep first 8000 chars)
         transcript_for_prompt = transcript[:8000] if len(transcript) > 8000 else transcript
@@ -191,7 +229,7 @@ class EliteAIService:
 Transcript: {transcript_for_prompt}
 Total Duration: {duration}s
 Audio Peaks (time, intensity): {audio_peaks}
-TREND CONTEXT (Suggested Styles/Hashtags): {trend_context.output}
+TREND CONTEXT (Suggested Styles/Hashtags): {trend_output}
 
 MISSION:
 Analyze the provided transcript and the audio energy peaks.
@@ -208,13 +246,7 @@ Flag 'loop_requested' if the start and end of the segment appear visually simila
             return result.output
         except Exception as e:
             logger.error(f"Elite AI analysis failed: {e}. Returning empty plan as fallback.")
-            # Return an empty plan so the pipeline continues without elite metadata
-            return EliteCreativePlan(
-                clips=[],
-                global_vibe="Standard",
-                brand_consistency_plan="Default brand voice",
-                custom_hashtags=["viral", "trending"],
-            )
+            return _fallback
 
     async def generate_social_reply(
         self,

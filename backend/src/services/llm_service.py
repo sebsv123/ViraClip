@@ -37,6 +37,7 @@ For each segment provide ALL of these fields:
 - virality_score (0-100): Sum of the four scores above
 - hook_type: One of: "Curiosity Gap", "Negative Hook", "Bold Claim", "Story", "Statistic", "Question", "Contrast", "Value"
 - suggested_title: A catchy, high-CTR title (leave empty string if nothing compelling)
+- suggested_hashtags: List of 5-8 trending hashtags for TikTok/Reels (e.g. ["#motivation", "#mindset"])
 - reasoning: Brief explanation of the viral strategy
 - viral_cues: Specific editing suggestions (e.g. "Fast zoom on key claim", "Split screen")
 
@@ -55,6 +56,7 @@ Return a JSON object with this exact structure:
             "virality_score": 79,
             "hook_type": "Curiosity Gap",
             "suggested_title": "The mindset hack you have been missing",
+            "suggested_hashtags": ["#motivation", "#mindset", "#selfdevelopment", "#viral", "#shorts"],
             "reasoning": "Opens with a pattern interrupt that creates immediate curiosity.",
             "viral_cues": "Fast-paced captions, zoom in on the main claim at 0:03"
         }}
@@ -141,6 +143,7 @@ Return a JSON object with this exact structure:
                     "hook_strength": "Medium",
                     "hook_type": "Value",
                     "suggested_title": "",  # empty → _build_hook_title uses segment text
+                    "suggested_hashtags": [],  # empty fallback when Ollama is offline
                     "reasoning": "Automated fallback analysis (Ollama offline)."
                 }
                 for i in range(count)

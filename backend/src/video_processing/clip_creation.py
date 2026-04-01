@@ -425,6 +425,10 @@ def create_optimized_clip(
                 logger.info("Using CPU encoding (libx264)")
 
             _fps_used = clip.fps or 30
+            
+            # Ensure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            
             final_clip.write_videofile(
                 str(output_path),
                 temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.m4a"),

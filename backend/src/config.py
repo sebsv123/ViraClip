@@ -45,10 +45,14 @@ class Config:
             "postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip",
         )
 
-        # Redis configuration
-        self.redis_host = os.getenv("REDIS_HOST", "localhost")
-        self.redis_port = int(os.getenv("REDIS_PORT", "6379"))
-        self.redis_password = self._get_optional_env("REDIS_PASSWORD")
+        # Redis settings for ARQ task queue
+        self.redis_host: str = os.getenv("REDIS_HOST", "redis")
+        self.redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
+        self.redis_password: Optional[str] = os.getenv("REDIS_PASSWORD")
+        
+        # Redis Sentinel for high availability (optional)
+        self.redis_sentinel_hosts: Optional[str] = os.getenv("REDIS_SENTINEL_HOSTS")  # "host1:port1,host2:port2"
+        self.redis_sentinel_master_name: str = os.getenv("REDIS_SENTINEL_MASTER", "mymaster")
 
         # Fail-safe: queued tasks should not stay queued forever
         self.queued_task_timeout_seconds = int(
@@ -84,6 +88,11 @@ class Config:
         self.fast_mode_transcript_model = os.getenv(
             "FAST_MODE_TRANSCRIPT_MODEL", "nano"
         )
+        
+        # Render concurrency: auto-detect based on GPU, or manual override
+        # auto = detect GPU and use optimal value (2-4)
+        # 2/3/4/6/8 = manual override
+        self.render_concurrency = os.getenv("RENDER_CONCURRENCY", "auto")
 
     @staticmethod
     def _get_optional_env(name: str):

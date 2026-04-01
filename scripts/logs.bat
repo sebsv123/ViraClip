@@ -1,0 +1,3 @@
+@echo off
+echo 📋 Logs del worker (Ctrl+C para salir)...
+docker-compose logs -f worker

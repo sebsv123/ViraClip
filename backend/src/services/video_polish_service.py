@@ -184,8 +184,8 @@ class VideoPolishService:
                 try:
                     if temp_noaudio.exists() and not output_path.exists():
                         os.rename(str(temp_noaudio), str(output_path))
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"[POLISH] Failed to recover temp file {temp_noaudio}: {e}", exc_info=True)
 
             return True
 
@@ -398,8 +398,8 @@ class VideoPolishService:
             # Clean up temp file
             try:
                 tmp_video.unlink()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[POLISH] Failed to delete temp file {tmp_video}: {e}")
 
             logger.info(f"✅ Eye contact correction done: {output_path}")
 
@@ -412,8 +412,8 @@ class VideoPolishService:
             import shutil
             try:
                 shutil.copy(input_path, output_path)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f"[POLISH] Fallback copy failed {input_path} → {output_path}: {e}", exc_info=True)
 
     async def apply_pattern_interrupts(self, input_path: Path, output_path: Path, viral_cues: list) -> bool:
         """
@@ -457,7 +457,8 @@ class VideoPolishService:
             try:
                 num, den = fps_raw.split("/")
                 fps = float(num) / float(den)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[POLISH] Failed to parse FPS '{fps_raw}': {e} — defaulting to 30.0")
                 fps = 30.0
 
             total_frames = int(duration * fps)
@@ -520,10 +521,10 @@ class VideoPolishService:
             return True
 
         except Exception as e:
-            logger.error(f"❌ Pattern interrupts error: {e}")
+            logger.error(f"[POLISH] Pattern interrupts error: {e}", exc_info=True)
             try:
                 import shutil
                 shutil.copy(input_path, output_path)
-            except Exception:
-                pass
+            except Exception as copy_e:
+                logger.error(f"[POLISH] Fallback copy also failed: {copy_e}", exc_info=True)
             return False

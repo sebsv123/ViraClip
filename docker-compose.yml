@@ -90,6 +90,7 @@ services:
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
       - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -163,6 +164,7 @@ services:
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
       - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -219,6 +221,7 @@ services:
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
       - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -272,6 +275,7 @@ services:
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
       - LLM=${LLM:-google-gla:gemini-2.0-flash}
+      - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -311,11 +315,11 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 30s
-      timeout: 10s
+      timeout: 15s
       retries: 5
-      start_period: 30s
+      start_period: 60s
 
   # Redis for caching and job queues (useful for video processing)
   redis:

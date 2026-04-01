@@ -1,0 +1,63 @@
+2026-03-31 00:07:01,721 - __main__ - INFO - 
+======================================================================
+2026-03-31 00:07:01,722 - __main__ - INFO - VIRACLIP LIVE TESTING SUITE
+2026-03-31 00:07:01,722 - __main__ - INFO - ======================================================================
+2026-03-31 00:07:01,722 - __main__ - INFO - Started: 2026-03-31 00:07:01
+2026-03-31 00:07:01,722 - __main__ - INFO - Videos to test: 2
+2026-03-31 00:07:01,723 - __main__ - INFO - ======================================================================
+
+2026-03-31 00:07:01,723 - __main__ - INFO - 
+============================================================
+2026-03-31 00:07:01,724 - __main__ - INFO - Testing video_1: Test Video 1 - Short educational content
+2026-03-31 00:07:01,725 - __main__ - INFO - URL: https://youtu.be/DHSigj8uPnE
+2026-03-31 00:07:01,725 - __main__ - INFO - ============================================================
+
+2026-03-31 00:07:01,725 - __main__ - INFO - [IMPORT] Importing ViraClip services...
+2026-03-31 00:07:01,726 - __main__ - ERROR - Import failed: No module named 'backend'
+2026-03-31 00:07:01,727 - __main__ - INFO - 
+[Test completed in 0.00 seconds]
+2026-03-31 00:07:01,727 - __main__ - INFO - Final status: failed
+2026-03-31 00:07:01,727 - __main__ - INFO - 
+Pausing 5 seconds before next test...
+2026-03-31 00:07:06,742 - __main__ - INFO - 
+============================================================
+2026-03-31 00:07:06,743 - __main__ - INFO - Testing video_2: Test Video 2 - Tutorial content
+2026-03-31 00:07:06,743 - __main__ - INFO - URL: https://youtu.be/3wgwaxIfUJQ
+2026-03-31 00:07:06,743 - __main__ - INFO - ============================================================
+
+2026-03-31 00:07:06,743 - __main__ - INFO - [IMPORT] Importing ViraClip services...
+2026-03-31 00:07:06,744 - __main__ - ERROR - Import failed: No module named 'backend'
+2026-03-31 00:07:06,745 - __main__ - INFO - 
+[Test completed in 0.00 seconds]
+2026-03-31 00:07:06,745 - __main__ - INFO - Final status: failed
+2026-03-31 00:07:06,745 - __main__ - INFO - 
+======================================================================
+2026-03-31 00:07:06,745 - __main__ - INFO - TEST SUMMARY REPORT
+2026-03-31 00:07:06,746 - __main__ - INFO - ======================================================================
+2026-03-31 00:07:06,746 - __main__ - INFO - 
+Overall Results:
+2026-03-31 00:07:06,746 - __main__ - INFO -    SUCCESS: 0
+2026-03-31 00:07:06,746 - __main__ - INFO -    PARTIAL: 0
+2026-03-31 00:07:06,746 - __main__ - INFO -    FAILED: 2
+2026-03-31 00:07:06,746 - __main__ - INFO -    Total time: 5.02 seconds
+2026-03-31 00:07:06,747 - __main__ - INFO - 
+Detailed Results:
+2026-03-31 00:07:06,747 - __main__ - INFO - 
+   [FAIL] video_1:
+2026-03-31 00:07:06,747 - __main__ - INFO -       Status: failed
+2026-03-31 00:07:06,747 - __main__ - INFO -       Time: 0.0s
+2026-03-31 00:07:06,748 - __main__ - INFO -       Clips: 0
+2026-03-31 00:07:06,748 - __main__ - INFO -       Errors: 1
+2026-03-31 00:07:06,748 - __main__ - INFO -       Error details:
+2026-03-31 00:07:06,748 - __main__ - INFO -          - Import failed: No module named 'backend'
+2026-03-31 00:07:06,748 - __main__ - INFO - 
+   [FAIL] video_2:
+2026-03-31 00:07:06,749 - __main__ - INFO -       Status: failed
+2026-03-31 00:07:06,749 - __main__ - INFO -       Time: 0.0s
+2026-03-31 00:07:06,749 - __main__ - INFO -       Clips: 0
+2026-03-31 00:07:06,749 - __main__ - INFO -       Errors: 1
+2026-03-31 00:07:06,749 - __main__ - INFO -       Error details:
+2026-03-31 00:07:06,749 - __main__ - INFO -          - Import failed: No module named 'backend'
+2026-03-31 00:07:06,751 - __main__ - INFO - 
+Full report saved to: test_report_20260331_000706.json
+2026-03-31 00:07:06,751 - __main__ - INFO - ======================================================================

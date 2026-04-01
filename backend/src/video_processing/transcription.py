@@ -1,0 +1,332 @@
+from __future__ import annotations
+
+"""Transcription utilities extracted from video_utils."""
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+import json
+import logging
+import os
+
+from ..config import Config
+
+logger = logging.getLogger(__name__)
+config = Config()
+
+_TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
+_TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/supoclip_transcript_cache")
+
+_whisper_model = None
+_whisper_model_config = None
+
+
+def snap_to_word_boundary(timestamp_ms: int, words: List[Dict], is_start: bool = True) -> int:
+    """Snap a timestamp to the nearest word boundary.
+    
+    Args:
+        timestamp_ms: The timestamp in milliseconds
+        words: List of word dictionaries with 'start' and 'end' timestamps
+        is_start: If True, snap to word start; if False, snap to word end
+        
+    Returns:
+        The adjusted timestamp in milliseconds
+    """
+    if not words:
+        return timestamp_ms
+    
+    # Find the closest word boundary
+    closest_time = timestamp_ms
+    min_diff = float('inf')
+    
+    for word in words:
+        if is_start:
+            word_time = int(word.get('start', 0) * 1000)
+        else:
+            word_time = int(word.get('end', 0) * 1000)
+        
+        diff = abs(word_time - timestamp_ms)
+        if diff < min_diff:
+            min_diff = diff
+            closest_time = word_time
+    
+    return closest_time
+
+
+def format_transcript_for_analysis(transcript) -> List[str]:
+    """Format transcripts into readable timestamped segments for AI analysis."""
+    utterances = getattr(transcript, "utterances", None) or []
+    if utterances:
+        formatted_lines = []
+        for utterance in utterances:
+            start_time = format_ms_to_timestamp(utterance.start)
+            end_time = format_ms_to_timestamp(utterance.end)
+            speaker = getattr(utterance, "speaker", None)
+            speaker_prefix = f"Speaker {speaker}: " if speaker else ""
+            formatted_lines.append(
+                f"[{start_time} - {end_time}] {speaker_prefix}{utterance.text}"
+            )
+        return formatted_lines
+
+    formatted_lines = []
+    words = getattr(transcript, "words", None) or []
+    if not words:
+        return formatted_lines
+
+    logger.info(f"Processing {len(words)} words with precise timing")
+
+    current_segment = []
+    current_start = None
+    segment_word_count = 0
+    max_words_per_segment = 8
+
+    for word in words:
+        if current_start is None:
+            current_start = word.start
+
+        current_segment.append(word.text)
+        segment_word_count += 1
+
+        if (
+            segment_word_count >= max_words_per_segment
+            or word.text.endswith(".")
+            or word.text.endswith("!")
+            or word.text.endswith("?")
+        ):
+            if current_segment:
+                start_time = format_ms_to_timestamp(current_start)
+                end_time = format_ms_to_timestamp(word.end)
+                text = " ".join(current_segment)
+                formatted_lines.append(f"[{start_time} - {end_time}] {text}")
+
+            current_segment = []
+            current_start = None
+            segment_word_count = 0
+
+    if current_segment and current_start is not None:
+        start_time = format_ms_to_timestamp(current_start)
+        end_time = format_ms_to_timestamp(words[-1].end)
+        text = " ".join(current_segment)
+        formatted_lines.append(f"[{start_time} - {end_time}] {text}")
+
+    return formatted_lines
+
+
+def format_ms_to_timestamp(ms: int) -> str:
+    """Format milliseconds to MM:SS format."""
+    seconds = ms // 1000
+    minutes = seconds // 60
+    seconds = seconds % 60
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def get_whisper_model():
+    """Get or create a singleton faster-whisper model with smart device detection."""
+    global _whisper_model, _whisper_model_config
+
+    model_size = os.environ.get("WHISPER_MODEL_SIZE", "medium")
+    device_setting = os.environ.get("WHISPER_DEVICE", "auto")
+    compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
+
+    if device_setting == "auto":
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                device = "cuda"
+            else:
+                device = "cpu"
+                compute_type = "int8"
+        except Exception as e:
+            logger.warning(f"[TRANSCRIPTION] CUDA detection failed, falling back to CPU: {e}")
+            device = "cpu"
+            compute_type = "int8"
+    else:
+        device = device_setting
+        if device == "cpu":
+            compute_type = "int8"
+
+    current_config = (model_size, device, compute_type)
+    if _whisper_model is not None and _whisper_model_config == current_config:
+        return _whisper_model
+
+    from faster_whisper import WhisperModel
+
+    model_path = model_size
+    _whisper_model = WhisperModel(
+        model_path,
+        device=device,
+        compute_type=compute_type,
+        download_root="/app/models",
+    )
+    _whisper_model_config = current_config
+    return _whisper_model
+
+
+def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
+    """Transcribe video locally with faster-whisper."""
+    logger.info(f"Transcribing with faster-whisper: {video_path}")
+
+    model = get_whisper_model()
+
+    try:
+        segments, info = model.transcribe(
+            str(video_path),
+            beam_size=5,
+            word_timestamps=True,
+            vad_filter=True,
+            vad_parameters=dict(min_silence_duration_ms=500),
+        )
+
+        logger.info(f"Language detected: {info.language} ({info.language_probability:.2f})")
+        logger.info(f"Audio duration: {info.duration:.1f}s")
+
+        formatted_lines = []
+        all_segments = []
+        for segment in segments:
+            start = format_ms_to_timestamp(int(segment.start * 1000))
+            end = format_ms_to_timestamp(int(segment.end * 1000))
+            formatted_lines.append(f"[{start} - {end}] {segment.text}")
+            all_segments.append(segment)
+
+        cache_transcript_data(video_path, all_segments)
+
+        result = "\n".join(formatted_lines)
+        logger.info(f"Transcript complete: {len(result)} chars, {len(formatted_lines)} segments")
+        return result
+
+    except Exception as exc:
+        logger.error(f"faster-whisper error: {exc}")
+        raise
+
+
+def _hash_cache_path(video_hash: str) -> Path:
+    return _TRANSCRIPT_HASH_CACHE_DIR / f"{video_hash}.transcript_cache.json"
+
+
+def cache_transcript_data(video_path: Path, transcript) -> None:
+    cache_path = video_path.with_suffix(".transcript_cache.json")
+
+    words_data = []
+    utterances_data = []
+    full_text = ""
+
+    if isinstance(transcript, list):
+        all_words = []
+        text_parts = []
+        for segment in transcript:
+            text_parts.append(segment.text.strip())
+            if hasattr(segment, "words") and segment.words:
+                for word in segment.words:
+                    all_words.append(
+                        {
+                            "text": getattr(word, "word", getattr(word, "text", "")),
+                            "start": int(word.start * 1000),
+                            "end": int(word.end * 1000),
+                            "confidence": getattr(word, "probability", 1.0),
+                            "speaker": None,
+                        }
+                    )
+        words_data = all_words
+        full_text = " ".join(text_parts)
+    else:
+        if hasattr(transcript, "words") and transcript.words:
+            words_data = [_serialize_transcript_word(word) for word in transcript.words]
+
+        if getattr(transcript, "utterances", None):
+            utterances_data = [
+                {
+                    "text": utterance.text,
+                    "start": utterance.start,
+                    "end": utterance.end,
+                    "speaker": getattr(utterance, "speaker", None),
+                    "words": [
+                        _serialize_transcript_word(word)
+                        for word in getattr(utterance, "words", []) or []
+                    ],
+                }
+                for utterance in transcript.utterances
+            ]
+
+        full_text = getattr(transcript, "text", "") or ""
+
+    cache_data = {
+        "version": _TRANSCRIPT_CACHE_SCHEMA_VERSION,
+        "words": words_data,
+        "utterances": utterances_data,
+        "text": full_text,
+    }
+
+    with open(cache_path, "w") as handle:
+        json.dump(cache_data, handle)
+
+    try:
+        video_hash = _get_video_content_hash(video_path)
+        if video_hash:
+            _TRANSCRIPT_HASH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            hash_path = _hash_cache_path(video_hash)
+            with open(hash_path, "w") as handle:
+                json.dump(cache_data, handle)
+    except Exception as exc:
+        logger.debug(f"Hash cache write skipped: {exc}")
+
+
+def load_cached_transcript_data(video_path: Path) -> Optional[Dict[str, Any]]:
+    def _parse_cache(path: Path) -> Optional[Dict[str, Any]]:
+        try:
+            with open(path, "r") as handle:
+                payload = json.load(handle)
+            if "version" not in payload:
+                payload["version"] = _TRANSCRIPT_CACHE_SCHEMA_VERSION
+                payload.setdefault("utterances", [])
+            return payload
+        except Exception as exc:
+            logger.warning(f"Failed to parse transcript cache {path}: {exc}")
+            return None
+
+    cache_path = video_path.with_suffix(".transcript_cache.json")
+    if cache_path.exists():
+        data = _parse_cache(cache_path)
+        if data is not None:
+            return data
+
+    try:
+        video_hash = _get_video_content_hash(video_path)
+        if video_hash:
+            hash_path = _hash_cache_path(video_hash)
+            if hash_path.exists():
+                data = _parse_cache(hash_path)
+                if data is not None:
+                    return data
+    except Exception as exc:
+        logger.debug(f"Hash-cache lookup failed: {exc}")
+
+    return None
+
+
+def _serialize_transcript_word(word) -> Dict[str, Any]:
+    return {
+        "text": getattr(word, "text", ""),
+        "start": getattr(word, "start", 0),
+        "end": getattr(word, "end", 0),
+        "confidence": getattr(word, "confidence", 1.0),
+        "speaker": getattr(word, "speaker", None),
+    }
+
+
+def _get_video_content_hash(video_path: Path) -> Optional[str]:
+    import hashlib
+
+    try:
+        with open(video_path, "rb") as handle:
+            chunk = handle.read(1_048_576)
+        return hashlib.sha256(chunk).hexdigest()
+    except Exception as e:
+        logger.error(f"[TRANSCRIPTION] Failed to generate file hash for {video_path}: {e}", exc_info=True)
+        return None
+
+
+def format_ms_to_timestamp(ms: int) -> str:
+    seconds = ms // 1000
+    minutes = seconds // 60
+    seconds = seconds % 60
+    return f"{minutes:02d}:{seconds:02d}"
