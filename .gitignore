@@ -1,17 +1,55 @@
+# Datos y modelos
+backend/temp/
+backend/uploads/
+backend/clips/
+*.mp4
+*.wav
+*.m4a
+
+# Entorno
+.env
+*.env
+**/.env
 .env.local
-.DS_Store
-__pycache__
+
+# Python
+__pycache__/
+*.pyc
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
 *.egg-info
+.Python
+
+# Node
+node_modules/
+package-lock.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+
+# Git
+.git/
+
+# Proyecto específico
 logs/
 temp/
-.env
-*.m4a
-frontend/e2e/.seed.json
-
-# Internal Claude memory and tooling — not part of the project
+exports/
+output/
 .claude/
 
-# Log files generated at runtime
+# Log files generados en runtime
 worker_logs.txt
 worker_progress.txt
 backend/worker_logs.txt
