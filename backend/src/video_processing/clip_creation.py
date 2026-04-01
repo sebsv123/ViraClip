@@ -6,6 +6,9 @@ Handles video clip extraction, cropping, zoom effects, and final composition.
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import logging
+import subprocess
+import uuid
+import os
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -175,14 +178,12 @@ def create_optimized_clip(
     # ── GUARD: video file must exist before ANY processing ──────────────────
     video_path = Path(video_path)
     if not video_path.exists():
-        # Log detailed diagnostics
         parent_dir = video_path.parent
         logger.error(
             f"❌ Source video NOT FOUND: {video_path}  "
             f"[clip {start_time:.1f}s-{end_time:.1f}s → {output_path.name}]  "
             f"Likely deleted/moved during EliteAI phase. Check video_service.py."
         )
-        # Log parent directory contents for debugging
         try:
             if parent_dir.exists():
                 files_in_dir = list(parent_dir.glob("*"))
@@ -193,12 +194,12 @@ def create_optimized_clip(
             logger.error(f"   Could not list parent dir: {e}")
         return False
     else:
-        # Log success for traceability
-        file_size = video_path.stat().st_size / (1024*1024)  # MB
+        file_size = video_path.stat().st_size / (1024*1024)
         logger.info(f"✓ Source video verified: {video_path.name} ({file_size:.1f}MB)")
     # ────────────────────────────────────────────────────────────────────────
 
     guard = ResourceGuard()
+    temp_segment_path = None
     try:
         with guard.manage():
             # 1. Word Boundary Snapping
@@ -213,7 +214,6 @@ def create_optimized_clip(
 
             # 2. Fast Path (ffmpeg stream copy)
             if not add_subtitles and keep_original and not camera_plan:
-                import subprocess
                 result = subprocess.run(
                     [
                         "ffmpeg", "-y", "-ss", str(start_time),
@@ -226,8 +226,49 @@ def create_optimized_clip(
                 if result.returncode == 0:
                     return True
 
-            # 3. Load & Track Master Resources
-            main_video = guard.track(VideoFileClip(str(video_path)))
+            # 3. PRE-EXTRACT SEGMENT WITH FFMPEG (prevents OOM on large/4K videos)
+            # Extract exact segment + scale to portrait before MoviePy touches it
+            ffmpeg_timeout = int(os.environ.get("FFMPEG_SEGMENT_TIMEOUT", "300"))
+            temp_segment_path = video_path.parent / f"temp_segment_{uuid.uuid4().hex}.mp4"
+
+            logger.info(f"🔧 FFmpeg pre-extraction: {duration:.1f}s segment from {video_path.name}")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start_time),
+                "-i", str(video_path),
+                "-t", str(duration),
+                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "23",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(temp_segment_path)
+            ]
+
+            ffmpeg_result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                timeout=ffmpeg_timeout
+            )
+
+            if ffmpeg_result.returncode != 0:
+                logger.error(f"❌ FFmpeg pre-extraction failed (exit {ffmpeg_result.returncode})")
+                logger.error(f"FFmpeg stderr: {ffmpeg_result.stderr[-500:]}")
+                raise RuntimeError(f"FFmpeg segment extraction failed: {ffmpeg_result.stderr[-200:]}")
+
+            segment_size = temp_segment_path.stat().st_size / (1024*1024)
+            logger.info(f"✅ FFmpeg extracted {segment_size:.1f}MB segment → MoviePy")
+
+            # MoviePy now loads only the small pre-extracted segment
+            video_for_moviepy = temp_segment_path
+            moviepy_start = 0.0
+            moviepy_end = duration
+
+            # 4. Load & Track Master Resources (small segment only)
+            main_video = guard.track(VideoFileClip(str(video_for_moviepy)))
 
             # Multi-Angle Intelligence
             if camera_plan and secondary_video_path and Path(secondary_video_path).exists():
@@ -236,8 +277,8 @@ def create_optimized_clip(
                 cut_clips = []
 
                 for cut in camera_plan:
-                    cut_start = max(start_time, cut["start"])
-                    cut_end = min(end_time, cut["end"])
+                    cut_start = max(moviepy_start, cut["start"] - start_time)
+                    cut_end = min(moviepy_end, cut["end"] - start_time)
                     if cut_start >= cut_end:
                         continue
 
@@ -258,34 +299,23 @@ def create_optimized_clip(
                     from moviepy import concatenate_videoclips
                     clip = guard.track(concatenate_videoclips(cut_clips))
                 else:
-                    clip = guard.track(main_video.subclipped(start_time, min(end_time, main_video.duration)))
+                    clip = guard.track(main_video.subclipped(moviepy_start, min(moviepy_end, main_video.duration)))
             else:
-                clip = guard.track(main_video.subclipped(start_time, min(end_time, main_video.duration)))
+                clip = guard.track(main_video.subclipped(moviepy_start, min(moviepy_end, main_video.duration)))
 
-            # 4. Process Geometry
+            # 5. Process Geometry
+            # Since FFmpeg already scaled to 1080x1920, geometry is already correct for vertical
             if keep_original:
                 processed_clip = clip
                 target_width, target_height = round_to_even(clip.w), round_to_even(clip.h)
                 if (target_width, target_height) != (clip.w, clip.h):
                     processed_clip = guard.track(clip.resized((target_width, target_height)))
             else:
-                orig_w, orig_h = main_video.w, main_video.h
-                target_ratio = 9 / 16
-                if orig_w / orig_h > target_ratio:
-                    new_width = round_to_even(int(orig_h * target_ratio))
-                    new_height = round_to_even(orig_h)
-                else:
-                    new_width = round_to_even(orig_w)
-                    new_height = round_to_even(int(orig_w / target_ratio))
-                target_width, target_height = new_width, new_height
+                # FFmpeg pre-extraction already scaled to 1080x1920
+                target_width, target_height = 1080, 1920
+                processed_clip = clip
 
-                trajectory = detect_active_speaker_trajectory(main_video, start_time, end_time)
-                cropped_clip = guard.track(
-                    create_dynamic_crop_clip(clip, trajectory, target_width, target_height)
-                )
-                processed_clip = cropped_clip
-
-            # 4.5 Zoom Punch-In Effect
+            # 5.5 Zoom Punch-In Effect
             try:
                 _clip_dur = processed_clip.duration or duration
                 _punch_dur = min(0.4, _clip_dur * 0.08)
@@ -320,10 +350,9 @@ def create_optimized_clip(
             except Exception as _zoom_e:
                 logger.debug(f"Zoom punch-in skipped: {_zoom_e}")
 
-            # 5. Composite Stack
+            # 6. Composite Stack
             final_stack = [processed_clip]
 
-            # Resolve template once — needed by both subtitles and hook_title
             from ..video_utils import get_template, get_scaled_font_size, find_font_path
             _tmpl = get_template(caption_template)
             _fs = get_scaled_font_size(_tmpl.get("font_size", font_size), target_width)
@@ -357,7 +386,6 @@ def create_optimized_clip(
 
             # Hook Title
             if hook_title:
-                # font_registry as fallback chain if video_utils find_font_path fails
                 _hook_resolved = _font_path
                 if not _hook_resolved:
                     try:
@@ -388,7 +416,6 @@ def create_optimized_clip(
                         duration=min(3.0, duration),
                     )
                     _raw_hook = TextClip(**hook_kwargs).with_position(("center", 0.15), relative=True)
-                    # Apply fade only if available
                     if CROSSFADE_AVAILABLE:
                         try:
                             _raw_hook = _raw_hook.with_effects([CrossFadeIn(0.3), CrossFadeOut(0.3)])
@@ -396,7 +423,7 @@ def create_optimized_clip(
                             logger.debug(f"Hook fade skipped: {_fx_e}")
                     final_stack.append(guard.track(_raw_hook))
 
-            # 6. Final Composition
+            # 7. Final Composition
             if len(final_stack) > 1:
                 final_clip = guard.track(CompositeVideoClip(final_stack))
             else:
@@ -413,7 +440,7 @@ def create_optimized_clip(
                 except Exception as _fade_e:
                     logger.debug(f"Fade effects skipped: {_fade_e}")
 
-            # 7. Write final clip
+            # 8. Write final clip
             from ..video_utils import VideoProcessor
             processor = VideoProcessor(font_family, font_size, font_color)
 
@@ -425,10 +452,9 @@ def create_optimized_clip(
                 logger.info("Using CPU encoding (libx264)")
 
             _fps_used = clip.fps or 30
-            
-            # Ensure output directory exists
+
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             final_clip.write_videofile(
                 str(output_path),
                 temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.m4a"),
@@ -442,3 +468,11 @@ def create_optimized_clip(
         import traceback
         logger.error(f"❌ Render Failed [{output_path}]: {e}\n{traceback.format_exc()}")
         return False
+    finally:
+        # Guaranteed cleanup of FFmpeg temp segment
+        if temp_segment_path and temp_segment_path.exists():
+            try:
+                temp_segment_path.unlink()
+                logger.debug(f"🧹 Cleaned up temp segment: {temp_segment_path.name}")
+            except Exception as cleanup_err:
+                logger.warning(f"Failed to cleanup temp segment: {cleanup_err}")
