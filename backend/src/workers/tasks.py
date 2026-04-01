@@ -110,24 +110,77 @@ async def process_video_task(
             return result
 
         except Exception as e:
-            logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            from ..workers.retry_policy import (
+                should_retry_task,
+                get_max_attempts_for_error,
+                format_error_for_storage
+            )
+            from ..exceptions import ViraClipException
+            
+            # Get current attempt
+            job_try = int(ctx.get("job_try", 1))
+            max_tries = get_max_attempts_for_error(e)
+            
+            # Format error for storage
+            error_details = format_error_for_storage(e, task_id, stage="worker")
+            
+            # Log error with context
+            if isinstance(e, ViraClipException):
+                logger.error(
+                    f"Task {task_id} failed [{e.error_code.value}]: {e.message}",
+                    extra={"error_context": e.context, "retryable": e.retryable}
+                )
+            else:
+                logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            
+            # Update task with error details
+            from ..repositories.task_repository import TaskRepository
+            task_repo = TaskRepository()
             try:
-                job_try = int(ctx.get("job_try", 1))
-                max_tries = int(getattr(WorkerSettings, "max_tries", 3))
-                if job_try >= max_tries:
+                await task_repo.update_task_error(
+                    db,
+                    task_id,
+                    error_code=error_details["error_code"],
+                    error_message=error_details["error_message"]
+                )
+                await db.commit()
+            except Exception as db_err:
+                logger.warning(f"Failed to update task error in DB: {db_err}")
+            
+            # Determine if we should retry
+            should_retry, delay = should_retry_task(e, job_try, max_tries)
+            
+            if not should_retry or job_try >= max_tries:
+                # Task failed permanently
+                try:
                     payload = {
                         "task_id": task_id,
-                        "error": str(e),
+                        "error_code": error_details["error_code"],
+                        "error": error_details["error_message"],
                         "tries": job_try,
+                        "context": error_details.get("context", {}),
                     }
                     await ctx["redis"].set(
                         f"dead_letter:{task_id}", json.dumps(payload)
                     )
                     await ctx["redis"].sadd("tasks:dead_letter", task_id)
-                    await progress.error("Task failed permanently after retries")
-            except Exception:
-                logger.exception("Failed to persist dead-letter payload")
-            # Error will be caught by arq and task status will be updated
+                    
+                    error_msg = f"Task failed permanently: {error_details['error_message']}"
+                    await progress.error(error_msg)
+                    
+                    logger.error(
+                        f"Task {task_id} moved to dead letter queue after {job_try} attempts"
+                    )
+                except Exception:
+                    logger.exception("Failed to persist dead-letter payload")
+            else:
+                # Task will be retried
+                logger.info(
+                    f"Task {task_id} will be retried (attempt {job_try + 1}/{max_tries})"
+                    + (f" after {delay}s delay" if delay else "")
+                )
+            
+            # Re-raise so arq handles retry
             raise
 
 async def worker_startup(ctx: Dict[str, Any]) -> None:

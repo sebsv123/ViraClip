@@ -303,6 +303,44 @@ class TaskRepository:
         await db.commit()
 
     @staticmethod
+    async def update_task_error(
+        db: AsyncSession,
+        task_id: str,
+        error_code: str,
+        error_message: str
+    ) -> None:
+        """Update task with error details."""
+        await db.execute(
+            text("""
+                UPDATE tasks
+                SET error_code = :error_code,
+                    error_message = :error_message,
+                    status = 'failed'
+                WHERE id = :task_id
+            """),
+            {"task_id": task_id, "error_code": error_code, "error_message": error_message}
+        )
+    
+    @staticmethod
+    async def update_task_error(
+        db: AsyncSession,
+        task_id: str,
+        error_code: str,
+        error_message: str
+    ) -> None:
+        """Update task with error details."""
+        await db.execute(
+            text("""
+                UPDATE tasks
+                SET error_code = :error_code,
+                    error_message = :error_message,
+                    status = 'failed'
+                WHERE id = :task_id
+            """),
+            {"task_id": task_id, "error_code": error_code, "error_message": error_message}
+        )
+    
+    @staticmethod
     async def update_task_status(
         db: AsyncSession,
         task_id: str,

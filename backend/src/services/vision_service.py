@@ -163,8 +163,8 @@ async def analyze_clip_visually(
         try:
             b64 = base64.b64encode(frame_path.read_bytes()).decode()
             images_b64.append(b64)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[VISION] Failed to encode frame {frame_path}: {e}")
 
     if not images_b64:
         return VisionScore.unavailable()
@@ -214,8 +214,8 @@ async def analyze_clip_visually(
                 fp.unlink(missing_ok=True)
                 if fp.parent.exists() and not any(fp.parent.iterdir()):
                     fp.parent.rmdir()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[VISION] Failed to clean up temp frame {fp}: {e}")
 
 
 def _build_prompt(transcript: str, n_frames: int) -> str:

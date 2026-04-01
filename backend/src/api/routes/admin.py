@@ -14,6 +14,9 @@ from ...utils.cleanup import cleanup_old_clips, cleanup_old_downloads
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+# Include AI metrics sub-router
+from .ai_metrics import router as ai_metrics_router
+
 
 @router.get("/health")
 async def admin_health(
@@ -21,6 +24,100 @@ async def admin_health(
 ):
     await require_admin_user(request, db, get_config())
     return {"status": "ok"}
+
+
+@router.get("/metrics")
+async def get_system_metrics(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Get system metrics for observability.
+    
+    Returns:
+        - Task statistics (total, by status, error rates)
+        - Performance metrics (avg render time, clip generation rate)
+        - Error breakdown (top error codes)
+        - Resource usage (disk space)
+    """
+    await require_admin_user(request, db, get_config())
+    from sqlalchemy import text
+    
+    # Task statistics
+    task_stats = await db.execute(text("""
+        SELECT 
+            COUNT(*) as total_tasks,
+            COUNT(*) FILTER (WHERE status = 'completed') as completed,
+            COUNT(*) FILTER (WHERE status = 'failed') as failed,
+            COUNT(*) FILTER (WHERE status = 'processing') as processing,
+            COUNT(*) FILTER (WHERE status = 'queued') as queued,
+            ROUND(AVG(EXTRACT(EPOCH FROM (updated_at - created_at))), 2) as avg_duration_seconds
+        FROM tasks
+        WHERE created_at > NOW() - INTERVAL '7 days'
+    """))
+    task_row = task_stats.fetchone()
+    
+    # Error breakdown
+    error_stats = await db.execute(text("""
+        SELECT 
+            error_code,
+            COUNT(*) as count,
+            ARRAY_AGG(DISTINCT error_message) as messages
+        FROM tasks
+        WHERE status = 'failed' 
+        AND error_code IS NOT NULL
+        AND created_at > NOW() - INTERVAL '7 days'
+        GROUP BY error_code
+        ORDER BY count DESC
+        LIMIT 10
+    """))
+    error_rows = error_stats.fetchall()
+    
+    # Performance metrics
+    perf_stats = await db.execute(text("""
+        SELECT 
+            COUNT(gc.id) as total_clips,
+            ROUND(AVG(gc.duration), 2) as avg_clip_duration,
+            COUNT(DISTINCT gc.task_id) as tasks_with_clips
+        FROM generated_clips gc
+        JOIN tasks t ON gc.task_id = t.id
+        WHERE t.created_at > NOW() - INTERVAL '7 days'
+    """))
+    perf_row = perf_stats.fetchone()
+    
+    # Disk usage
+    cfg = get_config()
+    clips_dir = Path(cfg.temp_dir) / "clips"
+    total_size = sum(f.stat().st_size for f in clips_dir.rglob("*") if f.is_file()) if clips_dir.exists() else 0
+    
+    return {
+        "tasks": {
+            "total": task_row[0] or 0,
+            "completed": task_row[1] or 0,
+            "failed": task_row[2] or 0,
+            "processing": task_row[3] or 0,
+            "queued": task_row[4] or 0,
+            "avg_duration_seconds": task_row[5] or 0,
+            "success_rate": round((task_row[1] / task_row[0] * 100) if task_row[0] > 0 else 0, 2),
+        },
+        "errors": [
+            {
+                "code": row[0],
+                "count": row[1],
+                "sample_messages": row[2][:3] if row[2] else []
+            }
+            for row in error_rows
+        ],
+        "performance": {
+            "total_clips_generated": perf_row[0] or 0,
+            "avg_clip_duration": perf_row[1] or 0,
+            "tasks_with_clips": perf_row[2] or 0,
+        },
+        "disk": {
+            "clips_dir_size_mb": round(total_size / (1024 * 1024), 2),
+        },
+        "period": "last_7_days"
+    }
 
 
 @router.post("/cleanup")

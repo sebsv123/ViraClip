@@ -108,6 +108,18 @@ CREATE TABLE generated_clips (
     translated_text TEXT,
     multi_angle_metadata TEXT,
 
+    -- Social copy & distribution (P3)
+    social_title        VARCHAR(120),
+    social_description  VARCHAR(300),
+    suggested_hashtags  TEXT[],          -- e.g. ARRAY['#motivation', '#mindset']
+
+    -- Thumbnail & face detection (P4)
+    thumbnail_filename  VARCHAR(255),
+    face_detected       BOOLEAN,
+
+    -- Preview scoring
+    hook_preview_score  FLOAT,
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

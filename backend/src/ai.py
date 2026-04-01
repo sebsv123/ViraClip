@@ -8,8 +8,13 @@ import asyncio
 import logging
 import re
 
-from pydantic_ai import Agent
-from pydantic import BaseModel, Field
+try:
+    from pydantic_ai import Agent
+    PYDANTIC_AI_AVAILABLE = True
+except ImportError:
+    PYDANTIC_AI_AVAILABLE = False
+    Agent = None
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .config import Config
 
@@ -82,6 +87,66 @@ class TranscriptSegment(BaseModel):
         default="Standard viral zoom and captions",
         description="Creative suggestions for editing this specific segment to maximize impact"
     )
+
+    @field_validator("relevance_score", mode="before")
+    @classmethod
+    def normalize_relevance_score(cls, v: float) -> float:
+        """Normalize relevance_score from 0-100 scale to 0-1 before field constraint fires."""
+        if isinstance(v, (int, float)) and v > 1.0:
+            normalized = round(float(v) / 100.0, 4)
+            logger.warning(
+                f"[VALIDATOR] relevance_score {v} out of [0,1] range — normalizing to {normalized}"
+            )
+            return min(normalized, 1.0)
+        return v
+
+    @model_validator(mode="after")
+    def enforce_business_rules(self) -> "TranscriptSegment":
+        """
+        Enforce all business invariants regardless of what the LLM returned.
+        Schema-first: TranscriptSegment must be impossible to construct with invalid data.
+        """
+        def _ts_to_secs(ts: str) -> float:
+            try:
+                parts = ts.strip().split(":")
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + float(parts[1])
+                return float(parts[0])
+            except Exception:
+                return 0.0
+
+        def _secs_to_ts(s: float) -> str:
+            m = int(s) // 60
+            sec = int(s) % 60
+            return f"{m:02d}:{sec:02d}"
+
+        start = _ts_to_secs(self.start_time)
+        end = _ts_to_secs(self.end_time)
+
+        # Regla 1: timestamps coherentes
+        if end <= start:
+            raise ValueError(
+                f"end_time ({self.end_time}) must be > start_time ({self.start_time})"
+            )
+
+        # Regla 2: duración mínima 10s (con límite de video_duration)
+        # TODO(future): contar cuántas veces se dispara por vídeo/modelo.
+        # Si un LLM concreto lo dispara siempre → ajustar el prompt, no el validator.
+        MIN_DURATION = 10.0
+        duration = end - start
+        if duration < MIN_DURATION:
+            logger.warning(
+                f"[VALIDATOR] Segment too short ({duration:.1f}s): "
+                f"{self.start_time}→{self.end_time} — extending end_time to +{MIN_DURATION}s"
+            )
+            # Clamp extended end_time to video duration - 0.5s buffer
+            extended_end = start + MIN_DURATION
+            max_end = getattr(self, '_video_duration', float('inf')) - 0.5
+            end = min(extended_end, max_end)
+            self.end_time = _secs_to_ts(end)
+            logger.info(f"[VALIDATOR] Extended segment: {self.start_time}→{self.end_time} (clamped to video bounds)")
+
+        return self
 
 
 class BRollOpportunity(BaseModel):
@@ -186,22 +251,24 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - At emotional peaks that could use supporting imagery
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
-TIMING GUIDELINES:
+TIMING GUIDELINES - ABSOLUTELY CRITICAL:
+- ⚠️ MINIMUM DURATION: 10 SECONDS - NO EXCEPTIONS
+- ⚠️ If end_time - start_time < 10 seconds, THE SEGMENT WILL BE REJECTED
 - Segments MUST be between 10-45 seconds for optimal engagement
-- CRITICAL: start_time MUST be different from end_time (minimum 10 seconds apart)
+- Prefer roughly 15-35 seconds when possible (viral sweet spot)
 - Focus on natural content boundaries rather than arbitrary time limits
 - Include enough context for the segment to be understandable
-- Prefer roughly 15-35 seconds when possible
 - Start as late as possible while preserving the hook, and end as early as possible after the payoff
 
 TIMESTAMP REQUIREMENTS - EXTREMELY IMPORTANT:
 - Use EXACT timestamps as they appear in the transcript
 - Never modify timestamp format (keep MM:SS structure)
 - start_time MUST be LESS THAN end_time (start_time < end_time)
-- MINIMUM segment duration: 10 seconds (end_time - start_time >= 10 seconds)
-- Look at transcript ranges like [02:25 - 02:35] and use different start/end times
+- ⚠️ CRITICAL: end_time - start_time MUST BE >= 10 SECONDS
+- Example VALID: start_time: "02:25", end_time: "02:37" (12 seconds ✅)
+- Example INVALID: start_time: "02:25", end_time: "02:28" (3 seconds ❌ REJECTED)
+- Look at transcript ranges like [02:25 - 02:45] and ensure 10+ second difference
 - NEVER use the same timestamp for both start_time and end_time
-- Example: start_time: "02:25", end_time: "02:35" (NOT "02:25" and "02:25")
 
 SCORING AND OUTPUT RULES:
 - relevance_score should reflect how well the segment works as a standalone short clip, not just whether the topic is generally important
@@ -272,46 +339,132 @@ def get_transcript_agent() -> Agent[None, TranscriptAnalysis]:
 
 
 def build_transcript_analysis_prompt(
-    transcript: str, include_broll: bool = False
+    transcript: str, include_broll: bool = False, video_duration: float = 0.0
 ) -> str:
-    """Build the grounded task prompt for transcript analysis."""
+    """Build the grounded task prompt for transcript analysis.
+    
+    Args:
+        transcript: Video transcript text
+        include_broll: Whether to include B-roll suggestions
+        video_duration: Total video duration in seconds (0 if unknown)
+    """
     broll_instruction = ""
     if include_broll:
         broll_instruction = (
             "\n5. Also identify B-roll opportunities for each chosen segment where stock footage could enhance the visual appeal."
         )
 
-    return f"""Analyze this video transcript and identify the most engaging segments for short-form content.
+    # Detect short-form content (YouTube Shorts, TikToks, Reels)
+    is_short_video = video_duration > 0 and video_duration < 90
+    
+    if is_short_video:
+        timing_instructions = f"""TIMING GUIDELINES FOR SHORT VIDEO ({int(video_duration)}s total):
+- This is already a short-form video (Shorts/TikTok/Reel)
+- Create 1-3 clips maximum from the best moments
+- Clips can be 5-{int(video_duration)} seconds (flexible based on content)
+- For videos under 60s, consider using the ENTIRE video as one clip if it's cohesive
+- MINIMUM segment duration: 5 seconds (not 10)
+- Focus on the most viral/engaging portions
+- It's OK to have just 1 clip if the whole video is one strong moment"""
+    else:
+        timing_instructions = """TIMING GUIDELINES:
+- Segments MUST be between 10-45 seconds for optimal engagement
+- CRITICAL: start_time MUST be different from end_time (minimum 10 seconds apart)
+- Focus on natural content boundaries rather than arbitrary time limits
+- Include enough context for the segment to be understandable
+- Prefer roughly 15-35 seconds when possible
+- Start as late as possible while preserving the hook, and end as early as possible after the payoff"""
+
+    return f"""You are an expert viral content curator trained by top social media algorithm experts. Your job is to identify the MOST viral-worthy segments from video transcripts.
+
+VIRAL CONTENT PATTERNS TO DETECT (in priority order):
+1. HOOK PATTERNS (High Priority):
+   - "You won't believe what happened when..."
+   - "The truth about [controversial topic]"
+   - "I was today years old when I learned..."
+   - "Stop doing [common mistake]"
+   - "The secret [experts] don't want you to know"
+   - "This changed everything for me"
+   - "[Number] things I wish I knew before..."
+
+2. EMOTIONAL ARC PATTERNS:
+   - Surprise twists or revelations
+   - Before/after transformations
+   - Overcoming obstacles/adversity
+   - Heartwarming moments
+   - Shocking facts or statistics
+   - Controversial takes or hot opinions
+
+3. VALUE DELIVERY PATTERNS:
+   - "Here's how to..." (tutorials)
+   - "The reason why..." (explanations)
+   - "What nobody tells you about..."
+   - Life hacks or productivity tips
+   - Money-saving or time-saving advice
+
+4. RETENTION MECHANISMS:
+   - Open loops ("Wait for the end...")
+   - Pattern interrupts (sudden topic changes)
+   - Cliffhangers ("But then something unexpected happened...")
+   - Visual descriptions that evoke curiosity
+
+SCORING CRITERIA (0-10 each):
+- hook_score: How strong is the opening? Does it stop the scroll?
+- engagement_score: Will viewers watch to the end? Any dead spots?
+- value_score: Is there concrete value (educational, entertaining, emotional)?
+- shareability_score: Will viewers share this with friends?
 
 The transcript is formatted as one line per timestamped span, for example:
 [00:12 - 00:21] Spoken text here
 [00:21 - 00:35] More spoken text here
 
 Follow this workflow:
-1. Read the transcript as a sequence of timestamped spans.
-2. Select only contiguous ranges that already exist in the transcript.
-3. Prefer moments with a strong hook, clear payoff, emotional charge, or concrete value.
-4. For each chosen segment, use the earliest timestamp in the selected range as start_time and the latest timestamp in the selected range as end_time.{broll_instruction}
+1. Scan the entire transcript for the patterns above.
+2. Identify 3-7 potential segments with viral potential.
+3. Score each segment on the 4 criteria (0-10 each).
+4. Select the TOP 3-5 segments with highest total virality scores.
+5. Ensure segments have strong hooks in the first 3 seconds.
+6. Verify each segment has a clear payoff/resolution by the end.
 
-Critical accuracy requirements:
+{broll_instruction}
+
+{timing_instructions}
+
+CRITICAL VIRAL OPTIMIZATION RULES:
+- The first 3 seconds MUST contain a hook (question, bold statement, visual action)
+- Avoid slow starts - cut directly to the interesting part
+- Each segment should be a complete story arc (setup → tension → payoff)
+- Look for moments where the speaker's energy/volume increases (passion)
+- Detect "mic drop" moments - powerful ending statements
+- Prefer segments with visual language ("look at this", "watch what happens")
+- Avoid segments with long pauses, filler words, or off-topic tangents
+- If there is a tradeoff between "complete" and "engaging", choose engaging
+
+ACCURACY REQUIREMENTS:
 - Do not fabricate or embellish content.
 - Do not use timestamps that are not present in the transcript.
 - Do not merge separate non-contiguous moments into one segment.
 - segment.text must reflect only the spoken content inside the selected time range.
 - If a span lacks enough context to stand alone, expand to nearby contiguous lines rather than guessing.
-- If there is a tradeoff between "viral" and "accurate", choose accuracy.
-- Do not reject or penalize a segment simply because of the subject matter; stay content-neutral and assess clip quality only.
 
 Transcript:
 {transcript}"""
 
 
 async def get_most_relevant_parts_by_transcript(
-    transcript: str, include_broll: bool = False
+    transcript: str, include_broll: bool = False, video_duration: float = 0.0
 ) -> TranscriptAnalysis:
-    """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection."""
+    """Get the most relevant parts of a transcript with virality scoring and optional B-roll detection.
+    
+    Args:
+        transcript: Video transcript text
+        include_broll: Whether to include B-roll suggestions
+        video_duration: Total video duration in seconds (used to adjust segment requirements for Shorts)
+    """
+    is_short = video_duration > 0 and video_duration < 90
     logger.info(
-        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}"
+        f"Starting AI analysis of transcript ({len(transcript)} chars), include_broll={include_broll}, "
+        f"duration={video_duration:.1f}s {'[SHORT VIDEO]' if is_short else ''}"
     )
 
     try:
@@ -319,20 +472,33 @@ async def get_most_relevant_parts_by_transcript(
 
         result = await agent.run(
             build_transcript_analysis_prompt(
-                transcript=transcript, include_broll=include_broll
+                transcript=transcript, include_broll=include_broll, video_duration=video_duration
             )
         )
 
         analysis = result.output
+        raw_segments_count = len(analysis.most_relevant_segments)
         logger.info(
-            f"AI analysis found {len(analysis.most_relevant_segments)} segments"
+            f"AI analysis raw output: {raw_segments_count} segments found"
         )
+
+        # Log details of raw segments before validation
+        for i, seg in enumerate(analysis.most_relevant_segments[:5]):  # Log first 5
+            logger.info(f"Raw segment {i+1}: {seg.start_time}-{seg.end_time}, text='{seg.text[:60]}...'")
 
         # Validation with virality data handling
         validated_segments = []
+        rejected_counts = {
+            "insufficient_content": 0,
+            "identical_timestamps": 0,
+            "invalid_duration": 0,
+            "too_short": 0,
+            "invalid_timestamp_format": 0,
+        }
         for segment in analysis.most_relevant_segments:
             # Validate text content
             if not segment.text.strip() or len(segment.text.split()) < 3:
+                rejected_counts["insufficient_content"] += 1
                 logger.warning(
                     f"Skipping segment with insufficient content: '{segment.text[:50]}...'"
                 )
@@ -340,6 +506,7 @@ async def get_most_relevant_parts_by_transcript(
 
             # Validate timestamps - CRITICAL: start and end must be different
             if segment.start_time == segment.end_time:
+                rejected_counts["identical_timestamps"] += 1
                 logger.warning(
                     f"Skipping segment with identical start/end times: {segment.start_time}"
                 )
@@ -356,16 +523,31 @@ async def get_most_relevant_parts_by_transcript(
                 duration = end_seconds - start_seconds
 
                 if duration <= 0:
+                    rejected_counts["invalid_duration"] += 1
                     logger.warning(
                         f"Skipping segment with invalid duration: {segment.start_time} to {segment.end_time} = {duration}s"
                     )
                     continue
 
-                if duration < 5:  # Minimum 5 seconds
+                # Flexible duration based on video length AND content quality
+                # UPDATED: Allow 5+ second clips for both shorts and long videos
+                # Short impactful clips (5-7s) can be highly viral
+                min_duration = 5
+                
+                logger.debug(f"Segment duration: {duration}s (min required: {min_duration}s)")
+                
+                if duration < min_duration:
+                    rejected_counts["too_short"] += 1
                     logger.warning(
-                        f"Skipping segment too short: {duration}s (min 5s required)"
+                        f"Skipping segment too short: {duration}s (min {min_duration}s required for {'short' if is_short else 'long'} video)"
                     )
                     continue
+                
+                # NEW: Bonus for optimal duration (15-35 seconds is the viral sweet spot)
+                if 15 <= duration <= 35 and segment.virality:
+                    bonus = 2  # Small bonus for optimal viral duration
+                    segment.virality.total_score += bonus
+                    logger.info(f"Optimal viral duration bonus (+{bonus} pts): {duration}s")
 
                 # Validate virality scores
                 if segment.virality:
@@ -393,6 +575,7 @@ async def get_most_relevant_parts_by_transcript(
                 )
 
             except (ValueError, IndexError) as e:
+                rejected_counts["invalid_timestamp_format"] += 1
                 logger.warning(
                     f"Skipping segment with invalid timestamp format: {segment.start_time}-{segment.end_time}: {e}"
                 )
@@ -416,6 +599,9 @@ async def get_most_relevant_parts_by_transcript(
         )
 
         logger.info(f"Selected {len(validated_segments)} segments for processing")
+        logger.info(
+            f"Segment validation summary: {rejected_counts}"
+        )
         if validated_segments:
             top = validated_segments[0]
             logger.info(

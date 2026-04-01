@@ -1,5 +1,8 @@
 from .youtube_utils import *
-from .video_utils import *
+from .video_processing import (
+    apply_transition_effect,
+    get_available_transitions,
+)
 from .ai import *
 from .config import Config
 from .caption_templates import get_template_info, get_template_names
@@ -42,10 +45,30 @@ config = Config()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # Initialize database
         await init_db()
+        
+        # Initialize Redis for caching and rate limiting
+        from .scaling.redis_manager import get_redis_client
+        from .middleware.rate_limiter import init_rate_limiter
+        from .caching import init_cache
+        
+        redis_client = await get_redis_client()
+        if redis_client:
+            await init_rate_limiter(redis_client)
+            await init_cache(redis_client)
+            logger.info("✅ Rate limiting and caching initialized")
+        else:
+            logger.warning("⚠️ Redis unavailable - rate limiting and caching disabled")
+        
         yield
     finally:
         await close_db()
+        
+        # Close Redis connections
+        from .scaling.redis_manager import get_redis_manager
+        manager = await get_redis_manager()
+        await manager.close()
 
 
 app = FastAPI(
@@ -75,6 +98,14 @@ app.include_router(tasks_router)
 app.include_router(feedback_router)
 app.include_router(billing_router)
 app.include_router(social_router)
+
+# Include admin routers
+from .api.routes.admin import router as admin_router
+from .api.routes.ai_metrics import router as ai_metrics_router
+from .api.routes.health import router as health_router
+app.include_router(admin_router)
+app.include_router(ai_metrics_router)
+app.include_router(health_router)
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"
@@ -791,7 +822,7 @@ async def get_font_file(font_name: str):
 async def get_available_transitions():
     """Get list of available transition effects"""
     try:
-        from .video_utils import get_available_transitions
+        from .video_processing import get_available_transitions
 
         transitions = get_available_transitions()
 

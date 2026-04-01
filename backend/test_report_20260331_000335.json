@@ -1,0 +1,40 @@
+{
+  "test_run": {
+    "started": "2026-03-31T00:03:35.930779",
+    "videos_tested": 2,
+    "successful": 0,
+    "partial": 0,
+    "failed": 2,
+    "total_duration_seconds": 5.05
+  },
+  "results": [
+    {
+      "video_id": "video_1",
+      "url": "https://youtu.be/DHSigj8uPnE",
+      "start_time": "2026-03-31T00:03:30.728888",
+      "status": "failed",
+      "stages": {},
+      "errors": [
+        "\u274c Import failed: No module named 'src'"
+      ],
+      "clips_generated": 0,
+      "metrics": {},
+      "elapsed_seconds": 0.0,
+      "end_time": "2026-03-31T00:03:30.733527"
+    },
+    {
+      "video_id": "video_2",
+      "url": "https://youtu.be/3wgwaxIfUJQ",
+      "start_time": "2026-03-31T00:03:35.769280",
+      "status": "failed",
+      "stages": {},
+      "errors": [
+        "\u274c Import failed: No module named 'src'"
+      ],
+      "clips_generated": 0,
+      "metrics": {},
+      "elapsed_seconds": 0.0,
+      "end_time": "2026-03-31T00:03:35.772417"
+    }
+  ]
+}

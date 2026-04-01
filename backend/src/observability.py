@@ -43,11 +43,63 @@ class JsonLogFormatter(logging.Formatter):
             "message": record.getMessage(),
             "trace_id": getattr(record, "trace_id", "-"),
         }
+        
+        # Add structured context fields if present
+        for field in ["task_id", "user_id", "stage", "clip_index", "error_code"]:
+            if hasattr(record, field):
+                payload[field] = getattr(record, field)
+        
+        # Add custom extra fields
+        if hasattr(record, "extra_context"):
+            payload["context"] = record.extra_context
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=True)
+
+
+class StructuredLogger:
+    """
+    Helper for structured logging with task context.
+    
+    Usage:
+        logger = StructuredLogger("my_module", task_id="abc123")
+        logger.info("Processing started", stage="download")
+        logger.error("Download failed", error_code="E1001", extra={"url": url})
+    """
+    
+    def __init__(self, name: str, **default_context):
+        self.logger = logging.getLogger(name)
+        self.default_context = default_context
+    
+    def _log(self, level: int, message: str, **kwargs):
+        """Internal log with structured context."""
+        # Merge default context with call-specific context
+        context = {**self.default_context, **kwargs}
+        
+        # Create log record with extra fields
+        extra = {}
+        for key, value in context.items():
+            if key not in ["exc_info", "stack_info", "stacklevel", "extra"]:
+                extra[key] = value
+        
+        self.logger.log(level, message, extra=extra)
+    
+    def debug(self, message: str, **kwargs):
+        self._log(logging.DEBUG, message, **kwargs)
+    
+    def info(self, message: str, **kwargs):
+        self._log(logging.INFO, message, **kwargs)
+    
+    def warning(self, message: str, **kwargs):
+        self._log(logging.WARNING, message, **kwargs)
+    
+    def error(self, message: str, **kwargs):
+        self._log(logging.ERROR, message, **kwargs)
+    
+    def critical(self, message: str, **kwargs):
+        self._log(logging.CRITICAL, message, **kwargs)
 
 
 def configure_logging() -> None:
