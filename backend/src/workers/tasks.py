@@ -241,8 +241,8 @@ class WorkerSettings:
     config = Config()
 
     # Functions to run
-    functions = [process_video_task]
-    queue_name = "viraclip_tasks"
+    from .translation_worker import translate_video_task as _translate_video_task
+    functions = [process_video_task, _translate_video_task]
 
     # Redis settings from environment
     redis_settings = RedisSettings(

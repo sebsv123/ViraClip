@@ -17,7 +17,51 @@ from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
 import uuid
 
+from pydantic import BaseModel, field_validator
+
 from .database import Base
+
+# ---------------------------------------------------------------------------
+# Pydantic schemas for the translation API
+# ---------------------------------------------------------------------------
+
+try:
+    from .translation.translator import SUPPORTED_LANGUAGES as _SUPPORTED_LANGUAGES
+except Exception:  # noqa: BLE001
+    # Graceful fallback if the translation package is not yet importable.
+    _SUPPORTED_LANGUAGES = {
+        "es": "Spanish",
+        "en": "English",
+        "fr": "French",
+        "de": "German",
+        "pt": "Portuguese",
+        "it": "Italian",
+        "ja": "Japanese",
+    }
+
+
+class TranslationRequest(BaseModel):
+    video_path: str
+    target_language: str  # must be one of SUPPORTED_LANGUAGES keys
+    preserve_background_music: bool = True
+
+    @field_validator("target_language")
+    @classmethod
+    def validate_language(cls, v: str) -> str:
+        if v not in _SUPPORTED_LANGUAGES:
+            raise ValueError(
+                f"Language '{v}' not supported. "
+                f"Use one of: {list(_SUPPORTED_LANGUAGES.keys())}"
+            )
+        return v
+
+
+class TranslationResponse(BaseModel):
+    task_id: str
+    status: str
+    output_video_url: Optional[str] = None
+    error: Optional[str] = None
+    source_language_detected: Optional[str] = None
 
 
 def generate_uuid_string():

@@ -186,11 +186,13 @@ def create_app(
     from .api.routes.feedback import router as feedback_router
     from .api.routes.billing import router as billing_router
     from .api.routes.social import router as social_router
+    from .api.routes.translation import router as translation_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
     app.include_router(billing_router)
     app.include_router(social_router)  # P4: Social distribution + campaigns
+    app.include_router(translation_router)
 
     @app.get("/")
     def read_root():
