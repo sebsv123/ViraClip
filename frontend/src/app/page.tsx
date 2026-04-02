@@ -126,6 +126,18 @@ export default function Home() {
   const [targetPlatform, setTargetPlatform] = useState<"tiktok" | "reels" | "shorts" | "all">("all");
   const [generateAbVariants, setGenerateAbVariants] = useState(false);
 
+  // Voice translation state
+  const [enableVoiceTranslation, setEnableVoiceTranslation] = useState(false);
+  const [translationTargetLang, setTranslationTargetLang] = useState("es");
+  const [preserveBackgroundMusic, setPreserveBackgroundMusic] = useState(true);
+  const [isTranslating, setIsTranslating] = useState(false);
+  const [translationStep, setTranslationStep] = useState<string | null>(null);
+  const [translationPercent, setTranslationPercent] = useState(0);
+  const [translationVideoUrl, setTranslationVideoUrl] = useState<string | null>(null);
+  const [translationError, setTranslationError] = useState<string | null>(null);
+  const [translationVideoPath, setTranslationVideoPath] = useState("");
+  const translationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // P3.4: Batch processing state
   const [batchMode, setBatchMode] = useState(false);
   const [batchUrls, setBatchUrls] = useState("");
@@ -287,6 +299,15 @@ export default function Home() {
 
     fetchBillingSummary();
   }, [session?.user?.id, apiUrl]);
+
+  // Clean up translation polling interval on unmount
+  useEffect(() => {
+    return () => {
+      if (translationPollRef.current) {
+        clearInterval(translationPollRef.current);
+      }
+    };
+  }, []);
 
   // Always treat file input as uncontrolled, and store file in a ref
   const fileRef = useRef<File | null>(null);
@@ -557,6 +578,67 @@ export default function Home() {
       setError(String(err));
     } finally {
       setIsBatchLoading(false);
+    }
+  };
+
+  // Voice translation handler
+  const handleTranslateVideo = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!translationVideoPath.trim()) return;
+
+    setIsTranslating(true);
+    setTranslationStep("Starting");
+    setTranslationPercent(0);
+    setTranslationVideoUrl(null);
+    setTranslationError(null);
+
+    try {
+      const res = await fetch(`${apiUrl}/api/translation/translate-video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video_path: translationVideoPath.trim(),
+          target_language: translationTargetLang,
+          preserve_background_music: preserveBackgroundMusic,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({ detail: res.statusText }));
+        throw new Error(errData.detail || `Error ${res.status}`);
+      }
+
+      const data = await res.json();
+      const jobId: string = data.task_id;
+
+      // Poll for status — store interval in ref so it can be cleared on unmount
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await fetch(`${apiUrl}/api/translation/status/${jobId}`);
+          if (!statusRes.ok) return;
+          const statusData = await statusRes.json();
+          if (statusData.step) setTranslationStep(statusData.step);
+          if (typeof statusData.percent === "number") setTranslationPercent(statusData.percent);
+
+          if (statusData.status === "completed") {
+            clearInterval(pollInterval);
+            translationPollRef.current = null;
+            setTranslationVideoUrl(statusData.output_video_url || null);
+            setIsTranslating(false);
+          } else if (statusData.status === "error") {
+            clearInterval(pollInterval);
+            translationPollRef.current = null;
+            setTranslationError(statusData.error || "Translation failed");
+            setIsTranslating(false);
+          }
+        } catch {
+          // ignore transient fetch errors during polling
+        }
+      }, 3000);
+      translationPollRef.current = pollInterval;
+    } catch (err) {
+      setTranslationError(err instanceof Error ? err.message : "Translation failed");
+      setIsTranslating(false);
     }
   };
 
@@ -1187,6 +1269,158 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
+                </CardContent>
+              </Card>
+
+              {/* Voice Translation Section */}
+              <Card className="border-indigo-200 bg-indigo-50/30">
+                <CardContent className="px-4 pt-3 pb-3 space-y-3">
+                  {/* Header toggle */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-lg">🌐</span>
+                      <div>
+                        <h3 className="text-sm font-semibold text-stone-900">Voice Translation</h3>
+                        <p className="text-xs text-stone-500">Translate video speech to another language (fully local)</p>
+                      </div>
+                    </div>
+                    <Switch
+                      checked={enableVoiceTranslation}
+                      onCheckedChange={setEnableVoiceTranslation}
+                      disabled={isLoading || isTranslating}
+                    />
+                  </div>
+
+                  {enableVoiceTranslation && (
+                    <form onSubmit={handleTranslateVideo} className="space-y-3">
+                      {/* Video path input */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-stone-700">Video path to translate</label>
+                        <Input
+                          type="text"
+                          value={translationVideoPath}
+                          onChange={(e) => setTranslationVideoPath(e.target.value)}
+                          placeholder="/uploads/video.mp4"
+                          disabled={isTranslating}
+                          className="h-9 text-sm"
+                        />
+                      </div>
+
+                      {/* Language selector */}
+                      <div className="space-y-1">
+                        <label className="text-xs font-medium text-stone-700">Target language</label>
+                        <Select value={translationTargetLang} onValueChange={setTranslationTargetLang} disabled={isTranslating}>
+                          <SelectTrigger className="w-full h-9">
+                            <SelectValue placeholder="Select language" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="es">🇪🇸 Español</SelectItem>
+                            <SelectItem value="en">🇬🇧 English</SelectItem>
+                            <SelectItem value="fr">🇫🇷 Français</SelectItem>
+                            <SelectItem value="de">🇩🇪 Deutsch</SelectItem>
+                            <SelectItem value="pt">🇵🇹 Português</SelectItem>
+                            <SelectItem value="it">🇮🇹 Italiano</SelectItem>
+                            <SelectItem value="ja">🇯🇵 日本語</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+
+                      {/* Preserve background music */}
+                      <div className="flex items-center justify-between p-2 border rounded-lg bg-white">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm">🎵</span>
+                          <div>
+                            <p className="text-xs font-medium text-stone-900">Preserve background music</p>
+                            <p className="text-xs text-stone-500">Mix original music under the new voice</p>
+                          </div>
+                        </div>
+                        <Switch
+                          checked={preserveBackgroundMusic}
+                          onCheckedChange={setPreserveBackgroundMusic}
+                          disabled={isTranslating}
+                        />
+                      </div>
+
+                      {/* Progress display */}
+                      {isTranslating && (() => {
+                        const STEPS: Array<{ label: string; doneAt: number }> = [
+                          { label: "Extracting audio",  doneAt: 15  },
+                          { label: "Transcribing",      doneAt: 45  },
+                          { label: "Translating",       doneAt: 60  },
+                          { label: "Synthesizing voice",doneAt: 75  },
+                          { label: "Mixing audio",      doneAt: 90  },
+                        ];
+                        return (
+                          <div className="space-y-2">
+                            <div className="flex justify-between text-xs text-stone-600">
+                              <span>{translationStep || "Processing…"}</span>
+                              <span>{translationPercent}%</span>
+                            </div>
+                            <Progress value={translationPercent} className="h-1.5" />
+                            <div className="grid grid-cols-2 gap-1.5 text-xs">
+                              {STEPS.map(({ label, doneAt }) => (
+                                <div
+                                  key={label}
+                                  className={`flex items-center gap-1.5 p-1.5 rounded ${
+                                    translationStep === label
+                                      ? "bg-indigo-100 text-indigo-700 font-medium"
+                                      : translationPercent >= doneAt
+                                        ? "bg-green-50 text-green-700"
+                                        : "bg-stone-50 text-stone-500"
+                                  }`}
+                                >
+                                  <CheckCircle className="w-3 h-3 shrink-0" />
+                                  {label}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* Error */}
+                      {translationError && (
+                        <Alert className="border-red-200 bg-red-50 py-2">
+                          <AlertCircle className="h-3.5 w-3.5 text-red-500" />
+                          <AlertDescription className="text-xs text-red-700">{translationError}</AlertDescription>
+                        </Alert>
+                      )}
+
+                      {/* Result */}
+                      {translationVideoUrl && !isTranslating && (
+                        <div className="p-3 bg-green-50 border border-green-200 rounded-lg space-y-2">
+                          <p className="text-xs font-medium text-green-800">✅ Translation complete!</p>
+                          <div className="flex gap-2">
+                            <a
+                              href={`${apiUrl}${translationVideoUrl}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex-1 text-center py-1.5 px-3 bg-green-600 hover:bg-green-700 text-white text-xs rounded-md font-medium transition-colors"
+                            >
+                              ▶ Preview
+                            </a>
+                            <a
+                              href={`${apiUrl}${translationVideoUrl}`}
+                              download
+                              className="flex-1 text-center py-1.5 px-3 bg-white border border-green-400 text-green-700 text-xs rounded-md font-medium hover:bg-green-50 transition-colors"
+                            >
+                              ⬇ Download
+                            </a>
+                          </div>
+                        </div>
+                      )}
+
+                      <Button
+                        type="submit"
+                        className="w-full h-9 text-sm bg-indigo-600 hover:bg-indigo-700"
+                        disabled={!translationVideoPath.trim() || isTranslating}
+                      >
+                        {isTranslating ? (
+                          <span className="flex items-center gap-2"><Loader2 className="w-4 h-4 animate-spin" /> Translating…</span>
+                        ) : "Translate Voice"}
+                      </Button>
+                    </form>
+                  )}
                 </CardContent>
               </Card>
 
