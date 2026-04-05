@@ -232,6 +232,9 @@ def create_app(
     from .api.routes.multi_angle import router as multi_angle_router
     from .api.routes.engagement import router as engagement_router
     from .api.routes.templates import router as templates_router
+    from .api.routes.audio_rec import router as audio_rec_router
+    from .api.routes.computer_vision import router as computer_vision_router
+    from .api.routes.competitor_intel import router as competitor_intel_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -281,6 +284,9 @@ def create_app(
     app.include_router(multi_angle_router)  # NEW: Multi-angle sync + camera switching plans
     app.include_router(engagement_router)   # NEW: LSTM/CNN engagement curve prediction + training
     app.include_router(templates_router)    # NEW: Dynamic niche templates (10 niches, style + timing)
+    app.include_router(audio_rec_router)    # NEW: AI audio/music/SFX recommendations + beat-matched cuts
+    app.include_router(computer_vision_router) # NEW: Frame visual analysis, faces, colors, engagement
+    app.include_router(competitor_intel_router)# NEW: Competitor monitoring, trend insights, comparison
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
