@@ -256,6 +256,8 @@ def create_app(
     from .api.routes.edge_cdn import router as edge_cdn_router
     from .api.routes.email_reports import router as email_reports_router
     from .api.routes.bulk_ops import router as bulk_ops_router
+    from .api.routes.cost_optimization import router as cost_router
+    from .api.routes.observability import router as observability_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -329,6 +331,8 @@ def create_app(
     app.include_router(edge_cdn_router)        # NEW: Edge CDN processing + global distribution
     app.include_router(email_reports_router)   # NEW: Scheduled email reports + subscriptions
     app.include_router(bulk_ops_router)        # NEW: Bulk video processing jobs management
+    app.include_router(cost_router)            # NEW: Cloud cost tracking + optimization analysis
+    app.include_router(observability_router)   # NEW: Distributed tracing + performance monitoring
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
