@@ -223,6 +223,9 @@ def create_app(
     from .api.routes.audit import router as audit_router
     from .api.routes.nft import router as nft_router
     from .api.routes.advanced_analytics import router as advanced_analytics_router
+    from .api.routes.virality_ml import router as virality_ml_router
+    from .api.routes.feature_flags import router as feature_flags_router
+    from .api.routes.genai import router as genai_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -263,6 +266,9 @@ def create_app(
     app.include_router(audit_router)        # NEW: Compliance audit log (query/export/anomaly)
     app.include_router(nft_router)          # NEW: Blockchain NFT minting + ownership + marketplace
     app.include_router(advanced_analytics_router) # NEW: Clip/user/system analytics + reports
+    app.include_router(virality_ml_router)  # NEW: ML virality prediction + online training
+    app.include_router(feature_flags_router)# NEW: Feature flags (gradual rollout + per-user)
+    app.include_router(genai_router)        # NEW: Generative AI thumbnails/backgrounds/text-effects
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
