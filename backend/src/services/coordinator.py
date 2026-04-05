@@ -304,6 +304,8 @@ class VideoCoordinator:
                 _words_for_editor = list(clip.get("words") or [])
                 try:
                     from .creative_pipeline import get_creative_pipeline
+                    from ..repositories.clip_repository import ClipRepository
+                    from ..database import AsyncSessionLocal
                     creative_meta = await get_creative_pipeline().enhance(
                         clip_path=_Path(clip["path"]),
                         source_video=_Path(self.video_path),
@@ -315,6 +317,11 @@ class VideoCoordinator:
                         platform=self.config.get("target_platform", "tiktok"),
                     )
                     clip.update(creative_meta)
+                    # Persist creative metadata to DB so it survives page reloads
+                    _clip_db_id = clip.get("id")
+                    if _clip_db_id:
+                        async with AsyncSessionLocal() as _db:
+                            await ClipRepository.update_creative_meta(_db, str(_clip_db_id), creative_meta)
                 except Exception as _ce:
                     logger.warning("Creative pipeline skipped for clip %d: %s", index, _ce)
                     clip.pop("words", None)

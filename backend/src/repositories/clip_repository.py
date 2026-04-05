@@ -5,6 +5,7 @@ Clip repository - handles all database operations for generated clips.
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import text as sa_text
 from typing import List, Dict, Any, Optional
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -141,7 +142,7 @@ class ClipRepository:
                            translated_text,
                            social_title, social_description, suggested_hashtags,
                            thumbnail_filename, face_detected, hook_preview_score,
-                           user_rating
+                           user_rating, creative_meta_json
                     FROM generated_clips
                     WHERE task_id = :task_id
                     ORDER BY clip_order ASC
@@ -194,10 +195,38 @@ class ClipRepository:
                     "face_detected": row_dict.get("face_detected"),
                     "hook_preview_score": row_dict.get("hook_preview_score") or 0,
                     "user_rating": row_dict.get("user_rating"),
+                    **ClipRepository._unpack_creative_meta(row_dict.get("creative_meta_json")),
                 }
             )
 
         return clips
+
+    @staticmethod
+    def _unpack_creative_meta(json_str: Optional[str]) -> Dict[str, Any]:
+        """Parse creative_meta_json and return its keys, or empty defaults."""
+        if not json_str:
+            return {}
+        try:
+            return json.loads(json_str)
+        except Exception:
+            return {}
+
+    @staticmethod
+    async def update_creative_meta(db: AsyncSession, clip_id: str, creative_meta: Dict[str, Any]) -> None:
+        """Persist creative pipeline metadata for a clip."""
+        try:
+            await db.execute(
+                sa_text("""
+                    UPDATE generated_clips
+                    SET creative_meta_json = :json
+                    WHERE id = :clip_id
+                """),
+                {"json": json.dumps(creative_meta), "clip_id": clip_id},
+            )
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            logger.warning("Failed to persist creative_meta for clip %s: %s", clip_id, exc)
 
     @staticmethod
     async def get_clips_count(db: AsyncSession, task_id: str) -> int:
