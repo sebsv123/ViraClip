@@ -1457,6 +1457,130 @@ clip = {
 
 ---
 
+## Session 6.1 — Validation System Enhancements (April 5, 2026)
+
+### Problem Statement
+Initial validation system (Session 6) was excellent but lacked:
+- Historical metrics tracking
+- Configurable thresholds for different environments
+- Per-operation retry customization
+- Deep integration with existing QA systems
+
+### ValidationStatsService
+**File**: `services/validation_stats.py`
+
+**Features:**
+- Aggregate validation statistics over time periods
+- Identify failure patterns (min occurrence threshold)
+- Daily validation trend analysis
+- Filter by task ID
+
+**API Integration:**
+```python
+# 3 new endpoints in analytics router
+GET /analytics/validation/stats?days=7
+GET /analytics/validation/patterns?days=30&min_occurrences=2
+GET /analytics/validation/trend?days=30
+```
+
+**Metrics Tracked:**
+- Total validations, passed, failed, success rate
+- Common issues (top 10 by frequency)
+- Common warnings (normalized)
+- Average duration differences
+- Average file sizes
+
+### Configurable Validation Thresholds
+**Enhancement**: All ClipValidator thresholds now environment-configurable
+
+**Environment Variables:**
+```env
+VALIDATOR_MIN_DURATION_S=3.0
+VALIDATOR_MAX_DURATION_S=180.0
+VALIDATOR_MAX_TIMESTAMP_DRIFT_S=0.5
+VALIDATOR_MIN_AUDIO_BITRATE_KBPS=64
+VALIDATOR_MIN_VIDEO_BITRATE_KBPS=500
+VALIDATOR_MAX_WORD_DURATION_S=3.0
+VALIDATOR_MIN_WORD_DURATION_S=0.05
+VALIDATOR_SIZE_SIMILARITY_BYTES=1024
+```
+
+**Use Cases:**
+- Production: Strict thresholds for quality
+- Development: Looser thresholds for testing
+- Platform-specific: Different requirements per platform
+
+### Per-Operation Retry Configuration
+**File**: `utils/retry_helper.py`
+
+**RetryConfig Dataclass:**
+```python
+@dataclass
+class RetryConfig:
+    max_attempts: int = 3
+    initial_delay: float = 1.0
+    backoff_multiplier: float = 2.0
+    max_delay: float = 30.0
+```
+
+**Predefined Configs:**
+- `RETRY_CONFIG_FFMPEG`: FFmpeg operations (env-loaded)
+- `RETRY_CONFIG_NETWORK`: Network requests
+- `RETRY_CONFIG_FILESYSTEM`: File operations
+- `RetryConfig.aggressive()`: 5 attempts, fast retries
+- `RetryConfig.conservative()`: 2 attempts, slow retries
+
+**Environment Loading:**
+```env
+RETRY_FFMPEG_MAX_ATTEMPTS=5
+RETRY_FFMPEG_INITIAL_DELAY=2.0
+RETRY_FFMPEG_BACKOFF_MULTIPLIER=1.5
+RETRY_FFMPEG_MAX_DELAY=30.0
+```
+
+**Enhanced Decorators:**
+```python
+@retry_async(config=RETRY_CONFIG_FFMPEG)
+async def ffmpeg_operation():
+    ...
+```
+
+### Learning Loop Integration
+**File**: `services/learning_loop.py`
+
+**Changes:**
+- `_qa` method now `async` (uses ClipValidator)
+- Calls `validator.validate_output()` for comprehensive checks
+- Adds validation issues to QA issues list
+- Critical warnings promoted to issues
+- Graceful fallback if validator fails
+
+**Benefits:**
+- Consistent QA across all clips
+- Richer issue detection
+- Unified validation approach
+
+### Impact Metrics
+
+| Metric | Value |
+|--------|-------|
+| **New API Endpoints** | 3 validation analytics |
+| **Configurable Thresholds** | 8 env variables |
+| **Retry Configs** | 3 predefined + custom |
+| **Tests Added** | 20 (all passing) |
+| **Code Flexibility** | Adaptive per environment |
+
+### Tests Added
+**File**: `tests/test_validation_enhancements.py` (20 tests)
+- ValidationStatsService: 7 tests
+- RetryConfig: 5 tests
+- Enhanced retry: 3 tests
+- Configurable thresholds: 2 tests
+- Learning loop integration: 2 tests
+- Singleton: 1 test
+
+---
+
 ## Final Statistics
 
 | Metric | Value |
