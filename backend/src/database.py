@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import (
 load_dotenv()
 
 DEFAULT_DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql+asyncpg://localhost:5432/supoclip"
+    "DATABASE_URL", "postgresql+asyncpg://localhost:5432/viraclip"
 )
 
 _database_url_override: str | None = None

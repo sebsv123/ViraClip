@@ -28,7 +28,7 @@ _NICHE_MUSIC_MOOD: Dict[str, str] = {
     "general": "background cinematic",
 }
 
-_PIXABAY_MUSIC_CACHE = Path("/tmp/supoclip_music_cache")
+_PIXABAY_MUSIC_CACHE = Path("/tmp/viraclip_music_cache")
 
 
 def _get_background_music_path(config_obj=None) -> Optional[Path]:
@@ -45,7 +45,7 @@ def _get_background_music_path(config_obj=None) -> Optional[Path]:
         Path(_cfg.temp_dir) / "music",
         Path("/app/music"),
         Path("/app/backend/music"),
-        Path("/tmp/supoclip_music_cache"),
+        Path("/tmp/viraclip_music_cache"),
     ]
     import random as _random
 
