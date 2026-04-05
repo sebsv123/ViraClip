@@ -209,6 +209,9 @@ def create_app(
     from .api.routes.campaigns import router as campaigns_router
     from .api.routes.competitors import router as competitors_router
     from .api.routes.scheduler import router as scheduler_router
+    from .api.routes.calendar import router as calendar_router
+    from .api.routes.search import router as search_router
+    from .api.routes.trending import router as trending_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -235,6 +238,9 @@ def create_app(
     app.include_router(campaigns_router)    # NEW: Campaign A/B testing + performance tracking
     app.include_router(competitors_router)  # NEW: Competitor intelligence & trend analysis
     app.include_router(scheduler_router)    # NEW: Auto-scheduler (recurring jobs + trend triggers)
+    app.include_router(calendar_router)     # NEW: Content calendar & optimal scheduling
+    app.include_router(search_router)       # NEW: Full-text clip search with filters + facets
+    app.include_router(trending_router)     # NEW: Trending topics + content recommendations
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
