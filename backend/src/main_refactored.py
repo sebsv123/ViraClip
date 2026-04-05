@@ -241,6 +241,8 @@ def create_app(
     from .api.routes.webhooks import router as webhooks_router
     from .api.routes.version_control import router as version_control_router
     from .api.routes.backup import router as backup_router
+    from .api.routes.workflows import router as workflows_router
+    from .api.routes.dashboard import router as dashboard_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -299,6 +301,8 @@ def create_app(
     app.include_router(webhooks_router)        # NEW: Webhook endpoints + HMAC delivery + retry
     app.include_router(version_control_router) # NEW: Git-like clip versioning + branches + diffs
     app.include_router(backup_router)          # NEW: Backup/restore + disaster recovery
+    app.include_router(workflows_router)       # NEW: Visual workflow automation pipelines + templates
+    app.include_router(dashboard_router)       # NEW: Real-time metrics dashboard + history
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
