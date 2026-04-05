@@ -212,6 +212,9 @@ def create_app(
     from .api.routes.calendar import router as calendar_router
     from .api.routes.search import router as search_router
     from .api.routes.trending import router as trending_router
+    from .api.routes.gamification import router as gamification_router
+    from .api.routes.notifications import router as notifications_router
+    from .api.routes.audio import router as audio_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -241,6 +244,9 @@ def create_app(
     app.include_router(calendar_router)     # NEW: Content calendar & optimal scheduling
     app.include_router(search_router)       # NEW: Full-text clip search with filters + facets
     app.include_router(trending_router)     # NEW: Trending topics + content recommendations
+    app.include_router(gamification_router) # NEW: Points, levels, achievements, leaderboard
+    app.include_router(notifications_router)# NEW: Smart notifications (ML-optimised delivery)
+    app.include_router(audio_router)        # NEW: Audio recommendations + beat-matched cuts
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
