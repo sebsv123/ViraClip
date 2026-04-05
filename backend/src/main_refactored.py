@@ -201,6 +201,7 @@ def create_app(
     from .api.routes.llm_ops import router as llm_ops_router
     from .api.routes.creative import router as creative_router
     from .api.routes.analytics import router as analytics_router
+    from .api.routes.timeline import router as timeline_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -219,6 +220,7 @@ def create_app(
     app.include_router(llm_ops_router)
     app.include_router(creative_router)
     app.include_router(analytics_router)    # NEW: Analytics dashboard
+    app.include_router(timeline_router)     # NEW: Timeline API & metrics
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
