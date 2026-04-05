@@ -238,6 +238,9 @@ def create_app(
     from .api.routes.recommendations import router as recommendations_router
     from .api.routes.voice_synthesis import router as voice_synthesis_router
     from .api.routes.platform_presets import router as platform_presets_router
+    from .api.routes.webhooks import router as webhooks_router
+    from .api.routes.version_control import router as version_control_router
+    from .api.routes.backup import router as backup_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -293,6 +296,9 @@ def create_app(
     app.include_router(recommendations_router) # NEW: Personalised content recs + virality tips
     app.include_router(voice_synthesis_router) # NEW: TTS synthesis, voice cloning, video narration
     app.include_router(platform_presets_router)# NEW: Platform export presets + FFmpeg settings (7 platforms)
+    app.include_router(webhooks_router)        # NEW: Webhook endpoints + HMAC delivery + retry
+    app.include_router(version_control_router) # NEW: Git-like clip versioning + branches + diffs
+    app.include_router(backup_router)          # NEW: Backup/restore + disaster recovery
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
