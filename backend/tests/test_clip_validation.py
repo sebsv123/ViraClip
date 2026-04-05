@@ -16,6 +16,7 @@ from src.utils.retry_helper import (
     retry_async,
     retry_sync,
     RetryExhausted,
+    RetryConfig,
     FFmpegRetryHelper,
     retry_ffmpeg_operation,
 )
@@ -344,7 +345,7 @@ class TestFFmpegRetryHelper:
         result = await retry_ffmpeg_operation(
             successful_operation,
             "Test operation",
-            max_attempts=3,
+            config=RetryConfig(max_attempts=3, initial_delay=0.01),
         )
         assert result == "output.mp4"
 
@@ -368,7 +369,7 @@ class TestFFmpegRetryHelper:
         result = await retry_ffmpeg_operation(
             flaky_operation,
             "Flaky FFmpeg",
-            max_attempts=3,
+            config=RetryConfig(max_attempts=3, initial_delay=0.01),
         )
         assert result == "output.mp4"
         assert call_count == 2
