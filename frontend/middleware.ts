@@ -24,7 +24,7 @@ export function middleware(request: NextRequest) {
 
   if (pathname.startsWith("/api")) {
     return NextResponse.json(
-      { error: "SupoClip is in landing-page-only mode." },
+      { error: "ViraClip is in landing-page-only mode." },
       { status: 503 }
     );
   }
