@@ -416,7 +416,26 @@ class VideoCoordinator:
                             creative_meta["timeline_id"] = timeline.clip_id
                             clip["timeline_built"] = True
                             logger.info(f"  [Timeline] Built timeline with {len(timeline.segments)} segments")
-                        
+
+                            # Optional: render with camera movements (enable_timeline_render=True)
+                            if self.config.get("enable_timeline_render", False):
+                                try:
+                                    from ..services.timeline_renderer import apply_timeline_to_clip
+                                    _clip_p = _Path(clip["path"])
+                                    _tl_out = _clip_p.parent / f"{_clip_p.stem}_timeline{_clip_p.suffix}"
+                                    rendered = await apply_timeline_to_clip(
+                                        timeline=timeline,
+                                        source_video=_clip_p,
+                                        output_path=_tl_out,
+                                    )
+                                    if rendered.exists():
+                                        clip["path"] = str(rendered)
+                                        clip["filename"] = rendered.name
+                                        creative_meta["timeline_rendered"] = True
+                                        logger.info(f"  [Timeline] Rendered with camera movements → {rendered.name}")
+                                except Exception as _trf:
+                                    logger.debug("Timeline rendering skipped for clip %d: %s", index, _trf)
+
                     except Exception as _te:
                         logger.debug("Timeline building skipped for clip %d: %s", index, _te)
 
