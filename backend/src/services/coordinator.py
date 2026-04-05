@@ -371,6 +371,55 @@ class VideoCoordinator:
                 except Exception as _se:
                     logger.debug("SmartAutoEditor skipped for clip %d: %s", index, _se)
 
+                # Videofy Timeline Integration (optional) — build structured timeline for future use
+                if self.config.get("enable_timeline", False):
+                    try:
+                        from ..project_store import ProjectStore
+                        from ..services.timeline_builder import build_clip_timeline
+                        
+                        store = ProjectStore()
+                        
+                        # Build timeline if not already done
+                        if not store.is_step_done(self.task_id, "timeline"):
+                            # Get OpenAI client for Vision AI
+                            openai_client = None
+                            try:
+                                import os
+                                from openai import OpenAI
+                                if os.getenv("OPENAI_API_KEY"):
+                                    openai_client = OpenAI()
+                            except Exception:
+                                pass
+                            
+                            # Build timeline from segment
+                            timeline = await build_clip_timeline(
+                                task_id=self.task_id,
+                                video_path=_Path(self.video_path),
+                                whisper_words=_words_for_editor,
+                                ai_segments=[{
+                                    "text": vs_segment.get("transcript", "") or vs_segment.get("text", ""),
+                                    "start_time": vs_segment.get("start_time", 0.0),
+                                    "end_time": vs_segment.get("end_time", 3.0),
+                                    "virality_score": vs_segment.get("virality_score", 0.0),
+                                    "hook_score": vs_segment.get("hook_score", 0.0),
+                                    "hook_type": vs_segment.get("hook_type", "none"),
+                                    "mood": creative_meta.get("preset_used", "neutral"),
+                                }],
+                                store=store,
+                                openai_client=openai_client,
+                                preset=creative_meta.get("preset_used", "default"),
+                                skip_vision=not self.config.get("enable_vision_ai", False),
+                            )
+                            
+                            # Add timeline metadata to clip
+                            creative_meta["timeline_built"] = True
+                            creative_meta["timeline_id"] = timeline.clip_id
+                            clip["timeline_built"] = True
+                            logger.info(f"  [Timeline] Built timeline with {len(timeline.segments)} segments")
+                        
+                    except Exception as _te:
+                        logger.debug("Timeline building skipped for clip %d: %s", index, _te)
+
                 # Persist all creative metadata (including smart-edit fields) in one DB write
                 try:
                     from ..repositories.clip_repository import ClipRepository
