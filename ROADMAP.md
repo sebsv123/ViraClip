@@ -907,5 +907,83 @@ async def predict_virality(clip_features: dict) -> float:
 | April 4, 2026 (S1) | Claurst Integration: 50 archivos, 5000+ LOC, 6 deploy blockers fix | 6, 7, 8.1-8.4, 9 |
 | April 4, 2026 (S2) | Deploy sequence validated, GPU worker config, SSE fixes | Deploy ready |
 | April 5, 2026 (S3) | **Production Readiness Audit**: 7 mejoras, 14 tests, zero warnings | Production ✅ |
+| April 5, 2026 (S4) | **Videofy Integration**: Data contract bridge (ClipTimeline), Vision AI frame analysis, persistent project state, 53 tests passing | Timeline system ✅ |
+
+---
+
+## Phase 10 — Videofy Timeline System (April 5, 2026) ✅
+
+**Problem Solved**: ViraClip had multiple parallel pipeline versions with **no unified data contract** connecting AI analysis (`ai.py`) to rendering (`video_utils.py`). Metadata was lost on render failures, no restart capability.
+
+**Solution**: Integrated patterns from [schibsted/videofy_minimal](https://github.com/schibsted/videofy_minimal) to create formal `ClipTimeline` structure bridging analysis and rendering.
+
+### Core Components
+
+| File | Purpose | Tests |
+|------|---------|-------|
+| `schemas_v2.py` | ClipTimeline, Segment, TextLine data contract | 5/5 ✅ |
+| `asset_analysis.py` | Vision AI frame extraction + GPT-4o descriptions | 4/4 ✅ |
+| `project_store.py` | Persistent input/working/output state | 6/6 ✅ |
+| `timeline_builder.py` | Whisper + AI → ClipTimeline bridge | 2/2 ✅ |
+| `timeline_renderer.py` | ClipTimeline → FFmpeg with camera movements | 6/6 ✅ |
+| **Total** | **1,705 lines, 7 new files** | **23/23 ✅** |
+
+### Features Delivered
+
+1. **Persistent State** - `ProjectStore` creates `input/working/output` folders, every pipeline step saved
+2. **Vision AI Context** - GPT-4o describes frames, assigns to segments for visual context
+3. **Camera Movements** - Cyclic zoom/pan patterns (zoom-in, pan-right, etc.) from Videofy
+4. **Restart Capability** - `is_step_done()` checks, skip completed work on failure recovery
+5. **Word-Synced Captions** - ASS subtitle generation from word-level TextLines
+6. **Opt-in Integration** - Disabled by default, enabled via `config['enable_timeline']`
+
+### Configuration
+
+```python
+# Enable in task config
+config = {
+    "enable_timeline": True,      # Build ClipTimeline
+    "enable_vision_ai": True,     # GPT-4o frame analysis
+}
+```
+
+### File Structure
+
+```
+projects/<task_id>/
+  input/video.mp4
+  working/
+    transcript.json
+    segments.json
+    timeline.json          ← ClipTimeline data contract
+    analysis/
+      frames/*.jpg
+      descriptions.json    ← Vision AI
+      placements.json
+  output/clip_01.mp4
+```
+
+### Performance
+
+- Timeline building (no Vision): <1s
+- Vision AI (8 frames): ~10-15s
+- Cost: ~$0.001/clip (GPT-4o-mini)
+
+### Documentation
+
+- `VIDEOFY_INTEGRATION.md` - Complete technical guide (500 lines)
+- `CONFIG_VIDEOFY.md` - Configuration, troubleshooting, cost estimation
+
+### Backward Compatibility
+
+✅ **No breaking changes** - Disabled by default, existing workflows unchanged  
+✅ **Gradual rollout** - Enable per-task or globally  
+✅ **Future-ready** - Timeline can power advanced rendering features
+
+### Tests
+
+- `test_videofy_integration.py` - 23 tests covering all modules
+- `test_smart_auto_editor.py` - 30 tests (previous session)
+- **Total**: 53/53 passing ✅
 
 ---
