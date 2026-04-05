@@ -189,6 +189,33 @@ class CreativePipeline:
             broll_pairs = await get_contextual_broll().get_for_timeline(
                 timeline, max_assets=3
             )
+
+            # Fallback: if timeline had no hook/impact keyword hits, use LLM to extract
+            # visual keywords from the actual transcript ("what the speaker says")
+            if not broll_pairs and transcript:
+                try:
+                    from .broll_service import BrollService
+                    from .multimodal_detector import TimelineEvent
+                    llm_kws = await BrollService().extract_keywords(transcript)
+                    clip_dur = max(1.0, end - start)
+                    llm_pairs = []
+                    for i, kw in enumerate(llm_kws[:2]):
+                        asset = await get_contextual_broll().get_for_keyword(kw, duration=3.0)
+                        if asset:
+                            t_ins = max(2.0, min(4.0 + i * 7.0, clip_dur - 4.0))
+                            evt = TimelineEvent(
+                                t=t_ins, type="keyword", strength=0.7,
+                                duration=3.0, payload={"word": kw, "category": "broll_llm"},
+                            )
+                            llm_pairs.append((evt, asset))
+                    if llm_pairs:
+                        broll_pairs = llm_pairs
+                        logger.info(
+                            "  [Creative] B-roll LLM fallback: keywords=%s", llm_kws
+                        )
+                except Exception as _fb:
+                    logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
+
             if broll_pairs:
                 brolled = clip_path.with_name(f"broll_{clip_path.name}")
                 result = await overlay_broll_clips(clip_path, broll_pairs, brolled)

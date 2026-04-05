@@ -94,22 +94,63 @@ class BrollService:
     # ──────────────────────────────────────────────────────────────────────────
 
     async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
-        """Fetch and cache a portrait video for *keyword*. Returns local Path or None."""
+        """Fetch and cache a portrait video/photo for *keyword*. Returns local Path or None."""
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
-        cached = self.broll_dir / f"{safe}.mp4"
-        if cached.exists() and cached.stat().st_size > 10_000:
-            logger.info(f"[BRoll] Cache hit: {cached}")
-            return cached
+        cached_video = self.broll_dir / f"{safe}.mp4"
+        if cached_video.exists() and cached_video.stat().st_size > 10_000:
+            logger.info(f"[BRoll] Cache hit (video): {cached_video}")
+            return cached_video
+        cached_photo = self.broll_dir / f"{safe}.jpg"
+        if cached_photo.exists() and cached_photo.stat().st_size > 5_000:
+            logger.info(f"[BRoll] Cache hit (photo): {cached_photo}")
+            return cached_photo
 
-        # Try Pexels first
+        # Try Pexels video first
         video_url = await self._search_pexels(keyword)
         if not video_url:
             video_url = await self._search_pixabay(keyword)
-        if not video_url:
-            logger.warning(f"[BRoll] No asset found for keyword '{keyword}'")
-            return None
+        if video_url:
+            result = await self._download(video_url, cached_video)
+            if result:
+                return result
 
-        return await self._download(video_url, cached)
+        # Fallback: Pexels Photos API (still image)
+        photo = await self._search_pexels_photos_and_download(keyword, safe)
+        if photo:
+            return photo
+
+        logger.warning(f"[BRoll] No asset found for keyword '{keyword}'")
+        return None
+
+    async def _search_pexels_photos_and_download(self, keyword: str, safe_name: str) -> Optional[Path]:
+        """Search Pexels Photos API and download a portrait image for *keyword*."""
+        key = self.config.pexels_api_key or os.getenv("PEXELS_API_KEY", "")
+        if not key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.pexels.com/v1/search",
+                    headers={"Authorization": key},
+                    params={"query": keyword, "per_page": 3, "orientation": "portrait"},
+                )
+                resp.raise_for_status()
+                photos = resp.json().get("photos", [])
+                if not photos:
+                    return None
+                src = photos[0].get("src", {})
+                photo_url = src.get("portrait") or src.get("large2x") or src.get("large")
+                if not photo_url:
+                    return None
+                dest = self.broll_dir / f"{safe_name}.jpg"
+                img_resp = await client.get(photo_url, follow_redirects=True, timeout=_BROLL_DOWNLOAD_TIMEOUT)
+                img_resp.raise_for_status()
+                dest.write_bytes(img_resp.content)
+                logger.info(f"[BRoll] Pexels photo: '{keyword}' → {dest} ({dest.stat().st_size // 1024} KB)")
+                return dest
+        except Exception as e:
+            logger.warning(f"[BRoll] Pexels Photos search error for '{keyword}': {e}")
+            return None
 
     async def _search_pexels(self, query: str) -> Optional[str]:
         key = self.config.pexels_api_key or os.getenv("PEXELS_API_KEY", "")
