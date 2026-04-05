@@ -235,6 +235,9 @@ def create_app(
     from .api.routes.audio_rec import router as audio_rec_router
     from .api.routes.computer_vision import router as computer_vision_router
     from .api.routes.competitor_intel import router as competitor_intel_router
+    from .api.routes.recommendations import router as recommendations_router
+    from .api.routes.voice_synthesis import router as voice_synthesis_router
+    from .api.routes.platform_presets import router as platform_presets_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -287,6 +290,9 @@ def create_app(
     app.include_router(audio_rec_router)    # NEW: AI audio/music/SFX recommendations + beat-matched cuts
     app.include_router(computer_vision_router) # NEW: Frame visual analysis, faces, colors, engagement
     app.include_router(competitor_intel_router)# NEW: Competitor monitoring, trend insights, comparison
+    app.include_router(recommendations_router) # NEW: Personalised content recs + virality tips
+    app.include_router(voice_synthesis_router) # NEW: TTS synthesis, voice cloning, video narration
+    app.include_router(platform_presets_router)# NEW: Platform export presets + FFmpeg settings (7 platforms)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
