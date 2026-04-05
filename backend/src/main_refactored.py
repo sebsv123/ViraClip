@@ -230,6 +230,8 @@ def create_app(
     from .api.routes.multilanguage import router as multilanguage_router
     from .api.routes.forensic import router as forensic_router
     from .api.routes.multi_angle import router as multi_angle_router
+    from .api.routes.engagement import router as engagement_router
+    from .api.routes.templates import router as templates_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -277,6 +279,8 @@ def create_app(
     app.include_router(multilanguage_router)# NEW: Language detection + subtitle/font config (15 langs)
     app.include_router(forensic_router)     # NEW: Deepfake detection + video authenticity forensics
     app.include_router(multi_angle_router)  # NEW: Multi-angle sync + camera switching plans
+    app.include_router(engagement_router)   # NEW: LSTM/CNN engagement curve prediction + training
+    app.include_router(templates_router)    # NEW: Dynamic niche templates (10 niches, style + timing)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
