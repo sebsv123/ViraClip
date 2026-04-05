@@ -3,8 +3,10 @@ Smart Auto-Editing System based on Viral Content Rules
 Automatically applies editing decisions based on viral content patterns.
 """
 
+import asyncio
 import re
 import logging
+import tempfile
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -224,10 +226,10 @@ class SmartAutoEditor:
             # Check if gap is in removable range
             if self.rules.min_silence_sec <= gap <= self.rules.max_silence_sec:
                 # Check if word is filler
-                word_text = current_word.get("text", "").lower().strip()
-                next_text = next_word.get("text", "").lower().strip()
+                word_text = current_word.get("word", current_word.get("text", "")).lower().strip()
+                next_text = next_word.get("word", next_word.get("text", "")).lower().strip()
                 
-                is_filler = any(filler in word_text for filler in self.FILLER_WORDS)
+                is_filler = any(filler in word_text for filler in self.FILLER_WORDS)  # noqa
                 
                 confidence = 0.7 if is_filler else 0.5
                 
@@ -258,7 +260,7 @@ class SmartAutoEditor:
             return decisions
         
         for i, word_timing in enumerate(word_timings):
-            word = word_timing.get("text", "").lower().strip()
+            word = word_timing.get("word", word_timing.get("text", "")).lower().strip()
             
             # Check if word is a keyword
             if word in self.rules.text_pop_keywords:
@@ -354,7 +356,7 @@ class SmartAutoEditor:
         decisions = []
         
         # Look for repeated phrases
-        words = [w.get("text", "").lower() for w in word_timings]
+        words = [w.get("word", w.get("text", "")).lower() for w in word_timings]
         
         for i in range(len(words) - 4):
             phrase = " ".join(words[i:i+3])
@@ -430,6 +432,75 @@ class SmartAutoEditor:
             parts.append(f"  - {count}x {rule_type.value.replace('_', ' ')}")
         
         return "\n".join(parts)
+
+    async def apply_text_pops(
+        self,
+        clip_path: Path,
+        output_path: Path,
+        decisions: List[Dict[str, Any]],
+        hook_offset: float = 0.0,
+    ) -> "Path | None":
+        """
+        Render TEXT_POP decisions onto the clip using FFmpeg drawtext.
+        hook_offset (seconds) is added to all timestamps — use 1.0 when
+        hook-flash reorder prepended 1 s to the clip.
+
+        Returns output_path on success, None if nothing to apply or on error.
+        """
+        text_decisions = [
+            d for d in decisions
+            if d.get("type") == EditRuleType.TEXT_POP.value
+            and d.get("parameters", {}).get("text")
+        ]
+        if not text_decisions:
+            return None
+
+        vf_parts: list[str] = []
+        for d in text_decisions[:5]:  # cap at 5 overlays
+            raw_text = d["parameters"]["text"]
+            # Escape special drawtext chars
+            safe_text = (
+                raw_text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+            )
+            t_start = round(float(d["timestamp"]) + hook_offset, 3)
+            t_end   = round(float(d["timestamp"]) + float(d["duration"]) + hook_offset, 3)
+            hex_color = d["parameters"].get("color", "#FF0050").lstrip("#")
+
+            vf_parts.append(
+                f"drawtext=text='{safe_text}'"
+                f":fontsize=72"
+                f":fontcolor=white"
+                f":borderw=5"
+                f":bordercolor=0x{hex_color}@0.95"
+                f":x=(w-text_w)/2"
+                f":y=h*0.65"
+                f":enable='between(t,{t_start},{t_end})'"
+            )
+
+        if not vf_parts:
+            return None
+
+        vf_chain = ",".join(vf_parts)
+        tmp = Path(tempfile.mktemp(suffix=clip_path.suffix, dir=clip_path.parent))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-hide_banner", "-loglevel", "quiet", "-y",
+                "-i", str(clip_path),
+                "-vf", vf_chain,
+                "-c:a", "copy",
+                str(tmp),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await asyncio.wait_for(proc.wait(), timeout=300.0)
+            if tmp.exists() and tmp.stat().st_size > 0:
+                return tmp
+            tmp.unlink(missing_ok=True)
+            return None
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("apply_text_pops failed: %s", exc)
+            tmp.unlink(missing_ok=True)
+            return None
     
     def apply_preset(self, preset_name: str) -> None:
         """Apply a predefined editing preset."""

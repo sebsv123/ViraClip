@@ -302,10 +302,9 @@ class VideoCoordinator:
 
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
                 _words_for_editor = list(clip.get("words") or [])
+                creative_meta: dict = {}
                 try:
                     from .creative_pipeline import get_creative_pipeline
-                    from ..repositories.clip_repository import ClipRepository
-                    from ..database import AsyncSessionLocal
                     creative_meta = await get_creative_pipeline().enhance(
                         clip_path=_Path(clip["path"]),
                         source_video=_Path(self.video_path),
@@ -317,17 +316,12 @@ class VideoCoordinator:
                         platform=self.config.get("target_platform", "tiktok"),
                     )
                     clip.update(creative_meta)
-                    # Persist creative metadata to DB so it survives page reloads
-                    _clip_db_id = clip.get("id")
-                    if _clip_db_id:
-                        async with AsyncSessionLocal() as _db:
-                            await ClipRepository.update_creative_meta(_db, str(_clip_db_id), creative_meta)
                 except Exception as _ce:
                     logger.warning("Creative pipeline skipped for clip %d: %s", index, _ce)
                     clip.pop("words", None)
                     clip.pop("audio_features", None)
 
-                # Smart Auto-Editor — viral edit analysis (filler detection, speed ramp, impact phrases)
+                # Smart Auto-Editor — viral keyword analysis + TEXT_POP overlay application
                 try:
                     from .smart_auto_editor import SmartAutoEditor
                     _editor = SmartAutoEditor()
@@ -336,17 +330,59 @@ class VideoCoordinator:
                         transcript=_transcript,
                         word_timings=_words_for_editor,
                     )
-                    clip["smart_edit_decisions"] = _edit_analysis.get("total_decisions", 0)
-                    clip["smart_edit_summary"] = _edit_analysis.get("edit_summary", "")
-                    clip["smart_edit_time_saved"] = _edit_analysis.get("estimated_time_saved", 0.0)
+                    _decisions = _edit_analysis.get("decisions", [])
+
+                    # Apply TEXT_POP overlays to clip (purely additive — safe after creative pipeline)
+                    _text_pops_applied = 0
+                    _hook_offset = 1.0 if creative_meta.get("hook_reorder_applied") else 0.0
+                    _clip_path_obj = _Path(clip["path"])
+                    _textpop_out = _clip_path_obj.with_name(f"tp_{_clip_path_obj.name}")
+                    _tp_result = await _editor.apply_text_pops(
+                        clip_path=_clip_path_obj,
+                        output_path=_textpop_out,
+                        decisions=_decisions,
+                        hook_offset=_hook_offset,
+                    )
+                    if _tp_result and _textpop_out.exists() and _textpop_out.stat().st_size > 0:
+                        _clip_path_obj.unlink(missing_ok=True)
+                        _textpop_out.rename(_clip_path_obj)
+                        _text_pops_applied = sum(
+                            1 for d in _decisions if d.get("type") == "text_pop"
+                        )
+                        logger.info("  [SmartEditor] %d text-pop overlays applied", _text_pops_applied)
+                    else:
+                        _textpop_out.unlink(missing_ok=True)
+
+                    # Merge smart-edit fields into creative_meta so they are persisted together
+                    creative_meta["smart_edit_decisions"] = _edit_analysis.get("total_decisions", 0)
+                    creative_meta["smart_edit_summary"]   = _edit_analysis.get("edit_summary", "")
+                    creative_meta["smart_edit_time_saved"] = _edit_analysis.get("estimated_time_saved", 0.0)
+                    creative_meta["text_pops_applied"] = _text_pops_applied
+                    clip["smart_edit_decisions"] = creative_meta["smart_edit_decisions"]
+                    clip["smart_edit_summary"]   = creative_meta["smart_edit_summary"]
+                    clip["smart_edit_time_saved"] = creative_meta["smart_edit_time_saved"]
+                    clip["text_pops_applied"] = _text_pops_applied
                     logger.info(
-                        "  [SmartEditor] clip %d: %d decisions, ~%.1fs saved",
+                        "  [SmartEditor] clip %d: %d decisions (~%.1fs saved)",
                         index,
-                        clip["smart_edit_decisions"],
-                        clip["smart_edit_time_saved"],
+                        creative_meta["smart_edit_decisions"],
+                        creative_meta["smart_edit_time_saved"],
                     )
                 except Exception as _se:
                     logger.debug("SmartAutoEditor skipped for clip %d: %s", index, _se)
+
+                # Persist all creative metadata (including smart-edit fields) in one DB write
+                try:
+                    from ..repositories.clip_repository import ClipRepository
+                    from ..database import AsyncSessionLocal
+                    _clip_db_id = clip.get("id")
+                    if _clip_db_id and creative_meta:
+                        async with AsyncSessionLocal() as _db:
+                            await ClipRepository.update_creative_meta(
+                                _db, str(_clip_db_id), creative_meta
+                            )
+                except Exception as _dbe:
+                    logger.warning("Creative meta DB persist failed for clip %d: %s", index, _dbe)
 
                 await emit_clip_generated(
                     task_id=self.task_id,
