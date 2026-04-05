@@ -363,6 +363,11 @@ class GeneratedClip(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Phase 9: Creative Engine metadata (JSON blob — all creative pipeline outputs)
+    creative_meta_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON: viral_score, hook_score, preset_used, timeline_built, zoom_punch_applied, etc.
+
     # Phase D: A/B testing
     ab_test_id: Mapped[Optional[str]] = mapped_column(
         String(36), nullable=True
