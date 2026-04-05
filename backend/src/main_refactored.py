@@ -249,6 +249,10 @@ def create_app(
     from .api.routes.retention import router as retention_router
     from .api.routes.cdn import router as cdn_router
     from .api.routes.ipfs import router as ipfs_router
+    from .api.routes.productivity import router as productivity_router
+    from .api.routes.auto_editor import router as auto_editor_router
+    from .api.routes.integrations import router as integrations_router
+    from .api.routes.cloud_storage import router as cloud_storage_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -315,6 +319,10 @@ def create_app(
     app.include_router(retention_router)       # NEW: Data retention policies + GDPR cleanup
     app.include_router(cdn_router)             # NEW: CDN upload + signed URLs + cache invalidation
     app.include_router(ipfs_router)            # NEW: IPFS decentralized storage + gateway management
+    app.include_router(productivity_router)    # NEW: Slack/Notion/Trello automation rules + event triggers
+    app.include_router(auto_editor_router)     # NEW: AI auto-edit plan + silence removal + text pops
+    app.include_router(integrations_router)    # NEW: Zapier/Make/n8n/IFTTT webhook integrations
+    app.include_router(cloud_storage_router)   # NEW: Multi-cloud upload/download/presign (S3/GCS/Azure)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
