@@ -119,12 +119,19 @@ interface Clip {
   hook_text?: string;
   zoom_punch_applied?: boolean;
   color_grade_applied?: boolean;
-  sfx_injected?: boolean;
+  sfx_injected?: number;
   loudnorm_applied?: boolean;
   preset_used?: string;
   broll_overlays?: number;
   qa_passed?: boolean;
   qa_issues?: string[];
+  pacing_score?: number | null;
+  emotion_score?: number | null;
+  improvements?: string[];
+  // Smart Auto-Editor
+  smart_edit_decisions?: number;
+  smart_edit_summary?: string;
+  smart_edit_time_saved?: number;
 }
 
 interface TaskDetails {
@@ -1366,7 +1373,7 @@ export default function TaskPage() {
                       {clip.virality_score > 0 && (
                         <div className="mb-4 p-3 bg-gray-50 rounded-lg">
                           <div className="flex items-center justify-between mb-3">
-                            <h4 className="font-medium text-black text-sm flex items-center gap-2">
+                            <h4 className="font-medium text-black text-sm flex items-center gap-1">
                               <Zap className="w-4 h-4" />
                               Virality Score
                             </h4>
@@ -1456,6 +1463,8 @@ export default function TaskPage() {
                               </span>
                             )}
                           </div>
+
+                          {/* Effect flags */}
                           <div className="grid grid-cols-2 gap-2 mb-3">
                             <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
                               clip.hook_reorder_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
@@ -1482,14 +1491,60 @@ export default function TaskPage() {
                               Color Grade {clip.color_grade_applied ? "✓" : "—"}
                             </div>
                           </div>
-                          {clip.broll_overlays !== undefined && clip.broll_overlays > 0 && (
-                            <div className="text-xs text-purple-300 mb-2">
-                              🎬 {clip.broll_overlays} B-roll overlay{clip.broll_overlays !== 1 ? "s" : ""} injected
+
+                          {/* Pacing + Emotion sub-scores */}
+                          {(clip.pacing_score != null || clip.emotion_score != null) && (
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                              {clip.pacing_score != null && (
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3" />Pacing</span>
+                                    <span className="text-cyan-300 font-medium">{Math.round(clip.pacing_score)}</span>
+                                  </div>
+                                  <Progress value={clip.pacing_score} className="h-1" />
+                                </div>
+                              )}
+                              {clip.emotion_score != null && (
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-gray-400 flex items-center gap-1"><Zap className="w-3 h-3" />Emotion</span>
+                                    <span className="text-purple-300 font-medium">{Math.round(clip.emotion_score)}</span>
+                                  </div>
+                                  <Progress value={clip.emotion_score} className="h-1" />
+                                </div>
+                              )}
                             </div>
                           )}
+
+                          {/* B-roll + SFX counts */}
+                          <div className="flex flex-wrap gap-3 mb-3 text-xs">
+                            {clip.broll_overlays !== undefined && clip.broll_overlays > 0 && (
+                              <span className="text-purple-300">🎬 {clip.broll_overlays} B-roll{clip.broll_overlays !== 1 ? "s" : ""}</span>
+                            )}
+                            {clip.sfx_injected !== undefined && clip.sfx_injected > 0 && (
+                              <span className="text-cyan-300">🔊 {clip.sfx_injected} SFX</span>
+                            )}
+                            {clip.smart_edit_decisions !== undefined && clip.smart_edit_decisions > 0 && (
+                              <span className="text-amber-300">✂️ {clip.smart_edit_decisions} edit{clip.smart_edit_decisions !== 1 ? "s" : ""}{clip.smart_edit_time_saved ? ` · ${clip.smart_edit_time_saved.toFixed(1)}s saved` : ""}</span>
+                            )}
+                          </div>
+
                           {clip.hook_text && (
                             <div className="text-xs text-cyan-200 italic mb-2">Hook: &ldquo;{clip.hook_text}&rdquo;</div>
                           )}
+
+                          {/* Improvement suggestions */}
+                          {clip.improvements && clip.improvements.length > 0 && (
+                            <div className="mb-3">
+                              <p className="text-xs text-amber-400 font-medium mb-1">💡 Suggestions</p>
+                              <ul className="space-y-0.5">
+                                {clip.improvements.slice(0, 3).map((imp, i) => (
+                                  <li key={i} className="text-xs text-amber-200/80">• {imp}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
                           <div className={`flex items-center gap-1.5 text-xs font-medium ${
                             clip.qa_passed ? "text-emerald-400" : "text-amber-400"
                           }`}>
