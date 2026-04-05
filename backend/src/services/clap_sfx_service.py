@@ -29,7 +29,7 @@ from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
-SFX_LIBRARY_PATH = Path(os.getenv("SFX_LIBRARY_PATH", "/app/assets/sfx_library"))
+SFX_LIBRARY_PATH = Path(os.getenv("SFX_LIBRARY_PATH", "/app/assets/sounds"))
 EMBEDDINGS_CACHE_FILE = SFX_LIBRARY_PATH / "embeddings_cache.json"
 
 # Similarity threshold — below this we return None (no confident match)

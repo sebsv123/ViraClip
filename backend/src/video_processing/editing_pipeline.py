@@ -658,8 +658,8 @@ class EditingPipeline:
 
         vcodec = ["libx264", "-preset", "veryfast", "-crf", "21"]
         if gpu_settings:
-            enc = gpu_settings.get("vcodec")
-            if enc in ("h264_nvenc", "h264_amf", "h264_videotoolbox"):
+            enc = gpu_settings.get("codec")  # gpu_detection.py uses "codec" key
+            if enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"):
                 vcodec = [enc, "-preset", gpu_settings.get("preset", "p4")]
 
         cmd = ["ffmpeg", "-y", "-i", str(video_path),

@@ -301,6 +301,7 @@ class VideoCoordinator:
                     clip.update(post_validation.metadata)
 
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
+                _words_for_editor = list(clip.get("words") or [])
                 try:
                     from .creative_pipeline import get_creative_pipeline
                     creative_meta = await get_creative_pipeline().enhance(
@@ -318,6 +319,27 @@ class VideoCoordinator:
                     logger.warning("Creative pipeline skipped for clip %d: %s", index, _ce)
                     clip.pop("words", None)
                     clip.pop("audio_features", None)
+
+                # Smart Auto-Editor — viral edit analysis (filler detection, speed ramp, impact phrases)
+                try:
+                    from .smart_auto_editor import SmartAutoEditor
+                    _editor = SmartAutoEditor()
+                    _transcript = vs_segment.get("transcript", "") or vs_segment.get("text", "")
+                    _edit_analysis = await _editor.analyze_and_edit(
+                        transcript=_transcript,
+                        word_timings=_words_for_editor,
+                    )
+                    clip["smart_edit_decisions"] = _edit_analysis.get("total_decisions", 0)
+                    clip["smart_edit_summary"] = _edit_analysis.get("edit_summary", "")
+                    clip["smart_edit_time_saved"] = _edit_analysis.get("estimated_time_saved", 0.0)
+                    logger.info(
+                        "  [SmartEditor] clip %d: %d decisions, ~%.1fs saved",
+                        index,
+                        clip["smart_edit_decisions"],
+                        clip["smart_edit_time_saved"],
+                    )
+                except Exception as _se:
+                    logger.debug("SmartAutoEditor skipped for clip %d: %s", index, _se)
 
                 await emit_clip_generated(
                     task_id=self.task_id,
