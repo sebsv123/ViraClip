@@ -221,6 +221,8 @@ def create_app(
     from .api.routes.thumbnails import router as thumbnails_router
     from .api.routes.batch import router as batch_router
     from .api.routes.audit import router as audit_router
+    from .api.routes.nft import router as nft_router
+    from .api.routes.advanced_analytics import router as advanced_analytics_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -259,6 +261,8 @@ def create_app(
     app.include_router(thumbnails_router)   # NEW: AI thumbnail generation + frame analysis
     app.include_router(batch_router)        # NEW: Batch video processing jobs
     app.include_router(audit_router)        # NEW: Compliance audit log (query/export/anomaly)
+    app.include_router(nft_router)          # NEW: Blockchain NFT minting + ownership + marketplace
+    app.include_router(advanced_analytics_router) # NEW: Clip/user/system analytics + reports
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
