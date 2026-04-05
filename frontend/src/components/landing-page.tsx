@@ -778,7 +778,7 @@ export default function LandingPage() {
                     <span className="opacity-50">$</span>{" "}
                     git clone{" "}
                     <span className="opacity-40">
-                      https://github.com/FujiwaraChoki/supoclip
+                      https://github.com/sebsv123/ViraClip
                     </span>
                   </div>
                   <div>
@@ -866,7 +866,7 @@ export default function LandingPage() {
           <div className="flex items-center gap-2">
             <Image
               src="/logo.png"
-              alt="SupoClip"
+              alt="ViraClip"
               width={24}
               height={24}
               className="rounded-md"
@@ -880,7 +880,7 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-6 text-xs text-muted-foreground">
             <a
-              href="https://github.com/FujiwaraChoki/supoclip"
+              href="https://github.com/sebsv123/ViraClip"
               target="_blank"
               rel="noopener noreferrer"
               className="hover:text-foreground transition-colors"
