@@ -1,3 +1,0 @@
-@echo off
-echo Monitoring worker logs for task %1...
-docker-compose logs -f worker 2>&1 | findstr /i "%1 TRANSCRIPTION SUBTITLES CROP EXPORT ERROR"
