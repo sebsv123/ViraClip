@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 config = Config()
 
 _TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
-_TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/supoclip_transcript_cache")
+_TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/viraclip_transcript_cache")
 _TRANSCRIPT_REDIS_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 _whisper_model = None

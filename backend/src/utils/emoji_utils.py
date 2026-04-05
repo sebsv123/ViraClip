@@ -1,5 +1,5 @@
 """
-Emoji overlay utilities for SupoClip.
+Emoji overlay utilities for ViraClip.
 
 Uses Twemoji (Twitter's open-source emoji PNG set) via CDN for clean,
 color emoji rendering without requiring NotoColorEmoji font.
@@ -16,7 +16,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Local cache dir for downloaded emoji PNGs
-_EMOJI_CACHE_DIR = Path("/tmp/supoclip_emoji_cache")
+_EMOJI_CACHE_DIR = Path("/tmp/viraclip_emoji_cache")
 
 # Twemoji CDN — 72x72 PNG, MIT licensed
 _TWEMOJI_BASE = "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72"

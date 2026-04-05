@@ -72,7 +72,7 @@ warnings.warn(
 
 # B-4 fix: shared directory for content-hash-based transcript caches
 # Lets the same video file re-use its transcript even if downloaded to a different path.
-_TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/supoclip_transcript_cache")
+_TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/viraclip_transcript_cache")
 
 
 def _get_video_content_hash(video_path: Path) -> Optional[str]:
@@ -2026,7 +2026,7 @@ def _get_background_music_path(config_obj=None) -> Optional[Path]:
         Path(_cfg.temp_dir) / "music",
         Path("/app/music"),
         Path("/app/backend/music"),
-        Path("/tmp/supoclip_music_cache"),  # P6: Pixabay auto-downloaded tracks
+        Path("/tmp/viraclip_music_cache"),  # P6: Pixabay auto-downloaded tracks
     ]
     import random as _random
     for music_dir in search_dirs:
@@ -2056,7 +2056,7 @@ _NICHE_MUSIC_MOOD: Dict[str, str] = {
     "general": "background cinematic",
 }
 
-_PIXABAY_MUSIC_CACHE = Path("/tmp/supoclip_music_cache")
+_PIXABAY_MUSIC_CACHE = Path("/tmp/viraclip_music_cache")
 
 
 def fetch_pixabay_music(niche: str = "general", api_key: Optional[str] = None) -> Optional[Path]:
@@ -2096,7 +2096,7 @@ def fetch_pixabay_music(niche: str = "general", api_key: Optional[str] = None) -
             f"https://pixabay.com/api/videos/music/"
             f"?key={key}&q={safe_query}&per_page=10&min_duration=30"
         )
-        req = urllib.request.Request(api_url, headers={"User-Agent": "SupoClip/1.0"})
+        req = urllib.request.Request(api_url, headers={"User-Agent": "ViraClip/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
 
@@ -3088,7 +3088,7 @@ def create_clips_with_transitions(
         f"Creating {len(segments)} standalone clips subtitles={add_subtitles} template '{caption_template}'"
     )
     logger.info(
-        "Inter-clip transitions are disabled for standalone SupoClip exports"
+        "Inter-clip transitions are disabled for standalone ViraClip exports"
     )
     return create_clips_from_segments(
         video_path,

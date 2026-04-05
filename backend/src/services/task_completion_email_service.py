@@ -56,7 +56,7 @@ class TaskCompletionEmailService:
         task_url = f"{self.app_url}/tasks/{task_id}"
         clips_label = f"{clips_count} clip" if clips_count == 1 else f"{clips_count} clips"
         safe_source_title = escape(source_title.strip()) if source_title else "your video"
-        subject = "Your SupoClip clips are ready"
+        subject = "Your ViraClip clips are ready"
 
         return EmailContent(
             subject=subject,
@@ -65,13 +65,13 @@ class TaskCompletionEmailService:
                 f"<p>Your clips for <strong>{safe_source_title}</strong> are ready.</p>"
                 f"<p>We generated {clips_label} for you.</p>"
                 f'<p><a href="{escape(task_url)}">Open your finished clips</a></p>'
-                "<p>Team SupoClip</p>"
+                "<p>Team ViraClip</p>"
             ),
             text=(
                 f"Hi {first_name},\n\n"
                 f"Your clips for {source_title or 'your video'} are ready.\n"
                 f"We generated {clips_label} for you.\n\n"
                 f"Open your finished clips: {task_url}\n\n"
-                "Team SupoClip"
+                "Team ViraClip"
             ),
         )
