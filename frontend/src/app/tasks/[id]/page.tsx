@@ -132,7 +132,7 @@ interface Clip {
   smart_edit_decisions?: number;
   smart_edit_summary?: string;
   smart_edit_time_saved?: number;
-}
+  text_pops_applied?: number;
 
 interface TaskDetails {
   id: string;
@@ -1526,6 +1526,9 @@ export default function TaskPage() {
                             )}
                             {clip.smart_edit_decisions !== undefined && clip.smart_edit_decisions > 0 && (
                               <span className="text-amber-300">✂️ {clip.smart_edit_decisions} edit{clip.smart_edit_decisions !== 1 ? "s" : ""}{clip.smart_edit_time_saved ? ` · ${clip.smart_edit_time_saved.toFixed(1)}s saved` : ""}</span>
+                            )}
+                            {clip.text_pops_applied !== undefined && clip.text_pops_applied > 0 && (
+                              <span className="text-pink-300">💥 {clip.text_pops_applied} keyword pop{clip.text_pops_applied !== 1 ? "s" : ""}</span>
                             )}
                           </div>
 
