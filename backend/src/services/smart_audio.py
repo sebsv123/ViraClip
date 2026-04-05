@@ -20,11 +20,15 @@ logger = logging.getLogger(__name__)
 
 # SFX filenames to look for (without extension) per event type/category
 SFX_TRIGGER_MAP: dict[str, str] = {
-    "hook":       "whoosh",
-    "impact":     "impact",
-    "energy":     "ding",
-    "audio_peak": "impact",
-    "keyword":    "whoosh",
+    "hook":       "whoosh_fast",
+    "impact":     "punch_impact",
+    "energy":     "ding_chime",
+    "audio_peak": "punch_impact",
+    "keyword":    "whoosh_heavy",
+    "transition":  "whoosh_fast",
+    "emphasis":    "glitch_hit",
+    "bass":        "bass_boom",
+    "riser":       "tension_riser",
 }
 
 LOUDNESS_TARGET = -14.0  # LUFS — TikTok / Reels recommendation
@@ -163,7 +167,7 @@ class SmartAudio:
     # ── SFX injection ─────────────────────────────────────────────────────────
 
     def _build_sfx_events(self, timeline_events: list) -> "list[_SfxEvent]":
-        sfx_dir = Path(os.environ.get("SFX_LIBRARY_PATH", "/app/assets/sfx_library"))
+        sfx_dir = Path(os.environ.get("SFX_LIBRARY_PATH", "/app/assets/sounds"))
         if not sfx_dir.exists():
             return []
 
@@ -258,13 +262,24 @@ class SmartAudio:
 
 
 def find_bgm_track() -> "Path | None":
-    """Return a random BGM track from the known music directories."""
-    for d in ("/app/music/bgm", "/app/assets/music", "/app/music"):
+    """Return a random BGM track from known music directories (Docker mount: ./backend/music:/app/assets/sounds)."""
+    search_dirs = [
+        "/app/assets/sounds/bgm",    # dedicated BGM subfolder (preferred)
+        "/app/assets/sounds/music",
+        "/app/assets/sounds",         # top-level fallback (filters out SFX by name)
+        "/app/music/bgm",
+        "/app/music",
+    ]
+    bgm_exclude = {"whoosh", "punch", "ding", "bass", "tension", "glitch"}  # skip SFX
+    for d in search_dirs:
         p = Path(d)
         if p.exists():
-            tracks = list(p.glob("*.mp3")) + list(p.glob("*.wav"))
-            if tracks:
-                return random.choice(tracks)
+            candidates = [
+                f for f in (list(p.glob("*.mp3")) + list(p.glob("*.wav")))
+                if not any(ex in f.stem.lower() for ex in bgm_exclude)
+            ]
+            if candidates:
+                return random.choice(candidates)
     return None
 
 
