@@ -8,8 +8,8 @@ import { hashPassword } from "better-auth/crypto";
 export default async function globalSetup() {
   const prisma = new PrismaClient();
   const now = new Date();
-  const regularEmail = "e2e-user@supoclip.test";
-  const adminEmail = "e2e-admin@supoclip.test";
+  const regularEmail = "e2e-user@viraclip.test";
+  const adminEmail = "e2e-admin@viraclip.test";
   const password = "Password123!";
 
   await prisma.$executeRawUnsafe(`
