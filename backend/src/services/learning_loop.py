@@ -62,8 +62,8 @@ class LearningLoop:
         loudnorm_applied: bool,
     ) -> RenderManifest:
         duration, size, has_audio = await self._probe(clip_path)
-        issues = self._qa(clip_path, source_path, duration, size, has_audio)
-        qa_passed = len(issues) == 0
+        qa_issues = await self._qa(clip_path, source_path, duration, size, has_audio)
+        qa_passed = len(qa_issues) == 0
 
         manifest = RenderManifest(
             task_id=task_id,
@@ -124,7 +124,7 @@ class LearningLoop:
             logger.debug("ffprobe failed for %s: %s", path, exc)
             return 0.0, size, False
 
-    def _qa(
+    async def _qa(
         self,
         output: Path,
         source: Path,
@@ -147,6 +147,28 @@ class LearningLoop:
             src_size = source.stat().st_size
             if abs(size - src_size) < 512:
                 issues.append("Output size matches source — effects may not have applied")
+        
+        # Enhanced validation using ClipValidator
+        try:
+            from .clip_validator import get_clip_validator
+            validator = get_clip_validator()
+            validation_result = await validator.validate_output(
+                output_path=output,
+                expected_duration=duration,
+                source_path=source,
+            )
+            
+            # Add validation-specific issues
+            if not validation_result.passed:
+                issues.extend(validation_result.issues)
+            
+            # Add warnings as issues if they're critical
+            for warning in validation_result.warnings:
+                if "bitrate" in warning.lower() or "corrupt" in warning.lower():
+                    issues.append(f"Warning: {warning}")
+        except Exception as exc:
+            logger.debug("ClipValidator integration failed: %s", exc)
+        
         return issues
 
     async def _save(self, manifest: RenderManifest) -> None:
