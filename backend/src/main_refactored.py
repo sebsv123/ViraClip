@@ -258,6 +258,7 @@ def create_app(
     from .api.routes.bulk_ops import router as bulk_ops_router
     from .api.routes.cost_optimization import router as cost_router
     from .api.routes.observability import router as observability_router
+    from .api.routes.distributed_cache import router as cache_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -333,6 +334,7 @@ def create_app(
     app.include_router(bulk_ops_router)        # NEW: Bulk video processing jobs management
     app.include_router(cost_router)            # NEW: Cloud cost tracking + optimization analysis
     app.include_router(observability_router)   # NEW: Distributed tracing + performance monitoring
+    app.include_router(cache_router)           # NEW: Multi-layer distributed cache management
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
