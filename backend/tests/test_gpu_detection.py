@@ -46,7 +46,7 @@ def test_detect_nvidia_via_nvidia_smi():
 
 def test_detect_nvidia_not_available():
     """Test when NVIDIA GPU is not available."""
-    with patch('src.utils.gpu_detection.torch', side_effect=ImportError):
+    with patch('src.utils.gpu_detection.torch', new=None):
         with patch('subprocess.run', side_effect=FileNotFoundError):
             gpu_type, settings = _detect_nvidia()
             

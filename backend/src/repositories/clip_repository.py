@@ -140,7 +140,8 @@ class ClipRepository:
                            virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
                            translated_text,
                            social_title, social_description, suggested_hashtags,
-                           thumbnail_filename, face_detected, hook_preview_score
+                           thumbnail_filename, face_detected, hook_preview_score,
+                           user_rating
                     FROM generated_clips
                     WHERE task_id = :task_id
                     ORDER BY clip_order ASC
@@ -177,7 +178,7 @@ class ClipRepository:
                     "reasoning": row_dict["reasoning"],
                     "clip_order": row_dict["clip_order"],
                     "created_at": row_dict["created_at"].isoformat(),
-                    "video_url": f"/clips/{row_dict['filename']}",
+                    "video_url": f"/clips/{task_id}/{row_dict['filename']}",
                     "virality_score": row_dict.get("virality_score") or 0,
                     "hook_score": row_dict.get("hook_score") or 0,
                     "engagement_score": row_dict.get("engagement_score") or 0,
@@ -189,9 +190,10 @@ class ClipRepository:
                     "social_description": row_dict.get("social_description"),
                     "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
                     "thumbnail_filename": thumb,
-                    "thumbnail_url": f"/clips/{thumb}" if thumb else None,
+                    "thumbnail_url": f"/clips/{task_id}/{thumb}" if thumb else None,
                     "face_detected": row_dict.get("face_detected"),
                     "hook_preview_score": row_dict.get("hook_preview_score") or 0,
+                    "user_rating": row_dict.get("user_rating"),
                 }
             )
 
@@ -245,7 +247,7 @@ class ClipRepository:
                            translated_text,
                            social_title, social_description, suggested_hashtags,
                            thumbnail_filename, face_detected, hook_preview_score,
-                           created_at
+                           user_rating, created_at
                     FROM generated_clips
                     WHERE id = :clip_id
                     """
@@ -294,11 +296,12 @@ class ClipRepository:
             "social_description": row_dict.get("social_description"),
             "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
             "thumbnail_filename": thumb,
-            "thumbnail_url": f"/clips/{thumb}" if thumb else None,
+            "thumbnail_url": f"/clips/{row_dict['task_id']}/{thumb}" if thumb else None,
             "face_detected": row_dict.get("face_detected"),
             "hook_preview_score": row_dict.get("hook_preview_score") or 0,
+            "user_rating": row_dict.get("user_rating"),
             "created_at": row_dict["created_at"].isoformat(),
-            "video_url": f"/clips/{row_dict['filename']}",
+            "video_url": f"/clips/{row_dict['task_id']}/{row_dict['filename']}",
         }
 
     @staticmethod
@@ -338,6 +341,41 @@ class ClipRepository:
             },
         )
         await db.commit()
+
+    @staticmethod
+    async def update_clip_rating(
+        db: AsyncSession, clip_id: str, rating: int
+    ) -> bool:
+        """Persist a user rating (1-5) for a clip. Returns True if row was updated."""
+        result = await db.execute(
+            sa_text(
+                """
+                UPDATE generated_clips
+                SET user_rating = :rating, updated_at = NOW()
+                WHERE id = :clip_id
+                """
+            ),
+            {"rating": rating, "clip_id": clip_id},
+        )
+        await db.commit()
+        return result.rowcount > 0
+
+    @staticmethod
+    async def get_rated_clips(db: AsyncSession) -> List[Dict[str, Any]]:
+        """Return all clips that have a user_rating (for training data export)."""
+        result = await db.execute(
+            sa_text(
+                """
+                SELECT id, task_id, text, virality_score, user_rating,
+                       hook_type, duration, reasoning
+                FROM generated_clips
+                WHERE user_rating IS NOT NULL
+                ORDER BY user_rating DESC, created_at DESC
+                """
+            )
+        )
+        rows = result.fetchall()
+        return [dict(r._mapping) for r in rows]
 
     @staticmethod
     async def reorder_task_clips(db: AsyncSession, task_id: str) -> None:

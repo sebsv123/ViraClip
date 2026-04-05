@@ -48,6 +48,14 @@ scenedetect[opencv]>=0.6.5
 openai>=1.0.0
 anthropic>=0.7.0
 google-generativeai>=0.3.0
+
+# === Phase 3: LLM Optimization (for future fine-tuning) ===
+# Uncomment when ready for Phase 3 implementation
+# dspy-ai==2.5.2
+# datasets>=2.0
+# transformers==4.40.2
+# peft==0.11.1
+# trl==0.8.6
 ollama>=0.1.0
 assemblyai>=0.26.0
 
@@ -59,3 +67,6 @@ tenacity>=8.2.0
 
 # === Monitoring ===
 prometheus-client>=0.18.0
+
+# === Optional: B-roll detection (B.4) — lazy-imported, install separately if BROLL_ENABLED=true ===
+# ultralytics>=8.0.0

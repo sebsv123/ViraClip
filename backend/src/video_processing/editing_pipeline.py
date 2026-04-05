@@ -1,0 +1,739 @@
+"""
+EditingPipeline — single-pass FFmpeg editing engine.
+
+Applies professional visual + audio effects in one FFmpeg invocation:
+  • Color grading     (eq: saturation, contrast, brightness + unsharp)
+  • Cinematic look    (teal shadows + warm highlights via colorbalance)
+  • Vignette          (darkened edges, focus on subject)
+  • Zoom punch-in     (zoompan at detected emphasis word timestamps)
+  • Ken Burns effect  (slow drift/zoom when no emphasis words detected)
+  • Pattern interrupts (periodic micro-zoom every 3.5s for attention reset)
+  • Lower thirds      (animated speaker/topic text overlay, 0-3s)
+  • Progress bar      (drawbox that grows across the top)
+  • Loudness norm     (loudnorm → -14 LUFS, broadcast standard)
+
+All effects compose into a single filter_complex — one decode + encode pass.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import math
+import os
+import re
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# ── tuneable constants (override via env vars) ────────────────────────────────
+SATURATION      = float(os.environ.get("EP_SATURATION",      "1.25"))
+CONTRAST        = float(os.environ.get("EP_CONTRAST",        "1.10"))
+BRIGHTNESS      = float(os.environ.get("EP_BRIGHTNESS",      "0.02"))
+SHARPNESS       = float(os.environ.get("EP_SHARPNESS",       "0.8"))
+ZOOM_FACTOR     = float(os.environ.get("EP_ZOOM_FACTOR",     "1.12"))
+ZOOM_FRAMES     = int(os.environ.get("EP_ZOOM_FRAMES",       "8"))     # ~0.27s @ 30fps
+KB_ZOOM_RATE    = float(os.environ.get("EP_KB_ZOOM_RATE",    "0.00004"))  # Ken Burns per-frame growth
+PI_INTERVAL     = float(os.environ.get("EP_PI_INTERVAL",     "3.5"))   # Pattern interrupt interval (s)
+PI_ZOOM         = float(os.environ.get("EP_PI_ZOOM",         "1.04"))  # Pattern interrupt peak zoom
+PI_FRAMES       = int(os.environ.get("EP_PI_FRAMES",         "12"))    # Pattern interrupt ramp frames
+PROGRESS_H      = int(os.environ.get("EP_PROGRESS_H",        "6"))
+PROGRESS_CLR    = os.environ.get("EP_PROGRESS_COLOR",        "ff4444")
+LUFS_TARGET     = float(os.environ.get("EP_LUFS_TARGET",     "-14.0"))
+LOWER_THIRD_ON    = os.environ.get("EP_LOWER_THIRD",   "true").lower() != "false"
+FONT_PATH         = os.environ.get("EP_FONT_PATH",    "/app/fonts/TikTokSans-Regular.ttf")
+VOICE_COMPRESS_ON = os.environ.get("EP_VOICE_COMPRESS", "true").lower() != "false"
+FILM_GRAIN        = int(os.environ.get("EP_FILM_GRAIN",  "10"))    # 0 = off
+WORD_CALLOUT_ON   = os.environ.get("EP_WORD_CALLOUT",   "true").lower() != "false"
+FACE_ZOOM_ON      = os.environ.get("EP_FACE_ZOOM",      "true").lower() != "false"
+CALLOUT_FONT_SIZE = int(os.environ.get("EP_CALLOUT_FONT_SIZE", "88"))
+CALLOUT_DURATION  = float(os.environ.get("EP_CALLOUT_DURATION", "0.45"))
+EP_HOOK_ZOOM_ON   = os.environ.get("EP_HOOK_ZOOM_ON",  "true").lower() != "false"
+EP_BEAT_SYNC_ON   = os.environ.get("EP_BEAT_SYNC_ON",  "true").lower() != "false"
+EP_FADE_ON        = os.environ.get("EP_FADE_ON",       "true").lower() != "false"
+EP_FADE_DURATION  = float(os.environ.get("EP_FADE_DURATION",   "0.25"))
+EP_CTA_ON         = os.environ.get("EP_CTA_ON",        "false").lower() != "false"
+EP_CTA_TEXT       = os.environ.get("EP_CTA_TEXT",      "Follow for more!")
+EP_CTA_DURATION   = float(os.environ.get("EP_CTA_DURATION",    "2.0"))
+EP_CTA_FONT_SIZE  = int(os.environ.get("EP_CTA_FONT_SIZE",     "54"))
+EP_SAT_PULSE_ON       = os.environ.get("EP_SAT_PULSE_ON",       "true").lower() != "false"
+EP_SAT_PULSE_STRENGTH = float(os.environ.get("EP_SAT_PULSE_STRENGTH", "1.60"))
+EP_LETTERBOX_ON       = os.environ.get("EP_LETTERBOX_ON",       "false").lower() != "false"
+EP_LETTERBOX_H        = float(os.environ.get("EP_LETTERBOX_H",   "0.07"))
+EP_WATERMARK_ON       = os.environ.get("EP_WATERMARK_ON",       "false").lower() != "false"
+EP_WATERMARK_TEXT     = os.environ.get("EP_WATERMARK_TEXT",     "")
+EP_THEME_GRADE_ON     = os.environ.get("EP_THEME_GRADE_ON",     "true").lower() != "false"
+EP_THEME_EQ_ON        = os.environ.get("EP_THEME_EQ_ON",        "true").lower() != "false"
+EP_PROGRESS_STYLE     = os.environ.get("EP_PROGRESS_STYLE",     "solid")  # solid | gradient | dots
+
+
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _probe_video(path: Path) -> Tuple[int, int, float, float]:
+    """Return (width, height, fps, duration) via ffprobe."""
+    import json
+    out = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_streams", "-show_format", str(path),
+        ],
+        capture_output=True, timeout=15,
+    )
+    data = json.loads(out.stdout)
+    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+    w = int(video.get("width",  1080))
+    h = int(video.get("height", 1920))
+    # fps: "30/1" or "30000/1001"
+    fps_raw = video.get("r_frame_rate", "30/1")
+    try:
+        num, den = fps_raw.split("/")
+        fps = float(num) / float(den)
+    except Exception:
+        fps = 30.0
+    dur = float(data.get("format", {}).get("duration", 0) or 0)
+    return w, h, fps, dur
+
+
+def _emphasis_items(
+    words: List[Dict[str, Any]], max_zooms: int = 4
+) -> List[Tuple[float, str]]:
+    """Return up to max_zooms (timestamp, word_text) pairs for zoom + callout effects."""
+    hits: List[Tuple[float, float, str]] = []
+    for w in words:
+        start = float(w.get("start", 0))
+        if start < 0.3:
+            continue
+        conf  = float(w.get("confidence", w.get("score", 0.8)))
+        text  = str(w.get("word", w.get("text", ""))).strip()
+        is_emph = bool(w.get("is_emphasis", False))
+        is_loud = text == text.upper() and len(text) > 2
+        is_excl = text.endswith("!")
+        if is_emph or (conf >= 0.92 and (is_loud or is_excl)):
+            hits.append((start, conf, text))
+
+    hits.sort(key=lambda x: -x[1])
+    selected: List[Tuple[float, str]] = []
+    for ts, _, word in hits:
+        if all(abs(ts - s) > 2.0 for s, _ in selected):
+            selected.append((ts, word))
+        if len(selected) >= max_zooms:
+            break
+    return sorted(selected, key=lambda x: x[0])
+
+
+def _beat_timestamps(video_path: Path, dur: float, max_beats: int = 6) -> List[float]:
+    """
+    Extract audio beat timestamps using librosa beat tracker.
+    Returns up to max_beats beat times in the range (1.0s, dur-1.0s).
+    Falls back to [] on any error (librosa not installed, silent audio, etc.).
+    """
+    try:
+        import librosa  # type: ignore
+        import numpy as np
+
+        y, sr = librosa.load(
+            str(video_path), sr=22050, mono=True,
+            duration=min(dur, 90.0),
+        )
+        _, beat_times = librosa.beat.beat_track(y=y, sr=sr, units="time")
+        valid = [float(t) for t in beat_times if 1.0 < float(t) < dur - 1.0]
+        if not valid:
+            return []
+        if len(valid) <= max_beats:
+            return valid
+        idxs = np.linspace(0, len(valid) - 1, max_beats, dtype=int)
+        return sorted(float(valid[i]) for i in idxs)
+    except Exception:
+        return []
+
+
+def _detect_face_position(path: Path, dur: float) -> Tuple[float, float]:
+    """
+    Sample the middle frame and return the normalised face centre (cx_norm, cy_norm).
+    Uses MediaPipe FaceMesh (nose-bridge landmark) for accuracy.
+    Returns (0.5, 0.5) if face not found — falls back to centred crop.
+    """
+    try:
+        import cv2
+        import mediapipe as mp
+
+        cap = cv2.VideoCapture(str(path))
+        cap.set(cv2.CAP_PROP_POS_MSEC, (dur / 2) * 1000)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret:
+            return 0.5, 0.5
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        with mp.solutions.face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            min_detection_confidence=0.5,
+        ) as face_mesh:
+            results = face_mesh.process(rgb)
+            if results.multi_face_landmarks:
+                lm  = results.multi_face_landmarks[0].landmark
+                cx  = float(lm[1].x)   # nose-bridge x  (stable across expressions)
+                cy  = float(lm[1].y)   # nose-bridge y
+                # clamp away from extreme edges to avoid over-panning
+                return max(0.15, min(0.85, cx)), max(0.15, min(0.85, cy))
+    except Exception:
+        pass
+    return 0.5, 0.5
+
+
+def _pattern_interrupt_timestamps(dur: float, interval: float = PI_INTERVAL) -> List[float]:
+    """Generate evenly-spaced pattern-interrupt timestamps across the clip duration."""
+    if dur <= 0 or interval <= 0:
+        return []
+    ts_list: List[float] = []
+    t = interval
+    while t < dur - 0.5:
+        ts_list.append(t)
+        t += interval
+    return ts_list
+
+
+def _build_zoom_expr(
+    timestamps: List[float],
+    fps: float,
+    zoom_factor: float = ZOOM_FACTOR,
+    zoom_frames: int = ZOOM_FRAMES,
+) -> str:
+    """
+    Build a zoompan z= expression using Gaussian bell curves centred at each
+    timestamp.  Uses only single-argument functions so no commas appear in the
+    expression — required for FFmpeg 4.4 where commas inside option values act
+    as filter-chain separators even inside single-quoted strings.
+
+    z = 1 + delta * sum_i( exp(-k * (in - f_i)^2) )
+
+    where k is chosen so the bell is at ~5 % of peak at ±zoom_frames frames.
+    Variable name is 'in' (input frame counter in zoompan, not 'n').
+    """
+    if not timestamps:
+        return "1.0"
+
+    half  = max(1, zoom_frames // 2)
+    delta = zoom_factor - 1.0
+    # k: exp(-k * half^2) = 0.05  →  k = ln(20) / half^2
+    k = math.log(20.0) / max(1, half * half)
+
+    terms: List[str] = []
+    for ts in timestamps:
+        fi = int(round(ts * fps))
+        # (in - fi)^2  written without pow() or any multi-arg function
+        sq = f"(in-{fi})*(in-{fi})"
+        terms.append(f"{delta:.4f}*exp(-{k:.5f}*{sq})")
+
+    return "1+" + "+".join(terms)
+
+
+def _build_ken_burns_zoom(fps: float, dur: float, pi_timestamps: List[float]) -> str:
+    """
+    Build a single zoompan z= expression that combines:
+      • Ken Burns slow drift: linear zoom growth (no functions/commas)
+      • Pattern interrupt Gaussian pulses at pi_timestamps
+
+    Uses only 'in' variable and single-arg exp() — safe for FFmpeg 4.4.
+    """
+    # Ken Burns: uncapped linear growth (stays well below 1.05 for clips < 25s)
+    kb_term = f"1+{KB_ZOOM_RATE:.6f}*in"
+
+    if not pi_timestamps:
+        return kb_term
+
+    # Pattern interrupt Gaussian bumps
+    delta = PI_ZOOM - 1.0
+    half  = max(1, PI_FRAMES // 2)
+    k     = math.log(20.0) / max(1, half * half)
+    pi_terms: List[str] = []
+    for ts in pi_timestamps:
+        fi = int(round(ts * fps))
+        sq = f"(in-{fi})*(in-{fi})"
+        pi_terms.append(f"{delta:.4f}*exp(-{k:.5f}*{sq})")
+
+    return kb_term + "+" + "+".join(pi_terms)
+
+
+def _sanitize_drawtext(text: str, max_chars: int = 40) -> str:
+    """Escape text for FFmpeg drawtext and truncate."""
+    # Remove special chars that break drawtext
+    cleaned = re.sub(r"[:\\'\[\]@]", "", text)
+    cleaned = cleaned.replace("%", "%%").replace("\n", " ").strip()
+    if len(cleaned) > max_chars:
+        cleaned = cleaned[:max_chars - 1] + "…"
+    return cleaned
+
+
+def _classify_theme(text: str) -> str:
+    """
+    Classify clip theme from keyword matching into 'warm', 'cool', or 'neutral'.
+    Drives the adaptive colorbalance grade and optional audio EQ preset.
+    """
+    warm = {
+        "motivat", "fitness", "workout", "lifestyle", "fashion", "food",
+        "travel", "love", "success", "mindset", "growth", "wellness",
+        "beauty", "relat", "health", "inspir", "positiv", "sport",
+    }
+    cool = {
+        "tech", "coding", "program", "gaming", "finance", "crypto", "invest",
+        "stock", "market", "ai ", "robot", "science", "data", "develop",
+        "software", "hardware", "startup", "business", "network",
+    }
+    low = text.lower()
+    wc = sum(1 for k in warm if k in low)
+    cc = sum(1 for k in cool if k in low)
+    if wc > cc:
+        return "warm"
+    if cc > wc:
+        return "cool"
+    return "neutral"
+
+
+def _build_flash_filter(flash_timestamps: List[float], duration: float = 0.07) -> str:
+    """
+    Return a geq expression that flashes white for `duration` seconds at each timestamp.
+    Used as: geq=r='255*...:g='255*...:b='255*...'
+    Composited as an overlay on top of the video via blend.
+    """
+    if not flash_timestamps:
+        return ""
+    parts = []
+    for ts in flash_timestamps:
+        # alpha ramps: 0→1 in first half, 1→0 in second half of duration
+        h = duration / 2
+        # Using 'between' in geq lum expression: full white during flash windows
+        parts.append(f"between(t\\,{ts:.3f}\\,{ts+duration:.3f})")
+    return "+".join(parts)
+
+
+def _build_filter_complex(
+    w: int,
+    h: int,
+    fps: float,
+    dur: float,
+    emphasis_items: List[Tuple[float, str]],
+    has_audio: bool,
+    segment_text: str = "",
+    flash_timestamps: Optional[List[float]] = None,
+    face_cx_norm: float = 0.5,
+    face_cy_norm: float = 0.5,
+    beat_pi_ts: Optional[List[float]] = None,
+) -> Tuple[str, str, Optional[str]]:
+    """
+    Compose the full filter_complex string for one clip.
+    Returns (filter_complex_str, v_out_label, a_out_label_or_None).
+    """
+    filters: List[str] = []
+
+    # ── 0. Determine clip theme for adaptive grade + audio EQ ──────────────────
+    theme = _classify_theme(segment_text) if segment_text else "neutral"
+
+    # ── 1. Colour grading: eq + unsharp ──────────────────────────────────────
+    eq_f     = f"eq=saturation={SATURATION}:contrast={CONTRAST}:brightness={BRIGHTNESS}"
+    sharp_f  = f"unsharp=5:5:{SHARPNESS}:5:5:0"
+    filters.append(f"[0:v]{eq_f},{sharp_f}[vgrade]")
+
+    # ── 1.5. Saturation pulse at emphasis moments ─────────────────────────────
+    # A second eq layer briefly boosts saturation at emphasis timestamps via the
+    # `enable` timeline option. When inactive it is identity (pass-through).
+    prev_grade = "[vgrade]"
+    if EP_SAT_PULSE_ON and emphasis_items:
+        ratio        = EP_SAT_PULSE_STRENGTH / max(SATURATION, 0.01)
+        enable_parts = [
+            f"between(t,{ts-0.10:.3f},{ts+0.50:.3f})" for ts, _ in emphasis_items
+        ]
+        filters.append(
+            f"[vgrade]eq=saturation={ratio:.3f}"
+            f":enable='{'+'.join(enable_parts)}'[vpulse]"
+        )
+        prev_grade = "[vpulse]"
+
+    # ── 2. Cinematic colour balance: theme-adaptive ───────────────────────────
+    # warm: red midtones/highlights up, blue down (golden-hour feel)
+    # cool: blue shadows/midtones up, red down (clean tech/digital feel)
+    # neutral: default teal/orange grade
+    if EP_THEME_GRADE_ON and theme == "warm":
+        cb_params = "rs=0.00:gs=0.03:bs=-0.02:rm=0.04:gm=0:bm=-0.02:rh=0.10:gh=0:bh=-0.08"
+    elif EP_THEME_GRADE_ON and theme == "cool":
+        cb_params = "rs=-0.06:gs=0.02:bs=0.10:rm=-0.02:gm=0:bm=0.03:rh=0.04:gh=0:bh=-0.02"
+    else:
+        cb_params = "rs=-0.03:gs=0.03:bs=0.06:rm=0:gm=0:bm=0:rh=0.06:gh=0:bh=-0.06"
+    filters.append(f"{prev_grade}colorbalance={cb_params}[vcine]")
+
+    # ── 3. Vignette ───────────────────────────────────────────────────────────
+    filters.append("[vcine]vignette=angle=PI/4[vvig]")
+    prev_v = "[vvig]"
+
+    # ── 3.5. Film grain (cinematic texture) ───────────────────────────────────
+    # noise=alls: strength 0-100; allf=t: temporal (varies per-frame like real grain)
+    if FILM_GRAIN > 0:
+        filters.append(f"{prev_v}noise=alls={FILM_GRAIN}:allf=t[vgrain]")
+        prev_v = "[vgrain]"
+
+    # ── 4. Zoom: emphasis punch-in OR Ken Burns + pattern interrupts ────────────
+    # All zoom logic runs in ONE zoompan call to avoid chained decode quality loss.
+    # Uses Gaussian exp(-k*(in-fi)^2) — no commas in expressions (FFmpeg 4.4 safe).
+    # x/y are face-aware: (iw-iw/zoom)*face_cx_norm centres the crop on the face.
+    x_expr = f"(iw-iw/zoom)*{face_cx_norm:.4f}"
+    y_expr = f"(ih-ih/zoom)*{face_cy_norm:.4f}"
+
+    emphasis_ts = [ts for ts, _ in emphasis_items]
+    if emphasis_ts:
+        z_expr = _build_zoom_expr(emphasis_ts, fps, ZOOM_FACTOR, ZOOM_FRAMES)
+    elif dur >= 4.0:
+        # Prefer beat-synced PI; fall back to evenly-spaced
+        if beat_pi_ts:
+            pi_ts = beat_pi_ts
+        elif dur >= PI_INTERVAL * 2:
+            pi_ts = _pattern_interrupt_timestamps(dur, PI_INTERVAL)
+        else:
+            pi_ts = []
+        z_expr = _build_ken_burns_zoom(fps, dur, pi_ts)
+    else:
+        z_expr = "1.0"
+
+    # ── 4.5. Hook zoom: sharp punch-in at t=0 to grab immediate attention ─────
+    # Gaussian bell centred on frame 0 — no comma in expression (FFmpeg 4.4 safe).
+    if EP_HOOK_ZOOM_ON and dur >= 1.0:
+        hook_delta = (ZOOM_FACTOR - 1.0) * 0.70         # 70% of normal punch
+        hook_half  = max(3, int(fps * 0.15))             # ~0.15 s radius
+        hook_k     = math.log(20.0) / max(1, hook_half * hook_half)
+        hook_term  = f"{hook_delta:.4f}*exp(-{hook_k:.5f}*in*in)"
+        if z_expr == "1.0":
+            z_expr = f"1+{hook_term}"
+        elif z_expr.startswith("1+"):
+            z_expr = "1+" + hook_term + "+" + z_expr[2:]
+
+    if z_expr == "1.0":
+        filters.append(f"{prev_v}null[vzoom]")
+    else:
+        filters.append(
+            f"{prev_v}zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
+            f":d=1:s={w}x{h}:fps={fps:.3f}[vzoom]"
+        )
+    prev_v = "[vzoom]"
+
+    # ── 5. (Pattern interrupts now baked into step 4 — no second zoompan) ─────
+
+    # ── 6. Progress bar (solid | gradient | dots) ─────────────────────────────
+    if dur > 0:
+        pb_w = f"iw*t/{dur:.3f}"
+        if EP_PROGRESS_STYLE == "gradient":
+            # Two-layer drawbox: dim full bar + bright right half = left-to-right gradient
+            half_dur = dur * 2
+            filters.append(
+                f"{prev_v}drawbox=x=0:y=0:w={pb_w}:h={PROGRESS_H}"
+                f":color={PROGRESS_CLR}@0.40:t=fill,"
+                f"drawbox=x=iw*t/{half_dur:.3f}:y=0:w=iw*t/{half_dur:.3f}:h={PROGRESS_H}"
+                f":color={PROGRESS_CLR}@0.55:t=fill[vpbar]"
+            )
+        elif EP_PROGRESS_STYLE == "dots":
+            # N evenly spaced dots that appear sequentially as time advances
+            n_dots = 10
+            dot_w  = max(4, int(w * 0.055))
+            gap    = w / n_dots
+            dot_x0 = max(0, int((gap - dot_w) // 2))
+            parts  = [
+                f"drawbox=x={int(dot_x0 + i * gap)}:y=0:w={dot_w}:h={PROGRESS_H}"
+                f":color={PROGRESS_CLR}@0.9:t=fill:enable='gte(t,{dur * i / n_dots:.3f})'"
+                for i in range(n_dots)
+            ]
+            filters.append(f"{prev_v}" + ",".join(parts) + "[vpbar]")
+        else:
+            # Default solid
+            filters.append(
+                f"{prev_v}drawbox=x=0:y=0:w={pb_w}:h={PROGRESS_H}"
+                f":color={PROGRESS_CLR}@0.9:t=fill[vpbar]"
+            )
+        prev_v = "[vpbar]"
+
+    # ── 7. Lower thirds ───────────────────────────────────────────────────────
+    if LOWER_THIRD_ON and segment_text:
+        safe_text = _sanitize_drawtext(segment_text)
+        font_arg  = f":fontfile={FONT_PATH}" if Path(FONT_PATH).exists() else ""
+        # alpha: fade-in 0→0.4s, hold 0.4→3.0s, fade-out 3.0→3.5s
+        alpha_expr = "if(lt(t,0.4),t/0.4,if(lt(t,3.0),1,if(lt(t,3.5),(3.5-t)/0.5,0)))"
+        # Push lower-third up if face is in the lower portion of frame
+        lt_frac = 0.68 if face_cy_norm > 0.60 else 0.80
+        y_pos = int(h * lt_frac)
+        filters.append(
+            f"{prev_v}drawtext=text='{safe_text}'{font_arg}"
+            f":fontsize=38:fontcolor=white@1.0"
+            f":x=60:y={y_pos}"
+            f":alpha='{alpha_expr}'"
+            f":box=1:boxcolor=black@0.55:boxborderw=12[vlt]"
+        )
+        prev_v = "[vlt]"
+
+    # ── 7.5. Emphasis word callouts ────────────────────────────────────────────
+    # Center-screen pop-in of the emphasis word for 0.45s. Distinct from lower
+    # thirds (smaller, permanent) — these are punchy attention-grabbing bursts.
+    if WORD_CALLOUT_ON and emphasis_items:
+        font_arg = f":fontfile={FONT_PATH}" if Path(FONT_PATH).exists() else ""
+        # Place callouts opposite the face: upper face → mid-frame callouts, lower face → top callouts
+        y_callout = int(h * 0.58) if face_cy_norm < 0.45 else int(h * 0.38)
+        cd = CALLOUT_DURATION
+        for i, (ts, word) in enumerate(emphasis_items):
+            safe_word = _sanitize_drawtext(word.upper(), max_chars=12)
+            # alpha: ramp-in 0.08s, hold, ramp-out 0.07s
+            alpha_expr = (
+                f"if(lt(t-{ts:.3f},0),0,"
+                f"if(lt(t-{ts:.3f},0.08),(t-{ts:.3f})/0.08,"
+                f"if(lt(t-{ts:.3f},{cd-0.07:.3f}),1,"
+                f"max(0,1-(t-{ts:.3f}-{cd-0.07:.3f})/0.07))))"
+            )
+            label_out = f"[vcall{i}]"
+            filters.append(
+                f"{prev_v}drawtext=text='{safe_word}'{font_arg}"
+                f":fontsize={CALLOUT_FONT_SIZE}:fontcolor=white"
+                f":x=(w-tw)/2:y={y_callout}"
+                f":alpha='{alpha_expr}'"
+                f":shadowx=4:shadowy=4:shadowcolor=black@0.9{label_out}"
+            )
+            prev_v = label_out
+
+    # ── 8. Flash/whiteout at cut transitions ─────────────────────────────────
+    if flash_timestamps:
+        enable_parts = [
+            f"between(t,{ts:.3f},{ts + 0.07:.3f})" for ts in flash_timestamps
+        ]
+        enable_expr = "+".join(enable_parts)
+        filters.append(
+            f"{prev_v}eq=brightness=0.35:enable='{enable_expr}'[vflash]"
+        )
+        prev_v = "[vflash]"
+
+    # ── 8.5. Cinematic letterbox bars (opt-in via EP_LETTERBOX_ON=true) ───────────
+    # Two drawbox calls chained with comma within one filter segment.
+    if EP_LETTERBOX_ON:
+        bars_h = max(1, int(h * EP_LETTERBOX_H))
+        filters.append(
+            f"{prev_v}drawbox=x=0:y=0:w=iw:h={bars_h}:color=black@1:t=fill,"
+            f"drawbox=x=0:y=ih-{bars_h}:w=iw:h={bars_h}:color=black@1:t=fill[vbars]"
+        )
+        prev_v = "[vbars]"
+
+    # ── 9. CTA end-card overlay (opt-in via EP_CTA_ON=true) ─────────────────────
+    # Shows a configurable call-to-action in the last EP_CTA_DURATION seconds.
+    if EP_CTA_ON and dur > EP_CTA_DURATION + 1.0:
+        cta_start = dur - EP_CTA_DURATION
+        safe_cta  = _sanitize_drawtext(EP_CTA_TEXT, max_chars=40)
+        ramp      = 0.30
+        alpha_cta = (
+            f"if(lt(t,{cta_start:.3f}),0,"
+            f"if(lt(t,{cta_start+ramp:.3f}),(t-{cta_start:.3f})/{ramp:.2f},"
+            f"if(lt(t,{dur-ramp:.3f}),1,"
+            f"max(0,1-(t-{dur-ramp:.3f})/{ramp:.2f}))))"
+        )
+        font_arg = f":fontfile={FONT_PATH}" if Path(FONT_PATH).exists() else ""
+        y_cta = int(h * 0.55)
+        filters.append(
+            f"{prev_v}drawtext=text='{safe_cta}'{font_arg}"
+            f":fontsize={EP_CTA_FONT_SIZE}:fontcolor=yellow"
+            f":x=(w-tw)/2:y={y_cta}"
+            f":alpha='{alpha_cta}'"
+            f":shadowx=3:shadowy=3:shadowcolor=black@0.9[vcta]"
+        )
+        prev_v = "[vcta]"
+
+    # ── 9.5. Watermark corner text (opt-in via EP_WATERMARK_ON=true) ────────────
+    if EP_WATERMARK_ON and EP_WATERMARK_TEXT:
+        safe_wm  = _sanitize_drawtext(EP_WATERMARK_TEXT, max_chars=30)
+        font_arg = f":fontfile={FONT_PATH}" if Path(FONT_PATH).exists() else ""
+        filters.append(
+            f"{prev_v}drawtext=text='{safe_wm}'{font_arg}"
+            f":fontsize=26:fontcolor=white@0.25"
+            f":x=(w-tw-20):y=(h-th-20)[vwm]"
+        )
+        prev_v = "[vwm]"
+
+    # ── 10. Fade-in / fade-out ───────────────────────────────────────────────────
+    # Smooth fade-in from black and fade-out to black. Comma-chain within one
+    # filter segment — no filter_complex separator issues.
+    if EP_FADE_ON and dur > EP_FADE_DURATION * 2 + 0.5:
+        fd = min(EP_FADE_DURATION, dur * 0.08)   # cap at 8 % of duration
+        filters.append(
+            f"{prev_v}fade=t=in:d={fd:.3f},"
+            f"fade=t=out:st={dur - fd:.3f}:d={fd:.3f}[vfade]"
+        )
+        prev_v = "[vfade]"
+
+    # rename last video label to [vout]
+    if prev_v != "[vout]":
+        filters.append(f"{prev_v}null[vout]")
+
+    # ── audio ──────────────────────────────────────────────────────────────────
+    # highpass: remove low-frequency rumble (<80 Hz) from non-bass content
+    # acompressor: tighten dynamic range so quiet/loud speech sound balanced
+    # loudnorm: broadcast-standard LUFS target (-14 by default)
+    # theme EQ: per-niche shelf filters (warm=low-shelf boost, cool=presence boost)
+    if has_audio:
+        theme_eq = ""
+        if EP_THEME_EQ_ON:
+            if theme == "warm":
+                theme_eq = "lowshelf=g=2:f=150:width_type=s:width=200,"
+            elif theme == "cool":
+                theme_eq = "highshelf=g=2:f=6000:width_type=s:width=2000,"
+        if VOICE_COMPRESS_ON:
+            filters.append(
+                f"[0:a]highpass=f=80,{theme_eq}"
+                f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
+                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
+            )
+        else:
+            filters.append(
+                f"[0:a]{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
+            )
+        return ";".join(filters), "[vout]", "[aout]"
+    else:
+        return ";".join(filters), "[vout]", None
+
+
+# ── public API ────────────────────────────────────────────────────────────────
+
+class EditingPipeline:
+    """
+    Apply a full professional editing pass to a single clip.
+
+    All effects run in one FFmpeg filter_complex pass — no quality loss
+    from multiple encode/decode cycles.
+    """
+
+    async def apply(
+        self,
+        video_path: Path,
+        words: Optional[List[Dict[str, Any]]],
+        output_path: Path,
+        segment_text: str = "",
+        flash_timestamps: Optional[List[float]] = None,
+        gpu_settings: Optional[Dict[str, Any]] = None,
+    ) -> Path:
+        """
+        Run the full editing pipeline.
+        Returns output_path on success, video_path unchanged on failure.
+        """
+        try:
+            w, h, fps, dur = await asyncio.get_event_loop().run_in_executor(
+                None, _probe_video, video_path
+            )
+        except Exception as probe_e:
+            logger.warning(f"[EP] probe failed: {probe_e}")
+            return video_path
+
+        if dur <= 0:
+            return video_path
+
+        emphasis_items = _emphasis_items(words or [], max_zooms=4)
+        emphasis_ts    = [ts for ts, _ in emphasis_items]
+        has_audio      = await self._check_has_audio(video_path)
+
+        # Detect face position for face-aware zoom centering
+        face_cx_norm, face_cy_norm = 0.5, 0.5
+        if FACE_ZOOM_ON:
+            face_cx_norm, face_cy_norm = await asyncio.get_event_loop().run_in_executor(
+                None, _detect_face_position, video_path, dur
+            )
+
+        # Beat-sync pattern interrupts via librosa
+        beat_pi_ts: List[float] = []
+        if EP_BEAT_SYNC_ON and dur >= 4.0 and not emphasis_ts:
+            beat_pi_ts = await asyncio.get_event_loop().run_in_executor(
+                None, _beat_timestamps, video_path, dur
+            )
+            if beat_pi_ts:
+                logger.debug(f"[EP] Beat sync: {len(beat_pi_ts)} beats → PI timestamps")
+
+        theme = _classify_theme(segment_text) if segment_text else "neutral"
+        fc, v_label, a_label = _build_filter_complex(
+            w, h, fps, dur, emphasis_items, has_audio, segment_text,
+            flash_timestamps=flash_timestamps or [],
+            face_cx_norm=face_cx_norm,
+            face_cy_norm=face_cy_norm,
+            beat_pi_ts=beat_pi_ts,
+        )
+
+        vcodec = ["libx264", "-preset", "veryfast", "-crf", "21"]
+        if gpu_settings:
+            enc = gpu_settings.get("vcodec")
+            if enc in ("h264_nvenc", "h264_amf", "h264_videotoolbox"):
+                vcodec = [enc, "-preset", gpu_settings.get("preset", "p4")]
+
+        cmd = ["ffmpeg", "-y", "-i", str(video_path),
+               "-filter_complex", fc, "-map", v_label]
+        if a_label:
+            cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
+        cmd += ["-c:v", *vcodec, "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", str(output_path)]
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=360)
+
+            if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+                effects = [f"color+cine({theme})"]
+                if EP_SAT_PULSE_ON and emphasis_items:
+                    effects.append("sat-pulse")
+                effects.append("vignette")
+                if FILM_GRAIN > 0:
+                    effects.append(f"grain({FILM_GRAIN})")
+                if EP_HOOK_ZOOM_ON:
+                    effects.append("hook-zoom")
+                if emphasis_ts:
+                    effects.append(f"zoom({len(emphasis_ts)} punches)")
+                elif beat_pi_ts:
+                    effects.append(f"KenBurns+beat-PI({len(beat_pi_ts)})")
+                else:
+                    effects.append("KenBurns+PI")
+                if FACE_ZOOM_ON:
+                    effects.append(f"face({face_cx_norm:.2f},{face_cy_norm:.2f})")
+                if WORD_CALLOUT_ON and emphasis_items:
+                    effects.append(f"callouts({len(emphasis_items)})")
+                effects.append("progress")
+                if segment_text and LOWER_THIRD_ON:
+                    effects.append("lower-third")
+                if EP_CTA_ON:
+                    effects.append("CTA")
+                if EP_LETTERBOX_ON:
+                    effects.append(f"letterbox({int(EP_LETTERBOX_H*100)}%)")
+                if EP_WATERMARK_ON and EP_WATERMARK_TEXT:
+                    effects.append("watermark")
+                if EP_FADE_ON:
+                    effects.append(f"fade({EP_FADE_DURATION:.2f}s)")
+                if VOICE_COMPRESS_ON:
+                    effects.append("compress+loudnorm")
+                else:
+                    effects.append("loudnorm")
+                logger.info(f"[EP] ✅ {video_path.name} → [{', '.join(effects)}]")
+                return output_path
+            else:
+                logger.error(f"[EP] ❌ exit {proc.returncode}: {stderr.decode()[-500:]}")
+                return video_path
+        except asyncio.TimeoutError:
+            logger.error(f"[EP] timeout on {video_path.name}")
+            return video_path
+        except Exception as e:
+            logger.error(f"[EP] error: {e}")
+            return video_path
+
+    @staticmethod
+    async def _check_has_audio(path: Path) -> bool:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "quiet", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type",
+                "-of", "csv=p=0", str(path),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            return b"audio" in stdout
+        except Exception:
+            return True

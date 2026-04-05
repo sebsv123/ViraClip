@@ -88,6 +88,7 @@ class ViraClipException(Exception):
         return {
             "error_code": self.error_code.value,
             "message": self.message,
+            "error_message": self.message,
             "retryable": self.retryable,
             "context": self.context,
         }

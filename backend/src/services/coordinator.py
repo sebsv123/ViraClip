@@ -1,0 +1,314 @@
+"""
+Video processing coordinator with parallel agent execution.
+
+Replaces sequential pipeline with parallel task execution using asyncio.gather().
+"""
+
+import asyncio
+import logging
+from typing import List, Dict, Any, Optional
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+
+class VideoCoordinator:
+    """
+    Orchestrates video processing with parallel execution.
+    
+    Phases:
+    1. Parallel: Transcription + Vision Analysis
+    2. Sequential: Scoring with combined context
+    3. Parallel: Render all clips simultaneously
+    """
+    
+    def __init__(self, task_id: str, video_path: str, config: dict):
+        self.task_id = task_id
+        self.video_path = video_path
+        self.config = config
+        self.clips_generated: List[dict] = []
+        self.errors: List[Exception] = []
+    
+    async def run(self) -> List[dict]:
+        """
+        Execute the complete video processing pipeline.
+        
+        Returns:
+            List of successfully generated clip metadata
+        """
+        from .progress_emitter import emit_progress, emit_completion, emit_error
+        from .cache_checker import get_cache_checker
+        
+        try:
+            # PHASE 0: Check cache BEFORE launching pipeline
+            cache_checker = get_cache_checker()
+            cached = await cache_checker.check_existing_clips(
+                task_id=self.task_id,
+                video_path=self.video_path,
+                min_clips=1
+            )
+            
+            if cached:
+                await emit_progress(
+                    self.task_id,
+                    "cache_hit",
+                    100,
+                    f"✅ {len(cached)} clips already exist (cache hit)"
+                )
+                logger.info(f"Cache hit for task {self.task_id}: {len(cached)} clips")
+                return cached
+            
+            logger.info(f"🎬 Starting coordinator for task {self.task_id}")
+            
+            # PHASE 1: Parallel transcription + vision analysis
+            await emit_progress(self.task_id, "analysis", 10, "Starting analysis...")
+            
+            transcript, vision_data = await self._parallel_analysis()
+            
+            await emit_progress(self.task_id, "analysis", 40, "Analysis completed")
+            
+            # PHASE 2: Scoring with combined context
+            await emit_progress(self.task_id, "scoring", 50, "Scoring viral segments...")
+            
+            segments = await self._score_segments(transcript, vision_data)
+            
+            await emit_progress(
+                self.task_id,
+                "scoring",
+                60,
+                f"{len(segments)} segments identified"
+            )
+            
+            # PHASE 3: Parallel clip rendering
+            await emit_progress(self.task_id, "render", 65, "Rendering clips...")
+            
+            clips = await self._parallel_rendering(segments)
+            
+            # Filter successful clips
+            successful = [c for c in clips if not isinstance(c, Exception)]
+            failed = [c for c in clips if isinstance(c, Exception)]
+            
+            if failed:
+                logger.warning(
+                    f"⚠️  {len(failed)} clips failed for task {self.task_id}: {failed}"
+                )
+            
+            self.clips_generated = successful
+            
+            # PHASE 4: Completion
+            await emit_completion(self.task_id, len(successful))
+            
+            logger.info(
+                f"✅ Task {self.task_id} complete: "
+                f"{len(successful)} successful, {len(failed)} failed"
+            )
+            
+            return successful
+            
+        except Exception as e:
+            logger.error(f"❌ Coordinator error for task {self.task_id}: {e}", exc_info=True)
+            await emit_error(self.task_id, str(e))
+            raise
+    
+    async def _parallel_analysis(self) -> tuple[str, Optional[dict]]:
+        """
+        Run transcription and vision analysis in parallel.
+        
+        Returns:
+            (transcript, vision_data) tuple
+        """
+        from .video_service import VideoService
+        from .vision_service import analyze_video_frames
+        from ..config import get_config
+        
+        config = get_config()
+        processing_mode = self.config.get("processing_mode", "fast")
+
+        # Transcription task — calls real faster-whisper via VideoService
+        async def get_transcript():
+            return await VideoService.generate_transcript(
+                Path(self.video_path), processing_mode
+            )
+
+        # Vision analysis is optional - run if enabled
+        tasks = [get_transcript()]
+        
+        if config.vision_analysis_enabled:
+            tasks.append(analyze_video_frames(self.video_path))
+        else:
+            tasks.append(asyncio.sleep(0))  # Dummy task that returns None
+        
+        results = await asyncio.gather(*tasks, return_exceptions=False)
+        
+        transcript = results[0]
+        vision_data = results[1] if len(results) > 1 and results[1] else None
+        
+        logger.info(
+            f"Analysis complete: transcript={len(transcript) if transcript else 0} chars, "
+            f"vision={'enabled' if vision_data else 'disabled'}"
+        )
+        
+        return transcript, vision_data
+    
+    async def _score_segments(self, transcript: str, vision_data: Optional[dict]) -> List[dict]:
+        """
+        Score segments using validated LLM scoring.
+        
+        Args:
+            transcript: Video transcript
+            vision_data: Optional vision analysis data
+            
+        Returns:
+            List of scored segments
+        """
+        from .ai_validator import get_validated_segments
+        from .ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT, build_dynamic_user_prompt
+        from ..config import get_config
+        
+        config = get_config()
+        language = self.config.get("language", "es")
+        num_clips = self.config.get("num_clips", 3)
+        
+        # Create scoring function that uses static/dynamic prompts
+        async def score_with_groq(transcript, language, num_clips, previous_error=None):
+            """Wrapper for Groq API call with prompt splitting."""
+            import httpx
+            
+            user_prompt = build_dynamic_user_prompt(
+                transcript=transcript,
+                language=language,
+                num_clips=num_clips,
+                previous_error=previous_error
+            )
+            
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {config.groq_api_key}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [
+                            {"role": "system", "content": VIRAL_SCORER_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.3
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+        
+        # Get validated segments with retry loop
+        segments = await get_validated_segments(
+            scoring_function=score_with_groq,
+            transcript=transcript,
+            language=language,
+            num_clips=num_clips,
+            max_retries=3
+        )
+        
+        # Convert Pydantic models to dicts
+        return [seg.model_dump() for seg in segments]
+    
+    async def _parallel_rendering(self, segments: List[dict]) -> List[dict]:
+        """
+        Render all clips in parallel.
+        
+        Args:
+            segments: List of segment metadata
+            
+        Returns:
+            List of clip results (mix of dicts and Exceptions)
+        """
+        from .progress_emitter import emit_clip_generated
+        
+        async def render_single_clip(segment: dict, index: int) -> dict:
+            """Render one clip via VideoService and emit progress."""
+            from pathlib import Path as _Path
+            try:
+                output_dir = _Path(self.config.get("output_dir", "/app/temp/uploads/clips"))
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                # ViralSegment uses 'start'/'end'; VideoService.create_single_clip
+                # expects 'start_time'/'end_time' — adapt here
+                vs_segment = {
+                    **segment,
+                    "start_time": segment.get("start_time") or segment.get("start"),
+                    "end_time":   segment.get("end_time")   or segment.get("end"),
+                }
+
+                clip = await VideoService.create_single_clip(
+                    video_path=_Path(self.video_path),
+                    segment=vs_segment,
+                    clip_index=index,
+                    output_dir=output_dir,
+                    font_family=self.config.get("font_family", "TikTokSans-Regular"),
+                    font_size=int(self.config.get("font_size", 24)),
+                    font_color=self.config.get("font_color", "#FFFFFF"),
+                    caption_template=self.config.get("caption_template", "default"),
+                    output_format=self.config.get("output_format", "vertical"),
+                    add_subtitles=self.config.get("add_subtitles", True),
+                    task_id=self.task_id,
+                    target_platform=self.config.get("target_platform", "tiktok"),
+                )
+
+                if clip is None:
+                    raise RuntimeError(f"create_single_clip returned None for clip {index}")
+
+                # Phase 9: Creative Engine — enhance clip with timeline-driven effects
+                try:
+                    from .creative_pipeline import get_creative_pipeline
+                    creative_meta = await get_creative_pipeline().enhance(
+                        clip_path=_Path(clip["path"]),
+                        source_video=_Path(self.video_path),
+                        segment=vs_segment,
+                        words=clip.pop("words", []) or [],
+                        audio_features=clip.pop("audio_features", {}) or {},
+                        task_id=self.task_id,
+                        clip_index=index,
+                        platform=self.config.get("target_platform", "tiktok"),
+                    )
+                    clip.update(creative_meta)
+                except Exception as _ce:
+                    logger.warning("Creative pipeline skipped for clip %d: %s", index, _ce)
+                    clip.pop("words", None)
+                    clip.pop("audio_features", None)
+
+                await emit_clip_generated(
+                    task_id=self.task_id,
+                    clip_id=clip.get("id", f"clip_{self.task_id}_{index}"),
+                    clip_path=clip.get("path", ""),
+                    clip_number=index + 1,
+                    total_clips=len(segments),
+                )
+
+                logger.info(f"Clip {index} rendered: {clip.get('path')}")
+                return clip
+
+            except Exception as e:
+                logger.error(f"Clip {index} rendering failed: {e}", exc_info=True)
+                return e
+        
+        # Launch all renders in parallel with return_exceptions=True
+        render_tasks = [
+            render_single_clip(seg, i)
+            for i, seg in enumerate(segments)
+        ]
+        
+        clips = await asyncio.gather(*render_tasks, return_exceptions=True)
+        
+        return clips
+    
+    def get_stats(self) -> dict:
+        """Get coordinator statistics."""
+        return {
+            "task_id": self.task_id,
+            "clips_generated": len(self.clips_generated),
+            "errors": len(self.errors),
+            "success_rate": (
+                len(self.clips_generated) / (len(self.clips_generated) + len(self.errors))
+                if (len(self.clips_generated) + len(self.errors)) > 0
+                else 0
+            )
+        }

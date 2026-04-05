@@ -10,6 +10,11 @@ import subprocess
 from typing import Dict, Any, Optional, Tuple
 from enum import Enum
 
+try:
+    import torch
+except ImportError:
+    torch = None  # type: ignore
+
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +78,8 @@ def _detect_nvidia() -> Tuple[GPUType, Dict[str, Any]]:
     """Detect NVIDIA GPU via PyTorch or nvidia-smi."""
     # Method 1: Check if PyTorch sees CUDA
     try:
-        import torch
+        if torch is None:
+            raise ImportError("torch not installed")
         if torch.cuda.is_available():
             device_name = torch.cuda.get_device_name(0)
             logger.info(f"NVIDIA GPU: {device_name}")
@@ -122,7 +128,7 @@ def _detect_amd() -> Tuple[GPUType, Dict[str, Any]]:
 
 
 def _detect_intel() -> Tuple[GPUType, Dict[str, Any]]:
-    """Detect Intel GPU via ffmpeg encoder availability."""
+    """Detect Intel GPU via ffmpeg encoder availability + functional test."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-encoders"],
@@ -130,9 +136,26 @@ def _detect_intel() -> Tuple[GPUType, Dict[str, Any]]:
             text=True,
             timeout=5
         )
-        if "h264_qsv" in result.stdout or "hevc_qsv" in result.stdout:
-            logger.info("Intel GPU detected (Quick Sync available)")
-            return (GPUType.INTEL_QSV, _get_intel_settings())
+        if "h264_qsv" not in result.stdout and "hevc_qsv" not in result.stdout:
+            return (GPUType.CPU_ONLY, {})
+        # Encoder appears in list — now verify it actually works at runtime
+        # (requires Intel Media SDK / VAAPI drivers; not just compiled-in support)
+        test = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "nullsrc=s=64x64:d=1",
+                "-c:v", "h264_qsv",
+                "-f", "null", "-"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if test.returncode != 0:
+            logger.debug(f"h264_qsv functional test failed: {test.stderr[-200:]}")
+            return (GPUType.CPU_ONLY, {})
+        logger.info("Intel GPU detected (Quick Sync available)")
+        return (GPUType.INTEL_QSV, _get_intel_settings())
     except Exception as e:
         logger.debug(f"Intel detection failed: {e}")
     
@@ -186,7 +209,6 @@ def _get_intel_settings() -> Dict[str, Any]:
         "audio_bitrate": "192k",
         "ffmpeg_params": [
             "-global_quality", "23",
-            "-look_ahead", "1",
         ]
     }
 

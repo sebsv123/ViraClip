@@ -2,15 +2,26 @@
 Phi-3-mini Virality Scoring Service
 Replaces generalist Ollama models with specialized viral content analysis
 Microsoft Phi-3-mini via Ollama - 3.8B parameters, MIT License
+
+Phase 4.3 Enhancement: Integrates viral trend boosting from trending hashtags/topics
 """
 import httpx
 import json
 import os
+import re
 import logging
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+# Import viral trend service (Phase 4.3)
+try:
+    from services.viral_trend_service import get_trend_service
+    TREND_SERVICE_AVAILABLE = True
+except ImportError:
+    TREND_SERVICE_AVAILABLE = False
+    logger.warning("Viral trend service not available")
 
 # Phi-3-mini Scroll Stop Test Prompt - The key differentiator
 SCROLL_STOP_TEST_PROMPT = """You are a viral content expert trained on the SCROLL STOP TEST methodology.
@@ -102,11 +113,17 @@ class Phi3ViralityService:
     """
     
     def __init__(self, ollama_url: Optional[str] = None):
-        self.ollama_url = (ollama_url or 
-                          os.environ.get("OLLAMA_BASE_URL") or 
-                          "http://ollama:11434")
+        raw_url = (ollama_url or
+                   os.environ.get("OLLAMA_BASE_URL") or
+                   "http://ollama:11434").rstrip("/")
+        self.ollama_url = re.sub(r"/v1$", "", raw_url)
         self.model = "phi3:mini"  # 3.8B params, MIT license
         self.timeout = httpx.Timeout(30.0, connect=5.0)
+        try:
+            from .viral_trend_service import ViralTrendService
+            self.trend_service = ViralTrendService()
+        except Exception:
+            self.trend_service = None
         
         logger.info(f"Phi-3-mini Virality Service initialized: {self.ollama_url}")
     
@@ -140,6 +157,9 @@ class Phi3ViralityService:
         )
         
         try:
+            # Auto-pull model if missing (fixes Ollama 404 on first run)
+            await self._ensure_model_pulled()
+
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.post(
                     f"{self.ollama_url}/api/generate",
@@ -211,6 +231,50 @@ class Phi3ViralityService:
             hashtag_themes=["#viral"]
         )
     
+    async def score_segment_with_trends(
+        self,
+        segment_text: str,
+        duration: float,
+        audio_features: Optional[Dict] = None,
+        hashtags: List[str] = None,
+        platform: str = "tiktok"
+    ) -> ViralityScore:
+        """
+        Score segment with viral trend boosting (Phase 4.3).
+        
+        Args:
+            segment_text: Transcript text
+            duration: Segment duration
+            audio_features: Audio analysis data
+            hashtags: Hashtags used in content
+            platform: Target platform
+            
+        Returns:
+            ViralityScore with trend-boosted total_score
+        """
+        # Get base score
+        base_score = await self.score_segment(segment_text, duration, audio_features)
+        
+        # Apply trend boost if service available
+        if TREND_SERVICE_AVAILABLE:
+            try:
+                trend_service = await get_trend_service()
+                boosted_total = trend_service.apply_trend_boost(
+                    base_score=base_score.total_score,
+                    transcript=segment_text,
+                    hashtags=hashtags or [],
+                    platform=platform
+                )
+                
+                # Update total score with boost
+                base_score.total_score = int(boosted_total)
+                base_score.scroll_stop_probability = boosted_total / 100.0
+                
+            except Exception as e:
+                logger.warning(f"Trend boost failed: {e}")
+        
+        return base_score
+    
     async def batch_score_segments(
         self,
         segments: List[Dict[str, Any]],
@@ -236,7 +300,28 @@ class Phi3ViralityService:
                     models = response.json()
                     return any(m.get("name") == self.model for m in models.get("models", []))
                 return False
-        except:
+        except Exception:
+            return False
+
+    async def _ensure_model_pulled(self) -> bool:
+        """Pull phi3:mini if not present. Returns True if model is ready."""
+        if await self.check_model_available():
+            return True
+        logger.info(f"[Phi-3] Model '{self.model}' not found — pulling from Ollama (this may take a few minutes)...")
+        try:
+            pull_timeout = httpx.Timeout(300.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=pull_timeout) as client:
+                resp = await client.post(
+                    f"{self.ollama_url}/api/pull",
+                    json={"name": self.model, "stream": False},
+                )
+                if resp.status_code == 200:
+                    logger.info(f"[Phi-3] Model '{self.model}' pulled successfully")
+                    return True
+                logger.warning(f"[Phi-3] Pull returned {resp.status_code}: {resp.text[:200]}")
+                return False
+        except Exception as pull_err:
+            logger.warning(f"[Phi-3] Auto-pull failed: {pull_err}")
             return False
 
 

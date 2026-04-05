@@ -290,6 +290,25 @@ def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
 
     except Exception as e:
         logger.error(f"❌ Error en faster-whisper: {e}")
+
+        # Fallback to AssemblyAI with speaker diarization when faster-whisper fails
+        if AAI_AVAILABLE:
+            try:
+                logger.info("🔄 Falling back to AssemblyAI transcription with speaker labels…")
+                config_aai = aai.TranscriptionConfig(speaker_labels=True)
+                transcriber = aai.Transcriber()
+                transcript = transcriber.transcribe(str(video_path), config=config_aai)
+                if transcript.status == aai.TranscriptStatus.completed:
+                    lines = []
+                    if transcript.utterances:
+                        for utterance in transcript.utterances:
+                            lines.append(f"Speaker {utterance.speaker}: {utterance.text}")
+                    elif transcript.text:
+                        lines.append(transcript.text)
+                    return "\n".join(lines)
+            except Exception as aai_e:
+                logger.error(f"❌ AssemblyAI fallback failed: {aai_e}")
+
         raise
 
 
@@ -2640,19 +2659,38 @@ def create_optimized_clip(
                 )
                 logger.info(f"✅ write_videofile finished")
             except Exception as write_e:
-                import traceback as _tb, datetime as _dt
-                _trace = _tb.format_exc()
-                logger.error(f"❌ write_videofile raised: {write_e}\n{_trace}")
-                # Write to BOTH locations: clips volume AND src mount (accessible from VM)
-                for _debug_dir in [Path("/app/temp/uploads/clips"), Path("/app/src")]:
-                    try:
-                        _debug_dir.mkdir(parents=True, exist_ok=True)
-                        with open(_debug_dir / "render_errors.log", "a") as _f:
-                            _f.write(f"\n=== {_dt.datetime.now().isoformat()} ===\n")
-                            _f.write(f"output_path: {output_path}\nencoding_settings: {encoding_settings}\nerror: {write_e}\n{_trace}\n")
-                    except Exception:
-                        pass
-                raise
+                # FIX 1b: If GPU codec (h264_qsv, h264_nvenc, etc.) failed, retry with libx264
+                if encoding_settings.get("codec") not in (None, "libx264"):
+                    logger.warning(
+                        f"⚠️ GPU encoding ({encoding_settings.get('codec')}) failed, "
+                        f"retrying with libx264 fallback: {write_e}"
+                    )
+                    _cpu_fallback = {
+                        "codec": "libx264",
+                        "audio_codec": "aac",
+                        "preset": "fast",
+                        "ffmpeg_params": ["-crf", "23", "-pix_fmt", "yuv420p"],
+                    }
+                    final_clip.write_videofile(
+                        str(output_path),
+                        temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.m4a"),
+                        remove_temp=True, logger=None, fps=_fps_used, **_cpu_fallback
+                    )
+                    logger.info(f"✅ write_videofile finished (libx264 fallback)")
+                else:
+                    import traceback as _tb, datetime as _dt
+                    _trace = _tb.format_exc()
+                    logger.error(f"❌ write_videofile raised: {write_e}\n{_trace}")
+                    # Write to BOTH locations: clips volume AND src mount (accessible from VM)
+                    for _debug_dir in [Path("/app/temp/uploads/clips"), Path("/app/src")]:
+                        try:
+                            _debug_dir.mkdir(parents=True, exist_ok=True)
+                            with open(_debug_dir / "render_errors.log", "a") as _f:
+                                _f.write(f"\n=== {_dt.datetime.now().isoformat()} ===\n")
+                                _f.write(f"output_path: {output_path}\nencoding_settings: {encoding_settings}\nerror: {write_e}\n{_trace}\n")
+                        except Exception:
+                            pass
+                    raise
 
             logger.info(f"✅ Render Complete: {output_path}")
             return True

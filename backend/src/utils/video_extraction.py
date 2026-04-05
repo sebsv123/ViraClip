@@ -152,6 +152,11 @@ async def _extract_single_segment(
             f"✓ Extracted segment {segment_index}: "
             f"{duration:.1f}s → {file_size_mb:.1f}MB ({output_file.name})"
         )
+        if duration < 40.0:
+            logger.warning(
+                f"⚠️ Segment {segment_index} is only {duration:.1f}s "
+                f"(expected ≥40s) — video may be shorter than target duration"
+            )
         
         return output_file
         

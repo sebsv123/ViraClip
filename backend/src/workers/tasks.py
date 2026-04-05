@@ -34,6 +34,7 @@ async def process_video_task(
     target_platform: str = "all",
     url_secondary: Optional[str] = None,
     generate_ab_variants: bool = False,   # P3.5
+    num_clips: int = 6,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -101,6 +102,7 @@ async def process_video_task(
                 target_platform=target_platform,
                 url_secondary=url_secondary,
                 generate_ab_variants=generate_ab_variants,
+                num_clips=num_clips,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,
@@ -185,17 +187,52 @@ async def process_video_task(
 
 async def worker_startup(ctx: Dict[str, Any]) -> None:
     """
-    Called once per worker process on startup.
-    Performs lightweight housekeeping: prune stale clip files so the disk
-    doesn't fill up across multiple processing runs.
+    Run cleanup on worker startup to remove old files.
     """
+    import asyncio
     from pathlib import Path
-    from ..config import Config
+    from ..config import get_config
+    from ..utils.resource_manager import cleanup_temp_files, detect_hardware_capabilities
     from ..utils.cleanup import cleanup_old_clips, cleanup_old_downloads
 
-    cfg = Config()
-    clips_dir = Path(cfg.temp_dir) / "clips"
+    logger.info("Worker starting up...")
+
+    # ── Whisper model warm-up ────────────────────────────────────────────────
+    # Pre-load the Whisper model so the first real task doesn't stall waiting
+    # for weights to download or for CTranslate2 to compile the graph.
+    async def _warm_whisper():
+        try:
+            from ..config import get_config as _cfg
+            _c = _cfg()
+            from faster_whisper import WhisperModel
+            _model_size = getattr(_c, "whisper_model_size", "small") or "small"
+            _device = getattr(_c, "whisper_device", "cpu") or "cpu"
+            _compute = getattr(_c, "whisper_compute_type", "int8") or "int8"
+            logger.info(
+                "🔄 Whisper warm-up: loading model=%s device=%s compute=%s ...",
+                _model_size, _device, _compute,
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: WhisperModel(_model_size, device=_device, compute_type=_compute),
+            )
+            logger.info("✅ Whisper model loaded and ready")
+        except Exception as _we:
+            logger.warning("Whisper warm-up skipped: %s", _we)
+
+    asyncio.create_task(_warm_whisper())
+
+    # Detect hardware and log capabilities
+    hw_caps = detect_hardware_capabilities()
+
+    cfg = get_config()
+    clips_dir = Path(cfg.temp_dir) / "uploads" / "clips"
     downloads_dir = Path(cfg.temp_dir) / "uploads"
+    
+    # Aggressive temp cleanup to free disk space
+    temp_base = Path(cfg.temp_dir)
+    cleanup_temp_files(temp_base / "segments", max_age_hours=12)
+    cleanup_temp_files(temp_base / "uploads", max_age_hours=24)
 
     # B-7 fix: collect filenames referenced by active/queued tasks so we never
     # delete their output files even if they exceed the retention window.
@@ -242,7 +279,8 @@ class WorkerSettings:
 
     # Functions to run
     functions = [process_video_task]
-    queue_name = "viraclip_tasks"
+    # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
+    queue_name = "viraclip_cpu_tasks"
 
     # Redis settings from environment
     redis_settings = RedisSettings(
@@ -260,4 +298,29 @@ class WorkerSettings:
 
     # Startup/shutdown hooks
     on_startup = worker_startup
-    cron_jobs = []
+    
+    # Periodic tasks (Phase 5.3: Model retraining — Sundays at 2 AM)
+    @staticmethod
+    def _build_cron_jobs():
+        from arq import cron
+        from ..services.feedback_loop_service import periodic_model_retraining
+        return [cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0)]
+
+    cron_jobs = _build_cron_jobs.__func__(None) if False else []  # activated below
+
+
+# Activate cron jobs after class definition to avoid forward-reference issues
+try:
+    from arq import cron
+    from .feedback_cron import periodic_model_retraining  # re-exported shim
+    from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
+    WorkerSettings.cron_jobs = [
+        # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
+        cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0),
+        # Phase 7.5: daily trending data fetch (03:00 UTC every day)
+        cron(fetch_trending_data, hour=3, minute=0),
+        # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)
+        cron(retrain_scorer_monthly, hour=4, minute=0, day=1),
+    ]
+except Exception:  # pragma: no cover
+    pass  # cron stays empty if import fails (test environments)

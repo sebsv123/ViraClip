@@ -24,6 +24,7 @@ VIRAL_SOUND_MAP = {
 
 # Rutas posibles para los sonidos
 SOUND_PATHS = [
+    Path("/app/assets/sounds"),           # Docker volume mount (absolute)
     Path("assets/sounds"),
     Path("./assets/sounds"),
     Path("../assets/sounds"),
@@ -36,6 +37,40 @@ def find_sounds_dir() -> Optional[Path]:
     for path in SOUND_PATHS:
         if path.exists() and any(path.iterdir()):
             return path
+    return None
+
+
+def _find_best_sfx(keyword: str) -> Optional[Path]:
+    """
+    Phase 2.5: Semantic SFX matching via CLAP, with filename fallback.
+    Searches the CLAP SFX library first; falls back to VIRAL_SOUND_MAP files.
+
+    Args:
+        keyword: Transcript keyword or hook type (e.g. "curiosity_gap", "whoosh")
+
+    Returns:
+        Path to best matching SFX, or None if nothing found.
+    """
+    try:
+        from .clap_sfx_service import find_best_sfx as clap_find
+        from pathlib import Path as _Path
+        import os
+
+        sfx_library = _Path(os.getenv("SFX_LIBRARY_PATH", "/app/assets/sfx_library"))
+        if sfx_library.exists() and any(sfx_library.iterdir()):
+            result = clap_find(keyword, sfx_dir=sfx_library)
+            if result:
+                return result
+    except Exception as e:
+        logger.debug(f"[sfx] CLAP lookup failed for '{keyword}': {e}")
+
+    # Fallback: VIRAL_SOUND_MAP file in legacy sounds dir
+    sounds_dir = find_sounds_dir()
+    if sounds_dir and keyword in VIRAL_SOUND_MAP:
+        legacy_path = sounds_dir / VIRAL_SOUND_MAP[keyword]
+        if legacy_path.exists():
+            return legacy_path
+
     return None
 
 
@@ -91,27 +126,21 @@ class SoundDesignService:
             seg_start = segment.get("start", 0)
             seg_end = segment.get("end", 0)
             
-            # Whoosh al inicio de cada segmento (excepto el primero)
+            hook_type = segment.get("hook_type", "")
+
             if i > 0:
+                # Whoosh transition between segments
                 cues.append({
                     "timestamp": seg_start,
                     "type": "transition",
                     "intensity": 0.8
                 })
-            else:
-                # Primer segmento: scroll_stop whoosh
-                cues.append({
-                    "timestamp": seg_start,
-                    "type": "scroll_stop",
-                    "intensity": 1.0
-                })
             
-            # Sound específico según hook_type
-            hook_type = segment.get("hook_type", "")
+            # Hook-type sound: slight delay so it doesn't clash with the first frame
             if hook_type in VIRAL_SOUND_MAP:
-                # El impacto va 0.3s después del inicio
+                offset = 0.5 if i == 0 else 0.3
                 cues.append({
-                    "timestamp": seg_start + 0.3,
+                    "timestamp": seg_start + offset,
                     "type": hook_type,
                     "intensity": 0.9
                 })
@@ -134,6 +163,45 @@ class SoundDesignService:
         logger.info(f"Generated {len(cues)} sound cues from {len(virality_segments)} segments")
         return cues
     
+    async def _apply_audio_normalization(
+        self,
+        video_path: str,
+        output_path: str,
+    ) -> str:
+        """Fallback: loudnorm + fade in/out when no sound assets are available."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=duration",
+                "-of", "csv=p=0", video_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            try:
+                vid_dur = float(stdout.decode().strip().split("\n")[0])
+            except Exception:
+                vid_dur = 60.0
+            fade_out_start = max(0.0, vid_dur - 0.5)
+            af = f"loudnorm,afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out_start:.2f}:d=0.5"
+            norm_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-i", video_path,
+                "-af", af,
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                output_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, norm_stderr = await norm_proc.communicate()
+            if norm_proc.returncode == 0 and Path(output_path).exists():
+                logger.info(f"  ✓ Audio normalized (loudnorm + fade): {output_path}")
+                return output_path
+            logger.warning(f"  Audio normalization failed: {norm_stderr.decode()[:200]}")
+        except Exception as norm_e:
+            logger.warning(f"  Audio normalization exception: {norm_e}")
+        return video_path
+
     async def inject_sound_effects(
         self,
         video_path: str,
@@ -151,20 +219,22 @@ class SoundDesignService:
         Returns:
             Path del video final o None si falla
         """
-        if not self.sounds_dir or not sound_cues:
-            logger.info("No sound effects to inject")
-            return video_path
+        if not self.sounds_dir:
+            logger.info("No sounds dir — applying loudnorm audio normalization as fallback")
+            return await self._apply_audio_normalization(video_path, output_path)
+        if not sound_cues:
+            logger.info("No sound cues — applying loudnorm audio normalization as fallback")
+            return await self._apply_audio_normalization(video_path, output_path)
         
         try:
             # Filtrar solo cues con sonidos disponibles
+            # Phase 2.5: use CLAP semantic matching (falls back to VIRAL_SOUND_MAP)
             valid_cues = []
             for cue in sound_cues:
                 sound_type = cue.get("type", "")
-                if sound_type in VIRAL_SOUND_MAP:
-                    filename = VIRAL_SOUND_MAP[sound_type]
-                    sound_path = self.sounds_dir / filename
-                    if sound_path.exists():
-                        valid_cues.append((cue, sound_path))
+                sound_path = _find_best_sfx(sound_type)
+                if sound_path and sound_path.exists():
+                    valid_cues.append((cue, sound_path))
             
             if not valid_cues:
                 logger.info("No valid sound cues with available files")

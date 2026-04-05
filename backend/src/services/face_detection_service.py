@@ -76,15 +76,21 @@ class FaceDetectionService:
     
     def __init__(self, detection_confidence: float = 0.5):
         self.confidence = detection_confidence
-        self.available = MEDIAPIPE_AVAILABLE and CV2_AVAILABLE
+        self.available = MEDIAPIPE_AVAILABLE and CV2_AVAILABLE and mp_face_detection is not None
         
         if self.available:
-            self.face_detection = mp_face_detection.FaceDetection(
-                min_detection_confidence=detection_confidence
-            )
-            logger.info("✓ Face Detection Service initialized (MediaPipe)")
+            try:
+                self.face_detection = mp_face_detection.FaceDetection(
+                    min_detection_confidence=detection_confidence
+                )
+                logger.info("✓ Face Detection Service initialized (MediaPipe)")
+            except Exception as _mp_init_err:
+                logger.warning(f"⚠ MediaPipe FaceDetection init failed: {_mp_init_err}")
+                self.available = False
+                self.face_detection = None
         else:
-            logger.warning("⚠ Face Detection Service unavailable")
+            self.face_detection = None
+            logger.warning("⚠ Face Detection Service unavailable (MediaPipe/cv2 not ready)")
     
     def detect_faces_in_frame(self, frame) -> List[FaceBox]:
         """

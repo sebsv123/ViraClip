@@ -11,7 +11,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 try:
-    import aioredis
+    import redis.asyncio as aioredis
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False

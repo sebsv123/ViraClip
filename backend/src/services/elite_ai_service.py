@@ -34,10 +34,15 @@ except ImportError:
     LIBROSA_AVAILABLE = False
     librosa = None
 
+import os
+import json
 import numpy as np
 import base64
+import httpx
 
 logger = logging.getLogger(__name__)
+
+_MAX_ELITE_CLIPS = int(os.getenv("MAX_ELITE_CLIPS", "6"))
 
 class VFXInstruction(BaseModel):
     """Specific VFX/Editing instructions for a clip."""
@@ -88,8 +93,8 @@ Analyze the provided data from multiple perspectives:
 7. GENERATIVE: Suggest Seedance 2.0 styles (anime, cyberpunk, epic) if the visual DNA allows for a radical transformation.
 8. RETENTION: Flag segments with infinite-loop potential for 'Vidrush' processing.
 
-Choose 3-5 'Elite' segments. For each, provide precise VFX and Audio cues.
-If the segment has a 'climax' or 'twist', ensure the VFX and Audio work together to amplify it."""
+Choose exactly {_MAX_ELITE_CLIPS} 'Elite' segments (never fewer than {_MAX_ELITE_CLIPS}). For each, provide precise VFX and Audio cues.
+If the segment has a 'climax' or 'twist', ensure the VFX and Audio work together to amplify it.""".format(_MAX_ELITE_CLIPS=_MAX_ELITE_CLIPS)
 
 # Initialize agents only if pydantic_ai is available
 if PYDANTIC_AI_AVAILABLE and Agent is not None:
@@ -221,32 +226,155 @@ class EliteAIService:
             logger.warning(f"⚠️ EliteAIService: Audio peak extraction failed ({audio_err}). Continuing without audio data.")
             audio_peaks = []
 
-        # Truncate transcript for prompt if it's very long (keep first 8000 chars)
-        transcript_for_prompt = transcript[:8000] if len(transcript) > 8000 else transcript
+        # Truncate transcript — keep ~3000 chars to stay within Groq context
+        transcript_for_prompt = transcript[:3000] if len(transcript) > 3000 else transcript
 
-        # Step 2: Orchestration
-        prompt = f"""VIDEO CONTEXT:
-Transcript: {transcript_for_prompt}
-Total Duration: {duration}s
-Audio Peaks (time, intensity): {audio_peaks}
-TREND CONTEXT (Suggested Styles/Hashtags): {trend_output}
-
-MISSION:
-Analyze the provided transcript and the audio energy peaks.
-Identify the most viral segments. For each, define the 'Elite' VFX and Audio instructions.
-Sync VFX transitions (zooms, cuts) with the identified audio peaks if they overlap with segments.
-Choose music moods that contrast or complement the emotional intensity.
-Suggest a 'style_transfer' (Seedance 2.0) if you see an opportunity for high-fidelity generative restyling.
-Flag 'loop_requested' if the start and end of the segment appear visually similar enough for an infinite scroll.
-"""
-
+        # Step 2: Direct Groq call with JSON mode (bypasses pydantic_ai schema 400s)
         try:
-            result = await director_agent.run(prompt)
-            logger.info(f"✅ Creative plan generated with {len(result.output.clips)} elite clips")
-            return result.output
+            result = await self._direct_llm_creative_plan(
+                transcript_for_prompt, duration, audio_peaks
+            )
+            if result:
+                logger.info(f"✅ Creative plan generated with {len(result.clips)} elite clips")
+                return result
         except Exception as e:
-            logger.error(f"Elite AI analysis failed: {e}. Returning empty plan as fallback.")
-            return _fallback
+            logger.error(f"Elite AI analysis failed: {e}")
+        return _fallback
+
+    async def _direct_llm_creative_plan(
+        self,
+        transcript: str,
+        duration: float,
+        audio_peaks: List[Dict[str, Any]],
+    ) -> Optional["EliteCreativePlan"]:
+        """Direct Groq API call with JSON mode — avoids pydantic_ai schema 400s."""
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            logger.warning("[EliteAI] GROQ_API_KEY not set — skipping direct call")
+            return None
+
+        n = _MAX_ELITE_CLIPS
+        schema_hint = (
+            f'Return ONLY valid JSON matching exactly this structure (choose {n} clips):\n'
+            '{\n'
+            '  "clips": [\n'
+            '    {\n'
+            '      "start_time": "MM:SS",\n'
+            '      "duration_seconds": 60,\n'
+            '      "text": "verbatim transcript text",\n'
+            '      "hook": "viral hook",\n'
+            '      "relevance_score": 0.9,\n'
+            '      "reasoning": "why this is viral",\n'
+            '      "virality_score": 85,\n'
+            '      "theme": "Motivational",\n'
+            '      "vfx_transition": "zoom-in",\n'
+            '      "vfx_zoom": 1.2,\n'
+            '      "music_mood": "hype",\n'
+            '      "cinematic_pacing": "Fast-paced rhythmic",\n'
+            '      "visual_hook": "description of visual hook"\n'
+            '    }\n'
+            '  ],\n'
+            '  "global_vibe": "Energetic and inspirational",\n'
+            '  "brand_plan": "Consistent voice across clips",\n'
+            '  "hashtags": ["viral", "trending"]\n'
+            '}\n'
+            f'For each clip choose duration_seconds between 45 and 120 based on content completeness.\n'
+            'End the clip at a natural narrative break (pause, topic change, punchline).'
+        )
+
+        user_prompt = (
+            f"VIDEO TRANSCRIPT ({duration:.0f}s total):\n{transcript}\n\n"
+            f"AUDIO ENERGY PEAKS: {json.dumps(audio_peaks[:5])}\n\n"
+            f"{schema_hint}"
+        )
+
+        import asyncio as _asyncio
+        _prompt = user_prompt
+        _max_retries = 3
+        data = None
+        async with httpx.AsyncClient(timeout=60) as client:
+            for _attempt in range(_max_retries):
+                resp = await client.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {groq_key}"},
+                    json={
+                        "model": "llama-3.3-70b-versatile",
+                        "messages": [
+                            {"role": "system", "content": creative_director_prompt},
+                            {"role": "user", "content": _prompt},
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "max_tokens": 4096,
+                        "temperature": 0.7,
+                    },
+                )
+                if resp.status_code == 200:
+                    content = resp.json()["choices"][0]["message"]["content"]
+                    data = json.loads(content)
+                    break
+                elif resp.status_code == 429:
+                    _wait = 2 ** _attempt
+                    logger.warning(f"[EliteAI] Groq 429 rate-limit — retrying in {_wait}s (attempt {_attempt+1}/{_max_retries})")
+                    await _asyncio.sleep(_wait)
+                elif resp.status_code == 400:
+                    logger.warning(f"[EliteAI] Groq 400 bad request — truncating prompt and retrying")
+                    _prompt = _prompt[:len(_prompt) // 2]
+                else:
+                    logger.error(f"[EliteAI] Groq {resp.status_code}: {resp.text[:300]}")
+                    return None
+        if data is None:
+            logger.error("[EliteAI] Groq call failed after retries")
+            return None
+
+        clips = []
+        for c in data.get("clips", []):
+            try:
+                vscore = int(c.get("virality_score", 75))
+                sub = min(25, vscore // 4)
+                raw_start = str(c.get("start_time", "00:00"))
+                # Prefer duration_seconds over end_time; clamp to platform bounds (45-120s)
+                if "duration_seconds" in c:
+                    _dur = max(45, min(120, int(c["duration_seconds"])))
+                    from ..video_utils import parse_timestamp_to_seconds as _pts
+                    _start_s = _pts(raw_start)
+                    _end_s = _start_s + _dur
+                    raw_end = f"{int(_end_s) // 60:02d}:{int(_end_s) % 60:02d}"
+                else:
+                    raw_end = str(c.get("end_time", "00:45"))
+                clip = EliteClipPlan(
+                    start_time=raw_start,
+                    end_time=raw_end,
+                    text=str(c.get("text", "")),
+                    relevance_score=float(c.get("relevance_score", 0.8)),
+                    reasoning=str(c.get("reasoning", "")),
+                    virality=ViralityAnalysis(
+                        hook_score=sub,
+                        shareability_score=sub,
+                        total_score=vscore,
+                        virality_reasoning=str(c.get("reasoning", "")),
+                    ),
+                    theme=c.get("theme", "General"),
+                    suggested_edits=c.get("vfx_transition", "Standard viral zoom"),
+                    vfx=VFXInstruction(
+                        transition_type=str(c.get("vfx_transition", "cut")),
+                        zoom_level=float(c.get("vfx_zoom", 1.0)),
+                    ),
+                    audio=AudioInstruction(
+                        music_mood=str(c.get("music_mood", "hype")),
+                    ),
+                    cinematic_pacing=str(c.get("cinematic_pacing", "balanced")),
+                    visual_hook_desc=str(c.get("visual_hook", "")),
+                )
+                clips.append(clip)
+            except Exception as ce:
+                logger.warning(f"[EliteAI] Skipping malformed clip: {ce}")
+
+        return EliteCreativePlan(
+            clips=clips,
+            global_vibe=str(data.get("global_vibe", "Viral")),
+            brand_consistency_plan=str(data.get("brand_plan", "Consistent brand voice")),
+            custom_hashtags=list(data.get("hashtags", ["viral", "trending"])),
+        )
 
     async def generate_social_reply(
         self,

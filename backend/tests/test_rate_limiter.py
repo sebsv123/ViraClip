@@ -11,14 +11,23 @@ from fastapi import Request
 
 @pytest.fixture
 def mock_redis():
-    """Mock Redis client."""
-    redis_mock = AsyncMock()
-    redis_mock.pipeline.return_value = redis_mock
-    redis_mock.zremrangebyscore.return_value = redis_mock
-    redis_mock.zcard.return_value = redis_mock
-    redis_mock.zadd.return_value = redis_mock
-    redis_mock.expire.return_value = redis_mock
-    redis_mock.execute.return_value = [None, 0, None, None]  # request_count = 0
+    """Mock Redis client.
+
+    Redis pipeline() is a synchronous call that returns a pipeline object;
+    only execute() is async.  Using AsyncMock for the top-level client but
+    overriding the pipeline and its chained methods with MagicMock so that
+    `pipe = self.redis.pipeline()` returns the mock synchronously.
+    """
+    redis_mock = MagicMock()
+    # pipeline() is synchronous — return the same mock for method chaining
+    redis_mock.pipeline = MagicMock(return_value=redis_mock)
+    redis_mock.zremrangebyscore = MagicMock(return_value=redis_mock)
+    redis_mock.zcard = MagicMock(return_value=redis_mock)
+    redis_mock.zadd = MagicMock(return_value=redis_mock)
+    redis_mock.expire = MagicMock(return_value=redis_mock)
+    # execute() IS awaited in the source code
+    redis_mock.execute = AsyncMock(return_value=[None, 0, None, None])
+    redis_mock.delete = AsyncMock()
     return redis_mock
 
 

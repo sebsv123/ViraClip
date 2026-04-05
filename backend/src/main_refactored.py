@@ -186,11 +186,44 @@ def create_app(
     from .api.routes.feedback import router as feedback_router
     from .api.routes.billing import router as billing_router
     from .api.routes.social import router as social_router
+    from .api.routes.clips import router as clips_router
+    from .api.routes.gpu_services import router as gpu_router
+    from .api.routes.health import router as health_router
+    from .api.routes.health_gpu import router as health_gpu_router
+    from .api.routes.progress import router as progress_router  # SSE streaming
+    from .api.routes.task_control import router as task_control_router  # Background tasks
+    from .api.middleware.monitoring import router as metrics_router, MetricsMiddleware
+    from .api.middleware.rate_limit import RateLimitHeadersMiddleware
+    from .api.middleware.compression import CompressionMiddleware
+    from .api.routes.automation import router as automation_router
+    from .api.routes.extras import router as extras_router
+    from .api.routes.advanced_ml import router as advanced_ml_router
+    from .api.routes.llm_ops import router as llm_ops_router
+    from .api.routes.creative import router as creative_router
+    from .api.routes.analytics import router as analytics_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
     app.include_router(billing_router)
-    app.include_router(social_router)  # P4: Social distribution + campaigns
+    app.include_router(social_router)
+    app.include_router(clips_router)
+    app.include_router(gpu_router)
+    app.include_router(health_router)
+    app.include_router(health_gpu_router)
+    app.include_router(progress_router)
+    app.include_router(task_control_router)
+    app.include_router(metrics_router)
+    app.include_router(automation_router)
+    app.include_router(extras_router)
+    app.include_router(advanced_ml_router)
+    app.include_router(llm_ops_router)
+    app.include_router(creative_router)
+    app.include_router(analytics_router)    # NEW: Analytics dashboard
+
+    # Add middleware
+    app.add_middleware(MetricsMiddleware)
+    app.add_middleware(RateLimitHeadersMiddleware)
+    app.add_middleware(CompressionMiddleware)  # HTTP response compression
 
     @app.get("/")
     def read_root():

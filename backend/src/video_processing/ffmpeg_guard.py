@@ -72,9 +72,9 @@ def validate_segment_call(
         )
 
     segment_duration = to - ss
-    if segment_duration < 1.0:
+    if segment_duration < 0.5:
         raise ValueError(
-            f"{prefix}segmento demasiado corto: {segment_duration:.2f}s (mínimo 1s)"
+            f"{prefix}segmento demasiado corto: {segment_duration:.2f}s (mínimo 0.5s)"
         )
 
     source_duration = get_duration(source_path)

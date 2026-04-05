@@ -12,6 +12,7 @@ import logging
 import httpx
 import json
 import os
+import re
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field, field_validator
 from enum import Enum
@@ -80,23 +81,37 @@ class ImprovedLLMService:
     """Enhanced LLM service with validation and fallback."""
     
     def __init__(self):
-        self.ollama_url = (
+        raw_url = (
             os.environ.get("OLLAMA_BASE_URL")
             or os.environ.get("OLLAMA_URL")
             or "http://ollama:11434"
         ).rstrip("/")
+        self.ollama_url = re.sub(r"/v1$", "", raw_url)
         self.model = os.environ.get("VIRALITY_MODEL") or os.environ.get("OLLAMA_VISION_MODEL", "qwen3-vl:8b")
         self.timeout = httpx.Timeout(120.0, connect=10.0)
         self.max_retries = 2
+        self.groq_api_key = os.environ.get("GROQ_API_KEY")
+        self.groq_model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
     
     async def get_virality_analysis(self, transcript_segments: List[str]) -> Dict[str, Any]:
         """
         Get virality analysis with validation and fallback.
+        Flow: Groq (if key) → Ollama → text-based fallback
         
         Returns:
             Dict with "analysis" key containing validated segment analyses
         """
-        # Try Ollama with retries
+        # Primary: Groq (fast, reliable, already used for segment selection)
+        if self.groq_api_key:
+            try:
+                result = await self._groq_virality_analysis(transcript_segments)
+                if result:
+                    logger.info("✓ Groq virality analysis successful")
+                    return result
+            except Exception as e:
+                logger.warning(f"Groq virality analysis failed: {e}")
+
+        # Secondary: Ollama with retries
         for attempt in range(self.max_retries + 1):
             try:
                 result = await self._try_ollama_analysis(transcript_segments)
@@ -107,11 +122,82 @@ class ImprovedLLMService:
                 logger.warning(f"Ollama attempt {attempt + 1} failed: {e}")
                 if attempt < self.max_retries:
                     import asyncio
-                    await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                    await asyncio.sleep(2 ** attempt)
         
-        # Fallback to text-based analysis
-        logger.warning("⚠️ Ollama unavailable, using text-based fallback")
+        # Last resort: text-based analysis
+        logger.warning("⚠️ Groq and Ollama unavailable, using text-based fallback")
         return self._text_based_fallback(transcript_segments)
+
+    async def _groq_virality_analysis(self, segments: List[str]) -> Optional[Dict[str, Any]]:
+        """
+        Virality scoring via Groq API (4 dimensions, variable scores per clip).
+        Uses the same API key already configured for segment selection.
+        """
+        clips_payload = [
+            {"index": i, "transcript": seg[:600], "duration_hint": "30-120s"}
+            for i, seg in enumerate(segments[:20])
+        ]
+        clips_json = json.dumps(clips_payload, ensure_ascii=False)
+
+        prompt = f"""You are a viral content scoring expert for TikTok, Reels, and YouTube Shorts.
+
+Score each clip transcript using this 4-dimension framework (each 0-25):
+
+1. HOOK POWER (0-25): Do the first ~5 seconds create irresistible curiosity?
+   25 = shocking stat, bold claim, or unanswered question
+   10 = context-setting intro  |  0-5 = no hook
+
+2. NARRATIVE COMPLETENESS (0-25): Does the clip have its own beginning/middle/end?
+   25 = fully self-contained story  |  10 = fragment needing context
+
+3. EMOTIONAL TRIGGER (0-25): Does it activate a strong emotion within 10s?
+   25 = surprise, indignation, aspiration, or humor  |  10 = neutral info
+
+4. SHAREABILITY (0-25): Would the viewer forward it to someone specific?
+   25 = "this is exactly what X is going through"  |  10 = generic content
+
+MANDATORY RULES:
+- Scores MUST differ between clips — never return the same total for two clips.
+- Justify each score with one specific phrase from the actual transcript.
+- hook_type must be one of: Curiosity Gap, Negative Hook, Bold Claim, Story, Statistic, Question, Contrast, Value
+- Return ONLY valid JSON, no explanation, no markdown.
+
+Clips to score:
+{clips_json}
+
+Return this exact JSON structure:
+{{"analysis": [
+  {{"segment_index": 0, "hook_score": 18, "engagement_score": 16, "value_score": 14, "shareability_score": 12,
+    "virality_score": 60, "hook_type": "Question",
+    "suggested_title": "...", "suggested_hashtags": ["#tag"],
+    "reasoning": "one sentence citing actual transcript text", "viral_cues": "editing tip"}}
+]}}"""
+
+        groq_url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {self.groq_api_key}",
+            "Content-Type": "application/json",
+        }
+        body = {
+            "model": self.groq_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.4,
+            "max_tokens": 4000,
+            "response_format": {"type": "json_object"},
+        }
+
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0)) as client:
+            response = await client.post(groq_url, headers=headers, json=body)
+
+        if response.status_code != 200:
+            logger.error(f"Groq virality API returned {response.status_code}: {response.text[:200]}")
+            return None
+
+        raw_content = response.json()["choices"][0]["message"]["content"]
+        raw_data = json.loads(raw_content)
+        validated = ViralityAnalysis(**raw_data)
+        logger.info(f"Groq scored {len(validated.analysis)} segments (scores: {[s.virality_score for s in validated.analysis]})")
+        return {"analysis": [seg.model_dump() for seg in validated.analysis]}
     
     async def _try_ollama_analysis(self, segments: List[str]) -> Optional[Dict[str, Any]]:
         """Attempt Ollama analysis with strict validation."""
@@ -304,7 +390,7 @@ Return JSON in this EXACT format:
                 "hook_type": hook_type,
                 "suggested_title": "",
                 "suggested_hashtags": [],
-                "reasoning": f"Text-based fallback analysis (score: {virality_score})",
+                "reasoning": f"Fallback score based on keyword and structure analysis ({virality_score}/10)",
                 "viral_cues": ""
             })
         

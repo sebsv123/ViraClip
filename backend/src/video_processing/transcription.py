@@ -3,10 +3,11 @@ from __future__ import annotations
 """Transcription utilities extracted from video_utils."""
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
 import os
+import hashlib
 
 from ..config import Config
 
@@ -15,9 +16,60 @@ config = Config()
 
 _TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
 _TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/supoclip_transcript_cache")
+_TRANSCRIPT_REDIS_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 
 _whisper_model = None
 _whisper_model_config = None
+
+
+async def get_redis_transcript_cache(video_hash: str) -> Optional[Dict[str, Any]]:
+    """Get transcript from Redis cache by video hash."""
+    try:
+        from ..utils.redis_pool import get_redis_client
+        
+        redis_client = await get_redis_client()
+        cache_key = f"transcript:{video_hash}"
+        cached_data = await redis_client.get(cache_key)
+        
+        if cached_data:
+            data = json.loads(cached_data)
+            logger.info(f"[TRANSCRIPTION] Redis cache HIT for hash {video_hash[:16]}...")
+            return data
+            
+    except Exception as exc:
+        logger.debug(f"[TRANSCRIPTION] Redis cache lookup failed: {exc}")
+        
+    return None
+
+
+async def set_redis_transcript_cache(video_hash: str, transcript_data: Dict[str, Any]) -> None:
+    """Store transcript in Redis cache with TTL."""
+    try:
+        from ..utils.redis_pool import get_redis_client
+        
+        redis_client = await get_redis_client()
+        cache_key = f"transcript:{video_hash}"
+        await redis_client.setex(
+            cache_key,
+            _TRANSCRIPT_REDIS_TTL_SECONDS,
+            json.dumps(transcript_data)
+        )
+        
+        logger.info(f"[TRANSCRIPTION] Cached to Redis: {video_hash[:16]}... (TTL={_TRANSCRIPT_REDIS_TTL_SECONDS}s)")
+        
+    except Exception as exc:
+        logger.warning(f"[TRANSCRIPTION] Redis cache write failed: {exc}")
+
+
+def _get_video_hash(video_path: Path) -> Optional[str]:
+    """Generate SHA256 hash of first 1MB for cache key."""
+    try:
+        with open(video_path, "rb") as handle:
+            chunk = handle.read(1_048_576)
+        return hashlib.sha256(chunk).hexdigest()
+    except Exception as e:
+        logger.error(f"[TRANSCRIPTION] Failed to generate file hash: {e}")
+        return None
 
 
 def snap_to_word_boundary(timestamp_ms: int, words: List[Dict], is_start: bool = True) -> int:
@@ -162,12 +214,37 @@ def get_whisper_model():
     return _whisper_model
 
 
-def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
-    """Transcribe video locally with faster-whisper."""
-    logger.info(f"Transcribing with faster-whisper: {video_path}")
-
+async def get_video_transcript(
+    video_path: Path, 
+    speech_model: str = "best",
+    use_cache: bool = True
+) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Transcribe video locally with faster-whisper, with Redis caching.
+    
+    Args:
+        video_path: Path to video file
+        speech_model: Model to use (best, tiny, base, small, medium, large)
+        use_cache: Whether to check/save to Redis cache
+        
+    Returns:
+        Tuple of (transcript_text, transcript_data_dict)
+    """
+    video_hash = None
+    
+    # Check Redis cache first
+    if use_cache:
+        video_hash = _get_video_hash(video_path)
+        if video_hash:
+            cached_data = await get_redis_transcript_cache(video_hash)
+            if cached_data:
+                text = cached_data.get("text", "")
+                logger.info(f"[TRANSCRIPTION] Redis cache HIT - skipping Whisper for {video_path.name}")
+                return text, cached_data
+    
+    logger.info(f"[TRANSCRIPTION] Cache MISS - transcribing with faster-whisper: {video_path}")
+    
     model = get_whisper_model()
-
+    
     try:
         segments, info = model.transcribe(
             str(video_path),
@@ -176,10 +253,10 @@ def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
             vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500),
         )
-
+        
         logger.info(f"Language detected: {info.language} ({info.language_probability:.2f})")
         logger.info(f"Audio duration: {info.duration:.1f}s")
-
+        
         formatted_lines = []
         all_segments = []
         for segment in segments:
@@ -187,13 +264,21 @@ def get_video_transcript(video_path: Path, speech_model: str = "best") -> str:
             end = format_ms_to_timestamp(int(segment.end * 1000))
             formatted_lines.append(f"[{start} - {end}] {segment.text}")
             all_segments.append(segment)
-
-        cache_transcript_data(video_path, all_segments)
-
+        
         result = "\n".join(formatted_lines)
         logger.info(f"Transcript complete: {len(result)} chars, {len(formatted_lines)} segments")
-        return result
-
+        
+        # Cache to local file and Redis
+        cache_transcript_data(video_path, all_segments)
+        
+        # Also cache to Redis for distributed access
+        if use_cache:
+            transcript_data = load_cached_transcript_data(video_path)
+            if transcript_data and video_hash:
+                await set_redis_transcript_cache(video_hash, transcript_data)
+        
+        return result, transcript_data if 'transcript_data' in dir() else None
+        
     except Exception as exc:
         logger.error(f"faster-whisper error: {exc}")
         raise
@@ -260,7 +345,7 @@ def cache_transcript_data(video_path: Path, transcript) -> None:
         json.dump(cache_data, handle)
 
     try:
-        video_hash = _get_video_content_hash(video_path)
+        video_hash = _get_video_hash(video_path)
         if video_hash:
             _TRANSCRIPT_HASH_CACHE_DIR.mkdir(parents=True, exist_ok=True)
             hash_path = _hash_cache_path(video_hash)
@@ -290,7 +375,7 @@ def load_cached_transcript_data(video_path: Path) -> Optional[Dict[str, Any]]:
             return data
 
     try:
-        video_hash = _get_video_content_hash(video_path)
+        video_hash = _get_video_hash(video_path)
         if video_hash:
             hash_path = _hash_cache_path(video_hash)
             if hash_path.exists():
@@ -311,18 +396,6 @@ def _serialize_transcript_word(word) -> Dict[str, Any]:
         "confidence": getattr(word, "confidence", 1.0),
         "speaker": getattr(word, "speaker", None),
     }
-
-
-def _get_video_content_hash(video_path: Path) -> Optional[str]:
-    import hashlib
-
-    try:
-        with open(video_path, "rb") as handle:
-            chunk = handle.read(1_048_576)
-        return hashlib.sha256(chunk).hexdigest()
-    except Exception as e:
-        logger.error(f"[TRANSCRIPTION] Failed to generate file hash for {video_path}: {e}", exc_info=True)
-        return None
 
 
 def format_ms_to_timestamp(ms: int) -> str:

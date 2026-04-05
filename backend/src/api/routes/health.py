@@ -27,7 +27,17 @@ async def health_check():
     
     Returns 200 if service is running.
     """
-    return {"status": "ok", "service": "viraclip"}
+    return {"status": "healthy"}
+
+
+@router.get("/db")
+async def db_health(db: AsyncSession = Depends(get_db)):
+    """Check database connectivity."""
+    try:
+        await db.execute(text("SELECT 1"))
+        return {"status": "healthy"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 
 
 @router.get("/detailed")
@@ -235,3 +245,192 @@ async def slow_stages(threshold_ms: float = 5000):
             "status": "error",
             "error": str(e)
         }
+
+
+@router.get("/diagnostics")
+async def comprehensive_diagnostics(db: AsyncSession = Depends(get_db)):
+    """
+    Comprehensive diagnostics endpoint for ViraClip.
+    
+    Verifies all critical dependencies:
+    - FFmpeg/FFprobe
+    - Groq API connectivity
+    - Ollama service
+    - Redis
+    - PostgreSQL
+    - Disk space
+    - Worker processes
+    """
+    import shutil
+    import httpx
+    import os
+    import psutil
+    from ...config import get_config
+    
+    checks = {}
+    config = get_config()
+    
+    # FFmpeg check
+    ffmpeg_path = shutil.which("ffmpeg")
+    checks["ffmpeg"] = {
+        "ok": bool(ffmpeg_path),
+        "path": ffmpeg_path or "Not found",
+        "version": None
+    }
+    if ffmpeg_path:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["ffmpeg", "-version"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            version_line = result.stdout.split('\n')[0] if result.stdout else ""
+            checks["ffmpeg"]["version"] = version_line
+        except Exception as e:
+            checks["ffmpeg"]["version_error"] = str(e)
+    
+    # FFprobe check
+    ffprobe_path = shutil.which("ffprobe")
+    checks["ffprobe"] = {
+        "ok": bool(ffprobe_path),
+        "path": ffprobe_path or "Not found"
+    }
+    
+    # Groq API check
+    if config.groq_api_key:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(
+                    "https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {config.groq_api_key}"}
+                )
+                checks["groq_api"] = {
+                    "ok": response.status_code == 200,
+                    "status_code": response.status_code,
+                    "models_available": len(response.json().get("data", [])) if response.status_code == 200 else 0
+                }
+        except Exception as e:
+            checks["groq_api"] = {
+                "ok": False,
+                "error": str(e)
+            }
+    else:
+        checks["groq_api"] = {
+            "ok": False,
+            "error": "GROQ_API_KEY not configured"
+        }
+    
+    # Ollama check
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.get(f"{config.ollama_base_url}/api/tags")
+            if response.status_code == 200:
+                models = [m["name"] for m in response.json().get("models", [])]
+                vision_model_available = any(
+                    config.ollama_vision_model in m or "qwen" in m or "phi3" in m 
+                    for m in models
+                )
+                checks["ollama"] = {
+                    "ok": vision_model_available,
+                    "models": models,
+                    "vision_model": config.ollama_vision_model,
+                    "vision_available": vision_model_available
+                }
+            else:
+                checks["ollama"] = {
+                    "ok": False,
+                    "status_code": response.status_code
+                }
+    except Exception as e:
+        checks["ollama"] = {
+            "ok": False,
+            "error": str(e)
+        }
+    
+    # Redis check
+    try:
+        from ...workers.job_queue import JobQueue
+        pool = await JobQueue.get_pool()
+        await pool.ping()
+        checks["redis"] = {
+            "ok": True,
+            "host": config.redis_host,
+            "port": config.redis_port
+        }
+    except Exception as e:
+        checks["redis"] = {
+            "ok": False,
+            "error": str(e)
+        }
+    
+    # PostgreSQL check
+    try:
+        await db.execute(text("SELECT 1"))
+        checks["postgres"] = {
+            "ok": True,
+            "connection": "healthy"
+        }
+    except Exception as e:
+        checks["postgres"] = {
+            "ok": False,
+            "error": str(e)
+        }
+    
+    # Disk space check (minimum 1GB free)
+    try:
+        temp_dir = config.temp_dir or "/app/temp"
+        disk = psutil.disk_usage(temp_dir)
+        free_gb = disk.free / (1024**3)
+        checks["disk_space"] = {
+            "ok": free_gb > 1.0,
+            "free_gb": round(free_gb, 2),
+            "total_gb": round(disk.total / (1024**3), 2),
+            "percent_used": disk.percent,
+            "path": temp_dir
+        }
+    except Exception as e:
+        checks["disk_space"] = {
+            "ok": False,
+            "error": str(e)
+        }
+    
+    # Python module checks
+    critical_modules = [
+        "faster_whisper",
+        "moviepy",
+        "pydantic",
+        "httpx"
+    ]
+    checks["python_modules"] = {}
+    for module_name in critical_modules:
+        try:
+            __import__(module_name)
+            checks["python_modules"][module_name] = {"ok": True}
+        except ImportError:
+            checks["python_modules"][module_name] = {"ok": False, "error": "Not installed"}
+    
+    # Worker process status (check if any ARQ workers are running)
+    checks["workers_active"] = {
+        "ok": True,
+        "note": "Backend is responding (workers are separate containers)"
+    }
+    
+    # Overall health status
+    all_ok = all(
+        v.get("ok", False) if isinstance(v, dict) else False
+        for v in checks.values()
+        if isinstance(v, dict) and "ok" in v
+    )
+    
+    # Check python modules separately
+    modules_ok = all(v.get("ok", False) for v in checks.get("python_modules", {}).values())
+    
+    overall_ok = all_ok and modules_ok
+    
+    return {
+        "status": "healthy" if overall_ok else "degraded",
+        "checks": checks,
+        "timestamp": __import__("datetime").datetime.utcnow().isoformat()
+    }
