@@ -50,7 +50,13 @@ class TestRedisConnectionPooling:
     async def test_redis_pool_performance_vs_individual(self):
         """Pool should be faster than individual connections."""
         from src.utils.redis_pool import get_redis_client
-        
+        import src.utils.redis_pool as _rpool
+
+        # Null out any singleton tied to a previous test's event loop
+        # (don't await close — that would fail on a stale loop)
+        _rpool._redis_client = None
+        _rpool._connection_pool = None
+
         # Warm up pool
         _ = await get_redis_client()
         
