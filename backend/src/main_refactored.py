@@ -205,6 +205,8 @@ def create_app(
     from .api.routes.ai_metrics import router as ai_metrics_router
     from .api.routes.ab_testing import router as ab_testing_router
     from .api.routes.avatar import router as avatar_router
+    from .api.routes.translation import router as translation_router
+    from .api.routes.campaigns import router as campaigns_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -227,6 +229,8 @@ def create_app(
     app.include_router(ai_metrics_router)   # NEW: AI quality metrics & anomaly detection
     app.include_router(ab_testing_router)   # NEW: A/B testing for clip variants
     app.include_router(avatar_router)       # NEW: NeRF avatars (ERNeRF/AvatarCraft/AnimNeRF/UV-Volumes)
+    app.include_router(translation_router)  # NEW: Auto-translation (multi-language clip localization)
+    app.include_router(campaigns_router)    # NEW: Campaign A/B testing + performance tracking
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
