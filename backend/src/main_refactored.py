@@ -218,6 +218,9 @@ def create_app(
     from .api.routes.collaboration import router as collaboration_router
     from .api.routes.moderation import router as moderation_router
     from .api.routes.reports import router as reports_router
+    from .api.routes.thumbnails import router as thumbnails_router
+    from .api.routes.batch import router as batch_router
+    from .api.routes.audit import router as audit_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -253,6 +256,9 @@ def create_app(
     app.include_router(collaboration_router)# NEW: Multi-user collaboration + comments
     app.include_router(moderation_router)   # NEW: Content moderation & safety filters
     app.include_router(reports_router)      # NEW: Automated email reports & subscriptions
+    app.include_router(thumbnails_router)   # NEW: AI thumbnail generation + frame analysis
+    app.include_router(batch_router)        # NEW: Batch video processing jobs
+    app.include_router(audit_router)        # NEW: Compliance audit log (query/export/anomaly)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
