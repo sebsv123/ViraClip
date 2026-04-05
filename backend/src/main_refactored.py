@@ -243,6 +243,10 @@ def create_app(
     from .api.routes.backup import router as backup_router
     from .api.routes.workflows import router as workflows_router
     from .api.routes.dashboard import router as dashboard_router
+    from .api.routes.sentiment import router as sentiment_router
+    from .api.routes.social_media import router as social_media_router
+    from .api.routes.compression import router as compression_router
+    from .api.routes.retention import router as retention_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -303,6 +307,10 @@ def create_app(
     app.include_router(backup_router)          # NEW: Backup/restore + disaster recovery
     app.include_router(workflows_router)       # NEW: Visual workflow automation pipelines + templates
     app.include_router(dashboard_router)       # NEW: Real-time metrics dashboard + history
+    app.include_router(sentiment_router)       # NEW: Transcript sentiment + emotion + virality correlation
+    app.include_router(social_media_router)    # NEW: Social media OAuth + publish + schedule (6 platforms)
+    app.include_router(compression_router)     # NEW: Video compression presets + quality analysis
+    app.include_router(retention_router)       # NEW: Data retention policies + GDPR cleanup
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
