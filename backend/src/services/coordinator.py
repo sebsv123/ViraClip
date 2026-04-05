@@ -226,6 +226,9 @@ class VideoCoordinator:
         async def render_single_clip(segment: dict, index: int) -> dict:
             """Render one clip via VideoService and emit progress."""
             from pathlib import Path as _Path
+            from ..services.clip_validator import get_clip_validator
+            from ..utils.retry_helper import retry_ffmpeg_operation
+            
             try:
                 output_dir = _Path(self.config.get("output_dir", "/app/temp/uploads/clips"))
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -237,6 +240,23 @@ class VideoCoordinator:
                     "start_time": segment.get("start_time") or segment.get("start"),
                     "end_time":   segment.get("end_time")   or segment.get("end"),
                 }
+                
+                # Pre-render validation
+                validator = get_clip_validator()
+                validation = await validator.validate_input(
+                    video_path=_Path(self.video_path),
+                    start_time=vs_segment["start_time"],
+                    end_time=vs_segment["end_time"],
+                    words=segment.get("words"),
+                )
+                
+                if not validation.passed:
+                    error_msg = f"Pre-render validation failed for clip {index}: {', '.join(validation.issues)}"
+                    logger.error(error_msg)
+                    raise ValueError(error_msg)
+                
+                if validation.warnings:
+                    logger.warning(f"Clip {index} validation warnings: {', '.join(validation.warnings)}")
 
                 clip = await VideoService.create_single_clip(
                     video_path=_Path(self.video_path),
@@ -255,6 +275,30 @@ class VideoCoordinator:
 
                 if clip is None:
                     raise RuntimeError(f"create_single_clip returned None for clip {index}")
+                
+                # Post-render validation
+                clip_path = _Path(clip.get("path", ""))
+                if clip_path.exists():
+                    expected_duration = vs_segment["end_time"] - vs_segment["start_time"]
+                    post_validation = await validator.validate_output(
+                        output_path=clip_path,
+                        expected_duration=expected_duration,
+                        source_path=_Path(self.video_path),
+                    )
+                    
+                    if not post_validation.passed:
+                        error_msg = f"Post-render validation failed for clip {index}: {', '.join(post_validation.issues)}"
+                        logger.error(error_msg)
+                        # Don't fail the clip, but log the issue
+                        clip["validation_issues"] = post_validation.issues
+                    
+                    if post_validation.warnings:
+                        logger.warning(f"Clip {index} post-render warnings: {', '.join(post_validation.warnings)}")
+                        clip["validation_warnings"] = post_validation.warnings
+                    
+                    # Add validation metadata
+                    clip["validation_passed"] = post_validation.passed
+                    clip.update(post_validation.metadata)
 
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
                 try:
