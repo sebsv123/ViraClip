@@ -81,7 +81,7 @@ class LearningLoop:
             output_size_bytes=size,
             has_audio=has_audio,
             qa_passed=qa_passed,
-            qa_issues=issues,
+            qa_issues=qa_issues,
             improvements=list(getattr(virality_prediction, "improvements", [])),
         )
 
@@ -94,7 +94,7 @@ class LearningLoop:
             task_id, clip_index,
             manifest.viral_score, manifest.timeline_events,
             sfx_count, broll_count,
-            f" issues={issues}" if issues else "",
+            f" issues={qa_issues}" if qa_issues else "",
         )
         return manifest
 

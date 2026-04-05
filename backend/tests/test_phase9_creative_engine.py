@@ -285,42 +285,52 @@ class TestLearningLoop:
         from src.services.learning_loop import LearningLoop
         self.loop = LearningLoop()
 
-    def test_qa_missing_file(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_qa_missing_file(self, tmp_path):
         missing = tmp_path / "nonexistent.mp4"
         source = tmp_path / "source.mp4"
-        issues = self.loop._qa(missing, source, duration=30.0, size=0, has_audio=True)
+        issues = await self.loop._qa(missing, source, duration=30.0, size=0, has_audio=True)
         assert any("not exist" in i for i in issues)
 
-    def test_qa_too_short(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_qa_too_short(self, tmp_path):
         f = tmp_path / "clip.mp4"
         f.write_bytes(b"x" * 1024)
         source = tmp_path / "source.mp4"
         source.write_bytes(b"y" * 2048)
-        issues = self.loop._qa(f, source, duration=1.0, size=1024, has_audio=True)
+        issues = await self.loop._qa(f, source, duration=1.0, size=1024, has_audio=True)
         assert any("short" in i.lower() for i in issues)
 
-    def test_qa_no_audio(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_qa_no_audio(self, tmp_path):
         f = tmp_path / "clip.mp4"
         f.write_bytes(b"x" * 1024)
         source = tmp_path / "source.mp4"
         source.write_bytes(b"y" * 2048)
-        issues = self.loop._qa(f, source, duration=30.0, size=1024, has_audio=False)
+        issues = await self.loop._qa(f, source, duration=30.0, size=1024, has_audio=False)
         assert any("audio" in i.lower() for i in issues)
 
-    def test_qa_passes_valid_clip(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_qa_passes_valid_clip(self, tmp_path):
+        from unittest.mock import AsyncMock, MagicMock
         f = tmp_path / "clip.mp4"
         f.write_bytes(b"x" * 5000)
         source = tmp_path / "source.mp4"
         source.write_bytes(b"y" * 10000)
-        issues = self.loop._qa(f, source, duration=30.0, size=5000, has_audio=True)
+        mock_val = MagicMock()
+        mock_result = MagicMock(passed=True, issues=[], warnings=[])
+        mock_val.validate_output = AsyncMock(return_value=mock_result)
+        with patch("src.services.clip_validator.get_clip_validator", return_value=mock_val):
+            issues = await self.loop._qa(f, source, duration=30.0, size=5000, has_audio=True)
         assert issues == []
 
-    def test_qa_too_similar_to_source(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_qa_too_similar_to_source(self, tmp_path):
         f = tmp_path / "clip.mp4"
         f.write_bytes(b"x" * 5000)
         source = tmp_path / "source.mp4"
         source.write_bytes(b"y" * 5000)  # same size → suspicious
-        issues = self.loop._qa(f, source, duration=30.0, size=5000, has_audio=True)
+        issues = await self.loop._qa(f, source, duration=30.0, size=5000, has_audio=True)
         assert any("source" in i.lower() or "size" in i.lower() for i in issues)
 
     @pytest.mark.asyncio
@@ -341,9 +351,13 @@ class TestLearningLoop:
         mock_pred.emotion_score = 70.0
         mock_pred.improvements = ["test improvement"]
 
+        mock_val = MagicMock()
+        mock_val_result = MagicMock(passed=True, issues=[], warnings=[])
+        mock_val.validate_output = AsyncMock(return_value=mock_val_result)
         with (
             patch.object(loop, "_probe", new_callable=AsyncMock) as mock_probe,
             patch.object(loop, "_save", new_callable=AsyncMock) as mock_save,
+            patch("src.services.clip_validator.get_clip_validator", return_value=mock_val),
         ):
             mock_probe.return_value = (30.0, 8000, True)
             manifest = await loop.post_render_analysis(
