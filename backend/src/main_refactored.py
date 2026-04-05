@@ -207,6 +207,8 @@ def create_app(
     from .api.routes.avatar import router as avatar_router
     from .api.routes.translation import router as translation_router
     from .api.routes.campaigns import router as campaigns_router
+    from .api.routes.competitors import router as competitors_router
+    from .api.routes.scheduler import router as scheduler_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -231,6 +233,8 @@ def create_app(
     app.include_router(avatar_router)       # NEW: NeRF avatars (ERNeRF/AvatarCraft/AnimNeRF/UV-Volumes)
     app.include_router(translation_router)  # NEW: Auto-translation (multi-language clip localization)
     app.include_router(campaigns_router)    # NEW: Campaign A/B testing + performance tracking
+    app.include_router(competitors_router)  # NEW: Competitor intelligence & trend analysis
+    app.include_router(scheduler_router)    # NEW: Auto-scheduler (recurring jobs + trend triggers)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
