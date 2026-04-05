@@ -247,6 +247,8 @@ def create_app(
     from .api.routes.social_media import router as social_media_router
     from .api.routes.compression import router as compression_router
     from .api.routes.retention import router as retention_router
+    from .api.routes.cdn import router as cdn_router
+    from .api.routes.ipfs import router as ipfs_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -311,6 +313,8 @@ def create_app(
     app.include_router(social_media_router)    # NEW: Social media OAuth + publish + schedule (6 platforms)
     app.include_router(compression_router)     # NEW: Video compression presets + quality analysis
     app.include_router(retention_router)       # NEW: Data retention policies + GDPR cleanup
+    app.include_router(cdn_router)             # NEW: CDN upload + signed URLs + cache invalidation
+    app.include_router(ipfs_router)            # NEW: IPFS decentralized storage + gateway management
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
