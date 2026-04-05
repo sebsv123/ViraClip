@@ -146,6 +146,17 @@ class Task(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Phase 10 / 11 Feature flags (per-task opt-in)
+    enable_timeline: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    enable_vision_ai: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    enable_timeline_render: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+
     target_language: Mapped[str] = mapped_column(
         String(10), nullable=False, server_default=sql_text("'eng'")
     )

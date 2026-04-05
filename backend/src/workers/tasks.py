@@ -185,6 +185,28 @@ async def process_video_task(
             # Re-raise so arq handles retry
             raise
 
+async def analyze_ab_test(
+    ctx: Dict[str, Any],
+    user_id: str,
+    test_id: str,
+) -> Dict[str, Any]:
+    """
+    ARQ background job: analyze A/B test results and determine winner.
+    Enqueued automatically after test_duration_hours expires.
+    """
+    set_trace_id(f"abtest-{test_id}")
+    logger.info(f"[ABTest] Analyzing test {test_id} for user {user_id}")
+    try:
+        from ..services.ab_testing_service import ABTestingService
+        svc = ABTestingService()
+        winner = await svc.analyze_test(user_id=user_id, test_id=test_id)
+        logger.info(f"[ABTest] Test {test_id} winner: {winner.variant_id if winner else 'inconclusive'}")
+        return {"status": "analyzed", "test_id": test_id, "winner": winner.variant_id if winner else None}
+    except Exception as e:
+        logger.error(f"[ABTest] analyze failed for {test_id}: {e}")
+        raise
+
+
 async def worker_startup(ctx: Dict[str, Any]) -> None:
     """
     Run cleanup on worker startup to remove old files.
@@ -278,7 +300,7 @@ class WorkerSettings:
     config = Config()
 
     # Functions to run
-    functions = [process_video_task]
+    functions = [process_video_task, analyze_ab_test]
     # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
     queue_name = "viraclip_cpu_tasks"
 
