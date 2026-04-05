@@ -46,6 +46,7 @@ Thumbs.db
 logs/
 temp/
 exports/
+downloads/
 output/
 .claude/
 
