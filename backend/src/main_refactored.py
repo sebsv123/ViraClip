@@ -226,6 +226,8 @@ def create_app(
     from .api.routes.virality_ml import router as virality_ml_router
     from .api.routes.feature_flags import router as feature_flags_router
     from .api.routes.genai import router as genai_router
+    from .api.routes.livestream import router as livestream_router
+    from .api.routes.multilanguage import router as multilanguage_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -269,6 +271,8 @@ def create_app(
     app.include_router(virality_ml_router)  # NEW: ML virality prediction + online training
     app.include_router(feature_flags_router)# NEW: Feature flags (gradual rollout + per-user)
     app.include_router(genai_router)        # NEW: Generative AI thumbnails/backgrounds/text-effects
+    app.include_router(livestream_router)   # NEW: Live stream monitoring + real-time clip extraction
+    app.include_router(multilanguage_router)# NEW: Language detection + subtitle/font config (15 langs)
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
