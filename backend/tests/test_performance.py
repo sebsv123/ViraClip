@@ -10,6 +10,7 @@ Measures performance improvements from optimizations:
 import pytest
 import time
 import asyncio
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch, MagicMock
 import json
@@ -240,7 +241,7 @@ class TestDatabaseQueryPerformance:
             t.clips = []
         
         mock_result.scalars.return_value.all.return_value = mock_tasks
-        mock_db.execute.return_value = mock_result
+        mock_db.execute = AsyncMock(return_value=mock_result)
         
         service = AnalyticsService(mock_db)
         
