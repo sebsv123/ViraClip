@@ -259,6 +259,8 @@ def create_app(
     from .api.routes.cost_optimization import router as cost_router
     from .api.routes.observability import router as observability_router
     from .api.routes.distributed_cache import router as cache_router
+    from .api.routes.ai_inference import router as ai_inference_router
+    from .api.routes.data_migration import router as migration_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -335,6 +337,8 @@ def create_app(
     app.include_router(cost_router)            # NEW: Cloud cost tracking + optimization analysis
     app.include_router(observability_router)   # NEW: Distributed tracing + performance monitoring
     app.include_router(cache_router)           # NEW: Multi-layer distributed cache management
+    app.include_router(ai_inference_router)    # NEW: AI model optimization (TensorRT/ONNX) + inference
+    app.include_router(migration_router)       # NEW: GDPR data export/import jobs
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
