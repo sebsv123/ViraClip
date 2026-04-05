@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
+import asyncio
 import json
 import logging
 from typing import Dict, Any
@@ -26,6 +27,7 @@ from ...config import get_config
 from ...font_registry import is_font_accessible
 from ...utils.async_helpers import run_in_thread
 from ...repositories.clip_repository import ClipRepository
+from ...api.middleware.rate_limit import task_rate_limit_dependency
 import redis.asyncio as aioredis
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
 
@@ -100,7 +102,7 @@ async def list_tasks(
         raise HTTPException(status_code=500, detail=f"Error retrieving tasks: {str(e)}")
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(task_rate_limit_dependency)])
 async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Create a new task and enqueue it for processing.
@@ -143,6 +145,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if target_platform not in {"tiktok", "reels", "shorts", "all"}:
         target_platform = "all"
     generate_ab_variants = bool(data.get("generate_ab_variants", False))  # P3.5
+    num_clips = max(3, min(10, int(data.get("num_clips", 6))))
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -201,6 +204,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             split_screen,
             target_platform,
             generate_ab_variants=generate_ab_variants,  # P3.5
+            num_clips=num_clips,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -219,7 +223,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 ex=60 * 60 * 24 * 7,
             )
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         logger.info(f"Task {task_id} created and job {job_id} enqueued")
 
@@ -570,7 +574,7 @@ async def get_task_progress_sse(task_id: str, request: Request):
                     break
 
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
     return EventSourceResponse(event_generator())
 
@@ -1158,7 +1162,7 @@ async def cancel_task(
         try:
             await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         await task_service.task_repo.update_task_status(
             db,
@@ -1226,7 +1230,7 @@ async def resume_task(
                 if isinstance(asub, bool):
                     add_subtitles = asub
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         if not source_url or not source_type:
             raise HTTPException(status_code=400, detail="Task source URL is missing")
@@ -1237,7 +1241,7 @@ async def resume_task(
         try:
             await redis_client.delete(f"task_cancel:{task_id}")
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         await task_service.task_repo.update_task_status(
             db,
@@ -1295,4 +1299,45 @@ async def list_dead_letter_tasks():
 
         return {"total": len(items), "tasks": items}
     finally:
-        await redis_client.close()
+        await redis_client.aclose()
+
+
+@router.get("/{task_id}/progress")
+async def stream_task_progress(task_id: str, request: Request):
+    """
+    SSE endpoint for real-time task progress updates.
+    
+    Client usage:
+        const evtSource = new EventSource(`/tasks/${taskId}/progress`);
+        evtSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log(data.progress, data.message);
+        };
+    """
+    config = get_config()
+    redis_client = aioredis.from_url(
+        f"redis://{config.redis_host}:{config.redis_port}",
+        password=config.redis_password,
+        decode_responses=True,
+    )
+
+    async def event_generator():
+        try:
+            # Send initial state from Redis cache
+            tracker = ProgressTracker(redis_client, task_id)
+            initial = await tracker.get()
+            if initial:
+                yield {"data": json.dumps(initial)}
+
+            # Subscribe to real-time updates
+            async for update in ProgressTracker.subscribe_to_progress(redis_client, task_id):
+                yield {"data": json.dumps(update)}
+                # Stop streaming when task completes or errors
+                if update.get("status") in {"completed", "error"}:
+                    break
+        except asyncio.CancelledError:
+            logger.debug(f"SSE stream cancelled for task {task_id}")
+        finally:
+            await redis_client.aclose()
+
+    return EventSourceResponse(event_generator())

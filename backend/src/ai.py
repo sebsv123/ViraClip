@@ -14,7 +14,7 @@ try:
 except ImportError:
     PYDANTIC_AI_AVAILABLE = False
     Agent = None
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator, computed_field
 
 from .config import Config
 
@@ -37,17 +37,17 @@ class ViralityAnalysis(BaseModel):
     hook_score: int = Field(
         description="How strong is the opening hook (0-25)", ge=0, le=25
     )
-    engagement_score: int = Field(
-        description="How engaging/entertaining is the content (0-25)", ge=0, le=25
+    engagement_score: Optional[int] = Field(
+        default=None, description="How engaging/entertaining is the content (0-25)", ge=0, le=25
     )
-    value_score: int = Field(
-        description="Educational/informational value (0-25)", ge=0, le=25
+    value_score: Optional[int] = Field(
+        default=None, description="Educational/informational value (0-25)", ge=0, le=25
     )
     shareability_score: int = Field(
         description="Likelihood of being shared (0-25)", ge=0, le=25
     )
-    total_score: int = Field(
-        description="Combined virality score (0-100)", ge=0, le=100
+    total_score: Optional[int] = Field(
+        default=None, description="Combined virality score (0-100)", ge=0, le=100
     )
     hook_type: Optional[
         Literal["question", "statement", "statistic", "story", "contrast", "none"]
@@ -56,6 +56,49 @@ class ViralityAnalysis(BaseModel):
         description="Type of hook: question, statement, statistic, story, contrast, or none",
     )
     virality_reasoning: str = Field(description="Explanation of the virality score")
+
+    @model_validator(mode="after")
+    def compute_total_score(self) -> "ViralityAnalysis":
+        if self.total_score is None:
+            self.total_score = min(100, (
+                (self.hook_score or 0)
+                + (self.engagement_score or 0)
+                + (self.value_score or 0)
+                + (self.shareability_score or 0)
+            ))
+        return self
+
+
+class _TimestampStr(str):
+    """String subclass that supports float arithmetic for duration calculations."""
+    @staticmethod
+    def _to_secs(v: "_TimestampStr") -> float:
+        try:
+            parts = str(v).strip().split(":")
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            return float(parts[0])
+        except Exception:
+            return 0.0
+
+    def __sub__(self, other):
+        return self._to_secs(self) - self._to_secs(other)  # type: ignore
+
+    def __rsub__(self, other):
+        return self._to_secs(other) - self._to_secs(self)  # type: ignore
+
+    def __float__(self):
+        return self._to_secs(self)
+
+    def __ge__(self, other):
+        if isinstance(other, str):
+            return self._to_secs(self) >= self._to_secs(_TimestampStr(other))
+        return self._to_secs(self) >= other
+
+    def __le__(self, other):
+        if isinstance(other, str):
+            return self._to_secs(self) <= self._to_secs(_TimestampStr(other))
+        return self._to_secs(self) <= other
 
 
 class TranscriptSegment(BaseModel):
@@ -87,6 +130,19 @@ class TranscriptSegment(BaseModel):
         default="Standard viral zoom and captions",
         description="Creative suggestions for editing this specific segment to maximize impact"
     )
+    virality_score: float = Field(
+        default=0.0,
+        description="Composite virality score 0-10 (computed from virality breakdown)"
+    )
+    hook_title: str = Field(
+        default="",
+        description="Short viral-optimized hook title for the segment"
+    )
+
+    @field_validator("start_time", "end_time", mode="after")
+    @classmethod
+    def wrap_as_timestamp_str(cls, v: str) -> _TimestampStr:
+        return _TimestampStr(v)
 
     @field_validator("relevance_score", mode="before")
     @classmethod
@@ -129,10 +185,16 @@ class TranscriptSegment(BaseModel):
                 f"end_time ({self.end_time}) must be > start_time ({self.start_time})"
             )
 
-        # Regla 2: duración mínima 10s (con límite de video_duration)
+        # Populate derived fields
+        if self.virality:
+            self.virality_score = round(self.virality.total_score / 10.0, 2) if self.virality.total_score else 0.0
+        if not self.hook_title and self.reasoning:
+            self.hook_title = self.reasoning[:80]
+
+        # Regla 2: duración mínima 30s (con límite de video_duration)
         # TODO(future): contar cuántas veces se dispara por vídeo/modelo.
         # Si un LLM concreto lo dispara siempre → ajustar el prompt, no el validator.
-        MIN_DURATION = 10.0
+        MIN_DURATION = 45.0
         duration = end - start
         if duration < MIN_DURATION:
             logger.warning(
@@ -251,24 +313,20 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - At emotional peaks that could use supporting imagery
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
-TIMING GUIDELINES - ABSOLUTELY CRITICAL:
-- ⚠️ MINIMUM DURATION: 10 SECONDS - NO EXCEPTIONS
-- ⚠️ If end_time - start_time < 10 seconds, THE SEGMENT WILL BE REJECTED
-- Segments MUST be between 10-45 seconds for optimal engagement
-- Prefer roughly 15-35 seconds when possible (viral sweet spot)
-- Focus on natural content boundaries rather than arbitrary time limits
-- Include enough context for the segment to be understandable
-- Start as late as possible while preserving the hook, and end as early as possible after the payoff
+TIMING RULES — MANDATORY, NON-NEGOTIABLE:
+- RULE 1: Every segment MUST have end_time - start_time >= 45 seconds. No exceptions.
+- RULE 2: If a natural segment is shorter than 45 seconds, extend end_time until the difference is >= 45. Include more of the surrounding context to complete the idea.
+- RULE 3: Maximum segment length is 120 seconds. Let the idea determine the length — never truncate mid-thought to hit an artificial cap. A 90-second revelation is better than a 20-second fragment.
+- RULE 4: You MUST return between 6 and 12 segments. Never return 0 segments.
+- RULE 5: If the transcript seems short or low quality, still return the best available segments (minimum 3).
 
-TIMESTAMP REQUIREMENTS - EXTREMELY IMPORTANT:
-- Use EXACT timestamps as they appear in the transcript
-- Never modify timestamp format (keep MM:SS structure)
-- start_time MUST be LESS THAN end_time (start_time < end_time)
-- ⚠️ CRITICAL: end_time - start_time MUST BE >= 10 SECONDS
-- Example VALID: start_time: "02:25", end_time: "02:37" (12 seconds ✅)
-- Example INVALID: start_time: "02:25", end_time: "02:28" (3 seconds ❌ REJECTED)
-- Look at transcript ranges like [02:25 - 02:45] and ensure 10+ second difference
-- NEVER use the same timestamp for both start_time and end_time
+TIMESTAMP FORMAT REQUIREMENTS:
+- Format MUST be MM:SS (examples: "00:12", "03:45", "12:05")
+- start_time MUST be strictly less than end_time
+- (end_time minutes * 60 + end_time seconds) - (start_time minutes * 60 + start_time seconds) MUST be >= 45
+- VALID example:   start_time="02:10", end_time="03:00"  → 50 seconds ✅
+- INVALID example: start_time="02:10", end_time="02:30"  → 20 seconds ❌ EXTEND end_time to "03:00"
+- INVALID example: start_time="02:10", end_time="02:10"  → 0 seconds ❌ REJECTED
 
 SCORING AND OUTPUT RULES:
 - relevance_score should reflect how well the segment works as a standalone short clip, not just whether the topic is generally important
@@ -286,7 +344,13 @@ Categorize each segment into a viral theme:
 EDITING SUGGESTIONS:
 Provide specific cues like "Zoom in on the surprise", "Add fast cuts here", "Use bright yellow captions".
 
-Find 3-7 compelling segments that would work well as standalone clips. Quality over quantity: choose segments that are accurate, self-contained, have proper time ranges, and score high on virality metrics."""
+Find 6-12 compelling segments of 30-120s each that would work well as standalone clips. Quality over quantity: choose segments that are accurate, self-contained, have proper time ranges, and score high on virality metrics. A complete thought needs as many seconds as it takes.
+
+FINAL CHECKLIST before returning your answer:
+☑ I returned at least 6 segments (mandatory minimum)
+☑ Every segment has end_time - start_time >= 45 seconds
+☑ No two segments have identical start_time and end_time
+☑ All timestamps use MM:SS format and exist in the transcript"""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
@@ -299,7 +363,7 @@ def _get_missing_llm_key_error(model_name: str) -> Optional[str]:
     if provider in {"google", "google-gla"} and not config.google_api_key:
         return (
             "Selected LLM provider is Google, but GOOGLE_API_KEY is not set. "
-            "Set GOOGLE_API_KEY or set LLM to openai:* / anthropic:* / ollama:* with the matching API key."
+            "Set GOOGLE_API_KEY or set LLM to openai:* / anthropic:* / groq:* / ollama:* with the matching API key."
         )
 
     if provider == "openai" and not config.openai_api_key:
@@ -312,6 +376,12 @@ def _get_missing_llm_key_error(model_name: str) -> Optional[str]:
         return (
             "Selected LLM provider is Anthropic, but ANTHROPIC_API_KEY is not set. "
             "Set ANTHROPIC_API_KEY or choose another provider with a matching API key."
+        )
+
+    if provider == "groq" and not config.groq_api_key:
+        return (
+            "Selected LLM provider is Groq, but GROQ_API_KEY is not set. "
+            "Set GROQ_API_KEY or choose another provider with a matching API key."
         )
 
     if provider == "ollama":
@@ -358,22 +428,21 @@ def build_transcript_analysis_prompt(
     is_short_video = video_duration > 0 and video_duration < 90
     
     if is_short_video:
-        timing_instructions = f"""TIMING GUIDELINES FOR SHORT VIDEO ({int(video_duration)}s total):
-- This is already a short-form video (Shorts/TikTok/Reel)
-- Create 1-3 clips maximum from the best moments
-- Clips can be 5-{int(video_duration)} seconds (flexible based on content)
-- For videos under 60s, consider using the ENTIRE video as one clip if it's cohesive
-- MINIMUM segment duration: 5 seconds (not 10)
-- Focus on the most viral/engaging portions
-- It's OK to have just 1 clip if the whole video is one strong moment"""
+        timing_instructions = f"""TIMING RULES FOR SHORT VIDEO ({int(video_duration)}s total) — MANDATORY:
+- RULE 1: Return 1-3 segments (minimum 1, mandatory)
+- RULE 2: Each segment MUST be at least 5 seconds long (end_time - start_time >= 5)
+- RULE 3: For videos under 60s you MAY use the entire video as one clip
+- RULE 4: Still return at least 1 segment even if quality is low
+- VALID:   start_time='00:05', end_time='00:20'  → 15s ✅
+- INVALID: start_time='00:05', end_time='00:08'  → 3s ❌ extend end_time to '00:10'"""
     else:
-        timing_instructions = """TIMING GUIDELINES:
-- Segments MUST be between 10-45 seconds for optimal engagement
-- CRITICAL: start_time MUST be different from end_time (minimum 10 seconds apart)
-- Focus on natural content boundaries rather than arbitrary time limits
-- Include enough context for the segment to be understandable
-- Prefer roughly 15-35 seconds when possible
-- Start as late as possible while preserving the hook, and end as early as possible after the payoff"""
+        timing_instructions = """TIMING RULES — MANDATORY:
+- RULE 1: Every segment MUST have end_time - start_time >= 10 seconds
+- RULE 2: You MUST return between 3 and 7 segments — never 0, never fewer than 3
+- RULE 3: If the best segment is only 8s, extend end_time by 2+ seconds to comply
+- RULE 4: Prefer 15-35 second segments (viral sweet spot)
+- VALID:   start_time='01:30', end_time='01:55'  → 25s ✅
+- INVALID: start_time='01:30', end_time='01:38'  → 8s ❌ must extend end_time to at least '01:40'"""
 
     return f"""You are an expert viral content curator trained by top social media algorithm experts. Your job is to identify the MOST viral-worthy segments from video transcripts.
 
@@ -425,6 +494,7 @@ Follow this workflow:
 4. Select the TOP 3-5 segments with highest total virality scores.
 5. Ensure segments have strong hooks in the first 3 seconds.
 6. Verify each segment has a clear payoff/resolution by the end.
+7. MANDATORY CHECK: verify every selected segment has end_time - start_time >= 10 seconds. If not, extend end_time.
 
 {broll_instruction}
 
@@ -446,9 +516,171 @@ ACCURACY REQUIREMENTS:
 - Do not merge separate non-contiguous moments into one segment.
 - segment.text must reflect only the spoken content inside the selected time range.
 - If a span lacks enough context to stand alone, expand to nearby contiguous lines rather than guessing.
+- If there is a tradeoff between "viral" and "accurate", choose accuracy.
+- Do not reject or penalize a segment simply because of the subject matter.
 
 Transcript:
 {transcript}"""
+
+
+def _ts_to_secs(ts: str) -> float:
+    """Convert MM:SS timestamp string to seconds."""
+    try:
+        parts = ts.strip().split(":")
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except Exception:
+        return 0.0
+
+
+def _secs_to_ts(s: float) -> str:
+    m = int(s) // 60
+    sec = int(s) % 60
+    return f"{m:02d}:{sec:02d}"
+
+
+def _text_based_transcript_analysis(
+    transcript: str, video_duration: float = 0.0, num_segments: int = 5
+) -> TranscriptAnalysis:
+    """
+    Fallback analysis when the LLM is unavailable (rate limit / no API key).
+    Parses timestamped lines from the transcript, groups them into candidate
+    segments, scores them heuristically, and returns the top results.
+    """
+    logger.warning("[FALLBACK] LLM unavailable — using text-based transcript analysis")
+
+    # Parse lines: "[MM:SS - MM:SS] text"
+    line_pattern = re.compile(r"\[(\d{1,2}:\d{2})\s*-\s*(\d{1,2}:\d{2})\]\s*(.*)")
+    parsed: List[Dict[str, Any]] = []
+    for line in transcript.splitlines():
+        m = line_pattern.match(line.strip())
+        if m:
+            start, end, text = m.group(1), m.group(2), m.group(3).strip()
+            if text:
+                parsed.append({"start": start, "end": end, "text": text,
+                                "start_s": _ts_to_secs(start), "end_s": _ts_to_secs(end)})
+
+    if not parsed:
+        # Treat whole transcript as one segment
+        dur = video_duration or 60.0
+        return TranscriptAnalysis(
+            most_relevant_segments=[TranscriptSegment(
+                start_time="00:00", end_time=_secs_to_ts(dur),
+                text=transcript[:500], relevance_score=0.5,
+                reasoning="Full transcript (no timestamps detected)",
+                virality=ViralityAnalysis(hook_score=10, engagement_score=10,
+                                          value_score=10, shareability_score=10,
+                                          virality_reasoning="Fallback heuristic"),
+            )],
+            summary="Auto-generated summary (LLM unavailable)",
+            key_topics=[], broll_opportunities=None, campaign_strategy=None,
+        )
+
+    # Viral keyword weights (Spanish + English)
+    VIRAL_KW: Dict[str, tuple] = {
+        "money":   (["dinero", "ganar", "ingreso", "$", "euros", "pagar", "cobrar", "precio",
+                     "money", "earn", "income", "pay", "cost", "price", "profit"], 4, 3),
+        "shock":   (["increíble", "impresionante", "sorprendente", "nunca", "jamás", "secreto", "verdad",
+                     "incredible", "secret", "amazing", "unbelievable", "mind-blowing", "changed",
+                     "discover", "mind", "blow", "truth", "never", "wow"], 5, 4),
+        "value":   (["cómo", "truco", "consejo", "aprende", "guía", "paso", "how to", "tip", "hack",
+                     "trick", "simple", "results", "learn", "guide", "step", "sharing", "shared",
+                     "how", "what", "why", "strategy", "method"], 4, 3),
+        "emotion": (["amor", "familia", "corazón", "llorar", "reír", "sentir", "emoción",
+                     "believe", "love", "heart", "feel", "moment", "clicked", "discover",
+                     "incredible", "everything", "changed", "incredible"], 3, 4),
+        "numbers": (["%", "millón", "miles", "veces", "años", "días", "número",
+                     "years", "days", "million", "thousands", "times", "people"], 3, 2),
+    }
+
+    def _score_text(text: str) -> ViralityAnalysis:
+        t = text.lower()
+        h, e, v, s = 10, 10, 10, 10
+        for _, (kws, dh, ds) in VIRAL_KW.items():
+            if any(kw in t for kw in kws):
+                h += dh; s += ds
+        if "?" in text: h += 3; e += 2
+        wc = len(text.split())
+        if wc < 8: v -= 3
+        elif wc > 120: e -= 2
+        h = max(0, min(25, h)); e = max(0, min(25, e))
+        v = max(0, min(25, v)); s = max(0, min(25, s))
+        return ViralityAnalysis(hook_score=h, engagement_score=e, value_score=v,
+                                shareability_score=s, virality_reasoning="Heuristic fallback scoring")
+
+    # Build ~30-45s windows by grouping consecutive parsed lines
+    TARGET_DURATION = 35.0
+    MIN_DURATION = 10.0
+    windows: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(parsed):
+        seg_start = parsed[i]["start_s"]
+        j = i
+        while j < len(parsed) and (parsed[j]["end_s"] - seg_start) < TARGET_DURATION:
+            j += 1
+        j = max(j, i + 1)
+        seg_end = parsed[min(j, len(parsed) - 1)]["end_s"]
+        if seg_end - seg_start < MIN_DURATION and j < len(parsed):
+            j += 1
+            seg_end = parsed[min(j, len(parsed) - 1)]["end_s"]
+        combined_text = " ".join(p["text"] for p in parsed[i:j])
+        windows.append({
+            "start": _secs_to_ts(seg_start),
+            "end": _secs_to_ts(max(seg_end, seg_start + MIN_DURATION)),
+            "text": combined_text,
+            "duration": seg_end - seg_start,
+        })
+        i = j
+
+    # Score each window
+    scored = []
+    for w in windows:
+        va = _score_text(w["text"])
+        total = (va.total_score or 0)
+        scored.append((total, w, va))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Build TranscriptSegment objects for the top N unique non-overlapping windows
+    segments: List[TranscriptSegment] = []
+    used_ranges: List[tuple] = []
+    for _, w, va in scored:
+        ws = _ts_to_secs(w["start"]); we = _ts_to_secs(w["end"])
+        # Skip overlapping windows
+        if any(not (we <= us or ws >= ue) for us, ue in used_ranges):
+            continue
+        used_ranges.append((ws, we))
+        segments.append(TranscriptSegment(
+            start_time=w["start"], end_time=w["end"],
+            text=w["text"][:400],
+            relevance_score=min(1.0, (va.total_score or 40) / 100.0),
+            reasoning=f"Selected by text-based heuristic (score {va.total_score})",
+            virality=va,
+        ))
+        if len(segments) >= num_segments:
+            break
+
+    if not segments:
+        # Last resort: first 35s of video
+        end_s = min(35.0, video_duration or 35.0)
+        text_all = " ".join(p["text"] for p in parsed[:10])
+        segments = [TranscriptSegment(
+            start_time="00:00", end_time=_secs_to_ts(end_s),
+            text=text_all[:400], relevance_score=0.4,
+            reasoning="Last-resort segment (first window)",
+            virality=ViralityAnalysis(hook_score=10, engagement_score=10,
+                                      value_score=10, shareability_score=10,
+                                      virality_reasoning="Fallback heuristic"),
+        )]
+
+    logger.info(f"[FALLBACK] Generated {len(segments)} segments via text heuristic")
+    return TranscriptAnalysis(
+        most_relevant_segments=segments,
+        summary="Auto-generated (LLM unavailable — text heuristic used)",
+        key_topics=[],
+        broll_opportunities=None,
+        campaign_strategy=None,
+    )
 
 
 async def get_most_relevant_parts_by_transcript(
@@ -468,19 +700,33 @@ async def get_most_relevant_parts_by_transcript(
     )
 
     try:
+        logger.info(f"[LLM CALL] Initializing agent with model: {config.llm}")
         agent = get_transcript_agent()
-
-        result = await agent.run(
-            build_transcript_analysis_prompt(
-                transcript=transcript, include_broll=include_broll, video_duration=video_duration
-            )
+        
+        prompt = build_transcript_analysis_prompt(
+            transcript=transcript, include_broll=include_broll, video_duration=video_duration
         )
-
+        logger.info(f"[LLM CALL] Prompt built ({len(prompt)} chars), calling LLM...")
+        
+        result = await agent.run(prompt)
+        
+        logger.info(f"[LLM CALL] ✅ LLM responded successfully")
+        
         analysis = result.output
         raw_segments_count = len(analysis.most_relevant_segments)
         logger.info(
-            f"AI analysis raw output: {raw_segments_count} segments found"
+            f"[LLM CALL] AI analysis raw output: {raw_segments_count} segments found"
         )
+        
+        if raw_segments_count == 0:
+            logger.error(
+                f"[LLM CALL] ❌ LLM returned 0 segments! "
+                f"Model: {config.llm}, transcript_length={len(transcript)} chars."
+            )
+            raise ValueError(
+                f"LLM ({config.llm}) returned 0 segments. "
+                f"Check: API key valid, model name correct, transcript not empty."
+            )
 
         # Log details of raw segments before validation
         for i, seg in enumerate(analysis.most_relevant_segments[:5]):  # Log first 5
@@ -529,19 +775,36 @@ async def get_most_relevant_parts_by_transcript(
                     )
                     continue
 
-                # Flexible duration based on video length AND content quality
-                # UPDATED: Allow 5+ second clips for both shorts and long videos
-                # Short impactful clips (5-7s) can be highly viral
-                min_duration = 5
-                
-                logger.debug(f"Segment duration: {duration}s (min required: {min_duration}s)")
-                
-                if duration < min_duration:
+                # Hard minimum: reject only truly degenerate segments (< 3s)
+                # Segments between 3s and 10s are AUTO-EXTENDED to 10s rather than discarded
+                # This fixes Groq/Llama ignoring the 10s rule while still producing usable clips
+                HARD_MIN = 3      # below this → skip (degenerate)
+                TARGET_MIN = 10 if not is_short else 5  # extend to this if below
+
+                if duration < HARD_MIN:
                     rejected_counts["too_short"] += 1
                     logger.warning(
-                        f"Skipping segment too short: {duration}s (min {min_duration}s required for {'short' if is_short else 'long'} video)"
+                        f"Skipping degenerate segment ({duration}s < {HARD_MIN}s): "
+                        f"{segment.start_time} → {segment.end_time}"
                     )
                     continue
+
+                if duration < TARGET_MIN:
+                    # Auto-extend: push end_time forward instead of discarding
+                    extended_end_s = start_seconds + TARGET_MIN
+                    # Clamp to video duration if known
+                    if video_duration > 0:
+                        extended_end_s = min(extended_end_s, int(video_duration) - 1)
+                    ext_m = extended_end_s // 60
+                    ext_s = extended_end_s % 60
+                    new_end = f"{ext_m:02d}:{ext_s:02d}"
+                    logger.info(
+                        f"[AUTO-EXTEND] Segment {segment.start_time}→{segment.end_time} "
+                        f"was {duration}s (< {TARGET_MIN}s). Extended end_time to {new_end}."
+                    )
+                    segment.end_time = new_end
+                    end_seconds = extended_end_s
+                    duration = end_seconds - start_seconds
                 
                 # NEW: Bonus for optimal duration (15-35 seconds is the viral sweet spot)
                 if 15 <= duration <= 35 and segment.virality:
@@ -581,6 +844,20 @@ async def get_most_relevant_parts_by_transcript(
                 )
                 continue
 
+        # Guard: all segments were rejected by validation
+        if not validated_segments:
+            logger.error(
+                f"[VALIDATION] \u274c All {raw_segments_count} segments rejected during validation! "
+                f"Rejection counts: {rejected_counts}. "
+                f"Model: {config.llm}"
+            )
+            raise ValueError(
+                f"LLM ({config.llm}) returned {raw_segments_count} segment(s) but all failed validation "
+                f"(rejected: {rejected_counts}). "
+                f"The model may be ignoring the 10-second minimum duration rule. "
+                f"Try a different model or check the transcript quality."
+            )
+
         # Sort by virality score (primary) then relevance (secondary)
         validated_segments.sort(
             key=lambda x: (
@@ -611,6 +888,18 @@ async def get_most_relevant_parts_by_transcript(
         return final_analysis
 
     except Exception as e:
+        err_str = str(e)
+        # Detect recoverable LLM failures: rate limits, auth errors, bad requests
+        is_recoverable = any(kw in err_str.lower() for kw in (
+            "rate_limit", "rate limit", "429", "400", "401", "403",
+            "timeout", "connection", "unavailable", "exceeded", "quota",
+        ))
+        if is_recoverable:
+            logger.warning(
+                f"[FALLBACK] LLM call failed ({type(e).__name__}: {err_str[:120]}). "
+                "Falling back to text-based analysis."
+            )
+            return _text_based_transcript_analysis(transcript, video_duration)
         logger.error(f"Error in transcript analysis: {e}")
         raise RuntimeError(f"Transcript analysis failed: {str(e)}") from e
 

@@ -14,7 +14,7 @@ async def test_admin_route_requires_admin_user(client, db_session):
 
     response = await client.get(
         "/admin/health",
-        headers={"x-supoclip-user-id": "user-1"},
+        headers={"x-viraclip-user-id": "user-1"},
     )
 
     assert response.status_code == 403

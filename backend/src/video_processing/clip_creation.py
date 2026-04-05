@@ -13,6 +13,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_PLATFORM_VF: dict = {
+    "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
+    "reels":    "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
+    "shorts":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
+    "all":      "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
+    "original": None,
+}
+
 # Global flag for CrossFade availability (set at module load time)
 try:
     from moviepy.video.fx import CrossFadeIn, CrossFadeOut
@@ -162,6 +170,7 @@ def create_optimized_clip(
     segment: Optional[Dict[str, Any]] = None,
     elite_metadata: Optional[Dict[str, Any]] = None,
     gpu_encoding_settings: Optional[Dict[str, Any]] = None,
+    target_platform: str = "tiktok",
 ) -> bool:
     """
     Create a high-quality clip with resource management and effects.
@@ -232,14 +241,20 @@ def create_optimized_clip(
             temp_segment_path = video_path.parent / f"temp_segment_{uuid.uuid4().hex}.mp4"
 
             logger.info(f"🔧 FFmpeg pre-extraction: {duration:.1f}s segment from {video_path.name}")
-            ffmpeg_cmd = [
+            _vf = _PLATFORM_VF.get(target_platform, _PLATFORM_VF["tiktok"])
+            _ffmpeg_base = [
                 "ffmpeg", "-y",
                 "-ss", str(start_time),
                 "-i", str(video_path),
                 "-t", str(duration),
-                "-vf", "scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
+                "-map", "0:v:0",
+                "-map", "0:a?",
+            ]
+            if _vf:
+                _ffmpeg_base += ["-vf", _vf]
+            ffmpeg_cmd = _ffmpeg_base + [
                 "-c:v", "libx264",
-                "-preset", "medium",
+                "-preset", "fast",
                 "-crf", "23",
                 "-c:a", "aac",
                 "-b:a", "128k",
@@ -358,23 +373,12 @@ def create_optimized_clip(
             _fs = get_scaled_font_size(_tmpl.get("font_size", font_size), target_width)
             _font_path = find_font_path(font_family)
 
-            # Subtitles
+            # Subtitles: handled via FFmpeg ASS burn in video_service.py (after face crop).
+            # MoviePy subtitle compositor disabled — it received 0 words because
+            # load_cached_transcript_data is keyed on the original video, not the
+            # pre-extracted segment, so no words were ever found here.
             if add_subtitles:
-                from ..video_utils import load_cached_transcript_data, get_words_in_range
-                transcript_data = load_cached_transcript_data(video_path)
-                relevant_words = []
-                if transcript_data and transcript_data.get("words"):
-                    relevant_words = get_words_in_range(transcript_data, start_time, end_time)
-
-                subtitle_clips = create_assemblyai_subtitles(
-                    relevant_words,
-                    target_width,
-                    target_height,
-                    _tmpl,
-                    str(_font_path) if _font_path else "",
-                )
-                for s_clip in subtitle_clips:
-                    final_stack.append(guard.track(s_clip))
+                logger.debug("Subtitles deferred to FFmpeg ASS burn (post crop stage)")
 
             # Split Screen
             if split_screen:

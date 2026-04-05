@@ -81,12 +81,17 @@ from .viral_effects import (
     get_effects_for_content,
 )
 
-# TEMPORARY: Re-export functions still in video_utils during migration
-from ..video_utils import (
-    get_available_transitions,
-    apply_transition_effect,
-    create_clips_with_transitions,
-)
+# TEMPORARY: Re-export functions still in video_utils during migration.
+# Suppress the module-level DeprecationWarning until these three functions
+# are moved into video_processing sub-modules.
+import warnings as _warnings
+with _warnings.catch_warnings():
+    _warnings.simplefilter("ignore", DeprecationWarning)
+    from ..video_utils import (
+        get_available_transitions,
+        apply_transition_effect,
+        create_clips_with_transitions,
+    )
 
 # Import generate_clip_thumbnail from correct location
 try:
@@ -112,6 +117,8 @@ __all__ = [
     "get_video_transcript",
     "cache_transcript_data",
     "load_cached_transcript_data",
+    "get_redis_transcript_cache",
+    "set_redis_transcript_cache",
     "snap_to_word_boundary",
     "format_transcript_for_analysis",
     # Face detection

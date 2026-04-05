@@ -86,7 +86,7 @@ def analyze_audio_virality(audio_path: str) -> Dict:
     attack_timestamps = (attack_points / sr).tolist()
     
     result = {
-        "tempo_bpm": float(tempo),
+        "tempo_bpm": float(np.asarray(tempo).flat[0]),
         "energy_peaks_timestamps": energy_peaks_timestamps[:20],  # Top 20 peaks
         "dramatic_pauses": len([p for p in pause_durations if p["type"] == "dramatic_pause"]),
         "natural_pauses": len([p for p in pause_durations if p["type"] == "natural_pause"]),
@@ -94,11 +94,11 @@ def analyze_audio_virality(audio_path: str) -> Dict:
         "attack_points": attack_timestamps[:15],  # Sudden volume changes
         "average_energy": float(np.mean(rms)),
         "peak_energy": float(np.max(rms)),
-        "analysis_duration": len(y) / sr
+        "analysis_duration": float(len(y) / sr)
     }
     
     logger.info(f"Audio analysis complete: {len(energy_peaks_timestamps)} energy peaks, "
-                f"{len(pause_durations)} pauses, tempo={tempo:.1f} BPM")
+                f"{len(pause_durations)} pauses, tempo={result['tempo_bpm']:.1f} BPM")
     
     return result
 
@@ -205,6 +205,46 @@ def extract_audio_from_video(video_path: str, output_audio_path: str) -> bool:
     except Exception as e:
         logger.error(f"Failed to extract audio: {e}")
         return False
+
+
+async def measure_snr(video_path: str) -> float:
+    """
+    Estimate Signal-to-Noise Ratio of the primary audio track in dB.
+    Uses FFmpeg volumedetect to get RMS and mean loudness; SNR proxy = mean_volume - noise_floor.
+    Returns 0.0 on any failure (caller treats as "high SNR / skip TTS").
+    """
+    import asyncio, json, subprocess
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", video_path,
+            "-af", "volumedetect",
+            "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        text = stderr.decode("utf-8", errors="replace")
+
+        mean_vol = None
+        max_vol  = None
+        for line in text.splitlines():
+            if "mean_volume" in line:
+                try:
+                    mean_vol = float(line.split(":")[1].strip().replace(" dB", ""))
+                except ValueError:
+                    pass
+            if "max_volume" in line:
+                try:
+                    max_vol = float(line.split(":")[1].strip().replace(" dB", ""))
+                except ValueError:
+                    pass
+
+        if mean_vol is not None and max_vol is not None:
+            snr = max_vol - mean_vol   # higher = cleaner audio
+            return max(0.0, snr)
+    except Exception:
+        pass
+    return 0.0
 
 
 # Example usage for testing

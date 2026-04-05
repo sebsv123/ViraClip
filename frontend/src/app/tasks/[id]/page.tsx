@@ -57,6 +57,13 @@ import {
   BrainCircuit,
   Target,
   MousePointer2,
+  Wand2,
+  Film,
+  Volume2,
+  CheckCircle2,
+  XCircle,
+  Layers,
+  Loader2,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
@@ -103,6 +110,21 @@ interface Clip {
   // V3 Phase 4: Social Intelligence
   strategic_advice?: string | null;
   conversion_tips?: string | null;
+  // B.6: User rating
+  user_rating?: number | null;
+  // Phase 9: Creative Engine
+  creative_enhanced?: boolean;
+  hook_reorder_applied?: boolean;
+  hook_already_optimized?: boolean;
+  hook_text?: string;
+  zoom_punch_applied?: boolean;
+  color_grade_applied?: boolean;
+  sfx_injected?: boolean;
+  loudnorm_applied?: boolean;
+  preset_used?: string;
+  broll_overlays?: number;
+  qa_passed?: boolean;
+  qa_issues?: string[];
 }
 
 interface TaskDetails {
@@ -163,6 +185,7 @@ export default function TaskPage() {
   const [highlightWords, setHighlightWords] = useState("");
   const [exportPreset, setExportPreset] = useState("tiktok");
   const [activeTopicFilter, setActiveTopicFilter] = useState<string | null>(null);
+  const [clipRatings, setClipRatings] = useState<Record<string, number>>({});
   // P3.1: AI refine state
   const [refiningClipId, setRefiningClipId] = useState<string | null>(null);
   const [refineInstruction, setRefineInstruction] = useState("");
@@ -181,8 +204,52 @@ export default function TaskPage() {
     Array<{ id: string; name: string; description: string; animation: string }>
   >([]);
   const hasTriggeredAutoRefresh = useRef(false);
+  const notifiedRef = useRef(false);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  const getStatusBadge = (status: string) => {
+    const map: Record<string, { label: string; className: string }> = {
+      completed: { label: "Completed", className: "bg-green-100 text-green-800 border-green-200" },
+      processing: { label: "Processing", className: "bg-blue-100 text-blue-800 border-blue-200" },
+      queued: { label: "Queued", className: "bg-yellow-100 text-yellow-800 border-yellow-200" },
+      failed: { label: "Failed", className: "bg-red-100 text-red-800 border-red-200" },
+      error: { label: "Error", className: "bg-red-100 text-red-800 border-red-200" },
+    };
+    const s = map[status] ?? { label: status, className: "bg-gray-100 text-gray-800 border-gray-200" };
+    return (
+      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${s.className}`}>{s.label}</span>
+    );
+  };
+
+  const fireCompletionNotification = useCallback((clipCount: number) => {
+    if (notifiedRef.current) return;
+    notifiedRef.current = true;
+    if (typeof window === "undefined") return;
+    if ("Notification" in window && Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("ViraClip — clips ready!", {
+        body: `${clipCount} clip${clipCount !== 1 ? "s" : ""} generated successfully.`,
+        icon: "/favicon.ico",
+      });
+    }
+    document.title = `✅ Done — ViraClip`;
+  }, []);
+
+  const rateClip = async (clipId: string, rating: number) => {
+    setClipRatings((prev) => ({ ...prev, [clipId]: rating }));
+    try {
+      await fetch(`${apiUrl}/clips/${clipId}/rating`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating }),
+      });
+    } catch {
+      setClipRatings((prev) => ({ ...prev, [clipId]: prev[clipId] }));
+    }
+  };
   const taskApiUrl = "/api/tasks";
 
   const buildSupportError = useCallback(async (response: Response, fallbackMessage: string) => {
@@ -314,6 +381,17 @@ export default function TaskPage() {
     void loadTemplates();
   }, [apiUrl]);
 
+  // document.title progress indicator
+  useEffect(() => {
+    const status = task?.status;
+    if (!status || status === "completed" || status === "failed") return;
+    const pct = progress > 0 ? ` ${progress}%` : "";
+    document.title = `⏳${pct} Processing — ViraClip`;
+    return () => {
+      document.title = "ViraClip";
+    };
+  }, [task?.status, progress]);
+
   // SSE effect - real-time progress updates
   useEffect(() => {
     const taskStatus = task?.status;
@@ -333,7 +411,10 @@ export default function TaskPage() {
       setProgressMessage(data.message || "");
 
       if (data.status === "completed") {
-        void fetchTaskStatus().then(() => triggerAutoRefresh());
+        void fetchTaskStatus().then((ok) => {
+          if (ok) fireCompletionNotification(clips.length);
+          triggerAutoRefresh();
+        });
       }
     });
 
@@ -348,7 +429,10 @@ export default function TaskPage() {
         setTask((currentTask) => (currentTask ? { ...currentTask, status: data.status } : currentTask));
 
         if (data.status === "completed") {
-          void fetchTaskStatus().then(() => triggerAutoRefresh());
+          void fetchTaskStatus().then((ok) => {
+            if (ok) fireCompletionNotification(clips.length);
+            triggerAutoRefresh();
+          });
         }
       }
     });
@@ -374,6 +458,7 @@ export default function TaskPage() {
 
       // Refresh task and clips
       await fetchTaskStatus();
+      fireCompletionNotification(clips.length);
       triggerAutoRefresh();
     });
 
@@ -391,7 +476,7 @@ export default function TaskPage() {
       console.log("🔌 Disconnecting SSE");
       eventSource.close();
     };
-  }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh]); // Re-run when task status changes
+  }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh, fireCompletionNotification, clips.length]); // Re-run when task status changes
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -683,197 +768,141 @@ export default function TaskPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-white p-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="mb-6">
-            <Skeleton className="h-8 w-48 mb-2" />
-            <Skeleton className="h-4 w-96" />
+      <div className="min-h-screen bg-[#0a0a0f] text-white flex">
+        <aside className="w-64 bg-[#0a0a0f] border-r border-white/5 min-h-screen flex flex-col">
+          <div className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="relative w-10 h-10">
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
+                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
+                  <Zap className="w-5 h-5 text-cyan-400" />
+                </div>
+              </div>
+              <span className="text-xl font-bold">
+                Vira<span className="text-cyan-400">Clip</span>
+              </span>
+            </div>
           </div>
-          <div className="grid gap-6">
-            {[1, 2, 3].map((i) => (
-              <Card key={i}>
-                <CardContent className="p-6">
-                  <Skeleton className="h-48 w-full mb-4" />
-                  <Skeleton className="h-4 w-full mb-2" />
-                  <Skeleton className="h-4 w-3/4" />
-                </CardContent>
-              </Card>
-            ))}
+        </aside>
+        <main className="flex-1 flex items-center justify-center">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+            <span className="text-gray-400">Loading task details...</span>
           </div>
-        </div>
+        </main>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-white p-4">
-        <div className="max-w-6xl mx-auto">
-          <Alert>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-          <Link href="/" className="mt-4 inline-block">
-            <Button variant="outline">
-              <ArrowLeft className="w-4 h-4" />
-              Back to Home
-            </Button>
-          </Link>
-        </div>
+      <div className="min-h-screen bg-[#0a0a0f] text-white flex">
+        <aside className="w-64 bg-[#0a0a0f] border-r border-white/5 min-h-screen flex flex-col">
+          <div className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="relative w-10 h-10">
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
+                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
+                  <Zap className="w-5 h-5 text-cyan-400" />
+                </div>
+              </div>
+              <span className="text-xl font-bold">
+                Vira<span className="text-cyan-400">Clip</span>
+              </span>
+            </div>
+          </div>
+        </aside>
+        <main className="flex-1 flex items-center justify-center p-8">
+          <div className="text-center">
+            <AlertCircle className="w-16 h-16 text-red-400 mx-auto mb-4" />
+            <p className="text-gray-400 mb-4">{error}</p>
+            <Link href="/list" className="text-cyan-400 hover:underline">
+              Back to My Clips
+            </Link>
+          </div>
+        </main>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-[#0a0a0f] text-white flex">
       {/* Header */}
-      <div className="border-b bg-white">
-        <div className="max-w-6xl mx-auto px-4 py-6">
-          <div className="flex items-center gap-4 mb-4">
-            <Link href="/">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="w-4 h-4" />
-                Back
-              </Button>
-            </Link>
-          </div>
-
+      <header className="sticky top-0 z-40 bg-[#0a0a0f]/80 backdrop-blur-xl border-b border-white/5 px-8 py-4">
+        <div className="flex items-center gap-4">
+          <Link href="/list">
+            <button className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+          </Link>
           {task && (
-            <div>
-              <div className="flex items-center gap-3 mb-2">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3">
                 {isEditing ? (
-                  <div className="flex items-center gap-2 flex-1">
-                    <Input
+                  <>
+                    <input
+                      type="text"
                       value={editedTitle}
                       onChange={(e) => setEditedTitle(e.target.value)}
-                      className="text-2xl font-bold h-auto py-1"
+                      className="flex-1 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-white focus:border-cyan-500/50 focus:outline-none"
                       autoFocus
                     />
-                    <Button size="sm" onClick={handleEditTitle} disabled={!editedTitle.trim()}>
-                      <Check className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
+                    <button
+                      onClick={handleEditTitle}
+                      disabled={!editedTitle.trim()}
+                      className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-50"
+                    >
+                      <Check className="w-5 h-5" />
+                    </button>
+                    <button
                       onClick={() => {
                         setIsEditing(false);
                         setEditedTitle(task.source_title);
                       }}
+                      className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white"
                     >
-                      <X className="w-4 h-4" />
-                    </Button>
-                  </div>
+                      <X className="w-5 h-5" />
+                    </button>
+                  </>
                 ) : (
                   <>
-                    <h1 className={`text-2xl font-bold text-black ${task.status === "processing" || task.status === "queued" ? "shimmer" : ""}`}>
-                      <span className="text-blue-600">ViraClip</span> Studio
+                    <h1 className="text-xl font-bold text-white truncate">
+                      {task.source_title}
                     </h1>
                     <div className="flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
+                      <button
                         onClick={() => {
                           setIsEditing(true);
                           setEditedTitle(task.source_title);
                         }}
+                        className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
                       >
                         <Edit2 className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                      </button>
+                      <button
                         onClick={() => setShowDeleteDialog(true)}
+                        className="p-2 rounded-lg hover:bg-red-500/10 text-red-400 hover:text-red-300 transition-colors"
                       >
                         <Trash2 className="w-4 h-4" />
-                      </Button>
+                      </button>
                     </div>
                   </>
                 )}
               </div>
-              <div className="flex items-center gap-4 text-sm text-gray-600">
-                <Badge variant="outline" className="capitalize">
+              <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
+                <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 capitalize">
                   {task.source_type}
-                </Badge>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="flex items-center gap-1 cursor-default">
-                        <Clock className="w-4 h-4" />
-                        {new Date(task.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {new Date(task.created_at).toLocaleString(undefined, {
-                        year: "numeric",
-                        month: "long",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                        timeZoneName: "short",
-                      })}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                {task.status === "completed" ? (
-                  <span>
-                    {clips.length} {clips.length === 1 ? "clip" : "clips"} generated
-                  </span>
-                ) : task.status === "processing" ? (
-                  <div className="relative group">
-                    <Badge className="bg-blue-100 text-blue-800 cursor-default shimmer">Processing</Badge>
-                    <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md opacity-0 scale-95 transition-all group-hover:opacity-100 group-hover:scale-100 pointer-events-none">
-                      🔍&nbsp;&nbsp;We&apos;re currently processing your video. Check back in a couple minutes.
-                    </div>
-                  </div>
-                ) : task.status === "queued" ? (
-                  <Badge className="bg-yellow-100 text-yellow-800">Queued</Badge>
-                ) : (
-                  <Badge variant="outline" className="capitalize">
-                    {task.status}
-                  </Badge>
-                )}
-                {task.status === "completed" && clips.length > 0 && (
-                  <Link href={`/tasks/${task.id}/edit`}>
-                    <Button size="sm" variant="outline">
-                      <Clapperboard className="w-4 h-4" />
-                      Open Editor
-                    </Button>
-                  </Link>
-                )}
-                {(task.status === "queued" || task.status === "processing") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      await fetch(`${taskApiUrl}/${task.id}/cancel`, {
-                        method: "POST",
-                      });
-                      await fetchTaskStatus();
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                )}
-                {(task.status === "cancelled" || task.status === "error") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      await fetch(`${taskApiUrl}/${task.id}/resume`, {
-                        method: "POST",
-                      });
-                      await fetchTaskStatus();
-                    }}
-                  >
-                    Resume
-                  </Button>
-                )}
+                </span>
+                <span>{new Date(task.created_at).toLocaleDateString()}</span>
+                <span>•</span>
+                <span>{clips.length} clips</span>
+                <span>•</span>
+                {getStatusBadge(task.status)}
               </div>
             </div>
           )}
         </div>
-      </div>
+      </header>
 
       {/* Main Content */}
       <div className="max-w-6xl mx-auto px-4 py-8">
@@ -937,7 +966,7 @@ export default function TaskPage() {
                         Todos ({clips.length})
                       </span>
                       {task.analysis.key_topics.map((topic: string) => {
-                        const matchCount = clips.filter(c =>
+                        const matchCount = clips.filter((c) =>
                           c.text?.toLowerCase().includes(topic.toLowerCase().split(" ")[0])
                         ).length;
                         return (
@@ -950,7 +979,7 @@ export default function TaskPage() {
                                 : "bg-blue-900/40 text-blue-300 border-blue-700/50 hover:bg-blue-900/60"
                               }`}
                           >
-                            {topic}{matchCount > 0 && ` (${matchCount})`}
+                            {topic} {matchCount > 0 && `(${matchCount})`}
                           </span>
                         );
                       })}
@@ -959,7 +988,9 @@ export default function TaskPage() {
                       <p className="text-xs text-zinc-500 mt-2">
                         Mostrando clips relacionados con <span className="text-blue-400">"{activeTopicFilter}"</span>
                         {" · "}
-                        <button onClick={() => setActiveTopicFilter(null)} className="underline hover:text-zinc-300">Ver todos</button>
+                        <button onClick={() => setActiveTopicFilter(null)} className="underline hover:text-zinc-300">
+                          Ver todos
+                        </button>
                       </p>
                     )}
                   </div>
@@ -972,67 +1003,90 @@ export default function TaskPage() {
               <div className="grid gap-6">
                 <p className="text-sm text-neutral-500 text-center">
                   {activeTopicFilter
-                    ? `${clips.filter(c => c.text?.toLowerCase().includes(activeTopicFilter.toLowerCase().split(" ")[0])).length} clip(s) en "${activeTopicFilter}"`
-                    : `${clips.length} clip${clips.length !== 1 ? "s" : ""} ready`
-                  }
+                    ? `${clips.filter((c) =>
+                        c.text?.toLowerCase().includes(activeTopicFilter.toLowerCase().split(" ")[0])
+                      ).length} clip(s) en "${activeTopicFilter}"`
+                    : `${clips.length} clip${clips.length !== 1 ? "s" : ""} ready`}
                 </p>
-                {clips.filter(clip => {
-                  if (!activeTopicFilter) return true;
-                  const keyword = activeTopicFilter.toLowerCase().split(" ")[0];
-                  return clip.text?.toLowerCase().includes(keyword);
-                }).map((clip) => (
-                  <Card key={clip.id} className="overflow-hidden">
-                    <CardContent className="p-0">
-                      <div className="flex flex-col lg:flex-row">
-                        <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                          <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
-                        </div>
-                        <div className="p-6 flex-1">
-                          <div className="flex items-start justify-between mb-4">
-                            <div>
-                              <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                              <div className="flex items-center gap-2 text-sm text-gray-600">
-                                <span>{clip.start_time} - {clip.end_time}</span>
-                                <span>•</span>
-                                <span>{formatDuration(clip.duration)}</span>
+                {clips
+                  .filter((clip) => {
+                    if (!activeTopicFilter) return true;
+                    const keyword = activeTopicFilter.toLowerCase().split(" ")[0];
+                    return clip.text?.toLowerCase().includes(keyword);
+                  })
+                  .map((clip) => (
+                    <Card key={clip.id} className="overflow-hidden">
+                      <CardContent className="p-0">
+                        <div className="flex flex-col lg:flex-row">
+                          <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                            <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                          </div>
+                          <div className="p-6 flex-1">
+                            <div className="flex items-start justify-between mb-4">
+                              <div>
+                                <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
+                                <div className="flex items-center gap-2 text-sm text-gray-600">
+                                  <span>{clip.start_time} - {clip.end_time}</span>
+                                  <span>•</span>
+                                  <span>{formatDuration(clip.duration)}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {clip.virality_score > 0 && (
+                                  <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
+                                    <Zap className="w-3 h-3 mr-1" />
+                                    {clip.virality_score}
+                                  </Badge>
+                                )}
+                                <Badge className={getScoreColor(clip.relevance_score)}>
+                                  <Star className="w-3 h-3 mr-1" />
+                                  {(clip.relevance_score * 100).toFixed(0)}%
+                                </Badge>
                               </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                              {clip.virality_score > 0 && (
-                                <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
-                                  <Zap className="w-3 h-3 mr-1" />
-                                  {clip.virality_score}
-                                </Badge>
-                              )}
-                              <Badge className={getScoreColor(clip.relevance_score)}>
-                                <Star className="w-3 h-3 mr-1" />
-                                {(clip.relevance_score * 100).toFixed(0)}%
-                              </Badge>
+                            {clip.text && (
+                              <div className="mb-4">
+                                <h4 className="font-medium text-black mb-2">Transcript</h4>
+                                <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
+                              </div>
+                            )}
+                            {clip.reasoning && (
+                              <div className="mb-4">
+                                <h4 className="font-medium text-black mb-2">AI Analysis</h4>
+                                <p className="text-sm text-gray-600">{clip.reasoning}</p>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3 flex-wrap">
+                              <div className="flex items-center gap-1" title="Rate this clip">
+                                {[1, 2, 3, 4, 5].map((star) => (
+                                  <button
+                                    key={star}
+                                    onClick={() => rateClip(clip.id, star)}
+                                    className="p-0.5 transition-transform hover:scale-110 focus:outline-none"
+                                    aria-label={`Rate ${star} star${star !== 1 ? "s" : ""}`}
+                                  >
+                                    <Star
+                                      className={`w-5 h-5 ${
+                                        star <= (clipRatings[clip.id] ?? clip.user_rating ?? 0)
+                                          ? "fill-yellow-400 text-yellow-400"
+                                          : "text-gray-300"
+                                      }`}
+                                    />
+                                  </button>
+                                ))}
+                              </div>
+                              <Button size="sm" variant="outline" asChild>
+                                <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
+                                  <Download className="w-4 h-4" />
+                                  Download
+                                </a>
+                              </Button>
                             </div>
                           </div>
-                          {clip.text && (
-                            <div className="mb-4">
-                              <h4 className="font-medium text-black mb-2">Transcript</h4>
-                              <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
-                            </div>
-                          )}
-                          {clip.reasoning && (
-                            <div className="mb-4">
-                              <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                              <p className="text-sm text-gray-600">{clip.reasoning}</p>
-                            </div>
-                          )}
-                          <Button size="sm" variant="outline" asChild>
-                            <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
-                              <Download className="w-4 h-4" />
-                              Download
-                            </a>
-                          </Button>
                         </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
+                      </CardContent>
+                    </Card>
+                  ))}
               </div>
             )}
           </div>
@@ -1195,7 +1249,8 @@ export default function TaskPage() {
                     {/* P2.6: hint about auto platform selection */}
                     {projectCaptionTemplate === "default" && (
                       <p className="text-[10px] text-gray-400 leading-tight">
-                        ✨ Auto-selects per platform: TikTok → Viral Pro / Hormozi, Reels → TikTok / Subtitles, Shorts → Subtitles
+                        ✨ Auto-selects per platform: TikTok → Viral Pro / Hormozi, Reels → TikTok / Subtitles, Shorts →
+                        Subtitles
                       </p>
                     )}
                   </div>
@@ -1278,7 +1333,7 @@ export default function TaskPage() {
                               <Star className="w-3 h-3 mr-1" />
                               {(clip.relevance_score * 100).toFixed(0)}%
                             </Badge>
-                            {/* P2.4: Hook Preview Score badge */}
+                            {/* P2.4: Hook preview score badge */}
                             {clip.hook_preview_score !== undefined && clip.hook_preview_score > 0 && (
                               <Badge
                                 variant="outline"
@@ -1387,6 +1442,65 @@ export default function TaskPage() {
                         </div>
                       )}
 
+                      {/* Phase 9: Creative Engine Panel */}
+                      {clip.creative_enhanced && (
+                        <div className="mb-4 p-4 bg-gradient-to-br from-cyan-950/60 to-purple-950/60 border border-cyan-800/40 rounded-lg">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Wand2 className="w-4 h-4 text-cyan-400" />
+                              <h4 className="font-bold text-sm text-cyan-300 uppercase tracking-wider">Creative Engine</h4>
+                            </div>
+                            {clip.preset_used && (
+                              <span className="text-xs bg-cyan-900/60 text-cyan-300 border border-cyan-700/40 rounded-full px-2 py-0.5 font-mono">
+                                {clip.preset_used}
+                              </span>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.hook_reorder_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Film className="w-3 h-3" />
+                              Hook Flash {clip.hook_reorder_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.zoom_punch_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Layers className="w-3 h-3" />
+                              Zoom Punch {clip.zoom_punch_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.loudnorm_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Volume2 className="w-3 h-3" />
+                              EBU R128 {clip.loudnorm_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.color_grade_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Sparkles className="w-3 h-3" />
+                              Color Grade {clip.color_grade_applied ? "✓" : "—"}
+                            </div>
+                          </div>
+                          {clip.broll_overlays !== undefined && clip.broll_overlays > 0 && (
+                            <div className="text-xs text-purple-300 mb-2">
+                              🎬 {clip.broll_overlays} B-roll overlay{clip.broll_overlays !== 1 ? "s" : ""} injected
+                            </div>
+                          )}
+                          {clip.hook_text && (
+                            <div className="text-xs text-cyan-200 italic mb-2">Hook: &ldquo;{clip.hook_text}&rdquo;</div>
+                          )}
+                          <div className={`flex items-center gap-1.5 text-xs font-medium ${
+                            clip.qa_passed ? "text-emerald-400" : "text-amber-400"
+                          }`}>
+                            {clip.qa_passed
+                              ? <><CheckCircle2 className="w-3.5 h-3.5" /> QA Passed</>
+                              : <><XCircle className="w-3.5 h-3.5" /> QA Issues: {(clip.qa_issues || []).join(", ")}</>
+                            }
+                          </div>
+                        </div>
+                      )}
+
                       {/* ViraClip V3: Viral Intelligence & Tactical Tips */}
                       {(clip.strategic_advice || clip.conversion_tips) && (
                         <div className="mb-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg backdrop-blur-sm">
@@ -1492,6 +1606,25 @@ export default function TaskPage() {
                           )}
                         </div>
                       )}
+
+                      <div className="flex items-center gap-1 mb-3" title="Rate this clip">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button
+                            key={star}
+                            onClick={() => rateClip(clip.id, star)}
+                            className="p-0.5 transition-transform hover:scale-110 focus:outline-none"
+                            aria-label={`Rate ${star} star${star !== 1 ? 's' : ''}`}
+                          >
+                            <Star
+                              className={`w-5 h-5 ${
+                                star <= (clipRatings[clip.id] ?? clip.user_rating ?? 0)
+                                  ? "fill-yellow-400 text-yellow-400"
+                                  : "text-gray-300"
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
 
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" asChild>

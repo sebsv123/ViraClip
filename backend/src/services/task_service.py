@@ -33,6 +33,12 @@ from ..clip_editor import (
 from ..video_processing.utils import parse_timestamp_to_seconds
 from ..utils.video_extraction import extract_segments_fast, cleanup_extracted_segments
 from ..utils.gpu_detection import detect_gpu, get_optimal_render_concurrency
+from ..utils.resource_manager import (
+    detect_hardware_capabilities,
+    get_adaptive_settings,
+    cleanup_temp_files,
+    should_throttle_processing,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +276,7 @@ class TaskService:
         should_cancel: Optional[Callable] = None,
         clip_ready_callback: Optional[Callable] = None,
         generate_ab_variants: bool = False,    # P3.5: also render a B variant per clip
+        num_clips: int = 6,
     ) -> Dict[str, Any]:
         """
         Process a task: download video, analyze, create clips.
@@ -361,6 +368,7 @@ class TaskService:
                     cached_analysis_json=cached_analysis_json,
                     progress_callback=update_progress,
                     should_cancel=should_cancel,
+                    num_clips=num_clips,
                 )
             except Exception as pipeline_error:
                 logger.error(f"[PIPELINE FAILED] Task {task_id}: {type(pipeline_error).__name__}: {pipeline_error}")
@@ -394,7 +402,36 @@ class TaskService:
             # Get segments to render
             segments_to_render = result.get("segments_to_render", [])
             total_clips = len(segments_to_render)
-            clips_output_dir = Path(self.config.temp_dir) / "clips"
+            
+            # CRITICAL VALIDATION: Check if we have segments
+            if total_clips == 0:
+                logger.error(
+                    f"[TASK {task_id}] ❌❌❌ CRITICAL: segments_to_render is EMPTY! "
+                    f"This will cause 'No Clips Generated' error."
+                )
+                logger.error(f"[TASK {task_id}] Pipeline result keys: {list(result.keys())}")
+                logger.error(f"[TASK {task_id}] LLM configured: {self.config.llm}")
+                
+                # Check API key configuration
+                if self.config.llm.startswith("google"):
+                    has_key = bool(self.config.google_api_key)
+                    logger.error(f"[TASK {task_id}] Google API key configured: {has_key}")
+                    if has_key:
+                        key_preview = self.config.google_api_key[:10] + "..." if len(self.config.google_api_key) > 10 else "[too short]"
+                        logger.error(f"[TASK {task_id}] API key preview: {key_preview}")
+                elif self.config.llm.startswith("ollama"):
+                    logger.error(f"[TASK {task_id}] Ollama base URL: {self.config.ollama_base_url}")
+                
+                # Log transcript info if available
+                if result.get("transcript"):
+                    transcript_preview = result["transcript"][:300]
+                    logger.error(f"[TASK {task_id}] Transcript exists ({len(result['transcript'])} chars), preview: {transcript_preview}")
+                else:
+                    logger.error(f"[TASK {task_id}] No transcript in result!")
+            else:
+                logger.info(f"[TASK {task_id}] ✅ {total_clips} segments ready to render")
+            
+            clips_output_dir = Path(self.config.temp_dir) / "clips" / task_id
             clips_output_dir.mkdir(parents=True, exist_ok=True)
 
             clip_ids: List[str] = []
@@ -515,6 +552,7 @@ class TaskService:
                             ),
                             gpu_encoding_settings=gpu_settings,  # Pass GPU settings for fast encoding
                             use_extracted_segment=(extracted_segment_paths[i] is not None),
+                            target_platform=target_platform,
                         )
                     except Exception as clip_error:
                         logger.error(
@@ -523,7 +561,45 @@ class TaskService:
                             exc_info=True
                         )
                         info = None
-                    
+
+                    # ── Phase 9: Creative Engine post-render enhancement ──────────────
+                    # Applies: hook-flash reorder, zoom punch, B-roll overlay,
+                    # audio mastering (EBU R128), QA check, learning-loop manifest.
+                    # All steps are independently guarded — never breaks clip delivery.
+                    if info is not None:
+                        try:
+                            from .creative_pipeline import get_creative_pipeline
+                            _cp = get_creative_pipeline()
+                            creative_meta = await _cp.enhance(
+                                clip_path=Path(info["path"]),
+                                source_video=video_path,
+                                segment=segment,
+                                words=info.pop("words", []) or [],
+                                audio_features=info.pop("audio_features", {}) or {},
+                                task_id=task_id,
+                                clip_index=i,
+                                platform=target_platform or "tiktok",
+                            )
+                            info.update(creative_meta)
+                            logger.info(
+                                "[Clip %d] Phase 9 ✓ — preset=%s qa=%s zoom=%s "
+                                "hook_reorder=%s loudnorm=%s",
+                                i + 1,
+                                creative_meta.get("preset_used"),
+                                creative_meta.get("qa_passed"),
+                                creative_meta.get("zoom_punch_applied"),
+                                creative_meta.get("hook_reorder_applied"),
+                                creative_meta.get("loudnorm_applied"),
+                            )
+                        except Exception as _ce:
+                            logger.warning(
+                                "Phase 9 creative pipeline skipped for clip %d: %s",
+                                i, _ce,
+                            )
+                            info.pop("words", None)
+                            info.pop("audio_features", None)
+                    # ─────────────────────────────────────────────────────────────────
+
                     elapsed = round(perf_counter() - t0, 3)
                     
                     # Update progress as each clip completes (success or failure)
@@ -553,7 +629,53 @@ class TaskService:
             
             segments_temp_dir = Path(self.config.temp_dir) / "segments" / task_id
             segments_temp_dir.mkdir(parents=True, exist_ok=True)
-            
+
+            # Bug B fix: update each segment's end_time to match virality-based
+            # dynamic duration BEFORE extraction so the pre-extracted file has
+            # the correct length (45-120s, not the original LLM 30s).
+            # Also inject _source_video_path so subtitle generation can look up
+            # the AssemblyAI transcript cache keyed on the original video.
+
+            # Fix 3: probe actual video duration so Bug B never overshoots the file end
+            import subprocess as _sp_dur, json as _json_dur
+            _video_dur: Optional[float] = None
+            try:
+                _probe = _sp_dur.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_format", str(video_path)],
+                    capture_output=True, timeout=10
+                )
+                _video_dur = float(
+                    _json_dur.loads(_probe.stdout).get("format", {}).get("duration", 0) or 0
+                )
+                logger.debug(f"[pre-extract] Video duration: {_video_dur:.1f}s")
+            except Exception as _probe_e:
+                logger.warning(f"[pre-extract] Could not probe video duration: {_probe_e}")
+
+            for _seg in segments_to_render:
+                _seg["_source_video_path"] = str(video_path)
+                _vscore = _seg.get("virality_score", 50)
+                if _vscore >= 70:
+                    _tdur = 90.0
+                elif _vscore >= 50:
+                    _tdur = 60.0
+                else:
+                    _tdur = 45.0
+                _tdur = max(45.0, min(120.0, _tdur))
+                _s0 = parse_timestamp_to_seconds(_seg["start_time"])
+                _e0 = parse_timestamp_to_seconds(_seg["end_time"])
+                if (_e0 - _s0) < _tdur:
+                    _new_end = _s0 + _tdur
+                    # Cap at video end to prevent FFmpeg silent truncation
+                    if _video_dur and _new_end > _video_dur - 1.0:
+                        _new_end = max(_s0 + 10.0, _video_dur - 1.0)
+                        logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
+                    _seg["end_time"] = f"{int(_new_end) // 60:02d}:{int(_new_end) % 60:02d}"
+                    logger.debug(
+                        f"  [pre-extract] Segment updated to {_tdur:.0f}s "
+                        f"({_seg['start_time']} → {_seg['end_time']})"
+                    )
+
             extracted_segment_paths = await extract_segments_fast(
                 video_path=video_path,
                 segments=segments_to_render,
@@ -572,14 +694,48 @@ class TaskService:
 
             # Launch all renders concurrently (they run in thread pool workers)
             render_tasks = [_render_one(i, seg) for i, seg in enumerate(segments_to_render)]
-            render_results: List[Tuple[int, Optional[Dict[str, Any]], float]] = await asyncio.gather(*render_tasks)
+            _raw_results = await asyncio.gather(*render_tasks, return_exceptions=True)
+            render_results: List[Tuple[int, Optional[Dict[str, Any]], float]] = []
+            for _ri, _raw in enumerate(_raw_results):
+                if isinstance(_raw, Exception):
+                    logger.error(
+                        f"[Clip {_ri+1}] RENDER FAILED (unhandled): "
+                        f"{type(_raw).__name__}: {_raw}",
+                        exc_info=_raw
+                    )
+                    render_results.append((_ri, None, 0.0))
+                else:
+                    render_results.append(_raw)
 
             # Sort by original index so clip_order is preserved
             render_results.sort(key=lambda r: r[0])
 
+            # ── Explicit per-clip diagnostics ─────────────────────────────────
+            logger.info(f"[RENDER SUMMARY] {total_clips} clips attempted:")
+            for _ri, _rinfo, _relapsed in render_results:
+                _seg = segments_to_render[_ri]
+                _status = "✅ OK" if _rinfo is not None else "❌ FAILED"
+                logger.info(
+                    f"  [Clip {_ri+1}] {_status} in {_relapsed:.1f}s "
+                    f"({_seg.get('start_time')} → {_seg.get('end_time')}, "
+                    f"virality={_seg.get('virality_score', '?')})"
+                )
+            successful_renders = sum(1 for _, info, _ in render_results if info is not None)
+            logger.info(
+                f"[RENDER SUMMARY] {successful_renders}/{total_clips} OK — "
+                f"saving up to {num_clips} clips to DB"
+            )
+            # ──────────────────────────────────────────────────────────────────
+
             # Persist results sequentially (DB ops must be on the event loop thread)
             saved_clips = 0
             for i, clip_info, elapsed in render_results:
+                # Stop once we've saved the requested number of clips.
+                # Extra buffer segments are only used when earlier clips fail.
+                if saved_clips >= num_clips:
+                    logger.debug(f"  Quota reached ({num_clips}), skipping buffer clip {i+1}")
+                    break
+
                 segment = segments_to_render[i]
                 clip_render_times[i + 1] = elapsed
 
@@ -980,7 +1136,7 @@ class TaskService:
                 if isinstance(asub, bool):
                     add_subtitles = asub
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         if not source_url or not source_type:
             raise ValueError("Task source URL is missing; cannot regenerate clips")

@@ -36,6 +36,7 @@ from .api.routes.tasks import router as tasks_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
 from .api.routes.social import router as social_router
+from .api.routes.clips import router as clips_router
 from .services.video_service import VideoService, UPLOAD_URL_PREFIX
 from .services.llm_service import LLMService
 
@@ -98,6 +99,7 @@ app.include_router(tasks_router)
 app.include_router(feedback_router)
 app.include_router(billing_router)
 app.include_router(social_router)
+app.include_router(clips_router)
 
 # Include admin routers
 from .api.routes.admin import router as admin_router

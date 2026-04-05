@@ -19,7 +19,11 @@ def _expected_signature(secret: str, user_id: str, timestamp: str) -> str:
     return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
-def get_signed_user_id(request: Request, config: Config) -> str:
+def get_signed_user_id(request: Request, config=None) -> str:
+    """Extract and verify signed user ID from request headers."""
+    if config is None:
+        config = Config()
+    
     user_id = request.headers.get(USER_ID_HEADER)
     timestamp = request.headers.get(TIMESTAMP_HEADER)
     signature = request.headers.get(SIGNATURE_HEADER)

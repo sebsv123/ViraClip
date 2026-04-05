@@ -2,6 +2,7 @@
 Hook Visual Overlay Service
 Añade texto grande impactante en los primeros 2 segundos para scroll-stop effect
 """
+import asyncio
 import logging
 from typing import Optional, Dict, List
 from dataclasses import dataclass
@@ -10,6 +11,27 @@ import subprocess
 import tempfile
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_bold_font() -> str:
+    """Return a drawtext-ready fontfile= path that works on Linux & Windows."""
+    candidates = [
+        # Linux / Docker (most common)
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+        "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+        # Windows fallback
+        "C:/Windows/Fonts/arialbd.ttf",
+        "C:/Windows/Fonts/Arial Bold.ttf",
+        # macOS fallback
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    ]
+    from pathlib import Path as _P
+    for c in candidates:
+        if _P(c).exists():
+            return c
+    return ""  # empty → FFmpeg uses built-in default font
 
 
 @dataclass
@@ -135,9 +157,11 @@ class HookVisualService:
         escaped_text = hook.text.replace("'", "'\\''")
         
         # Filtro con animación fade-in y zoom
+        _font_path = _resolve_bold_font()
+        _fontfile_part = f"fontfile={_font_path}:" if _font_path else ""
         filter_str = (
             f"drawtext=text='{escaped_text}':"
-            f"fontfile=/Windows/Fonts/arialbd.ttf:"
+            f"{_fontfile_part}"
             f"fontsize={font_size}:"
             f"fontcolor={hook.font_color}:"
             f"borderw={hook.stroke_width}:"
@@ -286,4 +310,3 @@ async def add_hook_overlay_to_clip(
     return await service.add_hook_to_video(video_path, output_path, hook)
 
 
-import asyncio

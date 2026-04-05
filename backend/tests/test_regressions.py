@@ -53,15 +53,15 @@ class TestSegmentValidation:
         duration = _ts(seg.end_time) - _ts(seg.start_time)
         assert duration >= 10.0
 
-    def test_exactly_10s_segment_unchanged(self):
-        """Segment exactly at 10s must not be modified."""
-        seg = _make_segment("01:00", "01:10")
-        assert seg.end_time == "01:10"
+    def test_exactly_45s_segment_unchanged(self):
+        """Segment exactly at 45s (current MIN_DURATION) must not be modified."""
+        seg = _make_segment("01:00", "01:45")
+        assert seg.end_time == "01:45"
 
     def test_longer_segment_unchanged(self):
-        """Segment of 25s must remain untouched."""
-        seg = _make_segment("02:00", "02:25")
-        assert seg.end_time == "02:25"
+        """Segment of 50s (above MIN_DURATION=45s) must remain untouched."""
+        seg = _make_segment("02:00", "02:50")
+        assert seg.end_time == "02:50"
 
     def test_inverted_timestamps_raise(self):
         """end_time <= start_time must raise ValidationError."""
@@ -132,7 +132,7 @@ class TestFfmpegGuard:
     def test_sub_second_duration_raises(self):
         with self._mocks(60.0):
             with pytest.raises(ValueError, match="demasiado corto"):
-                validate_segment_call("fake.mp4", ss=5.0, to=5.5)
+                validate_segment_call("fake.mp4", ss=5.0, to=5.4)
 
     def test_to_exceeds_duration_warns_not_raises(self, caplog):
         """to > source_duration should warn but not raise (FFmpeg truncates)."""

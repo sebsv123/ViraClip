@@ -3,12 +3,14 @@ Video service - handles video processing business logic.
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, Awaitable, cast
+from typing import List, Dict, Any, Optional, Callable, Awaitable, cast, Tuple
 from datetime import datetime
+import asyncio
 import logging
 import json
 import subprocess
 import os
+import tempfile
 
 from ..utils.async_helpers import run_in_thread
 from ..youtube_utils import (
@@ -48,6 +50,16 @@ from ..video_processing.export_profiles import ExportService, Platform, get_ffmp
 from ..video_processing.audio_analysis import analyze_audio_virality, extract_audio_from_video
 from ..video_processing.narrative_cut_engine import NarrativeCutEngine, detect_hesitations
 from ..video_processing.nonlinear_edit_engine import NonLinearEditingEngine
+from ..video_processing.silence_removal import (
+    remove_silences, speed_ramp_silences,
+    SILENCE_THRESHOLD, SILENCE_MODE,
+    build_keep_intervals, MIN_SILENCE_SAVINGS,
+)
+from ..video_processing.audio import denoise_audio, apply_voice_enhancement
+from ..video_processing.editing_pipeline import EditingPipeline
+from ..video_processing.thumbnail_selector import select_best_thumbnail
+from .viral_metadata_service import generate_viral_metadata
+from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
 
 logger = logging.getLogger(__name__)
 # Global config instance for static methods
@@ -128,73 +140,213 @@ class VideoService:
         output_path: str,
         style: str = "viral"
     ) -> str:
-        """Quema subtítulos word-level con colores de confidence en el vídeo."""
-        import subprocess
+        """
+        Quema subtítulos estilo CapCut/TikTok con animación profesional:
+        - 85px bold, shadow + outline grueso
+        - Palabra activa en amarillo (o rojo si is_emphasis=True)
+        - Animación pop-in: escala 80%→100% en 150ms via ASS \\t()
+        - Máx 4 palabras por línea
+        - Sin \\r resets (evita el bug libass con \\fscx + \\r)
+        """
         import asyncio
-        
-        # Generar archivo ASS (mejor que SRT para estilos)
-        ass_path = video_path.replace(".mp4", "_subtitles.ass")
-        
-        # Header ASS
-        ass_header = """[Script Info]
-ScriptType: v4.00+
-PlayResX: 1080
-PlayResY: 1920
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Viral,Arial,48,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,10,10,100,1
-Style: HighConf,Arial,48,&H0000FF00,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,10,10,100,1
-Style: LowConf,Arial,48,&H000000FF,&H000000FF,&H00000000,&H00000000,1,0,0,0,100,100,0,0,1,3,0,2,10,10,100,1
+        if not words:
+            logger.warning("[ASS] No words provided — skipping subtitle burn")
+            return output_path
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
-        
-        # Generar líneas de eventos
-        events = []
-        for i, word in enumerate(words):
-            start = word.get("start", 0)
-            end = word.get("end", start + 0.5)
-            text = word.get("word", "").strip()
-            conf = word.get("confidence", 1.0)
-            is_emphasis = word.get("is_emphasis", False)
-            
-            # Elegir estilo según confidence
-            if is_emphasis or conf < 0.7:
-                style_name = "LowConf"  # Rojo para énfasis/baja confianza
-            elif conf > 0.95:
-                style_name = "HighConf"  # Verde para alta confianza
-            else:
-                style_name = "Viral"  # Blanco normal
-            
-            start_str = _seconds_to_ass_time(start)
-            end_str = _seconds_to_ass_time(end)
-            events.append(f"Dialogue: 0,{start_str},{end_str},{style_name},,0,0,0,,{text}")
-        
-        # Escribir archivo ASS
-        with open(ass_path, "w", encoding="utf-8") as f:
-            f.write(ass_header)
-            f.write("\n".join(events))
-        
-        # FFmpeg: quemar subtítulos
+        ass_path = str(Path(video_path).with_suffix("")) + "_subtitles.ass"
+
+        _fonts_dir = Path(__file__).parent.parent.parent / "fonts"
+        # Prefer THEBOLDFONT (viral/Hormozi style), fall back in order
+        _font_candidates = [
+            ("THEBOLDFONT",         "THEBOLDFONT.ttf"),
+            ("BarlowCondensed-Bold", "BarlowCondensed-Bold.ttf"),
+            ("TikTokSans",          "TikTokSans-Regular.ttf"),
+        ]
+        _fontname = "Arial"
+        for _fn, _ff in _font_candidates:
+            if (_fonts_dir / _ff).exists():
+                _fontname = _fn
+                break
+
+        # ASS colour codes (BBGGRR inline format, no alpha byte)
+        _YELLOW  = "&H00FFFF&"   # active word — yellow
+        _ORANGE  = "&H0066FF&"   # impact word — orange
+        _RED     = "&H0000FF&"   # emphasis word — red
+        _WHITE   = "&HFFFFFF&"   # inactive words — white
+        _OUTLINE = "&H00000000"  # black outline (AABBGGRR)
+        _SHADOW  = "&HA0000000"  # semi-transparent black back box
+
+        # Impact keywords → orange highlight (ES + EN)
+        _IMPACT_WORDS = {
+            "dinero", "money", "gratis", "free", "peligroso", "dangerous",
+            "nuevo", "new", "secreto", "secret", "viral", "increible",
+            "incredible", "importante", "important", "urgente", "urgent",
+            "millones", "millions", "euros", "dolares", "dollars", "error",
+            "hack", "truco", "trick", "boom", "clave", "key", "ahora", "now",
+            "unico", "unique", "gratis", "lanzar", "launch", "exclusivo",
+        }
+
+        # pop-in bounce: 60%→115% in 100ms then settle to 100% by 200ms (MrBeast style)
+        _POPIN = r"{\fscx60\fscy60\t(0,100,\fscx115\fscy115)\t(100,200,\fscx100\fscy100)}"
+
+        ass_header = (
+            "[Script Info]\n"
+            "ScriptType: v4.00+\n"
+            "PlayResX: 1080\n"
+            "PlayResY: 1920\n"
+            "Encoding: UTF-8\n"
+            "\n"
+            "[V4+ Styles]\n"
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+            "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+            "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+            "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+            # Fontsize=105, Bold=1, Outline=8, Shadow=4, Alignment=2 (bottom-center)
+            f"Style: Viral,{_fontname},105,&H0000FFFF,&H00FFFFFF,{_OUTLINE},"
+            f"{_SHADOW},1,0,0,0,100,100,0,0,1,8,4,2,30,30,250,1\n"
+            "\n"
+            "[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+        )
+
+        WORDS_PER_LINE = 3  # max 3 words per line — Hormozi/MrBeast style keeps eye moving
+        events: List[str] = []
+
+        # Build groups of WORDS_PER_LINE
+        groups: List[List[Dict]] = []
+        idx = 0
+        while idx < len(words):
+            groups.append(words[idx: idx + WORDS_PER_LINE])
+            idx += WORDS_PER_LINE
+
+        for group in groups:
+            # Filter out empty word entries
+            valid = [w for w in group if (w.get("word") or "").strip()]
+            if not valid:
+                continue
+
+            for word_idx, current_word in enumerate(valid):
+                w_text = (current_word.get("word") or "").strip().upper()
+                if not w_text:
+                    continue
+
+                w_start = float(current_word.get("start", 0.0))
+                w_end   = float(current_word.get("end",   w_start + 0.4))
+                if w_end <= w_start:
+                    w_end = w_start + 0.4
+
+                is_emph = bool(current_word.get("is_emphasis", False))
+
+                # Build styled line: one \c per word, NO \r resets
+                # (resetting \r also resets \fscx which breaks the pop-in)
+                parts: List[str] = []
+                for j, w in enumerate(valid):
+                    t = (w.get("word") or "").strip().upper()
+                    if not t:
+                        continue
+                    if j == word_idx:
+                        # Active word: red for emphasis, orange for impact keyword, else yellow
+                        if is_emph:
+                            clr = _RED
+                        elif t.lower() in _IMPACT_WORDS:
+                            clr = _ORANGE
+                        else:
+                            clr = _YELLOW
+                        parts.append(f"{{\\c{clr}}}{t}")
+                    else:
+                        parts.append(f"{{\\c{_WHITE}}}{t}")
+
+                if parts:
+                    # Reset colour at end so next group starts clean
+                    line_text = _POPIN + " ".join(parts) + "{\\r}"
+                    events.append(
+                        f"Dialogue: 0,"
+                        f"{VideoService._seconds_to_ass_time(w_start)},"
+                        f"{VideoService._seconds_to_ass_time(w_end)},"
+                        f"Viral,,0,0,0,,{line_text}"
+                    )
+
+        if not events:
+            logger.warning("[ASS] 0 Dialogue events produced — skipping subtitle burn")
+            return output_path
+
+        ass_content = ass_header + "\n".join(events) + "\n"
+        with open(ass_path, "w", encoding="utf-8-sig") as f:
+            f.write(ass_content)
+
+        logger.info(
+            f"[ASS] {len(events)} word events written ({len(words)} words, "
+            f"{WORDS_PER_LINE} per group, pop-in enabled)"
+        )
+
         cmd = [
             "ffmpeg", "-y", "-i", video_path,
-            "-vf", f"ass={ass_path}",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-vf", f"ass={ass_path}:fontsdir=/app/fonts",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "copy",
             "-movflags", "+faststart",
-            output_path
+            output_path,
         ]
-        
+
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
-        await proc.wait()
-        
-        # Limpiar archivo temporal
+        _stdout, _stderr = await proc.communicate()
+
+        if proc.returncode != 0:
+            logger.error(
+                f"[ASS] FFmpeg subtitle burn failed (exit {proc.returncode}): "
+                f"{_stderr.decode()[:600]}"
+            )
+        else:
+            logger.info(f"[ASS] ✅ Subtitles burned into {Path(output_path).name}")
+
         Path(ass_path).unlink(missing_ok=True)
         return output_path
+
+    @staticmethod
+    def _adjust_words_for_cuts(
+        words: List[Dict[str, Any]],
+        keep_intervals: List[Tuple[float, float]],
+    ) -> List[Dict[str, Any]]:
+        """
+        Remap word start/end timestamps to the new timeline produced after
+        silence/jump-cut removal.  Words that fall entirely inside a removed
+        gap are dropped; words that straddle a gap boundary are clamped.
+        """
+        if not keep_intervals:
+            return words
+
+        # Pre-compute cumulative base offset for each kept interval
+        cum: List[Tuple[float, float, float]] = []  # (interval_start, interval_end, new_base)
+        base = 0.0
+        for s, e in keep_intervals:
+            cum.append((s, e, base))
+            base += e - s
+
+        def remap(t: float) -> float:
+            """Map original time t into the post-cut timeline."""
+            for s, e, b in cum:
+                if t <= e:
+                    return b + max(0.0, t - s)
+            # Past the last interval — clamp to end
+            s, e, b = cum[-1]
+            return b + (e - s)
+
+        adjusted: List[Dict[str, Any]] = []
+        for word in words:
+            w_start = float(word.get("start", 0))
+            w_end   = float(word.get("end",   0))
+            # Drop words entirely inside a removed gap
+            in_kept = any(s <= w_start < e for s, e, _ in cum)
+            if not in_kept:
+                continue
+            new_start = remap(w_start)
+            new_end   = remap(w_end)
+            if new_end > new_start:
+                adjusted.append({**word, "start": new_start, "end": new_end})
+        return adjusted
 
     @staticmethod
     async def _crop_to_vertical_9_16(
@@ -258,16 +410,41 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             video_duration: Total video duration in seconds (0 if unknown)
             include_broll: Whether to include B-roll suggestions
         """
-        logger.info(f"Starting AI analysis of transcript (duration={video_duration:.1f}s)")
-        relevant_parts = await get_most_relevant_parts_by_transcript(
-            transcript, 
-            include_broll=include_broll,
-            video_duration=video_duration
-        )
-        logger.info(
-            f"AI analysis complete: {len(relevant_parts.most_relevant_segments)} segments found"
-        )
-        return relevant_parts
+        logger.info(f"[AI ANALYSIS] Starting transcript analysis (duration={video_duration:.1f}s, transcript_length={len(transcript)} chars)")
+        logger.info(f"[AI ANALYSIS] LLM model configured: {Config().llm}")
+        
+        try:
+            relevant_parts = await get_most_relevant_parts_by_transcript(
+                transcript, 
+                include_broll=include_broll,
+                video_duration=video_duration
+            )
+            
+            segments_count = len(relevant_parts.most_relevant_segments)
+            logger.info(
+                f"[AI ANALYSIS] ✅ Complete: {segments_count} segments found"
+            )
+            
+            if segments_count == 0:
+                logger.error(
+                    f"[AI ANALYSIS] ❌ CRITICAL: LLM returned 0 segments! "
+                    f"This will cause 'No Clips Generated' error. "
+                    f"Check: 1) LLM is running, 2) API key is valid, 3) Transcript quality"
+                )
+                logger.error(f"[AI ANALYSIS] Transcript preview (first 500 chars): {transcript[:500]}")
+            else:
+                # Log first segment details for debugging
+                first_seg = relevant_parts.most_relevant_segments[0]
+                if isinstance(first_seg, dict):
+                    logger.info(f"[AI ANALYSIS] First segment: {first_seg.get('start_time')}-{first_seg.get('end_time')}, virality={first_seg.get('virality_score', 'N/A')}")
+                else:
+                    logger.info(f"[AI ANALYSIS] First segment: {first_seg.start_time}-{first_seg.end_time}, virality={getattr(first_seg.virality, 'total_score', 'N/A') if hasattr(first_seg, 'virality') else 'N/A'}")
+            
+            return relevant_parts
+            
+        except Exception as e:
+            logger.error(f"[AI ANALYSIS] ❌ EXCEPTION during transcript analysis: {type(e).__name__}: {e}", exc_info=True)
+            raise
 
     @staticmethod
     async def create_video_clips_parallel(
@@ -441,12 +618,53 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         secondary_video_path: Optional[Path] = None,
         gpu_encoding_settings: Optional[Dict[str, Any]] = None,
         use_extracted_segment: bool = False,
+        target_platform: str = "tiktok",
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
+        # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
+        _broll_prefetch_task = None
+        try:
+            from ..config import get_config as _get_cfg_fa
+            _cfg_fa = _get_cfg_fa()
+            if getattr(_cfg_fa, "broll_enabled", False) and getattr(_cfg_fa, "pexels_api_key", ""):
+                from .pexels_service import prefetch_broll_for_clip as _pfetch
+                _broll_cache_dir = Path(tempfile.gettempdir()) / "viraclip_broll"
+                _broll_theme = segment.get("theme") or "nature"
+                _broll_prefetch_task = asyncio.create_task(
+                    _pfetch(_broll_theme, _cfg_fa.pexels_api_key, _broll_cache_dir)
+                )
+        except Exception as _fa_init_e:
+            logger.debug(f"B-Roll prefetch task init skipped: {_fa_init_e}")
+
         try:
             start_seconds = parse_timestamp_to_seconds(segment["start_time"])
             end_seconds = parse_timestamp_to_seconds(segment["end_time"])
             duration = end_seconds - start_seconds
+
+            # Virality-based dynamic duration then platform cap
+            _vscore_pre = segment.get("virality_score", 50)
+            if _vscore_pre >= 70:
+                _target_dur = 90.0
+            elif _vscore_pre >= 50:
+                _target_dur = 60.0
+            else:
+                _target_dur = 45.0
+            _target_dur = max(45.0, min(120.0, _target_dur))
+            if duration < _target_dur:
+                end_seconds = start_seconds + _target_dur
+                duration = _target_dur
+                logger.info(f"  Dynamic duration: {duration:.0f}s (virality_pre={_vscore_pre})")
+
+            # Platform duration cap (TikTok=60s, Reels=90s, Shorts=60s)
+            _platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
+                             Platform.REELS if target_platform == "reels" else \
+                             Platform.SHORTS if target_platform == "shorts" else \
+                             Platform.UNIVERSAL
+            _export_svc_dur = ExportService()
+            _capped = _export_svc_dur.enforce_clip_duration(duration, _platform_enum)
+            if _capped != duration:
+                end_seconds = start_seconds + _capped
+                duration = _capped
 
             if duration <= 0:
                 logger.warning(
@@ -464,6 +682,24 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     audio_features=None  # Se llenará después
                 )
                 
+                # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+                try:
+                    from .viral_scorer_service import get_viral_scorer
+                    _mlp = get_viral_scorer()
+                    if _mlp.is_available():
+                        _blended = _mlp.blend_with_phi3(
+                            phi3_score=virality_result.total_score,
+                            transcript=segment.get("text", ""),
+                            duration=duration,
+                        )
+                        logger.info(
+                            f"  ↳ MLP blend: Phi3={virality_result.total_score} "
+                            f"→ blended={_blended}"
+                        )
+                        virality_result.total_score = _blended
+                except Exception as _mlp_e:
+                    logger.debug(f"  MLP blend skipped: {_mlp_e}")
+
                 # Actualizar segment con resultados Phi-3
                 segment["virality_score"] = virality_result.total_score
                 segment["phi3_hook_type"] = virality_result.primary_hook_type
@@ -568,70 +804,96 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             clip_path = output_dir / clip_filename
             
             if add_subtitles:
-                logger.info(f"[Clip {clip_index+1}] Step 4: Word-level confidence subtitles...")
+                logger.info(f"[Clip {clip_index+1}] Step 4: Generating subtitles...")
+
+                # ── Priority 1: AssemblyAI transcript cache ──────────────────
+                # The cache is keyed on the ORIGINAL source video, not the
+                # pre-extracted segment.  segment["_source_video_path"] is
+                # injected by task_service.py before the render loop.
                 try:
-                    subtitle_gen = ConfidenceSubtitleGenerator(model_size="base", device="cpu")
-                    
-                    # Re-extraer audio si no existe (fue eliminado en paso 2)
-                    audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
-                    audio_ss2 = 0.0 if use_extracted_segment else start_seconds
-                    from ..video_processing.ffmpeg_guard import validate_segment_call
-                    validate_segment_call(
-                        source_path=str(video_path),
-                        ss=audio_ss2,
-                        to=audio_ss2 + duration,
-                        context=f"clip_{clip_index+1}_audio_step4",
-                    )
-                    cmd_extract = [
-                        "ffmpeg", "-y",
-                        "-ss", str(audio_ss2), "-i", str(video_path),
-                        "-t", str(duration),
-                        "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                        str(audio_temp_path)
-                    ]
-                    subprocess.run(cmd_extract, capture_output=True, timeout=60)
-                    
-                    # Generar subtítulos con colores
-                    if audio_temp_path.exists():
-                        colored_segments = subtitle_gen.transcribe_with_confidence(str(audio_temp_path))
-                        if colored_segments:
-                            logger.info(f"  ✓ {len(colored_segments)} subtitle segments generated")
-                            
-                            # Guardar SRT coloreado
-                            srt_path = output_dir / f"{clip_path.stem}_colored.srt"
-                            subtitle_gen.generate_colored_srt(colored_segments, str(srt_path))
-                            segment["colored_subtitle_path"] = str(srt_path)
-                            
-                            # Extraer palabras con confidence para quemar después
-                            for seg in colored_segments:
-                                for w in seg.words:
+                    from ..video_processing.transcription import load_cached_transcript_data as _load_aai
+                    _orig_video = Path(segment.get("_source_video_path", str(video_path)))
+                    _transcript = _load_aai(_orig_video)
+                    if _transcript and _transcript.get("words"):
+                        _start_ms = start_seconds * 1000.0
+                        _end_ms   = end_seconds   * 1000.0
+                        for _w in _transcript["words"]:
+                            _ws = float(_w.get("start", 0))
+                            _we = float(_w.get("end", _ws + 400))
+                            # Filter strictly: only words whose start is within the segment
+                            # (no clamping — a word before segment_start must not appear)
+                            if _ws < _start_ms or _ws > _end_ms:
+                                continue
+                            words_with_confidence.append({
+                                "word":       (_w.get("text") or "").strip(),
+                                "start":      _ws / 1000.0 - start_seconds,
+                                "end":        _we / 1000.0 - start_seconds,
+                                "confidence": float(_w.get("confidence", 0.9)),
+                                "is_emphasis": float(_w.get("confidence", 0.9)) < 0.80,
+                            })
+                        if words_with_confidence:
+                            logger.info(
+                                f"  ✅ {len(words_with_confidence)} words from AssemblyAI cache"
+                            )
+                except Exception as _aai_e:
+                    logger.warning(f"  AssemblyAI cache lookup failed: {_aai_e}")
+
+                # ── Priority 2: faster-whisper re-transcription (fallback) ──
+                if not words_with_confidence:
+                    try:
+                        subtitle_gen = ConfidenceSubtitleGenerator(model_size="base", device="cpu")
+                        audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
+                        audio_ss2 = 0.0 if use_extracted_segment else start_seconds
+                        cmd_extract = [
+                            "ffmpeg", "-y",
+                            "-ss", str(audio_ss2), "-i", str(video_path),
+                            "-t", str(duration),
+                            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                            str(audio_temp_path),
+                        ]
+                        subprocess.run(cmd_extract, capture_output=True, timeout=60)
+                        if audio_temp_path.exists():
+                            colored_segs = subtitle_gen.transcribe_with_confidence(
+                                str(audio_temp_path)
+                            )
+                            for seg_cs in colored_segs:
+                                for _w in seg_cs.words:
+                                    # faster-whisper word.start/end are ABSOLUTE timestamps
+                                    # in the audio file — do NOT add seg_cs.start
                                     words_with_confidence.append({
-                                        "word": w.text,
-                                        "start": seg.start + (w.start if hasattr(w, 'start') else 0),
-                                        "end": seg.start + (w.end if hasattr(w, 'end') else 0.5),
-                                        "confidence": w.confidence if hasattr(w, 'confidence') else 0.9,
-                                        "is_emphasis": w.is_emphasis if hasattr(w, 'is_emphasis') else False
+                                        "word":       _w.text,
+                                        "start":      getattr(_w, "start", 0) or 0,
+                                        "end":        getattr(_w, "end",   0.5) or 0.5,
+                                        "confidence": getattr(_w, "confidence", 0.9),
+                                        "is_emphasis": getattr(_w, "is_emphasis", False),
                                     })
-                            
-                            # Contar palabras raras resaltadas
-                            rare_count = sum(1 for w in words_with_confidence if w.get("is_emphasis"))
-                            logger.info(f"  ✓ {rare_count} rare/technical terms highlighted")
-                        
-                        # Limpiar audio temporal
-                        audio_temp_path.unlink(missing_ok=True)
-                except Exception as sub_e:
-                    logger.warning(f"  Confidence subtitles generation failed: {sub_e}")
-            
-            # Duración dinámica basada en virality (Capa C)
-            dynamic_duration = duration
-            if virality_result and virality_result.total_score > 80:
-                # Contenido viral fuerte = permitir hasta 55s
-                dynamic_duration = min(55, max(25, duration))
-                logger.info(f"  Viral content ({virality_result.total_score}): extended to {dynamic_duration:.0f}s")
-            elif virality_result and virality_result.total_score < 50:
-                # Contenido débil = recortar a 15s
-                dynamic_duration = min(15, duration)
-                logger.info(f"  Low virality ({virality_result.total_score}): trimmed to {dynamic_duration:.0f}s")
+                            audio_temp_path.unlink(missing_ok=True)
+                            if words_with_confidence:
+                                logger.info(
+                                    f"  ✅ {len(words_with_confidence)} words from Whisper"
+                                )
+                    except Exception as sub_e:
+                        logger.warning(f"  Whisper subtitle generation failed: {sub_e}")
+
+            # Fallback: no transcript cache and no Whisper — build from segment.text.
+            # Emit one entry per word so the ASS karaoke grouper (3 words / line) works
+            # correctly; even spacing is imprecise but still watchable.
+            if not words_with_confidence and segment.get("text"):
+                logger.warning("[SUBTITLE-FALLBACK] No cache / Whisper — building from segment.text")
+                _words_list = [w for w in segment["text"].split() if w.strip()]
+                if _words_list:
+                    _spw = duration / max(1, len(_words_list))  # seconds per word
+                    for _j, _w in enumerate(_words_list):
+                        words_with_confidence.append({
+                            "word":       _w,
+                            "start":      _j * _spw,
+                            "end":        (_j + 1) * _spw,
+                            "confidence": 0.9,
+                            "is_emphasis": False,
+                        })
+                    logger.info(
+                        f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
+                    )
             
             # When using pre-extracted segment, timestamps are relative to segment start (0)
             # Otherwise, use original timestamps from full video
@@ -661,9 +923,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 output_format,
                 split_screen,
                 hook_title,
-                task_id,
                 elite_metadata=elite_metadata,
                 gpu_encoding_settings=gpu_encoding_settings,
+                target_platform=target_platform,
             )
 
             if not success:
@@ -671,8 +933,147 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 return None
 
             output_path = clip_path
-            
-            # Step 4.4: Burn subtitles word-level (quemar subtítulos con confidence colors)
+            _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
+
+            # Step 4.1b: ESRGAN Video Upscaling (Phase 3.3 — GPU only, opt-in)
+            _esrgan_enabled = os.environ.get("ESRGAN_ENABLED", "false").lower() == "true"
+            if _esrgan_enabled:
+                try:
+                    from .upscaling_service import UpscalingService
+                    _esrgan_svc = UpscalingService()
+                    if _esrgan_svc.is_available():
+                        _esrgan_out = output_path.with_name(f"up_{output_path.name}")
+                        _esrgan_res = await _esrgan_svc.upscale(
+                            str(output_path),
+                            scale_factor=int(os.environ.get("ESRGAN_SCALE", "2")),
+                            output_path=str(_esrgan_out),
+                        )
+                        if _esrgan_out.exists():
+                            output_path = _esrgan_out
+                            logger.info(
+                                f"  ✓ ESRGAN: {_esrgan_res.get('original_resolution')} → "
+                                f"{_esrgan_res.get('output_resolution')}"
+                            )
+                except Exception as _esr_e:
+                    logger.debug(f"  ESRGAN skipped: {_esr_e}")
+
+            # Step 4.2: Audio denoising (afftdn — built-in FFmpeg, no model needed)
+            try:
+                _denoise_out = output_path.with_name(f"dn_{output_path.name}")
+                _denoise_ok = await denoise_audio(
+                    str(output_path), str(_denoise_out),
+                    noise_floor_db=float(os.environ.get("DENOISE_NOISE_FLOOR_DB", "-25")),
+                )
+                if _denoise_ok and _denoise_out.exists():
+                    output_path = _denoise_out
+                    logger.info("  ✓ Audio denoised")
+            except Exception as _dn_e:
+                logger.debug(f"  Denoising skipped: {_dn_e}")
+
+            # Step 4.2b: RVC Voice Enhancement (Phase 3.2 — vocal clarity + presence boost)
+            _rvc_enabled = os.environ.get("RVC_ENABLED", "false").lower() == "true"
+            if _rvc_enabled:
+                try:
+                    _rvc_out = output_path.with_name(f"rvc_{output_path.name}")
+                    _rvc_ok = await apply_voice_enhancement(
+                        str(output_path), str(_rvc_out),
+                        model_path=os.environ.get("RVC_MODEL_PATH", ""),
+                    )
+                    if _rvc_ok and _rvc_out.exists():
+                        output_path = _rvc_out
+                        logger.info("  ✓ RVC voice enhancement applied")
+                except Exception as _rvc_e:
+                    logger.debug(f"  RVC skipped: {_rvc_e}")
+
+            # Step 4.2c: TTS Narration — inject AI narrator when audio SNR is low (Phase 3.4)
+            _tts_enabled = os.environ.get("TTS_NARRATION_ENABLED", "false").lower() == "true"
+            if _tts_enabled:
+                try:
+                    from .tts_service import maybe_add_narration
+                    _tts_out = output_path.with_name(f"tts_{output_path.name}")
+                    _tts_ok = await maybe_add_narration(
+                        video_path=output_path,
+                        segment_text=segment.get("text", "") if segment else "",
+                        output_path=_tts_out,
+                        language=os.environ.get("TTS_LANGUAGE", "en"),
+                    )
+                    if _tts_ok and _tts_out.exists():
+                        output_path = _tts_out
+                        logger.info("  ✓ TTS narration injected (low SNR audio)")
+                except Exception as _tts_e:
+                    logger.debug(f"  TTS narration skipped: {_tts_e}")
+
+            # Step 4.2-jc: Silence handling — jump-cut OR speed-ramp based on SILENCE_MODE.
+            # Must happen BEFORE subtitle burn so ASS timestamps stay in sync.
+            if words_with_confidence:
+                try:
+                    _silence_thresh = float(
+                        os.environ.get("SILENCE_THRESHOLD_SECONDS", str(SILENCE_THRESHOLD))
+                    )
+                    _jc_keep, _jc_saved = build_keep_intervals(
+                        words_with_confidence, duration, _silence_thresh
+                    )
+                    if _jc_saved >= MIN_SILENCE_SAVINGS and len(_jc_keep) >= 2:
+                        _jc_path = output_path.with_name(f"jc_{output_path.name}")
+                        if SILENCE_MODE == "ramp":
+                            _jc_ok = await speed_ramp_silences(
+                                str(output_path), str(_jc_path),
+                                words_with_confidence, duration, _silence_thresh,
+                            )
+                        else:
+                            _jc_ok = await remove_silences(
+                                str(output_path), str(_jc_path),
+                                words_with_confidence, duration, _silence_thresh,
+                            )
+                        if _jc_ok and _jc_path.exists():
+                            output_path = _jc_path
+                            words_with_confidence = VideoService._adjust_words_for_cuts(
+                                words_with_confidence, _jc_keep
+                            )
+                            # Compute flash positions in the NEW (post-cut) timeline
+                            # Each flash fires at the cumulative end of previous segment
+                            _flash_ts = []
+                            _cumulative = 0.0
+                            for _fs, _fe in _jc_keep:
+                                if _cumulative > 0.1:
+                                    _flash_ts.append(_cumulative)
+                                _cumulative += (_fe - _fs)
+                            mode_label = "Speed-ramp" if SILENCE_MODE == "ramp" else "Jump cuts"
+                            logger.info(
+                                f"  ✓ {mode_label} applied ({_jc_saved:.1f}s handled), "
+                                f"subtitle timestamps adjusted"
+                            )
+                except Exception as _jc_e:
+                    logger.debug(f"  Silence handling skipped: {_jc_e}")
+
+            # Step 4.3: B-Roll overlay (opt-in via BROLL_ENABLED=true)
+            from ..config import get_config as _get_cfg_broll
+            if _get_cfg_broll().broll_enabled:
+                try:
+                    from .broll_service import BrollService
+                    _broll_svc = BrollService()
+                    _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                    _broll_result = await _broll_svc.process_clip(
+                        video_path=str(output_path),
+                        output_path=str(_broll_out),
+                        segment_text=segment.get("text", ""),
+                        clip_duration=duration,
+                    )
+                    if Path(_broll_result).exists() and _broll_result != str(output_path):
+                        output_path = Path(_broll_result)
+                        logger.info(f"  ✓ B-roll overlay applied")
+                except Exception as _broll_e:
+                    logger.warning(f"  B-roll overlay failed: {_broll_e}")
+
+            # Step 4.9: Crop already handled — create_optimized_clip applies
+            # crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920 via _PLATFORM_VF
+            # during FFmpeg pre-extraction. The output is already 1080×1920.
+            # Re-running face-detection crop on 1080×1920 generates wrong
+            # dimensions and adds black bars — do NOT apply a second crop here.
+
+            # Step 4.4: Burn subtitles word-level — on the jump-cut 1080×1920 video.
+            # Timestamps in words_with_confidence are already remapped to the
+            # post-cut timeline by _adjust_words_for_cuts above.
             if add_subtitles and words_with_confidence:
                 try:
                     logger.info(f"  Burning word-level subtitles ({len(words_with_confidence)} words)...")
@@ -687,47 +1088,88 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         logger.info(f"  ✓ Word-level subtitles burned")
                 except Exception as burn_e:
                     logger.warning(f"  Burning subtitles failed: {burn_e}")
-            
+
             # Step 4.5: Advanced Polish (Auto-centering, Eye Contact)
             if auto_center_face or eye_contact_correction:
                 from .video_polish_service import VideoPolishService
                 polisher = VideoPolishService()
-                
                 if auto_center_face:
                     polished_path = output_path.with_name(f"centered_{output_path.name}")
                     await polisher.auto_center_face(output_path, polished_path)
                     output_path = polished_path
-                
                 if eye_contact_correction:
                     polished_path = output_path.with_name(f"gaze_{output_path.name}")
                     await polisher.apply_eye_contact_correction(output_path, polished_path)
                     output_path = polished_path
 
-            # Step 4.7: Hook Visual Overlay (texto grande primeros 2s)
+            # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
+            # When subtitles are active both layers appear simultaneously (0-2s) causing
+            # a double-text overlap. The karaoke subtitle already serves as the visual hook.
+            if not words_with_confidence:
+                try:
+                    hook_service = HookVisualService()
+                    hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
+                    hooked_path = output_path.with_name(f"hook_{output_path.name}")
+                    await hook_service.add_hook_to_video(
+                        str(output_path),
+                        str(hooked_path),
+                        hook,
+                        subtitle_path=segment.get("colored_subtitle_path")
+                    )
+                    if Path(hooked_path).exists():
+                        output_path = hooked_path
+                        logger.info(f"  ✓ Hook overlay added: {hook.text[:30]}...")
+                except Exception as hook_e:
+                    logger.warning(f"  Hook overlay failed: {hook_e}")
+
+            # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
+            # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
+            # progress bar, loudness normalization (single FFmpeg pass).
             try:
-                hook_service = HookVisualService()
-                hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
-                hooked_path = output_path.with_name(f"hook_{output_path.name}")
-                await hook_service.add_hook_to_video(
-                    str(output_path), 
-                    str(hooked_path), 
-                    hook,
-                    subtitle_path=segment.get("colored_subtitle_path")
+                _ep = EditingPipeline()
+                _ep_out = output_path.with_name(f"ep_{output_path.name}")
+                _ep_segment_text = segment.get("text", "")[:60] if segment else ""
+                _ep_result = await _ep.apply(
+                    video_path=output_path,
+                    words=words_with_confidence,
+                    output_path=_ep_out,
+                    segment_text=_ep_segment_text,
+                    flash_timestamps=_flash_ts if _flash_ts else None,
+                    gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
                 )
-                if Path(hooked_path).exists():
-                    output_path = hooked_path
-                    logger.info(f"  ✓ Hook overlay added: {hook.text[:30]}...")
-            except Exception as hook_e:
-                logger.warning(f"  Hook overlay failed: {hook_e}")
+                if _ep_result == _ep_out and _ep_out.exists():
+                    output_path = _ep_out
+                    logger.info("  ✓ EditingPipeline: color+cine+vignette+zoom+PI+lower-third+progress+loudnorm")
+            except Exception as _ep_e:
+                logger.warning(f"  EditingPipeline failed: {_ep_e}")
+
+            # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
+            if COMFYUI_ENABLED:
+                try:
+                    _cfy = ComfyUIBridge()
+                    _cfy_out = output_path.with_name(f"cfy_{output_path.name}")
+                    _cfy_result = await _cfy.enhance_video(output_path, _cfy_out)
+                    await _cfy.close()
+                    if _cfy_result and _cfy_out.exists():
+                        output_path = _cfy_out
+                        logger.info("  ✓ ComfyUI: GPU upscale (RealESRGAN x2)")
+                except Exception as _cfy_e:
+                    logger.debug(f"  ComfyUI enhance skipped: {_cfy_e}")
 
             # Step 4.8: Sound Design (efectos de sonido virales)
             try:
                 sound_service = SoundDesignService()
+                _emphasis_words = [
+                    {"start": w["start"]}
+                    for w in words_with_confidence
+                    if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
+                ] if words_with_confidence else []
                 virality_segments = [{
                     "start": 0,
                     "end": duration,
                     "hook_type": segment.get("hook_type", "insight_reveal"),
-                    "text": segment.get("text", "")
+                    "text": segment.get("text", ""),
+                    "emphasis_words": _emphasis_words,
                 }]
                 sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
                 if sound_cues:
@@ -743,52 +1185,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             except Exception as sound_e:
                 logger.warning(f"  Sound design failed: {sound_e}")
 
-            # Step 4.9: Face Detection Crop 9:16 (si es vertical)
-            if output_format == "vertical":
-                try:
-                    face_service = FaceDetectionService()
-                    crop_filter = face_service.generate_ffmpeg_crop_filter(str(output_path))
-                    if crop_filter and "crop=" in crop_filter:
-                        cropped_path = output_path.with_name(f"crop_{output_path.name}")
-                        # Aplicar crop con FFmpeg
-                        import subprocess
-                        cmd = [
-                            "ffmpeg", "-y",
-                            "-i", str(output_path),
-                            "-vf", f"{crop_filter},scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2",
-                            "-c:v", "libx264",
-                            "-crf", "23",
-                            "-preset", "fast",
-                            "-c:a", "copy",
-                            str(cropped_path)
-                        ]
-                        subprocess.run(cmd, capture_output=True, timeout=60)
-                        if Path(cropped_path).exists():
-                            output_path = cropped_path
-                            logger.info(f"  ✓ Face-centered 9:16 crop applied")
-                except Exception as crop_e:
-                    logger.warning(f"  Face detection crop failed: {crop_e}")
-                    # Fallback: crop simple centrado sin face detection
-                    try:
-                        logger.info(f"  Applying fallback 9:16 crop (centered)...")
-                        fallback_path = output_path.with_name(f"vertical_{output_path.name}")
-                        await VideoService._crop_to_vertical_9_16(
-                            str(output_path),
-                            str(fallback_path)
-                        )
-                        if Path(fallback_path).exists():
-                            output_path = fallback_path
-                            logger.info(f"  ✓ Fallback 9:16 crop applied")
-                    except Exception as fallback_e:
-                        logger.warning(f"  Fallback crop also failed: {fallback_e}")
-
             # Step 4.10: Export with Platform Profile
             try:
                 platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
                                 Platform.REELS if target_platform == "reels" else \
                                 Platform.SHORTS if target_platform == "shorts" else \
                                 Platform.UNIVERSAL
-                
+
                 export_service = ExportService()
                 profile = export_service.get_profile(platform_enum)
                 
@@ -800,7 +1203,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     burn_subtitles=segment.get("colored_subtitle_path")
                 )
                 import subprocess
-                subprocess.run(cmd, capture_output=True, timeout=120)
+                subprocess.run(cmd, capture_output=True, timeout=300)
                 if Path(final_path).exists():
                     output_path = final_path
                     logger.info(f"  ✓ Exported with {profile.name} profile")
@@ -815,7 +1218,64 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 await translator.dub_clip(output_path, dubbed_path, target_language)
                 output_path = dubbed_path
 
+            try:
+                from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
+                from ..config import get_config as _get_cfg
+                _cfg = _get_cfg()
+                _niche = segment.get("theme") or "general"
+                _music_path = get_background_music_for_niche(_niche, _cfg)
+                if _music_path:
+                    _music_tmp = output_path.with_name(f"music_{output_path.name}")
+                    if _mix_bg(
+                        output_path, _music_tmp,
+                        music_volume=0.12,
+                        ducking_enabled=getattr(_cfg, "music_ducking_enabled", True),
+                        music_path=_music_path,
+                    ):
+                        if _music_tmp.exists():
+                            _music_tmp.replace(output_path)
+                            logger.info(f"  ✓ Background music applied: {_music_path.name}")
+                else:
+                    logger.debug("  No background music tracks found — skipping")
+            except Exception as _music_e:
+                logger.warning(f"  Music mix skipped: {_music_e}")
+
+            # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task started at render launch)
+            if _broll_prefetch_task is not None:
+                try:
+                    from .pexels_service import overlay_broll_on_clip
+                    _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
+                    if _broll_path:
+                        _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                        ok = overlay_broll_on_clip(
+                            output_path, _broll_path, _broll_out,
+                            broll_start=0.3, broll_end=0.6,
+                        )
+                        if ok and _broll_out.exists():
+                            _broll_out.replace(output_path)
+                            logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
+                    else:
+                        logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
+                except asyncio.TimeoutError:
+                    logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
+                    _broll_prefetch_task.cancel()
+                except Exception as _br_e:
+                    logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
+
             logger.info(f"Created clip {clip_index + 1}: {duration:.1f}s")
+
+            # Phase 3.5: Hook slow-motion (opt-in via HOOK_SLOWMO_ENABLED=true)
+            try:
+                from ..video_processing.hook_slowmo import maybe_apply_hook_slowmo
+                _sm_applied = maybe_apply_hook_slowmo(
+                    output_path,
+                    virality_score=segment.get("virality_score", 0),
+                    inplace=True,
+                )
+                if _sm_applied:
+                    logger.info(f"  ↳ Hook slo-mo applied to clip {clip_index + 1}")
+            except Exception as _sm_e:
+                logger.debug(f"  Hook slo-mo skipped: {_sm_e}")
 
             # ── V4 Elite: Visual scoring + Scene rhythm ──────────────────────
             text_virality = segment.get("virality_score", 0)
@@ -850,18 +1310,115 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         "visual_virality": vision_score.visual_virality,
                         "vision_model": vision_score.model_used,
                         "vision_recommendations": vision_score.recommendations,
+                        # Phase 2.4: scene intelligence
+                        "scene_context": vision_score.scene_context,
+                        "boring_frames": vision_score.boring_frames,
+                        "broll_keywords": vision_score.broll_keywords,
                     }
+                    if vision_score.boring_frames:
+                        logger.info(
+                            f"  ↳ Boring frames detected: {vision_score.boring_frames} "
+                            f"→ B-roll injection candidates"
+                        )
+                    if vision_score.broll_keywords:
+                        logger.info(
+                            f"  ↳ B-roll keywords: {vision_score.broll_keywords}"
+                        )
             except Exception as e:
                 logger.debug(f"Vision scoring skipped: {e}")
 
-            # Thumbnail generation (always — fast ffmpeg operation)
+            # Thumbnail: Qwen3-VL quality scoring → pick best among 5 candidate frames
             thumbnail_filename = None
             try:
-                thumbnail_path = output_path.with_suffix(".jpg")
-                if generate_clip_thumbnail(output_path, thumbnail_path, seek_seconds=1.0):
-                    thumbnail_filename = thumbnail_path.name
-            except Exception as e:
-                logger.debug(f"Thumbnail generation failed: {e}")
+                from ..config import get_config
+                cfg = get_config()
+                if getattr(cfg, "vision_analysis_enabled", True):
+                    from .vision_service import score_thumbnail_frame
+                    from ..utils.scene_analysis import extract_representative_frames
+                    import tempfile, shutil
+
+                    # Extract 5 candidate frames
+                    candidates = extract_representative_frames(output_path, n_frames=5)
+                    if candidates:
+                        scored = []
+                        for fp in candidates:
+                            result = await score_thumbnail_frame(fp)
+                            scored.append((result.get("score", 0), fp))
+                        scored.sort(key=lambda x: x[0], reverse=True)
+                        best_score, best_frame = scored[0]
+                        thumb_path = output_path.with_suffix(".jpg")
+                        shutil.copy2(str(best_frame), str(thumb_path))
+                        thumbnail_filename = thumb_path.name
+                        logger.info(
+                            f"  ✓ Qwen3-VL thumbnail selected (score={best_score}): "
+                            f"{thumbnail_filename}"
+                        )
+                        for _, fp in candidates:
+                            try:
+                                fp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                if not thumbnail_filename:
+                    raise RuntimeError("Vision thumbnail skipped — fallback")
+            except Exception:
+                # Fallback: sharpness-based smart thumbnail
+                try:
+                    thumb_path = str(output_path.with_suffix(".jpg"))
+                    result_thumb = await select_best_thumbnail(str(output_path), thumb_path)
+                    if result_thumb and Path(result_thumb).exists():
+                        thumbnail_filename = Path(result_thumb).name
+                        logger.info(f"  ✓ Smart thumbnail selected: {thumbnail_filename}")
+                    else:
+                        thumbnail_path = output_path.with_suffix(".jpg")
+                        if generate_clip_thumbnail(output_path, thumbnail_path, seek_seconds=1.0):
+                            thumbnail_filename = thumbnail_path.name
+                except Exception as e:
+                    logger.debug(f"Thumbnail generation failed: {e}")
+
+            # Viral metadata: LLM-generated hashtags + SEO title
+            viral_meta: dict = {}
+            try:
+                viral_meta = await generate_viral_metadata(
+                    text=segment.get("text", ""),
+                    platform=target_platform,
+                )
+                logger.info(
+                    f"  ✓ Viral metadata: '{viral_meta.get('title', '')}' "
+                    f"({len(viral_meta.get('hashtags', []))} hashtags)"
+                )
+            except Exception as _vm_e:
+                logger.debug(f"  Viral metadata skipped: {_vm_e}")
+
+            # Phase 8.3: LSTM/CNN engagement prediction (drop-off curve)
+            engagement_data: dict = {}
+            try:
+                from .engagement_prediction_service import get_engagement_predictor
+                import asyncio as _asyncio
+                _predictor = get_engagement_predictor()
+                _loop = _asyncio.get_event_loop()
+                _eng = await _loop.run_in_executor(
+                    None,
+                    lambda: _predictor.predict_engagement_curve(
+                        words=words_with_confidence,
+                        audio_features=audio_features,
+                        duration=duration,
+                    ),
+                )
+                engagement_data = {
+                    "engagement_curve":   _eng["curve"],
+                    "drop_off_points":    _eng["drop_off_points"],
+                    "hook_insertion_pts": _eng["hook_points"],
+                    "retention_score":    _eng["retention_score"],
+                    "engagement_method":  _eng["predicted_by"],
+                }
+                logger.info(
+                    f"  ✓ Engagement curve [{_eng['predicted_by']}]: "
+                    f"retention={_eng['retention_score']}% "
+                    f"drop-offs={_eng['drop_off_points']}"
+                )
+            except Exception as _ep_e:
+                logger.debug(f"  Engagement prediction skipped: {_ep_e}")
             # ─────────────────────────────────────────────────────────────────
 
             return {
@@ -881,7 +1438,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "shareability_score": segment.get("shareability_score", 0),
                 "hook_type": segment.get("hook_type"),
                 "social_title": segment.get("suggested_title"),
-                "suggested_hashtags": segment.get("suggested_hashtags", []),
+                "suggested_hashtags": viral_meta.get("hashtags") or segment.get("suggested_hashtags", []),
+                "seo_title":          viral_meta.get("title") or segment.get("suggested_title", ""),
+                "seo_description":    viral_meta.get("description", ""),
                 "face_detected": segment.get("face_detected"),
                 "translated_text": segment.get("translated_text"),
                 "thumbnail_filename": thumbnail_filename,
@@ -891,10 +1450,18 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "scene_count": rhythm_data.get("scene_count"),
                 "loop_potential": rhythm_data.get("can_loop", False),
                 **vision_data,
+                # Phase 8.3: engagement prediction
+                **engagement_data,
+                # Phase 9: Creative Engine — passed to creative_pipeline.enhance()
+                "words": words_with_confidence,
+                "audio_features": audio_features,
             }
         except Exception as e:
             logger.error(f"Error creating clip {clip_index + 1}: {e}")
             return None
+        finally:
+            if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
+                _broll_prefetch_task.cancel()
 
     @staticmethod
     async def apply_single_transition(
@@ -903,14 +1470,65 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         clip_index: int,
         output_dir: Path,
     ) -> Dict[str, Any]:
-        """Return the original clip info.
-
-        Standalone exports intentionally do not depend on adjacent clips.
         """
-        logger.info(
-            "Skipping inter-clip transition for clip %s to preserve standalone exports",
-            clip_index + 1,
-        )
+        Phase 2.3: apply RAFT optical flow (or FFmpeg xfade) transition between
+        the previous clip and the current clip.
+
+        Returns updated clip_info with the transitioned path when successful;
+        returns the original clip_info unchanged on any failure.
+        """
+        current_path = Path(current_clip_info.get("path", ""))
+        prev_path = Path(prev_clip_path) if prev_clip_path else None
+
+        if not prev_path or not prev_path.exists() or not current_path.exists():
+            logger.debug(
+                "[transition] Skipping clip %s — adjacent clip not available",
+                clip_index + 1,
+            )
+            return current_clip_info
+
+        try:
+            from ..video_processing.optical_flow_transitions import (
+                apply_optical_flow_transition,
+                get_transition_capabilities,
+            )
+
+            caps = get_transition_capabilities()
+            if not caps["xfade_available"] and not caps["cv2_available"]:
+                logger.debug("[transition] No transition backend available — skipping")
+                return current_clip_info
+
+            out_name = f"trans_{clip_index:02d}_{current_path.name}"
+            out_path = output_dir / out_name
+
+            import asyncio
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                apply_optical_flow_transition,
+                prev_path,
+                current_path,
+                out_path,
+                0.4,   # transition_duration seconds
+                "auto",
+            )
+
+            if success and out_path.exists():
+                logger.info(
+                    "[transition] %s transition applied for clip %s → %s",
+                    caps["best_mode"].upper(),
+                    clip_index + 1,
+                    out_name,
+                )
+                updated = dict(current_clip_info)
+                updated["path"] = str(out_path)
+                updated["filename"] = out_name
+                updated["transition_applied"] = caps["best_mode"]
+                return updated
+
+        except Exception as e:
+            logger.debug("[transition] Transition failed for clip %s: %s", clip_index + 1, e)
+
         return current_clip_info
 
     @staticmethod
@@ -939,6 +1557,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         cached_analysis_json: Optional[str] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], Awaitable[bool]]] = None,
+        num_clips: int = 6,
     ) -> Dict[str, Any]:
         """
         Complete video processing pipeline.
@@ -1115,16 +1734,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 await cache_manager.set("ai_analysis", video_hash, cache_payload)
                 logger.info(f"[CACHE] Saved AI analysis to smart cache")
 
-            # Step 3.1: Elite Creative Direction (V4)
+            # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
             if progress_callback:
-                await progress_callback(55, "Generating Elite creative plan...", "processing")
-            
-            elite_service = EliteAIService()
-            elite_plan = await elite_service.generate_creative_plan(
-                video_path=video_path,
-                transcript=transcript,
-                duration=file_duration or 0.0
+                await progress_callback(55, "Preparing creative plan...", "processing")
+            from .elite_ai_service import EliteCreativePlan as _EliteCreativePlan
+            elite_plan = _EliteCreativePlan(
+                clips=[], global_vibe="Standard", brand_consistency_plan="Default brand voice",
+                custom_hashtags=[]
             )
+            logger.info("EliteAI: bypassed — using minimal plan (0 clips)")
             
             # Map Elite plans to the segments for metadata propagation
             elite_map = {
@@ -1159,13 +1777,39 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     logger.warning(f"⚠️ Low average virality score ({avg_score:.1f}/100) - segments may not be very viral")
 
             # Prepare B-roll suggestions if requested
-            broll_service = BrollService()
+            # NOTE: BrollService doesn't implement get_broll_for_opportunity - using process_clip instead
             all_broll_suggestions = []
-            if include_broll and relevant_parts.broll_opportunities:
-                for opp in relevant_parts.broll_opportunities:
-                    suggestion = broll_service.get_broll_for_opportunity(opp.model_dump() if hasattr(opp, "model_dump") else opp)
-                    if suggestion:
-                        all_broll_suggestions.append(suggestion)
+            # if include_broll and relevant_parts.broll_opportunities:
+            #     for opp in relevant_parts.broll_opportunities:
+            #         suggestion = broll_service.get_broll_for_opportunity(opp.model_dump() if hasattr(opp, "model_dump") else opp)
+            #         if suggestion:
+            #             all_broll_suggestions.append(suggestion)
+
+            # B.4: YOLO-based B-roll detection (opt-in via BROLL_ENABLED=true)
+            # NOTE: analyze_video_objects and get_broll_for_detected_objects don't exist in BrollService
+            from ..config import get_config as _get_cfg_b4
+            _cfg_b4 = _get_cfg_b4()
+            if False and getattr(_cfg_b4, "broll_enabled", False) and video_path:
+                try:
+                    logger.info("🔍 B.4: Running YOLOv8 object detection for B-roll...")
+                    broll_service = BrollService()
+                    detected_objects = await run_in_thread(
+                        broll_service.analyze_video_objects, video_path
+                    )
+                    if detected_objects:
+                        yolo_broll = await run_in_thread(
+                            broll_service.get_broll_for_detected_objects, detected_objects
+                        )
+                        if yolo_broll:
+                            all_broll_suggestions.append({
+                                "local_path": str(yolo_broll),
+                                "timestamp": 0,
+                                "duration": 5.0,
+                                "context": f"yolo:{','.join(detected_objects[:2])}",
+                            })
+                            logger.info(f"✅ B.4: YOLO B-roll prepared: {yolo_broll.name}")
+                except Exception as _yolo_e:
+                    logger.warning(f"B.4 YOLO B-roll skipped: {_yolo_e}")
 
             # Step 4: Create clips
             if should_cancel and await should_cancel():
@@ -1176,8 +1820,31 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             raw_segments = relevant_parts.most_relevant_segments
             segments_json: List[Dict[str, Any]] = []
+
+            def _enforce_min_duration_dict(seg: Dict[str, Any], min_secs: float = 45.0) -> Dict[str, Any]:
+                """Apply 45s minimum duration to cached dict segments (Pydantic validator skipped for dicts)."""
+                def _ts(ts: str) -> float:
+                    try:
+                        parts = ts.strip().split(":")
+                        return int(parts[0]) * 60 + float(parts[1]) if len(parts) == 2 else float(parts[0])
+                    except Exception:
+                        return 0.0
+                def _fmt(s: float) -> str:
+                    return f"{int(s)//60:02d}:{int(s)%60:02d}"
+                start = _ts(seg.get("start_time", "00:00"))
+                end = _ts(seg.get("end_time", "00:00"))
+                if end - start < min_secs:
+                    new_end = start + min_secs
+                    logger.warning(
+                        f"[CACHE-VALIDATOR] Segment too short ({end-start:.1f}s): "
+                        f"{seg.get('start_time')}→{seg.get('end_time')} — extending to {_fmt(new_end)}"
+                    )
+                    seg = dict(seg, end_time=_fmt(new_end))
+                return seg
+
             for idx, segment in enumerate(raw_segments):
                 if isinstance(segment, dict):
+                    segment = _enforce_min_duration_dict(segment)
                     # Segments from cache arrive as dicts — still apply virality_map
                     v_info = virality_map.get(idx, {})
                     elite_data = elite_map.get((segment.get("start_time"), segment.get("end_time")))
@@ -1236,9 +1903,51 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                         }
                     )
 
-            if processing_mode == "fast":
-                cfg = get_service_config()
-                segments_json = segments_json[: cfg.fast_mode_max_clips]
+            # ── CAUSA 5 guard: pad with synthetic segments if AI returned too few ──
+            if len(segments_json) < num_clips and file_duration and file_duration > 0:
+                needed = (num_clips + 2) - len(segments_json)
+                logger.warning(
+                    f"[SEGMENT-PAD] AI returned only {len(segments_json)} segments "
+                    f"(need {num_clips}). Generating {needed} synthetic fallback segments."
+                )
+                _seg_dur = 45.0
+                _spacing = file_duration / (needed + 1)
+                def _fmt_ts(s: float) -> str:
+                    return f"{int(s) // 60:02d}:{int(s) % 60:02d}"
+                for _pi in range(needed):
+                    _start = max(0.0, _spacing * (_pi + 1) - _seg_dur / 2)
+                    _start = min(_start, max(0.0, file_duration - _seg_dur))
+                    _end = min(_start + _seg_dur, file_duration)
+                    if _end - _start < 10.0:
+                        continue
+                    segments_json.append({
+                        "start_time": _fmt_ts(_start),
+                        "end_time": _fmt_ts(_end),
+                        "text": "",
+                        "relevance_score": 0.5,
+                        "reasoning": "Synthetic fallback segment (AI returned too few)",
+                        "virality_score": 40 + _pi * 5,
+                        "hook_score": 10, "engagement_score": 10,
+                        "value_score": 10, "shareability_score": 10,
+                        "hook_strength": "Low",
+                        "hook_type": "content",
+                        "suggested_title": f"Clip {len(segments_json) + 1}",
+                        "suggested_hashtags": [],
+                        "split_screen": split_screen,
+                        "elite_metadata": None,
+                    })
+                logger.info(
+                    f"[SEGMENT-PAD] Now have {len(segments_json)} segments after padding"
+                )
+            # ── Render a buffer of +2 extra segments so that if 1-2 clips fail to
+            # render the save loop can still fill the requested quota.
+            # The save loop in task_service.py caps successful saves at num_clips.
+            render_buffer = num_clips + 2
+            segments_json = segments_json[:render_buffer]
+            logger.info(
+                f"[PIPELINE] Selected {len(segments_json)} segments for render "
+                f"(quota={num_clips}, buffer={render_buffer})"
+            )
 
             # Step 4.5: Apply hook pattern analysis to enhance virality scoring
             if progress_callback:
@@ -1281,6 +1990,19 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             # Add niche info to segments
             for segment in segments_json:
                 segment["niche_info"] = niche_info
+
+            # CRITICAL VALIDATION before return
+            logger.info(f"[PIPELINE RETURN] Preparing return with {len(segments_json)} segments")
+            if len(segments_json) == 0:
+                logger.error(
+                    f"[PIPELINE RETURN] ❌❌❌ CRITICAL ERROR: segments_json is EMPTY at return! "
+                    f"Task will complete with 0 clips. "
+                    f"raw_segments count was: {len(raw_segments)}, "
+                    f"relevant_parts.most_relevant_segments: {len(relevant_parts.most_relevant_segments) if relevant_parts else 'N/A'}"
+                )
+            else:
+                top_virality = segments_json[0].get("virality_score", 0)
+                logger.info(f"[PIPELINE RETURN] Top segment virality: {top_virality}")
 
             # Record pipeline success metrics
             get_metrics_collector().finish_pipeline(task_id or "unknown", success=True)

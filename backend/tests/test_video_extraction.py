@@ -45,7 +45,7 @@ async def test_extract_segments_fast_success(sample_segments, temp_output_dir, t
         # Mock file existence check
         with patch('pathlib.Path.exists', return_value=True):
             with patch('pathlib.Path.stat') as mock_stat:
-                mock_stat.return_value = MagicMock(st_size=1024 * 1024)  # 1MB file
+                mock_stat.return_value = MagicMock(st_size=1024 * 1024, st_mode=16877)  # 1MB, dir mode
                 
                 results = await extract_segments_fast(
                     video_path=video_path,
@@ -156,7 +156,7 @@ async def test_extract_segments_partial_failure(sample_segments, temp_output_dir
     with patch('src.utils.video_extraction.asyncio.create_subprocess_exec', side_effect=mock_create_subprocess):
         with patch('pathlib.Path.exists', return_value=True):
             with patch('pathlib.Path.stat') as mock_stat:
-                mock_stat.return_value = MagicMock(st_size=1024 * 1024)
+                mock_stat.return_value = MagicMock(st_size=1024 * 1024, st_mode=16877)
                 
                 results = await extract_segments_fast(
                     video_path=video_path,

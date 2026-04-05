@@ -284,7 +284,7 @@ class HealthChecker:
 async def check_redis_connection():
     """Check Redis connectivity."""
     try:
-        import aioredis
+        import redis.asyncio as aioredis
         from ..config import Config
         config = Config()
         
@@ -294,7 +294,7 @@ async def check_redis_connection():
             password=config.redis_password,
         )
         await redis.ping()
-        await redis.close()
+        await redis.aclose()
         return "connected"
     except Exception as e:
         raise Exception(f"Redis check failed: {e}")

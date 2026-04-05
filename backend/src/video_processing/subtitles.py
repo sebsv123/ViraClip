@@ -419,6 +419,8 @@ def create_fade_subtitles(
             continue
 
         group_text = " ".join(w["text"] for w in word_group)
+        if template.get("uppercase", False):
+            group_text = group_text.upper()
         group_start = word_group[0]["start"]
         group_end = word_group[-1]["end"]
         group_duration = group_end - group_start
@@ -518,6 +520,15 @@ def create_assemblyai_subtitles(
     template: Dict,
     font_path: str,
 ) -> List[Any]:
-    """Create subtitles using AssemblyAI word-level timestamps."""
-    # AssemblyAI-style uses static grouping by default
-    return create_static_subtitles(relevant_words, video_width, video_height, template, font_path)
+    """Create subtitles dispatching to the right animation based on template."""
+    animation = template.get("animation", "none")
+    if animation == "karaoke":
+        return create_karaoke_subtitles(relevant_words, video_width, video_height, template, font_path)
+    elif animation == "bounce":
+        return create_bounce_subtitles(relevant_words, video_width, video_height, template, font_path)
+    elif animation == "pop":
+        return create_pop_subtitles(relevant_words, video_width, video_height, template, font_path)
+    elif animation == "fade":
+        return create_fade_subtitles(relevant_words, video_width, video_height, template, font_path)
+    else:
+        return create_static_subtitles(relevant_words, video_width, video_height, template, font_path)

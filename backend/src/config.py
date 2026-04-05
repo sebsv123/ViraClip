@@ -1,4 +1,5 @@
 from dotenv import load_dotenv
+from typing import Optional
 import os
 
 load_dotenv()
@@ -11,6 +12,7 @@ class Config:
         self.openai_api_key = self._get_optional_env("OPENAI_API_KEY")
         self.anthropic_api_key = self._get_optional_env("ANTHROPIC_API_KEY")
         self.google_api_key = self._get_optional_env("GOOGLE_API_KEY")
+        self.groq_api_key = self._get_optional_env("GROQ_API_KEY")
         self.youtube_data_api_key = self._get_optional_env("YOUTUBE_DATA_API_KEY")
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
         self.ollama_api_key = self._get_optional_env("OLLAMA_API_KEY")
@@ -84,7 +86,8 @@ class Config:
         self.discord_feedback_webhook_url = self._get_optional_env("DISCORD_FEEDBACK_WEBHOOK_URL")
         self.discord_sales_webhook_url = self._get_optional_env("DISCORD_SALES_WEBHOOK_URL")
         self.default_processing_mode = os.getenv("DEFAULT_PROCESSING_MODE", "fast")
-        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "4"))
+        self.fast_mode_max_clips = int(os.getenv("FAST_MODE_MAX_CLIPS", "6"))
+        self.max_elite_clips = int(os.getenv("MAX_ELITE_CLIPS", "6"))
         self.fast_mode_transcript_model = os.getenv(
             "FAST_MODE_TRANSCRIPT_MODEL", "nano"
         )
@@ -93,6 +96,30 @@ class Config:
         # auto = detect GPU and use optimal value (2-4)
         # 2/3/4/6/8 = manual override
         self.render_concurrency = os.getenv("RENDER_CONCURRENCY", "auto")
+        self.pixabay_api_key = os.getenv("PIXABAY_API_KEY", "")
+        self.pexels_api_key = os.getenv("PEXELS_API_KEY", "")
+        self.broll_enabled = self._get_bool_env("BROLL_ENABLED", False)
+        self.sam2_enabled = self._get_bool_env("SAM2_ENABLED", False)
+
+        # Rust sidecar agent
+        self.rust_agent_url = os.getenv("RUST_AGENT_URL", "http://rust-agent:8001")
+        self.rust_agent_enabled = self._get_bool_env("RUST_AGENT_ENABLED", False)
+
+        # LLM optimization & dataset collection
+        self.dataset_dir = os.getenv("DATASET_DIR", "/app/datasets")
+        self.llm_routing_enabled = self._get_bool_env("LLM_ROUTING_ENABLED", False)
+        self.dspy_optimized_prompt_path = os.getenv(
+            "DSPY_OPTIMIZED_PROMPT_PATH", "/app/datasets/dspy_optimized_prompt.txt"
+        )
+
+        # Feature flags — all off by default, opt-in via env
+        self.admin_enabled = self._get_bool_env("ADMIN_ENABLED", False)
+        self.feedback_enabled = self._get_bool_env("FEEDBACK_ENABLED", False)
+        self.notifications_enabled = self._get_bool_env("NOTIFICATIONS_ENABLED", False)
+        self.music_ducking_enabled = self._get_bool_env("MUSIC_DUCKING_ENABLED", True)
+
+        # Admin JWT auth
+        self.admin_secret = os.getenv("ADMIN_SECRET", "")
 
     @staticmethod
     def _get_optional_env(name: str):

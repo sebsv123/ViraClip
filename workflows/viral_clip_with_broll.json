@@ -1,0 +1,159 @@
+{
+  "last_node_id": 20,
+  "last_link_id": 19,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "ViraClipWhisperNode",
+      "pos": [100, 100],
+      "size": [320, 200],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {"name": "video_path", "type": "STRING", "link": null, "widget": {"name": "video_path", "value": ""}},
+        {"name": "model_size", "type": ["tiny", "base", "small", "medium", "large-v3"], "widget": {"name": "model_size", "value": "large-v3"}},
+        {"name": "device", "type": ["cpu", "cuda"], "widget": {"name": "device", "value": "cpu"}},
+        {"name": "compute_type", "type": ["int8", "float16", "float32"], "widget": {"name": "compute_type", "value": "int8"}},
+        {"name": "language", "type": "STRING", "widget": {"name": "language", "value": "auto"}},
+        {"name": "chunk_length", "type": "INT", "widget": {"name": "chunk_length", "value": 30}}
+      ],
+      "outputs": [
+        {"name": "transcription", "type": "STRING", "links": [2, 5, 8]},
+        {"name": "virality_scores", "type": "FLOAT_LIST", "links": []},
+        {"name": "segments", "type": "JSON", "links": [3]}
+      ],
+      "widgets_values": ["", "large-v3", "cpu", "int8", "auto", 30]
+    },
+    {
+      "id": 2,
+      "type": "ViraClipYOLONode",
+      "pos": [100, 400],
+      "size": [320, 160],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [
+        {"name": "video_path", "type": "STRING", "link": null, "widget": {"name": "video_path", "value": ""}},
+        {"name": "model_size", "type": ["yolov10n", "yolov10s", "yolov10m"], "widget": {"name": "model_size", "value": "yolov10n"}},
+        {"name": "max_frames", "type": "INT", "widget": {"name": "max_frames", "value": 6}},
+        {"name": "conf_threshold", "type": "FLOAT", "widget": {"name": "conf_threshold", "value": 0.35}}
+      ],
+      "outputs": [
+        {"name": "objects", "type": "STRING_LIST", "links": []},
+        {"name": "detection_data", "type": "JSON", "links": [9]}
+      ],
+      "widgets_values": ["", "yolov10n", 6, 0.35]
+    },
+    {
+      "id": 3,
+      "type": "ViraClipSilenceRemovalNode",
+      "pos": [500, 100],
+      "size": [320, 220],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {"name": "video_path", "type": "STRING", "link": null, "widget": {"name": "video_path", "value": ""}},
+        {"name": "segments_json", "type": "JSON", "link": 3},
+        {"name": "silence_threshold", "type": "FLOAT", "widget": {"name": "silence_threshold", "value": 0.4}},
+        {"name": "filler_words", "type": "STRING", "widget": {"name": "filler_words", "value": "um,uh,er,like,basically,literally"}},
+        {"name": "output_suffix", "type": "STRING", "widget": {"name": "output_suffix", "value": "_jumpcut"}}
+      ],
+      "outputs": [
+        {"name": "output_video", "type": "STRING", "links": [4, 10, 11]},
+        {"name": "removed_segments", "type": "JSON", "links": []}
+      ],
+      "widgets_values": ["", null, 0.4, "um,uh,er,like,basically,literally", "_jumpcut"]
+    },
+    {
+      "id": 4,
+      "type": "ViraClipMetadataNode",
+      "pos": [500, 450],
+      "size": [320, 180],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {"name": "transcription", "type": "STRING", "link": 2},
+        {"name": "platform", "type": ["tiktok", "reels", "shorts", "universal"], "widget": {"name": "platform", "value": "tiktok"}},
+        {"name": "llm_provider", "type": ["ollama", "openai", "groq"], "widget": {"name": "llm_provider", "value": "ollama"}},
+        {"name": "custom_prompt", "type": "STRING", "widget": {"name": "custom_prompt", "value": "Generate viral metadata with trending hashtags for TikTok. Focus on visual keywords detected."}}
+      ],
+      "outputs": [
+        {"name": "title", "type": "STRING", "links": []},
+        {"name": "description", "type": "STRING", "links": []},
+        {"name": "hashtags", "type": "STRING_LIST", "links": [12]},
+        {"name": "metadata_json", "type": "JSON", "links": []}
+      ],
+      "widgets_values": [null, "tiktok", "ollama", "Generate viral metadata with trending hashtags for TikTok. Focus on visual keywords detected."]
+    },
+    {
+      "id": 5,
+      "type": "ViraClipThumbnailNode",
+      "pos": [900, 100],
+      "size": [320, 160],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {"name": "video_path", "type": "STRING", "link": 4, "widget": {"name": "video_path", "value": ""}},
+        {"name": "n_candidates", "type": "INT", "widget": {"name": "n_candidates", "value": 8}},
+        {"name": "face_bonus", "type": "FLOAT", "widget": {"name": "face_bonus", "value": 50.0}},
+        {"name": "output_name", "type": "STRING", "widget": {"name": "output_name", "value": "thumbnail.jpg"}}
+      ],
+      "outputs": [
+        {"name": "thumbnail_path", "type": "STRING", "links": []},
+        {"name": "frame_scores", "type": "JSON", "links": []}
+      ],
+      "widgets_values": [null, 8, 50.0, "thumbnail.jpg"]
+    },
+    {
+      "id": 6,
+      "type": "Note",
+      "pos": [100, 600],
+      "size": [300, 120],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "widgets_values": ["B-ROLL KEYWORDS:\n- YOLO detects objects → keywords\n- Combined with transcript keywords\n- Search Pexels/Pixabay API\n- Overlay at silence moments"]
+    },
+    {
+      "id": 7,
+      "type": "Note",
+      "pos": [1300, 200],
+      "size": [250, 100],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "widgets_values": ["OUTPUTS:\n1. Jump-cut video\n2. Thumbnail (face-focused)\n3. SEO metadata\n4. Hashtags (30 for TikTok)\n5. B-roll keywords"]
+    }
+  ],
+  "links": [
+    [1, 0, 3, 1, "JSON"],
+    [1, 0, 4, 0, "STRING"],
+    [3, 0, 5, 0, "STRING"],
+    [3, 0, 7, 0, "STRING"],
+    [2, 1, 4, 3, "JSON"],
+    [4, 2, 7, 1, "STRING_LIST"]
+  ],
+  "groups": [
+    {
+      "title": "ViraClip Pipeline with B-Roll",
+      "bounding": [50, 50, 1500, 600],
+      "color": "#3f789e"
+    }
+  ],
+  "config": {},
+  "extra": {
+    "workspace_version": "1.0.0",
+    "viraclip_version": "1.0.0",
+    "description": "ViraClip pipeline with YOLO object detection for contextual B-roll keywords. Extended version of basic workflow.",
+    "features": ["whisper", "silence_removal", "metadata", "thumbnail", "yolo_detection", "broll_keywords"]
+  },
+  "version": 0.4
+}

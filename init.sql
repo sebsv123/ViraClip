@@ -120,6 +120,9 @@ CREATE TABLE generated_clips (
     -- Preview scoring
     hook_preview_score  FLOAT,
 
+    -- B.6: User rating (1-5 stars)
+    user_rating         SMALLINT CHECK (user_rating >= 1 AND user_rating <= 5),
+
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

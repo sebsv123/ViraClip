@@ -80,8 +80,12 @@ class VideoPolishService:
                 out = cv2.VideoWriter(str(output_path), fourcc, fps, (target_w, target_h))
 
             if not out.isOpened():
-                logger.error(f"Failed to open video writer for {output_path}")
+                logger.error(f"Failed to open video writer for {output_path} - codec not available")
                 cap.release()
+                # Fallback: copy original file
+                import shutil
+                shutil.copy(input_path, output_path)
+                logger.info(f"Fallback: copied original to {output_path}")
                 return False
 
             # Smoothed face position tracking — exponential moving average to eliminate

@@ -118,7 +118,7 @@ async def test_cache_invalidate_pattern(cache, mock_redis):
         for key in [b"cache:test:1", b"cache:test:2", b"cache:test:3"]:
             yield key
     
-    mock_redis.scan_iter.return_value = mock_scan()
+    mock_redis.scan_iter = MagicMock(return_value=mock_scan())
     mock_redis.delete = AsyncMock(return_value=3)
     
     deleted = await cache.invalidate_pattern("cache:test:*")
@@ -150,7 +150,7 @@ async def test_cache_get_metrics(cache, mock_redis):
         ]:
             yield key
     
-    mock_redis.scan_iter.return_value = mock_scan()
+    mock_redis.scan_iter = MagicMock(return_value=mock_scan())
     mock_redis.get = AsyncMock(side_effect=[b"100", b"10", b"50"])
     
     metrics = await cache.get_metrics()
