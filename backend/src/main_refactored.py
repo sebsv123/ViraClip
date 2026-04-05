@@ -228,6 +228,8 @@ def create_app(
     from .api.routes.genai import router as genai_router
     from .api.routes.livestream import router as livestream_router
     from .api.routes.multilanguage import router as multilanguage_router
+    from .api.routes.forensic import router as forensic_router
+    from .api.routes.multi_angle import router as multi_angle_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -273,6 +275,8 @@ def create_app(
     app.include_router(genai_router)        # NEW: Generative AI thumbnails/backgrounds/text-effects
     app.include_router(livestream_router)   # NEW: Live stream monitoring + real-time clip extraction
     app.include_router(multilanguage_router)# NEW: Language detection + subtitle/font config (15 langs)
+    app.include_router(forensic_router)     # NEW: Deepfake detection + video authenticity forensics
+    app.include_router(multi_angle_router)  # NEW: Multi-angle sync + camera switching plans
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
