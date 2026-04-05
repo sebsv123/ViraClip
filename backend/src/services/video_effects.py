@@ -14,6 +14,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
+
+
+def _is_image_path(path: str) -> bool:
+    from pathlib import Path as _Path
+    return _Path(path).suffix.lower() in _IMAGE_EXTS
+
+
 _PUNCH_ZOOM    = 1.04   # 4% zoom for punch
 _PUNCH_DUR_S   = 0.25   # duration of each punch in seconds
 _MAX_PUNCHES   = 6      # cap to keep filtergraph readable
@@ -121,7 +129,10 @@ async def overlay_broll_clips(
     # Build FFmpeg command with complex filtergraph
     inputs: list[str] = ["-i", str(clip_path)]
     for _, asset in pairs:
-        inputs += ["-i", asset.path]
+        if _is_image_path(asset.path):
+            inputs += ["-loop", "1", "-i", asset.path]
+        else:
+            inputs += ["-i", asset.path]
 
     w, h = 1080, 1920  # always 9:16
 

@@ -13,6 +13,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+_ASSET_EXTS = (".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png", ".webp")
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
 
 @dataclass
 class BrollAsset:
@@ -96,24 +99,28 @@ class ContextualBroll:
         if not self._bank.exists():
             return None
         kw = keyword.lower()
-        for ext in (".mp4", ".mov", ".webm"):
+        for ext in _ASSET_EXTS:
             for p in self._bank.glob(f"*{kw}*{ext}"):
                 if p.is_file():
                     return p
         for subdir in (self._bank / kw, self._bank / kw[:4]):
             if subdir.is_dir():
-                for ext in (".mp4", ".mov", ".webm"):
+                for ext in _ASSET_EXTS:
                     candidates = list(subdir.glob(f"*{ext}"))
                     if candidates:
                         return candidates[0]
         return None
 
+    @staticmethod
+    def _is_image(path: str) -> bool:
+        return Path(path).suffix.lower() in _IMAGE_EXTS
+
     async def _fetch_pexels(self, keyword: str, duration: float) -> "str | None":
-        """Delegate to existing broll_service which owns Pexels integration."""
+        """Delegate to BrollService which owns Pexels video + photo integration."""
         try:
             from .broll_service import BrollService
-            result = await BrollService().get_broll_clip(keyword, duration=duration)
-            return result if isinstance(result, str) else None
+            result = await BrollService().fetch_broll_asset(keyword)
+            return str(result) if result else None
         except Exception as exc:
             logger.debug("Pexels B-roll failed for '%s': %s", keyword, exc)
             return None
