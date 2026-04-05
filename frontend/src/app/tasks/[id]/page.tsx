@@ -133,6 +133,7 @@ interface Clip {
   smart_edit_summary?: string;
   smart_edit_time_saved?: number;
   text_pops_applied?: number;
+}
 
 interface TaskDetails {
   id: string;
