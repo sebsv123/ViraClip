@@ -253,6 +253,9 @@ def create_app(
     from .api.routes.auto_editor import router as auto_editor_router
     from .api.routes.integrations import router as integrations_router
     from .api.routes.cloud_storage import router as cloud_storage_router
+    from .api.routes.edge_cdn import router as edge_cdn_router
+    from .api.routes.email_reports import router as email_reports_router
+    from .api.routes.bulk_ops import router as bulk_ops_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -323,6 +326,9 @@ def create_app(
     app.include_router(auto_editor_router)     # NEW: AI auto-edit plan + silence removal + text pops
     app.include_router(integrations_router)    # NEW: Zapier/Make/n8n/IFTTT webhook integrations
     app.include_router(cloud_storage_router)   # NEW: Multi-cloud upload/download/presign (S3/GCS/Azure)
+    app.include_router(edge_cdn_router)        # NEW: Edge CDN processing + global distribution
+    app.include_router(email_reports_router)   # NEW: Scheduled email reports + subscriptions
+    app.include_router(bulk_ops_router)        # NEW: Bulk video processing jobs management
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)
