@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
 from ...services.analytics_service import get_analytics_service, AnalyticsService
+from ...services.validation_stats import get_validation_stats_service
 from ...auth_headers import get_signed_user_id
 
 router = APIRouter(prefix="/analytics", tags=["Analytics Dashboard"])
@@ -179,6 +180,97 @@ async def get_dashboard_summary(
             }
             for d in daily[-7:]
         ]
+    }
+
+
+@router.get("/validation/stats", response_model=None)
+async def get_validation_stats(
+    days: int = Query(7, ge=1, le=90),
+    task_id: Optional[str] = None,
+    current_user: str = Depends(get_signed_user_id)
+):
+    """
+    Get aggregated validation statistics.
+    
+    - **days**: Number of days to look back (1-90)
+    - **task_id**: Filter by specific task ID
+    
+    Returns metrics about clip validation success/failure rates.
+    """
+    stats_service = get_validation_stats_service()
+    stats = await stats_service.get_validation_stats(days=days, task_id=task_id)
+    
+    return {
+        "period_days": days,
+        "task_id": task_id,
+        "total_validations": stats.total_validations,
+        "passed": stats.passed,
+        "failed": stats.failed,
+        "success_rate": stats.success_rate,
+        "common_issues": stats.common_issues,
+        "common_warnings": stats.common_warnings,
+        "avg_duration_diff_seconds": stats.avg_duration_diff,
+        "avg_file_size_mb": stats.avg_file_size_mb,
+    }
+
+
+@router.get("/validation/patterns", response_model=None)
+async def get_validation_failure_patterns(
+    days: int = Query(30, ge=1, le=90),
+    min_occurrences: int = Query(2, ge=1, le=100),
+    current_user: str = Depends(get_signed_user_id)
+):
+    """
+    Identify patterns in validation failures.
+    
+    - **days**: Number of days to analyze (1-90)
+    - **min_occurrences**: Minimum occurrences to be considered a pattern
+    
+    Returns common failure patterns with timestamps and examples.
+    """
+    stats_service = get_validation_stats_service()
+    patterns = await stats_service.get_failure_patterns(
+        days=days,
+        min_occurrences=min_occurrences,
+    )
+    
+    return {
+        "period_days": days,
+        "min_occurrences": min_occurrences,
+        "patterns": [
+            {
+                "issue_type": p.issue_type,
+                "count": p.count,
+                "percentage": p.percentage,
+                "first_seen": p.first_seen,
+                "last_seen": p.last_seen,
+                "example": p.example_metadata,
+            }
+            for p in patterns
+        ],
+        "total_patterns": len(patterns),
+    }
+
+
+@router.get("/validation/trend", response_model=None)
+async def get_validation_trend(
+    days: int = Query(30, ge=1, le=90),
+    current_user: str = Depends(get_signed_user_id)
+):
+    """
+    Get daily validation success rate trend.
+    
+    - **days**: Number of days to analyze (1-90)
+    
+    Returns daily breakdown of validation pass/fail rates.
+    """
+    stats_service = get_validation_stats_service()
+    trend = await stats_service.get_validation_trend(days=days)
+    
+    return {
+        "period_days": days,
+        "trend": trend,
+        "total_days": len(trend),
     }
 
 

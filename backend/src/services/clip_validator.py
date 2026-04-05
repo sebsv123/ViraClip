@@ -11,6 +11,7 @@ Ensures clip quality and catches errors before they reach users:
 import asyncio
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,13 +32,19 @@ class ValidationResult:
 class ClipValidator:
     """Validates clip inputs and outputs for quality and correctness."""
 
-    # ── Configuration ─────────────────────────────────────────────────────────
-    MIN_DURATION_S = 3.0
-    MAX_DURATION_S = 180.0
-    MIN_FILE_SIZE_BYTES = 1024  # 1KB minimum
-    MAX_TIMESTAMP_DRIFT_S = 0.5  # Max allowed A/V sync drift
-    MIN_AUDIO_BITRATE_KBPS = 64
-    MIN_VIDEO_BITRATE_KBPS = 500
+    # ── Configurable Validation Thresholds ────────────────────────────────────
+    # All thresholds can be adjusted via environment variables for stricter/looser validation
+    MIN_DURATION_S = float(os.getenv("VALIDATOR_MIN_DURATION_S", "3.0"))
+    MAX_DURATION_S = float(os.getenv("VALIDATOR_MAX_DURATION_S", "180.0"))
+    MIN_FILE_SIZE_BYTES = int(os.getenv("VALIDATOR_MIN_FILE_SIZE_BYTES", "1024"))
+    MAX_TIMESTAMP_DRIFT_S = float(os.getenv("VALIDATOR_MAX_TIMESTAMP_DRIFT_S", "0.5"))
+    MIN_AUDIO_BITRATE_KBPS = float(os.getenv("VALIDATOR_MIN_AUDIO_BITRATE_KBPS", "64"))
+    MIN_VIDEO_BITRATE_KBPS = float(os.getenv("VALIDATOR_MIN_VIDEO_BITRATE_KBPS", "500"))
+    
+    # Additional configurable thresholds
+    MAX_WORD_DURATION_S = float(os.getenv("VALIDATOR_MAX_WORD_DURATION_S", "3.0"))
+    MIN_WORD_DURATION_S = float(os.getenv("VALIDATOR_MIN_WORD_DURATION_S", "0.05"))
+    SIZE_SIMILARITY_THRESHOLD_BYTES = int(os.getenv("VALIDATOR_SIZE_SIMILARITY_BYTES", "1024"))
 
     async def validate_input(
         self,
@@ -215,9 +222,10 @@ class ClipValidator:
         # Compare to source if available
         if source_path and source_path.exists():
             source_size = source_path.stat().st_size
-            if abs(file_size - source_size) < 1024:
+            if abs(file_size - source_size) < self.SIZE_SIMILARITY_THRESHOLD_BYTES:
                 warnings.append(
-                    "Output size nearly identical to source - effects may not have applied"
+                    f"Output size nearly identical to source ({abs(file_size - source_size)}B diff) - "
+                    "effects may not have applied"
                 )
 
         passed = len(issues) == 0
@@ -287,15 +295,15 @@ class ClipValidator:
                     f"start={start:.2f}s < prev_end={prev_end:.2f}s"
                 )
 
-            # Check duration (typical speech: 0.1s - 2s per word)
+            # Check duration (typical speech: configurable range)
             word_dur = end - start
-            if word_dur > 3.0:
+            if word_dur > self.MAX_WORD_DURATION_S:
                 warnings.append(
-                    f"Word '{word_text}' unusually long: {word_dur:.2f}s"
+                    f"Word '{word_text}' unusually long: {word_dur:.2f}s > {self.MAX_WORD_DURATION_S}s"
                 )
-            elif word_dur < 0.05:
+            elif word_dur < self.MIN_WORD_DURATION_S:
                 warnings.append(
-                    f"Word '{word_text}' unusually short: {word_dur:.2f}s"
+                    f"Word '{word_text}' unusually short: {word_dur:.2f}s < {self.MIN_WORD_DURATION_S}s"
                 )
 
             prev_end = end
