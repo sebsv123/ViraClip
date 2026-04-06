@@ -608,7 +608,7 @@ class VideoService:
         broll_suggestions: Optional[List[Dict[str, Any]]] = None,
         split_screen: bool = False,
         hook_title: Optional[str] = None,
-        auto_center_face: bool = False,
+        auto_center_face: bool = True,
         eye_contact_correction: bool = False,
         target_language: Optional[str] = None,
         task_id: str = "unknown",
@@ -619,6 +619,7 @@ class VideoService:
         gpu_encoding_settings: Optional[Dict[str, Any]] = None,
         use_extracted_segment: bool = False,
         target_platform: str = "tiktok",
+        preferred_music_category: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
@@ -1071,36 +1072,77 @@ class VideoService:
             # Re-running face-detection crop on 1080×1920 generates wrong
             # dimensions and adds black bars — do NOT apply a second crop here.
 
-            # Step 4.4: Burn subtitles word-level — on the jump-cut 1080×1920 video.
-            # Timestamps in words_with_confidence are already remapped to the
-            # post-cut timeline by _adjust_words_for_cuts above.
+            # Step 4.4: ASS Karaoke captions via CaptionService
+            # Auto-selects style based on caption_template + platform safe zones.
+            # Falls back to legacy _burn_subtitles_word_level on any error.
             if add_subtitles and words_with_confidence:
                 try:
-                    logger.info(f"  Burning word-level subtitles ({len(words_with_confidence)} words)...")
+                    from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
+                    logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
+                    _cap_style  = _CS.style_for_template(caption_template, target_platform)
                     subtitled_path = output_path.with_name(f"sub_{output_path.name}")
-                    await VideoService._burn_subtitles_word_level(
-                        str(output_path),
+                    _cap_ok = await _burn_caps(
+                        output_path, subtitled_path,
                         words_with_confidence,
-                        str(subtitled_path)
+                        style=_cap_style,
+                        platform=target_platform,
                     )
-                    if Path(subtitled_path).exists():
+                    if _cap_ok and subtitled_path.exists():
                         output_path = subtitled_path
-                        logger.info(f"  ✓ Word-level subtitles burned")
+                        logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
+                    else:
+                        raise RuntimeError("caption_service returned False")
                 except Exception as burn_e:
-                    logger.warning(f"  Burning subtitles failed: {burn_e}")
+                    logger.warning(f"  CaptionService failed ({burn_e}), falling back to legacy subtitles")
+                    try:
+                        subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                        await VideoService._burn_subtitles_word_level(
+                            str(output_path), words_with_confidence, str(subtitled_path)
+                        )
+                        if subtitled_path.exists():
+                            output_path = subtitled_path
+                    except Exception as _fb_e:
+                        logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
 
-            # Step 4.5: Advanced Polish (Auto-centering, Eye Contact)
+            # Step 4.5: Advanced Polish (Auto-centering, Eye Contact, Background Blur)
             if auto_center_face or eye_contact_correction:
                 from .video_polish_service import VideoPolishService
                 polisher = VideoPolishService()
+                _face_centered = False
                 if auto_center_face:
                     polished_path = output_path.with_name(f"centered_{output_path.name}")
-                    await polisher.auto_center_face(output_path, polished_path)
-                    output_path = polished_path
-                if eye_contact_correction:
-                    polished_path = output_path.with_name(f"gaze_{output_path.name}")
-                    await polisher.apply_eye_contact_correction(output_path, polished_path)
-                    output_path = polished_path
+                    _face_centered = await polisher.auto_center_face(output_path, polished_path)
+                    if _face_centered and polished_path.exists():
+                        output_path = polished_path
+
+                # Talking-head auto-detection: if face was found AND audio has words
+                # → we're looking at a speaker clip → auto-apply eye contact correction.
+                # Override via EYE_CONTACT_AUTO=false to disable.
+                _eye_contact_auto = os.environ.get("EYE_CONTACT_AUTO", "true").lower() != "false"
+                _is_talking_head = _face_centered and bool(words_with_confidence)
+                if eye_contact_correction or (_is_talking_head and _eye_contact_auto):
+                    try:
+                        polished_path = output_path.with_name(f"gaze_{output_path.name}")
+                        await polisher.apply_eye_contact_correction(output_path, polished_path)
+                        if polished_path.exists():
+                            output_path = polished_path
+                            if _is_talking_head and not eye_contact_correction:
+                                logger.info("  ✓ Eye contact correction auto-applied (talking head detected)")
+                    except Exception as _ec_e:
+                        logger.debug("  Eye contact correction skipped: %s", _ec_e)
+
+            # Step 4.5c: Portrait background blur (MediaPipe Selfie Segmentation).
+            # Enabled via BACKGROUND_BLUR_ENABLED=true.  Defaults off — adds ~10s/clip.
+            if os.environ.get("BACKGROUND_BLUR_ENABLED", "false").lower() == "true":
+                try:
+                    from .video_polish_service import VideoPolishService as _VPS
+                    _blur_out = output_path.with_name(f"blur_{output_path.name}")
+                    _blur_ok = await _VPS().blur_background(output_path, _blur_out)
+                    if _blur_ok and _blur_out.exists():
+                        output_path = _blur_out
+                        logger.info("  ✓ Background blur applied (Selfie Segmentation)")
+                except Exception as _bl_e:
+                    logger.debug("  Background blur skipped: %s", _bl_e)
 
             # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
             # When subtitles are active both layers appear simultaneously (0-2s) causing
@@ -1122,6 +1164,27 @@ class VideoService:
                 except Exception as hook_e:
                     logger.warning(f"  Hook overlay failed: {hook_e}")
 
+            # Step 4.5b: Beat-sync BPM detection — derive beat timestamps for
+            # edit-point alignment BEFORE EditingPipeline so zoom punches land on beats.
+            _beat_times: List[float] = []
+            _beat_bpm: float = 0.0
+            try:
+                from .beat_sync_service import analyse_bpm as _analyse_bpm
+                _bpm_result = await _analyse_bpm(audio_path=output_path)
+                _beat_bpm   = _bpm_result.get("bpm", 0.0)
+                _beat_times = _bpm_result.get("beat_times", [])
+                if _beat_times:
+                    logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
+            except Exception as _bpm_e:
+                logger.debug(f"  BPM detection skipped: {_bpm_e}")
+
+            # Merge beat timestamps into flash_timestamps so zoom punches land on beats.
+            if _beat_times:
+                _flash_ts = sorted(set(_flash_ts) | {
+                    t for t in _beat_times
+                    if 0.5 < t < (duration - 0.5)
+                })
+
             # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
             # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
             # progress bar, loudness normalization (single FFmpeg pass).
@@ -1142,6 +1205,19 @@ class VideoService:
                     logger.info("  ✓ EditingPipeline: color+cine+vignette+zoom+PI+lower-third+progress+loudnorm")
             except Exception as _ep_e:
                 logger.warning(f"  EditingPipeline failed: {_ep_e}")
+
+            # Step 4.6b: Cinematic LUT color grade (after EditingPipeline basic grade).
+            # Controlled via env LUT_PRESET (default: teal_orange). Set to 'none' to skip.
+            _lut_preset = os.environ.get("LUT_PRESET", "teal_orange")
+            if _lut_preset and _lut_preset.lower() not in ("none", "off", "false", ""):
+                try:
+                    from .lut_service import get_lut_service as _get_lut
+                    _lut_out = output_path.with_name(f"lut_{output_path.name}")
+                    if await _get_lut().apply_lut(output_path, _lut_out, lut_id=_lut_preset):
+                        output_path = _lut_out
+                        logger.info(f"  ✓ Cinematic LUT applied: {_lut_preset}")
+                except Exception as _lut_e:
+                    logger.debug(f"  LUT skipped: {_lut_e}")
 
             # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
             if COMFYUI_ENABLED:
@@ -1218,27 +1294,46 @@ class VideoService:
                 await translator.dub_clip(output_path, dubbed_path, target_language)
                 output_path = dubbed_path
 
+            # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
+            # Falls back to niche-based static track when BGM library is empty.
             try:
-                from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
-                from ..config import get_config as _get_cfg
-                _cfg = _get_cfg()
-                _niche = segment.get("theme") or "general"
-                _music_path = get_background_music_for_niche(_niche, _cfg)
-                if _music_path:
-                    _music_tmp = output_path.with_name(f"music_{output_path.name}")
-                    if _mix_bg(
-                        output_path, _music_tmp,
-                        music_volume=0.12,
-                        ducking_enabled=getattr(_cfg, "music_ducking_enabled", True),
-                        music_path=_music_path,
-                    ):
-                        if _music_tmp.exists():
-                            _music_tmp.replace(output_path)
-                            logger.info(f"  ✓ Background music applied: {_music_path.name}")
+                from .beat_sync_service import get_beat_sync_service as _get_bs
+                _music_out = output_path.with_name(f"music_{output_path.name}")
+                _speech_segs = [
+                    {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
+                    for w in (words_with_confidence or [])[::3]
+                ]
+                _bs_result = await _get_bs().mix_bgm_beat_synced(
+                    video_path=output_path,
+                    output_path=_music_out,
+                    speech_segments=_speech_segs,
+                    bgm_volume=float(os.environ.get("BGM_VOLUME", "0.13")),
+                    preferred_category=preferred_music_category or None,
+                )
+                if _bs_result.get("success") and _music_out.exists():
+                    _music_out.replace(output_path)
+                    _bgm_name = (_bs_result.get("bgm_used") or "").split("/")[-1] or "?"
+                    logger.info(
+                        "  ✓ Beat-synced BGM: %.1f BPM / %s / %s",
+                        _bs_result.get("bpm", 0), _bs_result.get("category", "?"), _bgm_name
+                    )
                 else:
-                    logger.debug("  No background music tracks found — skipping")
+                    raise RuntimeError("beat_sync returned no output — using niche fallback")
             except Exception as _music_e:
-                logger.warning(f"  Music mix skipped: {_music_e}")
+                logger.debug(f"  BeatSync BGM skipped ({_music_e}), trying niche fallback")
+                try:
+                    from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
+                    from ..config import get_config as _get_cfg
+                    _cfg = _get_cfg()
+                    _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
+                    if _music_path:
+                        _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
+                        if _mix_bg(output_path, _music_tmp, music_volume=0.12, music_path=_music_path):
+                            if _music_tmp.exists():
+                                _music_tmp.replace(output_path)
+                                logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
+                except Exception as _fb_music_e:
+                    logger.warning(f"  All music paths skipped: {_fb_music_e}")
 
             # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task started at render launch)
             if _broll_prefetch_task is not None:

@@ -176,7 +176,9 @@ def maybe_apply_hook_slowmo(
     Returns:
         True if slow-mo was applied, False if skipped or failed.
     """
-    if not HOOK_SLOWMO_ENABLED:
+    # Hard-disable: only when HOOK_SLOWMO_ENABLED is explicitly set to "false".
+    # No env var (or any other value) → auto-enable based on score threshold.
+    if os.getenv("HOOK_SLOWMO_ENABLED", "").lower() == "false":
         return False
 
     if virality_score < MIN_VIRALITY_SCORE:

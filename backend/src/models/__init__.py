@@ -161,7 +161,7 @@ class Task(Base):
         String(10), nullable=False, server_default=sql_text("'eng'")
     )
     auto_center_face: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default=sql_text("'false'")
+        Boolean, nullable=False, server_default=sql_text("'true'")
     )
     eye_contact_correction: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=sql_text("'false'")
@@ -287,6 +287,17 @@ class GeneratedClip(Base):
 
     ab_test_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     ab_variant: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    # Phase 10: Viral polish flags + A/B variant paths
+    cta_overlay_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    emoji_overlays_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    variants_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON list of {path, variant, label, type} dicts from variant_generator
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

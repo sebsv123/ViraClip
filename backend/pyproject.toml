@@ -32,6 +32,7 @@ dependencies = [
     "torch>=2.2.0",
     "sentencepiece>=0.2.0",
     "librosa>=0.10.1",
+    "soundfile>=0.12.1",
     "scenedetect>=0.6.5",
     "httpx>=0.27.0",
     "PyJWT>=2.8.0",
@@ -51,6 +52,13 @@ dependencies = [
     "google-auth-oauthlib>=1.2.0",
     "skl2onnx>=1.16.0",
     "onnxruntime>=1.17.0",
+    # ── LangChain (Phase 10+ AI orchestration) ──────────────────────────────
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-anthropic>=0.3.0",
+    "langchain-community>=0.3.0",
+    # ── Open Interpreter (natural language task execution) ───────────────────
+    "open-interpreter>=0.4.0",
 ]
 
 [dependency-groups]
@@ -59,7 +67,48 @@ dev = [
     "pytest>=8.4.2",
     "pytest-asyncio>=1.2.0",
     "pytest-cov>=7.0.0",
+    "ruff>=0.9.0",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [
+    ".venv", "__pycache__", "migrations", "alembic",
+    "*.egg-info", "htmlcov", "build", "dist",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes (unused imports, undefined names)
+    "I",   # isort (import order)
+    "B",   # flake8-bugbear (likely bugs)
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade (modernise syntax)
+    "SIM", # flake8-simplify
+    "TID", # flake8-tidy-imports
+    "RUF", # ruff-native rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # function calls in default args (FastAPI pattern)
+    "B904",   # raise-without-from-inside-except (too noisy in services)
+    "SIM108", # ternary operator (readability preference)
+    "UP007",  # X | Y union syntax (3.10+, keep Optional for clarity)
+]
+# Allow unused imports in __init__.py re-exports
+per-file-ignores = { "__init__.py" = ["F401"], "tests/*" = ["S101"] }
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+force-sort-within-sections = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
 
 [tool.uv]
 package = true

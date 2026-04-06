@@ -40,6 +40,10 @@ DEFAULT_LIMITS = {
     "lora": {"requests": int(os.environ.get("RATE_LIMIT_LORA_PER_HOUR", "1")), "window": 3600},
     # Task creation: 20 tasks/hour by default (override via RATE_LIMIT_TASKS_PER_HOUR)
     "tasks": {"requests": int(os.environ.get("RATE_LIMIT_TASKS_PER_HOUR", "20")), "window": 3600},
+    # Video ingestion via yt-dlp: 10/hour (bandwidth-heavy)
+    "ingest": {"requests": int(os.environ.get("RATE_LIMIT_INGEST_PER_HOUR", "10")), "window": 3600},
+    # Autopilot full pipeline: 5/hour (very compute-heavy)
+    "autopilot": {"requests": int(os.environ.get("RATE_LIMIT_AUTOPILOT_PER_HOUR", "5")), "window": 3600},
 }
 
 
@@ -244,10 +248,48 @@ async def task_rate_limit_dependency(request: Request) -> None:
         )
 
 
+async def ingest_rate_limit_dependency(request: Request) -> None:
+    """FastAPI dependency: 10 yt-dlp ingestions per hour per user."""
+    user_id = (
+        request.headers.get("x-viraclip-user-id")
+        or request.headers.get("user_id")
+        or request.query_params.get("user_id")
+        or (request.client.host if request.client else "anonymous")
+    )
+    allowed, current, retry_after = await check_rate_limit(user_id, "ingest")
+    if not allowed:
+        config = DEFAULT_LIMITS["ingest"]
+        raise RateLimitExceeded(
+            retry_after=retry_after,
+            current_usage=current,
+            limit=config["requests"],
+        )
+
+
+async def autopilot_rate_limit_dependency(request: Request) -> None:
+    """FastAPI dependency: 5 autopilot runs per hour per user."""
+    user_id = (
+        request.headers.get("x-viraclip-user-id")
+        or request.headers.get("user_id")
+        or request.query_params.get("user_id")
+        or (request.client.host if request.client else "anonymous")
+    )
+    allowed, current, retry_after = await check_rate_limit(user_id, "autopilot")
+    if not allowed:
+        config = DEFAULT_LIMITS["autopilot"]
+        raise RateLimitExceeded(
+            retry_after=retry_after,
+            current_usage=current,
+            limit=config["requests"],
+        )
+
+
 __all__ = [
     "rate_limit_gpu",
     "check_rate_limit",
     "task_rate_limit_dependency",
+    "ingest_rate_limit_dependency",
+    "autopilot_rate_limit_dependency",
     "RateLimitExceeded",
     "RateLimitHeadersMiddleware",
     "get_rate_limit_status",

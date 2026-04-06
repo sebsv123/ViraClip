@@ -7,6 +7,9 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "next lint",
+    "lint:biome": "biome lint --write .",
+    "format": "biome format --write .",
+    "check": "biome check --write .",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -44,6 +47,7 @@
     "tw-shimmer": "^0.4.9"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@eslint/eslintrc": "^3.3.4",
     "@playwright/test": "^1.55.0",
     "@tailwindcss/postcss": "^4.2.1",

@@ -64,6 +64,8 @@ import {
   XCircle,
   Layers,
   Loader2,
+  Shuffle,
+  Music,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
@@ -133,6 +135,15 @@ interface Clip {
   smart_edit_summary?: string;
   smart_edit_time_saved?: number;
   text_pops_applied?: number;
+  // Phase 10: Viral Polish & A/B
+  cta_overlay_applied?: boolean;
+  emoji_overlays_applied?: boolean;
+  variants?: Array<{
+    path: string;
+    variant: string;  // "caption" | "bgm"
+    label: string;
+    type: string;
+  }>;
 }
 
 interface TaskDetails {
@@ -1557,6 +1568,60 @@ export default function TaskPage() {
                               : <><XCircle className="w-3.5 h-3.5" /> QA Issues: {(clip.qa_issues || []).join(", ")}</>
                             }
                           </div>
+                        </div>
+                      )}
+
+                      {/* Phase 10: Viral Polish panel */}
+                      {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (
+                        <div className="mb-4 p-4 bg-gradient-to-br from-rose-950/50 to-orange-950/50 border border-rose-800/40 rounded-lg">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Sparkles className="w-4 h-4 text-rose-400" />
+                            <h4 className="font-bold text-sm text-rose-300 uppercase tracking-wider">Viral Polish</h4>
+                          </div>
+
+                          {/* Applied effects badges */}
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {clip.cta_overlay_applied && (
+                              <span className="flex items-center gap-1 text-xs bg-orange-900/50 text-orange-300 border border-orange-700/40 rounded-full px-2 py-0.5">
+                                <Target className="w-3 h-3" /> CTA Overlay
+                              </span>
+                            )}
+                            {clip.emoji_overlays_applied && (
+                              <span className="flex items-center gap-1 text-xs bg-pink-900/50 text-pink-300 border border-pink-700/40 rounded-full px-2 py-0.5">
+                                😀 Emoji Cues
+                              </span>
+                            )}
+                          </div>
+
+                          {/* A/B Variants */}
+                          {clip.variants && clip.variants.length > 0 && (
+                            <div>
+                              <p className="text-xs text-rose-400 font-medium mb-2 flex items-center gap-1">
+                                <Shuffle className="w-3 h-3" /> A/B Variants ({clip.variants.length})
+                              </p>
+                              <div className="space-y-1.5">
+                                {clip.variants.map((v, vi) => (
+                                  <div key={vi} className="flex items-center justify-between bg-black/30 rounded px-2 py-1.5">
+                                    <div className="flex items-center gap-2">
+                                      {v.type === "caption_style" ? (
+                                        <Subtitles className="w-3 h-3 text-cyan-400 flex-shrink-0" />
+                                      ) : (
+                                        <Music className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                                      )}
+                                      <span className="text-xs text-gray-300 truncate max-w-[160px]" title={v.label}>{v.label}</span>
+                                    </div>
+                                    <a
+                                      href={`${apiUrl}/clips/${clip.video_url.split("/")[2]}/${v.path.split("/").pop()}`}
+                                      download
+                                      className="text-xs text-rose-400 hover:text-rose-300 font-medium ml-2 flex-shrink-0"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                    </a>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
                         </div>
                       )}
 

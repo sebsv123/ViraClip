@@ -6,10 +6,177 @@ Replaces sequential pipeline with parallel task execution using asyncio.gather()
 
 import asyncio
 import logging
+import os
+import re
+import tempfile
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+_Path = Path
 
 logger = logging.getLogger(__name__)
+
+# ── Emoji keyword map ──────────────────────────────────────────────────────────
+_EMOJI_MAP: Dict[str, str] = {
+    # energy / hype
+    "insane": "🤯", "crazy": "🤯", "mind-blowing": "🤯", "shocking": "😱",
+    "incredible": "🔥", "amazing": "🔥", "unbelievable": "😱", "wow": "😲",
+    "fire": "🔥", "hot": "🔥", "viral": "🚀", "growth": "📈",
+    "secret": "🤫", "hidden": "🤫", "truth": "💡", "fact": "💡",
+    "money": "💰", "rich": "💰", "profit": "💰", "earn": "💰",
+    "best": "🏆", "winner": "🏆", "number one": "🥇", "#1": "🥇",
+    "love": "❤️", "heart": "❤️", "life": "✨", "dream": "✨",
+    "stop": "🛑", "wait": "⏸️", "listen": "👂", "watch": "👀",
+    "go": "🚀", "now": "⚡", "today": "📅", "free": "🎁",
+    "dead": "💀", "kill": "💀", "die": "💀", "wrong": "❌",
+    "right": "✅", "yes": "✅", "no": "❌", "perfect": "💯",
+    "100": "💯", "real": "💯", "true": "💯",
+}
+
+# ── Creator profile caption_style → caption template mapping ─────────────────
+_CAPTION_STYLE_TEMPLATE: Dict[str, str] = {
+    "minimal":  "minimal",
+    "bold":      "bold",
+    "karaoke":   "tiktok_word",
+    "none":      "default",
+}
+
+# ── CTA options per platform ───────────────────────────────────────────────────
+_CTA_TEXTS: Dict[str, List[str]] = {
+    "tiktok":    ["Follow for more 🔥", "Like if this helped 👍", "Comment your thoughts 💬"],
+    "reels":     ["Follow for more 🔥", "Save this 🔖", "Share with a friend 👇"],
+    "shorts":    ["Subscribe for more ▶️", "Like & Subscribe 🔔", "Comment below 💬"],
+    "universal": ["Follow for more 🔥", "Share this 🚀", "Save for later 🔖"],
+}
+
+# Platform-aware Y position for CTA (above platform UI safe zone, in pixels on 1920-tall video)
+_CTA_Y: Dict[str, int] = {
+    "tiktok": 1580, "reels": 1600, "shorts": 1560, "universal": 1700,
+}
+
+
+async def _apply_cta_overlay(
+    input_path: _Path,
+    output_path: _Path,
+    platform: str = "tiktok",
+    custom_cta_text: Optional[str] = None,
+) -> bool:
+    """
+    Burn a call-to-action drawtext overlay onto the last 2 seconds of a clip.
+    Text is platform-aware and positioned above the platform's UI safe zone.
+    Returns True on success.
+    """
+    import asyncio as _asyncio
+    import subprocess as _sp
+
+    try:
+        # Probe clip duration
+        probe = _sp.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(input_path)],
+            capture_output=True, text=True, timeout=15,
+        )
+        import json as _json
+        dur = float(_json.loads(probe.stdout).get("format", {}).get("duration", 0) or 0)
+    except Exception:
+        dur = 0.0
+
+    if dur < 3.0:
+        return False
+
+    import random
+    _plat = platform.lower() if platform.lower() in _CTA_TEXTS else "universal"
+    cta_text = custom_cta_text if custom_cta_text else random.choice(_CTA_TEXTS[_plat])
+    cta_y    = _CTA_Y.get(_plat, 1700)
+    show_from = max(0.5, dur - 2.2)
+    show_to   = dur - 0.1
+
+    # Escape special chars for FFmpeg drawtext
+    safe_text = cta_text.replace("'", "\\'").replace(":", "\\:")
+    font_path = "/app/fonts/TikTokSans-Bold.ttf"
+    font_arg  = f":fontfile={font_path}" if _Path(font_path).exists() else ""
+
+    ft = (
+        f"drawtext=text='{safe_text}'{font_arg}"
+        f":fontsize=52:fontcolor=white:bordercolor=black:borderw=3"
+        f":x=(w-text_w)/2:y={cta_y}"
+        f":enable='between(t,{show_from:.2f},{show_to:.2f})'"
+    )
+
+    proc = await _asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(input_path),
+        "-vf", ft,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "copy",
+        str(output_path),
+        stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+    return proc.returncode == 0
+
+
+async def _apply_emoji_overlays(
+    input_path: _Path,
+    output_path: _Path,
+    words: List[Dict[str, Any]],
+    transcript: str = "",
+) -> bool:
+    """
+    Scan word-level timestamps for high-energy keywords and overlay matching
+    emoji for 1 second at the word's start time using FFmpeg drawtext.
+    Returns True if at least one emoji was placed.
+    """
+    import asyncio as _asyncio
+
+    # Build list of (timestamp, emoji) pairs from word list
+    cues: List[tuple] = []
+    seen_times: set = set()
+    for w in (words or []):
+        word_clean = re.sub(r"[^a-z0-9 \-#]", "", (w.get("word") or "").lower().strip())
+        emoji_char  = _EMOJI_MAP.get(word_clean)
+        if emoji_char and w.get("start") is not None:
+            t = round(float(w["start"]), 2)
+            if t not in seen_times:
+                cues.append((t, emoji_char))
+                seen_times.add(t)
+        if len(cues) >= 6:
+            break
+
+    # Also scan full transcript for keywords missing from word list
+    if not cues:
+        for kw, emoji_char in _EMOJI_MAP.items():
+            if kw in transcript.lower():
+                cues.append((1.5, emoji_char))
+                break
+
+    if not cues:
+        return False
+
+    # Build one drawtext filter per cue, chained
+    vf_parts = []
+    for ts, emoji_char in cues[:5]:
+        safe_emoji = emoji_char.encode("utf-8").decode("utf-8")
+        # Use text substitution with safe ASCII fallback
+        safe_text = safe_emoji.replace("'", "\\'")
+        vf_parts.append(
+            f"drawtext=text='{safe_text}'"
+            f":fontsize=90:x=(w-text_w)/2-300:y=h/2-200"
+            f":enable='between(t,{ts:.2f},{ts+0.9:.2f})'"
+            f":alpha='if(lt(t-{ts:.2f},0.15),(t-{ts:.2f})/0.15,if(gt(t-{ts:.2f},0.75),1-(t-{ts:.2f}-0.75)/0.15,1))'"
+        )
+
+    vf = ",".join(vf_parts)
+
+    proc = await _asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(input_path),
+        "-vf", vf,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "copy",
+        str(output_path),
+        stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+    return proc.returncode == 0
 
 
 class VideoCoordinator:
@@ -226,6 +393,7 @@ class VideoCoordinator:
         async def render_single_clip(segment: dict, index: int) -> dict:
             """Render one clip via VideoService and emit progress."""
             from pathlib import Path as _Path
+            from .video_service import VideoService
             from ..services.clip_validator import get_clip_validator
             from ..utils.retry_helper import retry_ffmpeg_operation
             
@@ -235,10 +403,12 @@ class VideoCoordinator:
 
                 # ViralSegment uses 'start'/'end'; VideoService.create_single_clip
                 # expects 'start_time'/'end_time' — adapt here
+                _st = segment.get("start_time")
+                _et = segment.get("end_time")
                 vs_segment = {
                     **segment,
-                    "start_time": segment.get("start_time") or segment.get("start"),
-                    "end_time":   segment.get("end_time")   or segment.get("end"),
+                    "start_time": _st if _st is not None else segment.get("start"),
+                    "end_time":   _et if _et is not None else segment.get("end"),
                 }
                 
                 # Pre-render validation
@@ -258,6 +428,29 @@ class VideoCoordinator:
                 if validation.warnings:
                     logger.warning(f"Clip {index} validation warnings: {', '.join(validation.warnings)}")
 
+                # Load creator profile for personalisation (non-blocking; defaults if missing)
+                _creator_profile = None
+                _user_id = self.config.get("user_id", "")
+                if _user_id:
+                    try:
+                        from .creator_profile_service import get_profile as _get_cp
+                        _creator_profile = _get_cp(_user_id)
+                    except Exception as _cp_e:
+                        logger.debug("Creator profile load skipped: %s", _cp_e)
+
+                # Resolve caption template: profile.caption_style > config > default
+                _caption_tmpl = self.config.get("caption_template", "default")
+                if _creator_profile:
+                    _style = _creator_profile.caption_style
+                    _caption_tmpl = _CAPTION_STYLE_TEMPLATE.get(_style, _caption_tmpl)
+
+                # Resolve preferred music category from profile or config
+                _preferred_music = None
+                if _creator_profile:
+                    _genres = _creator_profile.music_genres()
+                    if _genres and _genres[0] != "auto":
+                        _preferred_music = _genres[0]
+
                 clip = await VideoService.create_single_clip(
                     video_path=_Path(self.video_path),
                     segment=vs_segment,
@@ -266,11 +459,12 @@ class VideoCoordinator:
                     font_family=self.config.get("font_family", "TikTokSans-Regular"),
                     font_size=int(self.config.get("font_size", 24)),
                     font_color=self.config.get("font_color", "#FFFFFF"),
-                    caption_template=self.config.get("caption_template", "default"),
+                    caption_template=_caption_tmpl,
                     output_format=self.config.get("output_format", "vertical"),
                     add_subtitles=self.config.get("add_subtitles", True),
                     task_id=self.task_id,
                     target_platform=self.config.get("target_platform", "tiktok"),
+                    preferred_music_category=_preferred_music,
                 )
 
                 if clip is None:
@@ -438,6 +632,213 @@ class VideoCoordinator:
 
                     except Exception as _te:
                         logger.debug("Timeline building skipped for clip %d: %s", index, _te)
+
+                # ── Emoji keyword overlays ─────────────────────────────────────
+                # Scan transcript for high-energy keywords → burn FFmpeg drawtext
+                # emoji at the matching word timestamp.  Purely additive / safe.
+                try:
+                    _clip_path_obj = _Path(clip["path"])
+                    _transcript_text = vs_segment.get("text", "") or vs_segment.get("transcript", "")
+                    _emo_out = _clip_path_obj.with_name(f"emo_{_clip_path_obj.name}")
+                    _emo_applied = await _apply_emoji_overlays(
+                        _clip_path_obj, _emo_out,
+                        words=_words_for_editor,
+                        transcript=_transcript_text,
+                    )
+                    if _emo_applied and _emo_out.exists() and _emo_out.stat().st_size > 0:
+                        _clip_path_obj.unlink(missing_ok=True)
+                        _emo_out.rename(_clip_path_obj)
+                        clip["path"] = str(_clip_path_obj)
+                        clip["emoji_overlays_applied"] = True
+                        logger.info("  [Emoji] Keyword emoji overlays applied")
+                    else:
+                        _emo_out.unlink(missing_ok=True)
+                except Exception as _eo_e:
+                    logger.debug("Emoji overlays skipped for clip %d: %s", index, _eo_e)
+
+                # ── A/B variant generation ────────────────────────────────────
+                # Generate 2 quick variants (caption style swap + BGM swap) so
+                # the user can A/B test without waiting for a full re-render.
+                # Runs fire-and-forget; failures are non-fatal.
+                try:
+                    from .variant_generator import generate_clip_variants
+                    _clip_path_obj = _Path(clip["path"])
+                    _primary_style = creative_meta.get("caption_style") or "tiktok"
+                    _primary_bgm_cat = creative_meta.get("bgm_category") or "hype"
+                    _variants = await generate_clip_variants(
+                        clip_path=_clip_path_obj,
+                        words=_words_for_editor,
+                        platform=self.config.get("target_platform", "tiktok"),
+                        primary_caption_style=_primary_style,
+                        primary_bgm_category=_primary_bgm_cat,
+                    )
+                    if _variants:
+                        clip["variants"] = _variants
+                        logger.info(
+                            "  [Variants] %d A/B variant(s) generated for clip %d",
+                            len(_variants), index,
+                        )
+                except Exception as _ve:
+                    logger.debug("Variant generation skipped for clip %d: %s", index, _ve)
+
+                # ── CTA overlay (last 2 s) ─────────────────────────────────────
+                # "Follow for more 🔥" / "Comment below 👇" injected as drawtext
+                # on the final clip, respecting the platform safe zone.
+                try:
+                    _clip_path_obj = _Path(clip["path"])
+                    _platform = self.config.get("target_platform", "tiktok")
+                    _cta_out = _clip_path_obj.with_name(f"cta_{_clip_path_obj.name}")
+                    _profile_cta = (
+                        _creator_profile.cta_for_platform(_platform)
+                        if _creator_profile else None
+                    )
+                    _cta_applied = await _apply_cta_overlay(
+                        _clip_path_obj, _cta_out,
+                        platform=_platform,
+                        custom_cta_text=_profile_cta,
+                    )
+                    if _cta_applied and _cta_out.exists() and _cta_out.stat().st_size > 0:
+                        _clip_path_obj.unlink(missing_ok=True)
+                        _cta_out.rename(_clip_path_obj)
+                        clip["path"] = str(_clip_path_obj)
+                        clip["cta_overlay_applied"] = True
+                        logger.info("  [CTA] Call-to-action overlay applied (%s)", _platform)
+                    else:
+                        _cta_out.unlink(missing_ok=True)
+                except Exception as _cta_e:
+                    logger.debug("CTA overlay skipped for clip %d: %s", index, _cta_e)
+
+                # ── Brand overlay from creator profile ────────────────────────
+                if _creator_profile and (
+                    _creator_profile.watermark_text or _creator_profile.watermark_image_path
+                ):
+                    try:
+                        from .brand_overlay_service import (
+                            BrandConfig as _BrandCfg,
+                            apply_text_watermark as _apply_text_wm,
+                            apply_image_watermark as _apply_img_wm,
+                        )
+                        _brand_in = _Path(clip["path"])
+                        _brand_out = _brand_in.with_name(f"brand_{_brand_in.name}")
+                        _bcfg = _BrandCfg(
+                            text=_creator_profile.watermark_text or "",
+                            image_path=_creator_profile.watermark_image_path or "",
+                            position=_creator_profile.watermark_position,
+                        )
+                        if _creator_profile.watermark_image_path:
+                            _brand_ok = await _apply_img_wm(str(_brand_in), str(_brand_out), _bcfg)
+                        else:
+                            _brand_ok = await _apply_text_wm(str(_brand_in), str(_brand_out), _bcfg)
+                        if _brand_ok and _brand_out.exists() and _brand_out.stat().st_size > 0:
+                            _brand_in.unlink(missing_ok=True)
+                            _brand_out.rename(_brand_in)
+                            clip["path"] = str(_brand_in)
+                            clip["brand_overlay_applied"] = True
+                            logger.info(
+                                "  [Brand] Watermark applied (%s / %s)",
+                                _creator_profile.watermark_position,
+                                "image" if _creator_profile.watermark_image_path else "text",
+                            )
+                        else:
+                            _brand_out.unlink(missing_ok=True)
+                    except Exception as _brand_e:
+                        logger.debug("Brand overlay skipped for clip %d: %s", index, _brand_e)
+
+                # ── Audio denoiser (opt-in: config.denoise_audio=True) ───────
+                if self.config.get("denoise_audio", False):
+                    try:
+                        from .audio_denoiser import denoise_audio as _denoise
+                        _dn_in = _Path(clip["path"])
+                        _dn_out = _dn_in.with_name(f"dn_{_dn_in.name}")
+                        _dn_result = await _denoise(
+                            str(_dn_in), str(_dn_out),
+                            noise_reduction=True,
+                            voice_isolation=True,
+                            apply_loudnorm=True,
+                        )
+                        if not _dn_result.error and _dn_out.exists() and _dn_out.stat().st_size > 0:
+                            _dn_in.unlink(missing_ok=True)
+                            _dn_out.rename(_dn_in)
+                            clip["audio_denoised"] = True
+                            clip["audio_lufs_before"] = _dn_result.original_lufs
+                            clip["audio_lufs_after"] = _dn_result.output_lufs
+                            logger.info("  [Denoiser] Audio cleaned (%.1f→%.1f LUFS)",
+                                        _dn_result.original_lufs or -99, _dn_result.output_lufs or -99)
+                        else:
+                            _dn_out.unlink(missing_ok=True)
+                    except Exception as _dn_e:
+                        logger.debug("Audio denoiser skipped for clip %d: %s", index, _dn_e)
+
+                # ── Jump-cut engine (opt-in: config.jump_cut=True) ───────────
+                if self.config.get("jump_cut", False):
+                    try:
+                        from .jump_cut_service import apply_jump_cuts as _jump_cut
+                        _jc_in = _Path(clip["path"])
+                        _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
+                        _jc_words = list(clip.get("words") or vs_segment.get("words") or [])
+                        _jc_result = await _jump_cut(
+                            str(_jc_in), str(_jc_out),
+                            words=_jc_words,
+                            remove_fillers=self.config.get("jump_cut_fillers", True),
+                            remove_silence=self.config.get("jump_cut_silence", True),
+                        )
+                        if not _jc_result.error and _jc_out.exists() and _jc_out.stat().st_size > 0:
+                            _jc_in.unlink(missing_ok=True)
+                            _jc_out.rename(_jc_in)
+                            clip["jump_cut_applied"] = True
+                            clip["jump_cut_time_saved"] = _jc_result.time_saved
+                            clip["jump_cut_fillers_removed"] = _jc_result.filler_words_removed
+                            clip["jump_cut_silences_removed"] = _jc_result.silence_gaps_removed
+                            logger.info(
+                                "  [JumpCut] %.1fs saved, %d fillers, %d silences removed",
+                                _jc_result.time_saved, _jc_result.filler_words_removed,
+                                _jc_result.silence_gaps_removed,
+                            )
+                        else:
+                            _jc_out.unlink(missing_ok=True)
+                    except Exception as _jc_e:
+                        logger.debug("Jump-cut skipped for clip %d: %s", index, _jc_e)
+
+                # ── Language detection + locale info ──────────────────────────
+                _transcript_for_lang = vs_segment.get("text", "") or vs_segment.get("transcript", "")
+                if _transcript_for_lang:
+                    try:
+                        from .language_detector import detect_language as _detect_lang
+                        _lang_result = _detect_lang(_transcript_for_lang)
+                        clip["detected_language"] = _lang_result.language
+                        clip["language_confidence"] = _lang_result.confidence
+                        clip["locale_territory"] = _lang_result.locale.get("territory", "global")
+                    except Exception as _ld_e:
+                        logger.debug("Language detection skipped: %s", _ld_e)
+
+                # ── Actionable clip health report ─────────────────────────────
+                try:
+                    from .clip_health_service import generate_health_report as _health_report
+                    _health = _health_report(
+                        clip_id=clip.get("id", f"clip_{index}"),
+                        virality_score=float(creative_meta.get("viral_score") or vs_segment.get("virality_score") or 0),
+                        hook_score=float(creative_meta.get("hook_score") or vs_segment.get("hook_score") or 0),
+                        hook_start=creative_meta.get("hook_start"),
+                        hook_type=vs_segment.get("hook_type"),
+                        duration=float(vs_segment.get("end_time", 30) - vs_segment.get("start_time", 0)),
+                        platform=self.config.get("target_platform", "tiktok"),
+                        loudnorm_applied=bool(creative_meta.get("loudnorm_applied")),
+                        sfx_injected=bool(creative_meta.get("sfx_injected")),
+                        broll_count=len(creative_meta.get("broll_overlays") or []),
+                        has_subtitles=self.config.get("add_subtitles", True),
+                        hashtag_count=len(vs_segment.get("hashtags") or vs_segment.get("suggested_hashtags") or []),
+                        zoom_punch_applied=bool(creative_meta.get("zoom_punch_applied")),
+                    )
+                    clip["health_report"] = _health.to_dict()
+                    clip["health_grade"] = _health.grade
+                    clip["health_score"] = _health.overall_score
+                    logger.info(
+                        "  [Health] Clip %d: Grade %s (%s/100) — %s",
+                        index, _health.grade, _health.overall_score,
+                        _health.top_fix or "No critical issues",
+                    )
+                except Exception as _he:
+                    logger.debug("Health report skipped for clip %d: %s", index, _he)
 
                 # Persist all creative metadata (including smart-edit fields) in one DB write
                 try:

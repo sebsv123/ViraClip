@@ -42,12 +42,24 @@ class BrollService:
     # 1. KEYWORD EXTRACTION
     # ──────────────────────────────────────────────────────────────────────────
 
-    async def extract_keywords(self, text: str) -> List[str]:
-        """Use Groq llama-3.1-8b-instant to pull 2-3 visual search keywords."""
+    async def extract_keywords(
+        self,
+        text: str,
+        video_path: Optional[Path] = None,
+        clip_duration: float = 0.0,
+    ) -> List[str]:
+        """
+        Extract 2-3 visual B-roll keywords from *text*.
+
+        If *video_path* is provided, YOLOv10 visual grounding filters out
+        keywords whose subject is already visible in the clip — no B-roll
+        needed for what the viewer can already see.
+        """
         groq_key = os.getenv("GROQ_API_KEY", "")
         if not groq_key:
             logger.warning("[BRoll] GROQ_API_KEY not set — falling back to first 3 nouns")
-            return self._simple_keyword_fallback(text)
+            keywords = self._simple_keyword_fallback(text)
+            return await self._apply_yolo_filter(keywords, video_path, clip_duration)
 
         prompt = (
             "Extract 2-3 short, highly visual search keywords from the following transcript "
@@ -74,10 +86,34 @@ class BrollService:
                 if isinstance(keywords, list):
                     result = [str(k).strip() for k in keywords[:3] if k]
                     logger.info(f"[BRoll] Keywords extracted: {result}")
-                    return result
+                    return await self._apply_yolo_filter(result, video_path, clip_duration)
         except Exception as e:
             logger.warning(f"[BRoll] Keyword extraction failed: {e}")
-        return self._simple_keyword_fallback(text)
+        fallback = self._simple_keyword_fallback(text)
+        return await self._apply_yolo_filter(fallback, video_path, clip_duration)
+
+    async def _apply_yolo_filter(
+        self,
+        keywords: List[str],
+        video_path: Optional[Path],
+        clip_duration: float,
+    ) -> List[str]:
+        """Filter *keywords* using YOLOv10 visual grounding on *video_path*."""
+        if not video_path or clip_duration <= 0:
+            return keywords
+        try:
+            from .yolo_detector import get_visual_context, filter_keywords_with_yolo
+            ctx = await get_visual_context(video_path, clip_duration)
+            filtered = filter_keywords_with_yolo(keywords, ctx["detected_labels"])
+            if filtered != keywords:
+                logger.info(
+                    "[BRoll] YOLO filtered %d → %d keywords: %s → %s",
+                    len(keywords), len(filtered), keywords, filtered,
+                )
+            return filtered
+        except Exception as exc:
+            logger.debug("[BRoll] YOLO filter skipped: %s", exc)
+            return keywords
 
     @staticmethod
     def _simple_keyword_fallback(text: str) -> List[str]:

@@ -407,6 +407,7 @@ export default function ListPage() {
             {[
               { label: "Dashboard", href: "/dashboard", active: false },
               { label: "My Clips", href: "/list", active: true },
+              { label: "Auto-Pilot", href: "/autopilot", active: false },
               { label: "Analytics", href: "/analytics", active: false },
               { label: "Settings", href: "/settings", active: false },
             ].map((item) => (

@@ -1,7 +1,7 @@
 # ViraClip — Technical Roadmap
 
-> **Status: April 5, 2026** — ✅ **ALL PHASES COMPLETE (1-9)**  
-> Production-ready CPU pipeline with silence removal, denoising, smart thumbnails, viral metadata, YOLOv10 object detection, SSE progress streaming, ComfyUI integration, and full performance optimizations.
+> **Status: April 6, 2026** — ✅ **ALL PHASES COMPLETE (1-10)**  
+> Production-ready CPU pipeline with silence removal, denoising, smart thumbnails, viral metadata, YOLOv10 object detection, SSE progress streaming, ComfyUI integration, full performance optimizations, and Phase 10 viral polish (caption safe zones, LUT grading, beat-sync BGM, CTA/emoji overlays, background blur, hook slow-mo, A/B variants, eye-contact auto-correction).
 
 ---
 
@@ -57,6 +57,24 @@
 - ✅ Quantum-inspired optimization
 - ✅ Evolutionary algorithm engine
 - ✅ 8K Hollywood upscaling
+
+### Phase 10 — Viral Polish & A/B Automation (April 6, 2026)
+- ✅ Platform-aware caption safe zones (TikTok=280px, Reels=260px, Shorts=300px)
+- ✅ Cinematic LUT grading (5 presets: teal_orange, cinema_cold, vintage_warm, high_contrast, matte_fade)
+- ✅ Beat-synced BGM via `beat_sync_service` with `preferred_category` param; cut points merged with zoom punches
+- ✅ CTA overlay injected last 2s per clip (platform-aware Y position)
+- ✅ Emoji keyword overlays (40+ keyword→emoji pairs, max 5 cues, drawtext)
+- ✅ Portrait background blur (MediaPipe Selfie Segmentation, boxblur fallback)
+- ✅ Hook slow-mo auto-enabled when virality score ≥ 70 (env `HOOK_SLOWMO_ENABLED=false` to disable)
+- ✅ Auto A/B variant generation: 2 variants per clip (caption style rotation + BGM category swap)
+- ✅ Eye contact correction auto-applied for talking-head detection (face found + words present)
+- ✅ `GeneratedClip` model: `cta_overlay_applied`, `emoji_overlays_applied`, `variants_json` columns
+- ✅ `clip_repository`: Phase 10 fields in INSERT, SELECT, and row mapping; `_parse_variants()` helper
+- ✅ `variants[]` deserialized and returned in GET /tasks/{id}/clips and GET /clips/{id}
+- ✅ Trending topics upgraded from stub to Google Trends Daily RSS (60-min cache, sample fallback)
+- ✅ LUT bootstrap script (`scripts/bootstrap_luts.py`) generates 5 `.cube` files at Docker build time
+- ✅ DB migration: idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for all Phase 10 cols
+- ✅ Tests: 181 pass, 6 skipped (init.sql not mounted in container)
 
 ---
 
@@ -185,23 +203,26 @@ All features implemented, tested, and documented:
 - **Cost**: ~200ms per SFX lookup, cached after first run
 - **Status**: ✅ Complete — `services/clap_sfx_service.py`
 
-### 1.5 Subtitle font auto-install
+### 1.5 Subtitle font auto-install ✅ **DONE**
 - **What**: Auto-download TikTokSans-Regular.ttf if missing from `/app/fonts/`
 - **Why**: Without the font, libass falls back to Arial — subtitle style is wrong
 - **How**: Add font fetch to `Dockerfile` or `video_service.py` startup check
 - **File**: `backend/Dockerfile` — `ADD` the font, or fetch from Google Fonts CDN at container start
+- **Status**: ✅ Complete — `Dockerfile` fetches Oswald Bold from Google Fonts CDN as `TikTokSans-Regular.ttf` at build time; graceful Arial fallback if CDN unreachable
 
-### 1.6 Viral duration enforcement per platform
+### 1.6 Viral duration enforcement per platform ✅ **DONE**
 - **What**: Hard-cap clip duration by platform: TikTok 15–60s, Reels 15–90s, Shorts 15–60s
 - **Current state**: Dynamic 45–120s based on virality score (too wide a range)
 - **Fix**: Add platform-specific `MAX_CLIP_DURATION` to `export_service.py` profiles
 - **File**: `services/export_service.py`
+- **Status**: ✅ Complete — `ExportProfile.max_duration_seconds` (TikTok=60, Reels=90, Shorts=60, Universal=120) in `video_processing/export_profiles.py`; `enforce_clip_duration()` clamps to min/max
 
-### 1.7 Silence/filler removal (jump cuts)
+### 1.7 Silence/filler removal (jump cuts) ✅ **DONE**
 - **What**: Detect and remove pauses >0.4s and filler words ("um", "uh", "like") via transcript
 - **How**: Parse `words_with_confidence` gaps → build FFmpeg `select` filter to skip silent segments → concat
 - **Integration point**: `video_service.py` after transcript collection, before `create_optimized_clip`
 - **Impact**: Clips feel tighter, more energetic — highest virality signal
+- **Status**: ✅ Complete — `video_processing/silence_removal.py`: `build_keep_intervals()`, `remove_silences()` (hard-cut), `speed_ramp_silences()` (2× ramp); wired at Step 4.2-jc in `video_service.py`; `SILENCE_MODE=cut|ramp`, `SILENCE_THRESHOLD=0.4`
 
 ---
 
@@ -210,13 +231,14 @@ All features implemented, tested, and documented:
 > These features add significant quality but require larger models (1–7B params).  
 > Run on CPU but benefit greatly from even a mid-tier GPU (RTX 3060+).
 
-### 2.1 YOLOv10 object detection for contextual B-Roll
+### 2.1 YOLOv10 object detection for contextual B-Roll ✅ **DONE**
 - **What**: Detect objects mentioned in transcript → trigger B-roll search for that object
 - **Example**: "habla de playa" → YOLO detects no beach in frame → inject Pexels B-roll "beach"
 - **How**: `pip install ultralytics` → `YOLO("yolov10n.pt")` (6MB) on keyframes → match to transcript keywords
 - **Integration point**: `services/broll_service.py` — enhance keyword extraction with visual grounding
 - **Model size**: YOLOv10-n = 6MB (nano), YOLOv10-x = 58MB (large)
 - **Cost**: ~50ms per frame on CPU (nano model)
+- **Status**: ✅ Complete — `services/yolo_detector.py`: `get_visual_context()` samples up to 3 keyframes via FFmpeg + `detect_objects_in_frame()` + `filter_keywords_with_yolo()` removes already-visible subjects; wired into `BrollService.extract_keywords(video_path, clip_duration)` via `_apply_yolo_filter()`; `YOLO_ENABLED=false` to disable; 20 tests pass
 
 ### 2.2 Custom virality scorer fine-tuning ✅ **DONE**
 - **What**: Fine-tune a small classifier on top of text + audio features to predict viral score
@@ -1082,6 +1104,477 @@ AvatarMode
   - AvatarCompositor: all 5 composite modes, chroma key, face detection (13)
   - API routes: create/list/get/delete/render/composite (9)
   - Integration: full pipelines ERNeRF + TEXT2AVATAR + UV_VOLUMES (3)
-- **Total**: 58/58 passing ✅
+- **Total**: 58/58 passing 
+
+---
+
+## Phase 12 — Autonomy & Virality Layer (April 6, 2026)
+
+**Problem Solved**: ViraClip produced technically correct clips but lacked self-improvement capability, creator personalization, multi-platform distribution, and actionable quality feedback.
+
+**Solution**: Implemented 11 new services covering the full creator intelligence stack.
+
+### Services Added
+
+| File | Feature | Description |
+|------|---------|-------------|
+| `services/creator_profile_service.py` | Creator Profile | Niche, tone, target demo, caption style, CTA text, music genre, language, watermark per creator |
+| `services/analytics_importer.py` | Closed A/B Feedback | TikTok/YouTube API metrics → actual virality score → training sample for scorer retraining |
+| `services/trending_audio_service.py` | Trending Audio | TikTok Creative Center + Spotify Charts → ranked sound recommendations per genre/territory |
+| `services/thumbnail_text_service.py` | Hook Text Thumbnails | Pillow overlay: bold callout text + arrow on best thumbnail frame (per-platform font sizes) |
+| `video_processing/subtitle_qa.py` | Subtitle Quality Guard | Reading speed check (>3 wps), line breaks, profanity filter, emoji injection |
+| `video_processing/smart_reframe.py` | Smart Reframe | FFmpeg: 1:1 square crop (face-tracked via MediaPipe) + 16:9 blur-fill letterbox |
+| `services/language_detector.py` | Multi-Language Support | 15 languages: EN/ES/PT/HI/FR/DE/IT/AR/ZH/KO/JA/RU/NL/PL/TR — locale-aware LLM prompts |
+| `services/narrative_arc_service.py` | Multi-Clip Arc | Series (Part 1/2/3), best-of compilation, 15s teaser — all FFmpeg concat |
+| `services/brand_overlay_service.py` | Brand Overlay | FFmpeg drawtext (text) + overlay (PNG logo) at 5 configurable positions + thumbnail variant |
+| `services/clip_health_service.py` | Clip Health Report | 8-check actionable report: hook, duration, virality, audio, B-roll, captions, hashtags, thumbnail |
+| `services/tiktok_templates_service.py` | TikTok Templates | Duet (split-screen), Stitch (N-sec + reaction), Green Screen (chromakey), Subject-over-Broll |
+
+### API Endpoints (11 new routers)
+
+- `GET|POST|PUT|DELETE /creator-profile/{user_id}` — CRUD + music genres + locale hints
+- `POST /ab-feedback/import` — batch analytics import from TikTok/YouTube APIs
+- `POST /ab-feedback/manual` — manually report metrics without API token
+- `GET /trending-audio/` — ranked trending sounds by genre/territory
+- `POST /trending-audio/recommend` — best sound for a clip's features
+- `POST /thumbnail-text/generate` — hook text overlay on any thumbnail
+- `POST /subtitle-qa/check` — validate + auto-fix ASS subtitle string
+- `POST /subtitle-qa/check-file` — validate + auto-fix subtitle file
+- `POST /smart-reframe/generate` — 1:1 + 16:9 variants from 9:16 source
+- `POST /language-detect/detect` — detect language from transcript
+- `POST /language-detect/locale-prompt` — locale-aware LLM prompt for task
+- `GET /language-detect/supported` — list all 15 supported languages
+- `POST /narrative-arc/build` — series | best_of | teaser strategy
+- `POST /brand-overlay/apply` — watermark clip with text or PNG logo
+- `POST /brand-overlay/thumbnail` — watermark thumbnail with text
+- `POST /clip-health/report` — single clip actionable health report
+- `POST /clip-health/batch` — batch health reports with average score
+- `POST /tiktok-templates/duet` — split-screen duet render
+- `POST /tiktok-templates/stitch` — stitch + reaction render
+- `POST /tiktok-templates/green-screen` — chroma-key composite
+- `POST /tiktok-templates/subject-over-broll` — subject overlay on B-roll
+
+### Pipeline Wiring (`coordinator.py`)
+
+- **Creator Profile**: loaded per `user_id` on every clip render; `caption_style` → template, `cta_for_platform()` → personalized CTA text
+- **Language Detection**: auto-detects transcript language; attaches `detected_language`, `language_confidence`, `locale_territory` to every clip dict
+- **Clip Health Report**: auto-generated after render; attaches `health_report`, `health_grade`, `health_score` to every clip dict
+
+### Phase 12 Pipeline Wiring (Completed)
+
+All Phase 12 services are fully integrated into the video processing pipeline:
+
+**Subtitle QA Integration** (`caption_service.py`):
+- Auto-runs `run_subtitle_qa()` on generated ASS content before burning subtitles
+- Applies speed guard, emoji injection, and optional profanity filtering
+- Gracefully handles failures without breaking subtitle generation
+
+**Brand Overlay Integration** (`coordinator.py`):
+- Auto-applies watermarks when creator profile has `watermark_text` or `watermark_image_path`
+- Runs after CTA overlay, before clip metadata persistence
+- Supports text (drawtext) and image (PNG overlay) watermarks at 5 positions
+
+**Trending Audio Integration** (`coordinator.py` → `video_service.py` → `beat_sync_service.py`):
+- Creator profile's first non-"auto" music genre passed as `preferred_music_category`
+- BGM selection prioritizes preferred genre when available
+- Falls back to auto-selection when profile is missing or genre is "auto"
+
+**Bug Fixes**:
+- Added missing `VideoService` import in `coordinator.py:render_single_clip()`
+- Fixed falsy-zero bug: `start_time: 0` now handled correctly (explicit `None` check instead of `or` shortcut)
+
+### Tests
+
+- `tests/test_phase11_new_features.py` — 110 tests across all 11 services
+  - CreatorProfileService: CRUD, music genres, CTA, locale hints (13)
+  - AnalyticsImporter: score computation, training samples, API fallbacks (8)
+  - TrendingAudioService: genre matching, recommendation, local fallback (7)
+  - ThumbnailTextService: hex_to_rgb, missing file graceful, config defaults (5)
+  - SubtitleQA: reading speed, profanity filter, emoji injection, line breaks, full QA (12)
+  - SmartReframe: probe, face detect, square/landscape reframe, all-ratios (7)
+  - LanguageDetector: detect, locale, RTL, supported list, prompt builder (12)
+  - NarrativeArcService: part assignment, best-of, teaser, empty cases (10)
+  - BrandOverlayService: position expr, drawtext filter, watermark apply (8)
+  - ClipHealthService: all 8 check functions, generate report, grade logic (19)
+  - TikTokTemplatesService: duet/stitch/green-screen/subject-broll (9)
+- `tests/test_phase12_pipeline_wiring.py` — 14 tests for pipeline integration
+  - SubtitleQA auto-run in caption_service (3)
+  - Brand overlay auto-apply from creator profile (4)
+  - BGM genre preference forwarding through pipeline (5)
+  - BeatSyncService preferred_category parameter (2)
+- **Phase 12 Total**: 124/124 passing (110 services + 14 wiring)
+- **Full suite (post-Phase 12)**: 1939 passed, 19 skipped, 2 known-flaky
+
+---
+
+## Phase 13 — Growth & Distribution Layer (April 6, 2026)
+
+**Problem Solved**: ViraClip created great clips but couldn't post them, didn't know *when* to post, didn't clean audio, and scored virality without niche context.
+
+### New Services (8)
+
+| File | Feature | Description |
+|------|---------|-------------|
+| `services/jump_cut_service.py` | Jump-Cut Engine | FFmpeg silencedetect + transcript filler-word removal; produces jump-cut versions of clips |
+| `services/social_publisher.py` | Direct Publishing | TikTok v2 / Instagram Graph / YouTube Data API upload with scheduling + optimal-time helper |
+| `services/voiceover_service.py` | AI Voiceover | OpenAI TTS-HD + ElevenLabs; auto-mixes narration into clips with BGM ducking |
+| `services/audio_denoiser.py` | Audio Denoiser | FFmpeg afftdn + highpass/lowpass + EBU R128 loudnorm; cleans voice before captioning |
+| `services/performance_webhook_service.py` | Performance Webhooks | Receives TikTok/Instagram/YouTube events; auto-flags viral templates; persists stats |
+| `services/trend_intelligence_service.py` | Trend Intelligence | Per-niche hook phrases, viral caption patterns, day/time posting coefficients, hashtag clusters |
+| `services/niche_virality_service.py` | Per-Niche Virality | Niche-calibrated score (0-100) with duration sweet spots; auto-retrains weights from real data |
+
+### New API Routes (5 registered in `main_refactored.py`)
+
+- `POST /jump-cut/apply` — apply silence + filler cuts
+- `GET  /jump-cut/fillers` — list default filler words
+- `POST /audio-denoise/clean` — denoise + normalize video audio
+- `POST /performance-webhook/tiktok|instagram|youtube` — receive platform webhooks
+- `GET  /trend-intelligence/report` — full niche trend report
+- `POST /niche-virality/score` — niche-calibrated virality score
+- `POST /niche-virality/retrain` — retrain from real performance data
+
+### Pipeline Wiring (`coordinator.py`)
+
+- **Audio Denoiser**: opt-in via `config.denoise_audio=True` — runs after brand overlay, attaches `audio_denoised`, `audio_lufs_before`, `audio_lufs_after`
+- **Jump-Cut**: opt-in via `config.jump_cut=True` — runs after denoiser, attaches `jump_cut_applied`, `jump_cut_time_saved`, `jump_cut_fillers_removed`, `jump_cut_silences_removed`
+
+### Tests: 57/57 passing
+- Jump-cut unit tests: filler detection, keep-segment building, FFmpeg error handling (8)
+- Audio denoiser: no-op copy, error result, filter string verification (3)
+- Social publisher: token-missing failures, publish_to_all, optimal times (5)
+- Voiceover: no-key error, provider fallback, TTS→mix chain (4)
+- Performance webhooks: event recording, viral flagging, template stats, platform parsers (9)
+- Trend intelligence: hooks, patterns, posting times, report completeness (9)
+- Niche virality: scoring, duration penalty, weights, retrain, recommendations (9)
+- Pipeline wiring: denoiser + jump-cut enabled/disabled paths (4) + (4)
+
+### Full Suite: 1997 passed, 19 skipped, 1 known-flaky
+
+---
+
+## Phase 14 — Automation & Reach Layer (April 6, 2026)
+
+**Problem Solved**: ViraClip had no way to pull videos from URLs, required manual per-step operation, and couldn't close the A/B learning loop automatically.
+
+### New Services (3)
+
+| File | Feature | Description |
+|------|---------|-------------|
+| `services/video_ingestion_service.py` | Multi-Source Ingest | yt-dlp wrapper; accepts YouTube/TikTok/Instagram/Twitch/Twitter/Vimeo URLs; `ingest_url()`, `ingest_multiple()`, `detect_platform()`, `get_video_info()` |
+| `services/autopilot_service.py` | Auto-Pilot | 6-stage workflow: ingest → task creation → wait for clips → voiceover → publish → track; `start_autopilot()`, `get_workflow()`, `list_workflows()` |
+| A/B loop extension in `performance_webhook_service.py` | A/B Auto-Winner | `auto_update_creator_template()` — auto-promotes winning template to creator profile when ≥ N viral clips |
+
+### New API Routes (2 registered in `main_refactored.py`)
+
+- `GET  /ingest/check` — yt-dlp availability check
+- `GET  /ingest/info` — video metadata without downloading
+- `POST /ingest/url` — download a single URL
+- `POST /ingest/batch` — download up to 20 URLs concurrently
+- `GET  /ingest/detect-platform` — identify platform from URL
+- `POST /autopilot/run` — start end-to-end automation workflow
+- `GET  /autopilot/status/{id}` — poll workflow progress
+- `GET  /autopilot/workflows` — list recent workflows
+- `POST /autopilot/ab-winner` — trigger A/B winner promotion
+
+### Frontend Components (2 new React components)
+
+- `components/trend-panel.tsx` — `<TrendPanel>`: shows per-niche hook phrases, best posting hours (UTC), hashtag cluster, trending topics; niche selector + refresh
+- `components/processing-options.tsx` — `<ProcessingOptions>`: jump-cut / denoiser / voiceover toggles with inline config; `<UrlIngestWidget>`: URL download + platform detection inline in UI
+
+### tsconfig Fix
+- Added `"node"` to `types` array → `process.env` now recognized in IDE
+
+### Tests: 50/50 passing
+- Platform detection for 8 URL patterns (9)
+- IngestResult dataclass (3)
+- ingest_url: yt-dlp not found, timeout, nonzero rc, success + file discovery, platform tagging (5)
+- ingest_multiple concurrency (1)
+- is_ytdlp_available (2)
+- AutopilotWorkflow: create, save/load, get/list, fail without source, to_dict, ingest stage called, config defaults (9)
+- A/B auto-winner: threshold, update, no-duplicate, graceful null (4)
+- Ingest API: check, detect, 503, success, batch-limit, batch-ok, info-404 (8)
+- Autopilot API: requires-source, local-path, url, 404, status, list, ab-winner-empty, ab-winner-triggers (9)
+
+### Full Suite: **2048 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 15 — Polish & Integration (April 6, 2026)
+
+**Problem Solved**: New Phase 13-14 services had no storage dirs in Docker, no env var documentation, and no frontend entry point.
+
+### Infrastructure Fixes
+- **`backend/Dockerfile`**: Added `/app/storage/ingested`, `/app/data`, `/app/data/creator_profiles` to `mkdir -p` (required by ingestion + autopilot + performance stores)
+- **`.env.example`**: Documented all Phase 13-14 env vars — `TIKTOK_ACCESS_TOKEN`, `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_ACCOUNT_ID`, `YOUTUBE_ACCESS_TOKEN`, `VIRACLIP_CDN_URL`, `ELEVENLABS_API_KEY`, `PERF_STORE_PATH`, `NICHE_WEIGHTS_PATH`, `INGEST_OUTPUT_DIR`, `AUTOPILOT_STORE_PATH`
+
+### New Frontend Pages & Components
+
+| File | What it does |
+|------|-------------|
+| `app/autopilot/page.tsx` | Full auto-pilot UI: URL input, niche/platform/clip config, jump-cut + denoise + auto-publish toggles, live workflow status polling, recent workflow history |
+| `components/trend-panel.tsx` | `<TrendPanel>` — per-niche hook phrases, posting hours, hashtags, trending topics with niche selector + refresh |
+| `components/processing-options.tsx` | `<ProcessingOptions>` — jump-cut/denoise/voiceover toggles; `<UrlIngestWidget>` — yt-dlp URL download with platform detection |
+| `components/performance-analytics.tsx` | `<PerformanceAnalytics>` — top viral templates bar chart with engagement rate + viral rate progress bars |
+
+### Nav
+- Added **Auto-Pilot** link to `app/list/page.tsx` sidebar nav
+
+### Full Suite: **2048 passed, 19 skipped, 0 failures** (no regressions)
+
+---
+
+## Phase 16 — Export, Search & Security (April 6, 2026)
+
+### 3 New Services
+
+| File | What it does |
+|------|-------------|
+| `services/export_service.py` | `build_task_zip(clips, task_title, include_metadata)` — streams ZIP archive of all clip files + optional `metadata.json` with per-clip scores |
+| `services/clip_search_service.py` | `search_clips(db, user_id, query, hook_type, min_virality, …)` full-text + score search across all user clips; `get_search_facets()` for filter UI |
+| `services/webhook_security_service.py` | HMAC-SHA256 verification for TikTok (`X-TikTok-Signature`) + Meta/Instagram (`X-Hub-Signature-256`) + HMAC-SHA1 for YouTube (`X-Hub-Signature`); gracefully skips verification when secret not set |
+
+### 2 New API Route Groups
+
+| Router | Endpoints |
+|--------|-----------|
+| `api/routes/export.py` → `/export/*` | `GET /export/tasks/{id}/zip/info` (preflight), `POST /export/tasks/{id}/zip` (stream ZIP) |
+| `api/routes/clip_search.py` → `/clips/*` | `GET /clips/search` (full-text + filters + pagination), `GET /clips/facets` (hook_type distribution) |
+
+### New env vars
+- `TIKTOK_WEBHOOK_SECRET` — HMAC secret for incoming TikTok webhooks
+- `META_WEBHOOK_SECRET` / `INSTAGRAM_WEBHOOK_SECRET` — Meta webhook HMAC secret
+- `YOUTUBE_WEBHOOK_SECRET` — YouTube PubSubHubbub HMAC secret
+
+### Tests: **34/34** | Full suite: **2082 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 17 — Rate Limits & Scheduled Publishing (April 6, 2026)
+
+### Rate Limiting Extensions (`api/middleware/rate_limit.py`)
+- Added `"ingest"` limit type: 10 yt-dlp ingest requests per hour (`RATE_LIMIT_INGEST_PER_HOUR`)
+- Added `"autopilot"` limit type: 5 pipeline runs per hour (`RATE_LIMIT_AUTOPILOT_PER_HOUR`)
+- New FastAPI Depends: `ingest_rate_limit_dependency` applied to `POST /ingest/url` + `POST /ingest/batch`
+- New FastAPI Depends: `autopilot_rate_limit_dependency` applied to `POST /autopilot/run`
+- Both added to `__all__`
+
+### Scheduled Publish Service (`services/scheduled_publish_service.py`)
+Redis sorted-set backed scheduler. Score = Unix publish timestamp.
+
+| Function | What it does |
+|----------|-------------|
+| `schedule_publish(user_id, clip_id, platform, publish_at, …)` | Add job to sorted set; rejects past timestamps + quota exceeded |
+| `list_scheduled(user_id, limit, include_past)` | Return pending jobs ordered by publish_at |
+| `cancel_scheduled(user_id, job_id)` | Remove a specific job by job_id |
+| `execute_now(user_id, job_id)` | Immediately publish regardless of scheduled time |
+| `execute_due_jobs(user_id)` | Run all jobs with publish_at ≤ now; mark published/failed |
+
+Quota: max 50 pending jobs per user (`_MAX_JOBS_PER_USER`)
+
+### New API Route (`api/routes/scheduled_publish.py` → `/scheduled-publish/*`)
+- `POST /scheduled-publish/schedule` — queue clip for future post
+- `GET  /scheduled-publish/list` — list pending jobs
+- `DELETE /scheduled-publish/{job_id}` — cancel job
+- `POST /scheduled-publish/{job_id}/publish-now` — immediate publish
+- `POST /scheduled-publish/execute-due` — cron trigger endpoint
+
+### Tests: **35/35** | Full suite: **2117 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 18 — Cache, Dedup & User Quota (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/cache_service.py` | `cached_response(key)` / `set_cached_response(key, val, ttl)` / `invalidate_cache(key)` / `invalidate_prefix(prefix)` / `get_cache_stats()` — Redis-backed JSON response cache; all functions fail open |
+| `services/dedup_service.py` | `compute_file_hash(path)` / `compute_bytes_hash(data)` / `is_duplicate(user_id, hash)` / `register_hash(user_id, hash, task_id)` / `get_original_task(user_id, hash)` / `clear_hash(user_id, hash)` — SHA-256 source dedup with 30-day TTL |
+
+### New API Route (`api/routes/user_quota.py` → `/users/*`)
+- `GET  /users/{user_id}/quota` — rate limit statuses + scheduled job count + cache stats
+- `GET  /users/{user_id}/dedup/check?file_hash=` — check if content hash is duplicate
+- `DELETE /users/{user_id}/dedup/{file_hash}` — clear a dedup registration (e.g. after task deletion)
+
+### Tests: **27/27** | Full suite: **2143 passed, 19 skipped, 0 failures**
+*(1 pre-existing flaky AI scoring test unrelated to Phase 18)*
+
+---
+
+## Phase 19 — Clip Tags, Bulk Actions & Enhanced Health (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_tag_service.py` | Redis SET-backed clip tags: `add_tags`, `remove_tags`, `get_tags`, `clear_tags`, `get_clips_by_tag`. Max 20 tags/clip, 50-char limit, auto-normalised to lowercase |
+| `services/health_service.py` | `check_redis()`, `check_database()`, `check_disk()`, `check_worker_queue()`, `full_health_check()` — comprehensive infrastructure health report |
+
+### New API Routes
+
+| Router | Endpoints |
+|--------|-----------|
+| `api/routes/clip_bulk.py` → `/clips/*` | `POST /clips/bulk` (delete/archive/tag/untag batch), `GET/POST/DELETE /clips/{id}/tags` |
+| `api/routes/health_enhanced.py` → `/health/*` | `GET /health/detailed` (full report), `GET /health/ready` (readiness probe), `GET /health/live` (liveness probe) |
+
+### Bug Fix
+- `tests/test_phase14_automation.py`: Added `dependency_overrides` for `ingest_rate_limit_dependency` and `autopilot_rate_limit_dependency` in test app factories — prevents real Redis rate limit counters from causing 429s during the test suite.
+
+### Tests: **29/29** | Full suite: **2173 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 20 — Task Retry, Thumbnails & Usage Analytics (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/task_retry_service.py` | `retry_task(task_id)` / `get_retry_info(task_id)` — max 3 retries per task (Redis counter), re-queues via JobQueue |
+| `services/clip_thumbnail_service.py` | `extract_thumbnail(clip_path, clip_id, timestamp, width)` — FFmpeg JPEG frame extraction with Redis cache; `delete_thumbnail()` |
+| `services/usage_analytics_service.py` | `record_usage(user_id, endpoint)` / `get_daily_usage(user_id, days)` / `get_total_usage(user_id)` / `get_usage_summary()` — daily-bucketed Redis counters, 90-day retention |
+
+### New API Routes
+
+| Router | Endpoints |
+|--------|-----------|
+| `api/routes/task_retry.py` → `/tasks/*` | `POST /tasks/{id}/retry`, `GET /tasks/{id}/retry-info` |
+| `api/routes/usage_analytics.py` | `GET /usage/{id}/summary`, `/daily`, `/totals`; `POST /usage/{id}/record`; `GET /clips/{id}/thumbnail` |
+
+### Tests: **27/27** | Full suite: **2200 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 21 — Annotations, Notifications & Content Moderation (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_annotation_service.py` | Redis hash per clip: `set_annotation`, `get_annotation`, `delete_annotation`, `update_annotation_field`. Max 2000-char notes |
+| `services/inapp_notification_service.py` | Redis list per user (newest-first, max 100): `push_notification`, `get_notifications`, `mark_read`, `mark_all_read`, `clear_notifications`, `unread_count` |
+| `services/content_moderation_service.py` | Regex-based transcript scanner: profanity / violence / hate_speech categories → severity (none/low/medium/high); 24h Redis cache |
+
+### New API Route (`api/routes/clip_moderation.py`)
+- `GET/PUT/DELETE /clips/{id}/annotation` + `PATCH /clips/{id}/annotation/field`
+- `POST/GET/DELETE /clips/{id}/moderate`
+- `GET/POST /notifications/{user_id}` + `PATCH /notifications/{user_id}/{id}/read` + `POST /notifications/{user_id}/read-all` + `DELETE /notifications/{user_id}` + `GET /notifications/{user_id}/unread-count`
+
+### Tests: **32/32** | Full suite: **2232 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 22 — Playlists, A/B Tests & Webhook Event Log (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/playlist_service.py` | Redis LIST-backed ordered clip playlists: `create_playlist`, `get_playlist`, `list_playlists`, `delete_playlist`, `add_clip_to_playlist`, `remove_clip_from_playlist`. Max 50 playlists, 200 clips each |
+| `services/ab_test_service.py` | Per-clip caption/title variant tracking: `create_variant`, `record_impression`, `record_click`, `get_variant_stats`, `get_all_variants`, `delete_variant`. CTR computed per variant. Max 5 variants/clip |
+| `services/webhook_event_log_service.py` | Outgoing webhook event history: `log_event`, `update_event_status`, `get_event_log`, `clear_event_log`, `get_event_stats`. 500 entries/user, 30-day Redis TTL |
+
+### New API Route (`api/routes/playlist_ab_webhook.py`)
+- `POST/GET /playlists` + `GET/DELETE /playlists/{uid}/{pid}` + `POST/DELETE /playlists/{uid}/{pid}/clips/{cid}`
+- `POST/GET /ab-tests/{clip_id}/variants` + impression/click/delete per variant
+- `POST/GET/PATCH/DELETE /webhook-log/{user_id}` + `GET /webhook-log/{user_id}/stats`
+
+### Tests: **34/34** | Full suite: **2266 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 23 — Score Overrides, Feedback & Export History (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_score_override_service.py` | `set_score_override`, `get_score_override`, `delete_score_override`, `resolve_score` — Redis hash, score 0–100, `resolve_score` picks override over computed |
+| `services/feedback_aggregation_service.py` | `submit_thumbs`, `submit_rating` (1-5 stars), `get_feedback_stats`, `get_user_feedback` — per-user dedup via Redis hash |
+| `services/clip_export_history_service.py` | `record_export`, `update_export_status`, `get_export_history`, `get_export_stats` — Redis list, 200 records/user, 60-day TTL |
+
+### New API Route (`api/routes/clip_feedback_score.py`)
+- `PUT/GET/DELETE /clips/{id}/score-override` + `GET /clips/{id}/effective-score`
+- `POST /clips/{id}/feedback/thumbs`, `POST /clips/{id}/feedback/rating`, `GET /clips/{id}/feedback`, `GET /clips/{id}/feedback/{user_id}`
+- `POST/GET /exports/{user_id}` + `GET /exports/{user_id}/stats` + `PATCH /exports/{user_id}/{export_id}`
+
+### Tests: **31/31** | Full suite: **2296 passed, 19 skipped, 1 pre-existing flaky failure**
+
+---
+
+## Phase 24 — Chapters, Caption Variants & User Activity Log (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_chapter_service.py` | Redis sorted-set per clip: `add_chapter`, `get_chapters`, `remove_chapter`, `clear_chapters`, `get_chapter_at_time`. Max 50 chapters |
+| `services/caption_variant_service.py` | Template-based caption generator (hook/question/statement/listicle/challenge): `generate_variants`, `get_or_generate_variants`, `clear_variants`. 30-day Redis cache |
+| `services/user_activity_log_service.py` | Append-only action log per user: `log_action`, `get_activity_log`, `get_activity_stats`, `clear_activity_log`. Max 1000 entries, 90-day TTL |
+
+### New API Route (`api/routes/clip_chapters_captions.py`)
+- `POST/GET /clips/{id}/chapters` + `DELETE /clips/{id}/chapters/{cid}` + `DELETE /clips/{id}/chapters` + `GET /clips/{id}/chapters/at/{ts}`
+- `GET/DELETE /clips/{id}/caption-variants`
+- `POST/GET /activity/{user_id}` + `GET /activity/{user_id}/stats` + `DELETE /activity/{user_id}`
+
+### Tests: **29/29** | Full suite: **2326 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 25 — Watermark, Transcript Search & Share Links (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_watermark_service.py` | Per-user watermark config (Redis hash): text, position, opacity, font_size, color, enabled. `apply_watermark()` runs FFmpeg drawtext. 5 positions supported |
+| `services/transcript_search_service.py` | Full-text substring search across indexed clip transcripts: `index_transcript`, `get_transcript`, `delete_transcript`, `search_transcripts` (hit_count + snippet), `list_indexed_clips` |
+| `services/clip_share_link_service.py` | Short share token generation: `create_share_link`, `resolve_share_link` (auto-increments views), `list_share_links`, `revoke_share_link`. 8-char token, 7-day default TTL, max 10 links/clip |
+
+### New API Route (`api/routes/watermark_search_share.py`)
+- `GET/PUT/DELETE /watermark/{uid}` + `POST /watermark/{uid}/apply`
+- `GET /transcripts/{uid}/search` + `GET /transcripts/{uid}/clips` + `POST/GET/DELETE /transcripts/{uid}/{cid}`
+- `POST/GET /share/{clip_id}` + `GET /share/resolve/{token}` + `DELETE /share/{clip_id}/{token}`
+
+### Tests: **29/29** | Full suite: **2355 passed, 19 skipped, 0 failures**
+
+---
+
+## Phase 26 — Collections, AI Summary & Clip Comparison (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_collection_service.py` | User-curated clip collections: `create_collection`, `get_collection`, `list_collections`, `delete_collection`, `add_clip_to_collection`, `remove_clip_from_collection`. Max 100 collections/user, max 500 clips/collection |
+| `services/ai_summary_service.py` | Keyword extraction (stop-word filtering) + auto-summary (top sentence scoring): `extract_keywords`, `generate_summary`, `get_or_generate_summary`, `clear_summary_cache`. 24h Redis cache |
+| `services/clip_comparison_service.py` | Side-by-side clip comparison: `compare_metrics` with diff + winner calculation. Redis metadata loader (`compare_clips_from_redis`) |
+
+### New API Route (`api/routes/collections_summary_compare.py`)
+- `POST/GET/DELETE /collections/{user_id}` + `GET /collections/{user_id}/{coll_id}`
+- `POST/DELETE /collections/{user_id}/{coll_id}/clips/{clip_id}`
+- `POST/DELETE /clips/{id}/summary`
+- `POST /clips/compare`
+
+### Tests: **26/26** | Full suite: **2380 passed, 19 skipped, 1 pre-existing flaky failure**
+
+---
+
+## Phase 27 — Flagging, Smart Compression & Analytics Aggregation (April 6, 2026)
+
+### New Services
+
+| File | What it does |
+|------|-------------|
+| `services/clip_flagging_service.py` | User report submission + auto-moderation rules: `submit_report`, `get_clip_reports`, `resolve_reports`. Auto-hide (3 flags), auto-strike (5 flags), escalation keywords. Redis list storage |
+| `services/smart_compression_service.py` | Content-aware compression: `analyze_content_complexity` (low/medium/high), `recommend_compression` (CRF + bitrate). Optional size constraint. 24h Redis cache |
+| `services/clip_analytics_aggregation_service.py` | Time-series analytics: `record_view`, `get_daily_stats`, `get_weekly_stats`, `get_analytics_range`. Daily (90d TTL) + weekly (1y TTL) rollups in Redis |
+
+### New API Route (`api/routes/flagging_compression_analytics.py`)
+- `POST /clips/{id}/report` + `GET /clips/{id}/reports` + `GET /clips/{id}/flag-meta` + `POST /clips/{id}/resolve`
+- `GET /clips/{id}/compression` + `DELETE /clips/{id}/compression`
+- `POST /clips/{id}/analytics/view` + `GET /clips/{id}/analytics/daily` + `GET /clips/{id}/analytics/weekly` + `GET /clips/{id}/analytics/range` + `GET /clips/{id}/analytics/periods`
+
+### Tests: **21/21** | Full suite: **2401 passed, 19 skipped, 1 pre-existing flaky failure**
 
 ---

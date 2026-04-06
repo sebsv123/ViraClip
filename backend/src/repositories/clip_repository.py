@@ -45,6 +45,10 @@ class ClipRepository:
         face_detected: Optional[bool] = None,
         # P2.4: hook preview score
         hook_preview_score: int = 0,
+        # Phase 10: viral polish
+        cta_overlay_applied: bool = False,
+        emoji_overlays_applied: bool = False,
+        variants_json: Optional[str] = None,
     ) -> str:
         """Create a new clip record and return its ID."""
         try:
@@ -59,6 +63,7 @@ class ClipRepository:
                      social_title, social_description, suggested_hashtags,
                      thumbnail_filename, face_detected,
                      hook_preview_score,
+                     cta_overlay_applied, emoji_overlays_applied, variants_json,
                      created_at)
                     VALUES
                     (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
@@ -69,6 +74,7 @@ class ClipRepository:
                      :social_title, :social_description, :suggested_hashtags,
                      :thumbnail_filename, :face_detected,
                      :hook_preview_score,
+                     :cta_overlay_applied, :emoji_overlays_applied, :variants_json,
                      NOW())
                     RETURNING id
                 """),
@@ -97,6 +103,9 @@ class ClipRepository:
                     "thumbnail_filename": thumbnail_filename,
                     "face_detected": face_detected,
                     "hook_preview_score": hook_preview_score,
+                    "cta_overlay_applied": cta_overlay_applied,
+                    "emoji_overlays_applied": emoji_overlays_applied,
+                    "variants_json": variants_json,
                 },
             )
         except Exception:
@@ -142,7 +151,8 @@ class ClipRepository:
                            translated_text,
                            social_title, social_description, suggested_hashtags,
                            thumbnail_filename, face_detected, hook_preview_score,
-                           user_rating, creative_meta_json
+                           user_rating, creative_meta_json,
+                           cta_overlay_applied, emoji_overlays_applied, variants_json
                     FROM generated_clips
                     WHERE task_id = :task_id
                     ORDER BY clip_order ASC
@@ -195,6 +205,9 @@ class ClipRepository:
                     "face_detected": row_dict.get("face_detected"),
                     "hook_preview_score": row_dict.get("hook_preview_score") or 0,
                     "user_rating": row_dict.get("user_rating"),
+                    "cta_overlay_applied": bool(row_dict.get("cta_overlay_applied", False)),
+                    "emoji_overlays_applied": bool(row_dict.get("emoji_overlays_applied", False)),
+                    "variants": ClipRepository._parse_variants(row_dict.get("variants_json")),
                     **ClipRepository._unpack_creative_meta(row_dict.get("creative_meta_json")),
                 }
             )
@@ -210,6 +223,16 @@ class ClipRepository:
             return json.loads(json_str)
         except Exception:
             return {}
+
+    @staticmethod
+    def _parse_variants(json_str: Optional[str]) -> List[Dict[str, Any]]:
+        """Deserialize variants_json to a list of variant dicts."""
+        if not json_str:
+            return []
+        try:
+            return json.loads(json_str)
+        except Exception:
+            return []
 
     @staticmethod
     async def update_creative_meta(db: AsyncSession, clip_id: str, creative_meta: Dict[str, Any]) -> None:
@@ -276,7 +299,8 @@ class ClipRepository:
                            translated_text,
                            social_title, social_description, suggested_hashtags,
                            thumbnail_filename, face_detected, hook_preview_score,
-                           user_rating, created_at
+                           user_rating, created_at,
+                           cta_overlay_applied, emoji_overlays_applied, variants_json
                     FROM generated_clips
                     WHERE id = :clip_id
                     """
@@ -329,6 +353,10 @@ class ClipRepository:
             "face_detected": row_dict.get("face_detected"),
             "hook_preview_score": row_dict.get("hook_preview_score") or 0,
             "user_rating": row_dict.get("user_rating"),
+            "cta_overlay_applied": bool(row_dict.get("cta_overlay_applied", False)),
+            "emoji_overlays_applied": bool(row_dict.get("emoji_overlays_applied", False)),
+            "variants_json": row_dict.get("variants_json"),
+            "variants": ClipRepository._parse_variants(row_dict.get("variants_json")),
             "created_at": row_dict["created_at"].isoformat(),
             "video_url": f"/clips/{row_dict['task_id']}/{row_dict['filename']}",
         }

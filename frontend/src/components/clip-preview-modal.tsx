@@ -3,7 +3,7 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { Sparkles, TrendingUp, Target, Zap, Share2 } from "lucide-react";
+import { Sparkles, TrendingUp, Target, Zap, Share2, Shuffle, Music, Download, Subtitles } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
 interface ClipPreviewModalProps {
@@ -22,6 +22,15 @@ interface ClipPreviewModalProps {
     social_title?: string | null;
     social_description?: string | null;
     suggested_hashtags?: string[];
+    // Phase 10: Viral Polish & A/B
+    cta_overlay_applied?: boolean;
+    emoji_overlays_applied?: boolean;
+    variants?: Array<{
+      path: string;
+      variant: string;
+      label: string;
+      type: string;
+    }>;
   };
 }
 
@@ -304,6 +313,66 @@ export function ClipPreviewModal({ isOpen, onClose, clip }: ClipPreviewModalProp
               )}
             </div>
           )}
+
+          {/* Phase 10: Viral Polish */}
+          {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (() => {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+            const taskId = clip.video_url.split("/")[2];
+            return (
+              <div className="bg-gradient-to-br from-rose-950/30 to-orange-950/30 border border-rose-700/40 rounded-lg p-4">
+                <h4 className="font-semibold text-rose-400 mb-3 flex items-center gap-2">
+                  <Sparkles className="w-4 h-4" />
+                  Viral Polish Applied
+                </h4>
+
+                {/* Effect badges */}
+                {(clip.cta_overlay_applied || clip.emoji_overlays_applied) && (
+                  <div className="flex flex-wrap gap-2 mb-3">
+                    {clip.cta_overlay_applied && (
+                      <span className="flex items-center gap-1 text-xs bg-orange-900/50 text-orange-300 border border-orange-700/40 rounded-full px-2 py-0.5">
+                        <Target className="w-3 h-3" /> CTA Overlay
+                      </span>
+                    )}
+                    {clip.emoji_overlays_applied && (
+                      <span className="flex items-center gap-1 text-xs bg-pink-900/50 text-pink-300 border border-pink-700/40 rounded-full px-2 py-0.5">
+                        😀 Emoji Cues
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* A/B Variants */}
+                {clip.variants && clip.variants.length > 0 && (
+                  <div>
+                    <p className="text-xs text-rose-400 font-medium mb-2 flex items-center gap-1">
+                      <Shuffle className="w-3 h-3" /> A/B Variants ({clip.variants.length})
+                    </p>
+                    <div className="space-y-1.5">
+                      {clip.variants.map((v, vi) => (
+                        <div key={vi} className="flex items-center justify-between bg-black/30 rounded px-2 py-1.5">
+                          <div className="flex items-center gap-2">
+                            {v.type === "caption_style" ? (
+                              <Subtitles className="w-3 h-3 text-cyan-400 flex-shrink-0" />
+                            ) : (
+                              <Music className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                            )}
+                            <span className="text-xs text-gray-300 truncate max-w-[180px]" title={v.label}>{v.label}</span>
+                          </div>
+                          <a
+                            href={`${apiUrl}/clips/${taskId}/${v.path.split("/").pop()}`}
+                            download
+                            className="text-xs text-rose-400 hover:text-rose-300 font-medium ml-2 flex-shrink-0"
+                          >
+                            <Download className="w-3 h-3" />
+                          </a>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Pro Tips */}
           <div className="bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg p-4">
