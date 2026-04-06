@@ -169,6 +169,7 @@ class Config:
     def _infer_default_llm(self) -> str:
         """
         Infer a usable default model based on whichever API key is present.
+        Priority order: Google > OpenAI > Anthropic > Groq > Ollama
         Falls back to Google for backward compatibility.
         """
         if self.google_api_key:
@@ -177,6 +178,10 @@ class Config:
             return "openai:gpt-4o-mini"
         if self.anthropic_api_key:
             return "anthropic:claude-3-5-haiku-latest"
+        if self.groq_api_key:
+            return "groq:llama-3.3-70b-versatile"
+        if self.ollama_base_url:
+            return "ollama:llama3.2"
         return "google-gla:gemini-2.0-flash"
 
 
