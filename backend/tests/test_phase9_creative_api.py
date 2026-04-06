@@ -58,7 +58,7 @@ class TestGetTaskCreativeReport:
 
         with patch("src.api.routes.creative.get_task_status", return_value=None):
             with pytest.raises(HTTPException) as exc_info:
-                asyncio.get_event_loop().run_until_complete(
+                asyncio.run(
                     get_task_creative_report("unknown-id")
                 )
         assert exc_info.value.status_code == 404

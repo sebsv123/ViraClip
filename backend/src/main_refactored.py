@@ -261,6 +261,53 @@ def create_app(
     from .api.routes.distributed_cache import router as cache_router
     from .api.routes.ai_inference import router as ai_inference_router
     from .api.routes.data_migration import router as migration_router
+    from .api.routes.scene_detection import router as scene_detection_router
+    from .api.routes.vector_search import router as vector_search_router
+    from .api.routes.vfx import router as vfx_router
+    from .api.routes.video_polish import router as video_polish_router
+    from .api.routes.onnx import router as onnx_router
+    from .api.routes.kubernetes import router as kubernetes_router
+    from .api.routes.image_gen import router as image_gen_router
+    from .api.routes.federated_learning import router as federated_learning_router
+    from .api.routes.external_analytics import router as external_analytics_router
+    from .api.routes.langchain_ops import router as langchain_ops_router
+    from .api.routes.interpreter import router as interpreter_router
+    from .api.routes.captions import router as captions_router
+    from .api.routes.lut import router as lut_router
+    from .api.routes.beat_sync import router as beat_sync_router
+    from .api.routes.creator_profile import router as creator_profile_router
+    from .api.routes.ab_feedback import router as ab_feedback_router
+    from .api.routes.trending_audio import router as trending_audio_router
+    from .api.routes.thumbnail_text import router as thumbnail_text_router
+    from .api.routes.subtitle_qa import router as subtitle_qa_router
+    from .api.routes.smart_reframe import router as smart_reframe_router
+    from .api.routes.language_detect import router as language_detect_router
+    from .api.routes.narrative_arc import router as narrative_arc_router
+    from .api.routes.brand_overlay import router as brand_overlay_router
+    from .api.routes.clip_health import router as clip_health_router
+    from .api.routes.tiktok_templates import router as tiktok_templates_router
+    from .api.routes.jump_cut import router as jump_cut_router
+    from .api.routes.audio_denoise import router as audio_denoise_router
+    from .api.routes.performance_webhook import router as performance_webhook_router
+    from .api.routes.trend_intelligence import router as trend_intelligence_router
+    from .api.routes.niche_virality import router as niche_virality_router
+    from .api.routes.ingest import router as ingest_router
+    from .api.routes.autopilot import router as autopilot_router
+    from .api.routes.export import router as export_router
+    from .api.routes.clip_search import router as clip_search_router
+    from .api.routes.scheduled_publish import router as scheduled_publish_router
+    from .api.routes.user_quota import router as user_quota_router
+    from .api.routes.clip_bulk import router as clip_bulk_router
+    from .api.routes.health_enhanced import router as health_enhanced_router
+    from .api.routes.task_retry import router as task_retry_router
+    from .api.routes.usage_analytics import router as usage_analytics_router
+    from .api.routes.clip_moderation import router as clip_moderation_router
+    from .api.routes.playlist_ab_webhook import router as playlist_ab_webhook_router
+    from .api.routes.clip_feedback_score import router as clip_feedback_score_router
+    from .api.routes.clip_chapters_captions import router as clip_chapters_captions_router
+    from .api.routes.watermark_search_share import router as watermark_search_share_router
+    from .api.routes.collections_summary_compare import router as collections_summary_compare_router
+    from .api.routes.flagging_compression_analytics import router as flagging_compression_analytics_router
 
     app.include_router(media_router)
     app.include_router(feedback_router)
@@ -339,6 +386,53 @@ def create_app(
     app.include_router(cache_router)           # NEW: Multi-layer distributed cache management
     app.include_router(ai_inference_router)    # NEW: AI model optimization (TensorRT/ONNX) + inference
     app.include_router(migration_router)       # NEW: GDPR data export/import jobs
+    app.include_router(scene_detection_router) # NEW: Scene detection + cut points + keyframe extraction
+    app.include_router(vector_search_router)   # NEW: Milvus multimodal vector search (text/visual/hybrid)
+    app.include_router(vfx_router)             # NEW: VFX generative style, Kling swap, viral loops, branding
+    app.include_router(video_polish_router)    # NEW: Face centering, eye contact, pattern interrupts
+    app.include_router(onnx_router)            # NEW: ONNX fast inference for virality + engagement
+    app.include_router(kubernetes_router)      # NEW: K8s auto-scaling metrics + worker management
+    app.include_router(image_gen_router)       # NEW: DALL-E / SDXL image generation
+    app.include_router(federated_learning_router) # NEW: Federated learning rounds + client management
+    app.include_router(external_analytics_router) # NEW: GA4/Mixpanel/Amplitude/Segment/PostHog integration
+    app.include_router(langchain_ops_router)       # NEW: LangChain virality/metadata/hook/chat chains
+    app.include_router(interpreter_router)         # NEW: Natural language task execution (Open Interpreter)
+    app.include_router(captions_router)            # NEW: ASS karaoke + highlight caption burn-in
+    app.include_router(lut_router)                 # NEW: lut3d cinematic color grading
+    app.include_router(beat_sync_router)           # NEW: BPM detection + beat-synced BGM mixing
+    app.include_router(creator_profile_router)     # NEW: Per-creator personalization profiles
+    app.include_router(ab_feedback_router)         # NEW: Closed A/B feedback loop (analytics import)
+    app.include_router(trending_audio_router)      # NEW: Trending sound matching (TikTok/Spotify)
+    app.include_router(thumbnail_text_router)      # NEW: Hook-text thumbnail overlays (Pillow)
+    app.include_router(subtitle_qa_router)         # NEW: Subtitle QA guard (speed/profanity/emoji)
+    app.include_router(smart_reframe_router)       # NEW: Smart reframe 1:1 + 16:9 variants
+    app.include_router(language_detect_router)     # NEW: Language detection + locale LLM prompts
+    app.include_router(narrative_arc_router)       # NEW: Multi-clip series/best-of/teaser arc
+    app.include_router(brand_overlay_router)       # NEW: Brand/watermark overlay (text + image)
+    app.include_router(clip_health_router)         # NEW: Actionable clip health report
+    app.include_router(tiktok_templates_router)    # NEW: Duet/stitch/green-screen templates
+    app.include_router(jump_cut_router)            # NEW: Jump-cut engine (silence + filler removal)
+    app.include_router(audio_denoise_router)       # NEW: Audio denoiser (noise reduction + loudnorm)
+    app.include_router(performance_webhook_router) # NEW: Performance feedback webhooks + auto-flagging
+    app.include_router(trend_intelligence_router)  # NEW: Real-time hook phrases + caption patterns + timing
+    app.include_router(niche_virality_router)      # NEW: Per-niche virality scoring + auto-retraining
+    app.include_router(ingest_router)              # NEW: Multi-source video ingestion (yt-dlp)
+    app.include_router(autopilot_router)           # NEW: Full end-to-end automation pipeline
+    app.include_router(export_router)              # NEW: Batch ZIP export
+    app.include_router(clip_search_router)         # NEW: Full-text + score clip search
+    app.include_router(scheduled_publish_router)   # NEW: Scheduled social publishing
+    app.include_router(user_quota_router)           # NEW: User quota + dedup check
+    app.include_router(clip_bulk_router)            # NEW: Clip tags + bulk actions
+    app.include_router(health_enhanced_router)      # NEW: Detailed health + readiness/liveness probes
+    app.include_router(task_retry_router)           # NEW: Task retry + retry-info
+    app.include_router(usage_analytics_router)      # NEW: Per-user usage analytics + clip thumbnails
+    app.include_router(clip_moderation_router)      # NEW: Clip annotations + content moderation + in-app notifications
+    app.include_router(playlist_ab_webhook_router)  # NEW: Playlists + A/B tests + webhook event log
+    app.include_router(clip_feedback_score_router)   # NEW: Feedback, score overrides + export history
+    app.include_router(clip_chapters_captions_router) # NEW: Clip chapters + caption variants + user activity log
+    app.include_router(watermark_search_share_router)  # NEW: Watermark config + transcript search + share links
+    app.include_router(collections_summary_compare_router)  # NEW: Clip collections + AI summary + clip comparison
+    app.include_router(flagging_compression_analytics_router)  # NEW: Flagging + compression + analytics aggregation
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)

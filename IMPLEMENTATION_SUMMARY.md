@@ -1,7 +1,162 @@
-# ViraClip — Implementation Summary (Phase 1 & 2 Complete)
+# ViraClip — Implementation Summary (Phases 1–13 Complete)
 
-**Date:** April 3, 2026  
-**Status:** ✅ CPU-optimized production pipeline complete
+**Date:** April 6, 2026  
+**Status:** ✅ Full viral pipeline + creator personalization + direct publishing + niche intelligence
+
+---
+
+## Phase 13 — Growth & Distribution Layer (Latest)
+
+**Status:** ✅ 8 new services + 5 API routes + 2 pipeline integrations + 57/57 tests
+
+### Services Wired into Pipeline
+| Service | Where | Trigger |
+|---------|-------|---------|
+| `audio_denoiser` | `coordinator.py` | `config.denoise_audio=True` |
+| `jump_cut_service` | `coordinator.py` | `config.jump_cut=True` |
+
+### New Standalone Services (not auto-wired; called via API)
+- `social_publisher.py` — TikTok v2 / Instagram Graph / YouTube Data API; optimal posting time
+- `voiceover_service.py` — OpenAI TTS-HD + ElevenLabs; BGM-ducked narration mix
+- `performance_webhook_service.py` — platform event ingestion, viral template auto-flagging
+- `trend_intelligence_service.py` — niche hook phrases, caption patterns, posting-time coefficients
+- `niche_virality_service.py` — per-niche score calibration + auto-retrain from real engagement data
+
+### New API Routes (all registered in `main_refactored.py`)
+- `/jump-cut/*` — apply cuts, detect silence, list fillers
+- `/audio-denoise/*` — clean audio, measure LUFS
+- `/performance-webhook/tiktok|instagram|youtube|manual` — ingest performance events
+- `/trend-intelligence/*` — hooks, patterns, posting times, hashtags, full report
+- `/niche-virality/*` — score, retrain, weights, niche list
+
+### Clip Dict New Keys (when features enabled)
+`audio_denoised`, `audio_lufs_before`, `audio_lufs_after`, `jump_cut_applied`, `jump_cut_time_saved`, `jump_cut_fillers_removed`, `jump_cut_silences_removed`
+
+### Env Vars Required
+- `TIKTOK_ACCESS_TOKEN` — TikTok publishing
+- `INSTAGRAM_ACCESS_TOKEN` + `INSTAGRAM_ACCOUNT_ID` — Instagram publishing
+- `YOUTUBE_ACCESS_TOKEN` — YouTube publishing
+- `VIRACLIP_CDN_URL` — public URL base for Instagram video uploads
+- `OPENAI_API_KEY` or `ELEVENLABS_API_KEY` — voiceover generation
+
+### Tests: 57/57 passing | Full suite: 1997 passed, 1 known-flaky
+
+---
+
+## Phase 14 — Automation & Reach Layer
+
+**Status:** ✅ 3 new services + 2 API route groups + 2 frontend components + 50/50 tests
+
+### New Services
+- `services/video_ingestion_service.py` — yt-dlp wrapper; `ingest_url()`, `ingest_multiple()`, `detect_platform()`, `get_video_info()`; supports YouTube/TikTok/Instagram/Twitch/Twitter/Vimeo
+- `services/autopilot_service.py` — 6-stage async workflow (ingest→task→wait→voiceover→publish→track); `start_autopilot()`, `get_workflow()`, `list_workflows()`
+- `auto_update_creator_template()` in `performance_webhook_service.py` — A/B loop auto-winner; promotes best template to `creator_profile` when ≥ N viral clips
+
+### New API Routes (registered in `main_refactored.py`)
+- `/ingest/*` — check yt-dlp, get info, download single URL, batch download (20 max), detect platform
+- `/autopilot/*` — run workflow, poll status, list workflows, trigger A/B winner
+
+### Frontend Components
+- `components/trend-panel.tsx` — `<TrendPanel niche platform compact>`: hook phrases + posting hours + hashtags + trending topics; niche selector + auto-refresh
+- `components/processing-options.tsx` — `<ProcessingOptions>` (jump-cut/denoise/voiceover toggles) + `<UrlIngestWidget>` (yt-dlp download inline in UI)
+
+### Env Vars Required (new)
+- `INGEST_OUTPUT_DIR` (optional; defaults to `/app/storage/ingested`)
+- `AUTOPILOT_STORE_PATH` (optional; defaults to `/app/data/autopilot_workflows.json`)
+- yt-dlp must be installed: `pip install yt-dlp`
+
+### Tests: 50/50 passing | Full suite: **2048 passed, 0 failures**
+
+---
+
+## Phase 12 — Autonomy & Virality Layer
+
+**Status:** ✅ All 11 services implemented + fully wired into pipeline
+
+### Services Wired into Main Pipeline
+| Service | Where | Purpose |
+|---------|-------|---------|
+| `subtitle_qa` (speed/emoji/profanity) | `caption_service.py` | Auto-runs on ASS content before burning |
+| `brand_overlay` (watermark) | `coordinator.py` | Auto-applies from creator profile after CTA |
+| `trending_audio` (BGM genre) | `coordinator.py` → `video_service.py` → `beat_sync_service.py` | Creator's music preference forwarded through chain |
+| `creator_profile` (personalization) | `coordinator.py` | Loads per user_id; controls caption template, CTA, music |
+| `language_detector` | `coordinator.py` | Auto-detects language, adds locale metadata |
+| `clip_health` | `coordinator.py` | Auto-generates 8-check report after render |
+
+### New Modules (11 total)
+- `services/creator_profile_service.py` — per-creator settings (niche/tone/demo/CTA/music/watermark)
+- `services/analytics_importer.py` — TikTok/YouTube metrics → virality training samples
+- `services/trending_audio_service.py` — TikTok CC + Spotify trending sound matching
+- `services/thumbnail_text_service.py` — Pillow hook text + arrow overlays
+- `video_processing/subtitle_qa.py` — reading speed guard, emoji inject, profanity filter
+- `video_processing/smart_reframe.py` — 1:1 + 16:9 variants via FFmpeg + MediaPipe
+- `services/language_detector.py` — 15 languages, locale-aware LLM prompts
+- `services/narrative_arc_service.py` — multi-clip series/best-of/teaser
+- `services/brand_overlay_service.py` — text/image watermarks, 5 positions
+- `services/clip_health_service.py` — 8-check actionable quality report
+- `services/tiktok_templates_service.py` — duet/stitch/green-screen/subject-over-broll
+
+### API Routes (11 new)
+All registered in `main_refactored.py`:
+- `/creator-profile/*` — CRUD, music genres, locale hints
+- `/ab-feedback/*` — import analytics, fetch virality scores
+- `/trending-audio/*` — list trending, recommend for clip
+- `/thumbnail-text/*` — generate hook overlays
+- `/subtitle-qa/*` — check content/file, apply fixes
+- `/smart-reframe/*` — 1:1 + 16:9 variants
+- `/language-detect/*` — detect, locale prompt, supported list
+- `/narrative-arc/*` — build series/compilation/teaser
+- `/brand-overlay/*` — text/image watermark on video/thumbnail
+- `/clip-health/*` — generate health report
+- `/tiktok-templates/*` — duet/stitch/green-screen/subject-broll
+
+### Tests: 124/124 passing
+- `test_phase11_new_features.py` — 110 service tests
+- `test_phase12_pipeline_wiring.py` — 14 integration tests
+- **Full suite:** 1939 passed, 19 skipped, 2 known-flaky
+
+### Bug Fixes
+- Added missing `VideoService` import in `coordinator.py:render_single_clip()`
+- Fixed falsy-zero bug: `start_time: 0` now correctly handled with explicit `None` check
+
+---
+
+## Phase 10 — Viral Polish & A/B Automation
+
+### Services wired into main pipeline
+| Service | Where | Guard |
+|---------|-------|-------|
+| `caption_service` (platform safe zones) | `video_service.py` Step 4.4 | always on |
+| `lut_service` (cinematic grade) | `video_service.py` Step 4.6b | `LUT_PRESET` env |
+| `beat_sync_service` (BGM + cut points) | `video_service.py` Step 4.5b | always on |
+| `VideoPolishService.blur_background` | `video_service.py` Step 4.5c | `BACKGROUND_BLUR_ENABLED=true` |
+| `auto_center_face` (default **True**) | `video_service.py` Step 4.5 | `EYE_CONTACT_AUTO=false` to disable auto |
+| Eye contact correction (talking-head) | `video_service.py` Step 4.5 | auto when face found + words |
+| Hook slow-mo | `hook_slowmo.py` | auto when virality ≥ 70; `HOOK_SLOWMO_ENABLED=false` to disable |
+| CTA overlay | `coordinator.py` | always on (skipped for clips < 3s) |
+| Emoji keyword overlays | `coordinator.py` | always on |
+| A/B variant generation | `coordinator.py` | always on (fire-and-forget, non-fatal) |
+
+### New modules
+- `services/variant_generator.py` — async A/B caption style + BGM category variants
+- `scripts/bootstrap_luts.py` — generates 5 `.cube` LUT files at Docker build time
+
+### Database
+- `GeneratedClip`: `cta_overlay_applied`, `emoji_overlays_applied`, `variants_json` columns
+- `Task.auto_center_face` server_default changed to `true`
+- `init.sql`: idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS` for all Phase 10 cols
+
+### API
+- `GET /tasks/{id}/clips` and `GET /clips/{id}` now return `variants[]` (deserialized), `cta_overlay_applied`, `emoji_overlays_applied`
+- `GET /trending` auto-refreshes from Google Trends Daily RSS (60-min TTL, sample fallback)
+
+### Tests  `181 pass, 6 skipped`
+- `tests/test_pipeline_wiring.py` (45) — caption, LUT, beat-sync, CTA, emoji, blur
+- `tests/test_cinematic_features.py` (maintained)
+- `tests/test_phase2_features.py` (34) — hook slowmo, variants, beat-sync preferred_category, talking-head eye contact, coordinator wiring
+- `tests/test_phase3_persistence.py` (34 pass / 6 skip) — model fields, repository, task_service, trending RSS, LUT bootstrap, migration SQL
+
+---
 
 ---
 

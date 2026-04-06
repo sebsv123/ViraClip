@@ -12,197 +12,260 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 class VideoPolishService:
-    """Service for advanced video processing like gaze redirection."""
-    
+    """Service for advanced video processing — MediaPipe-powered face tracking."""
+
     def __init__(self):
-        self.face_cascade = None
+        self.face_cascade = None   # kept for Haar fallback only
         self.eye_cascade = None
-        # Placeholder for deep learning model
         self.gaze_model = None
 
     def _load_cascades(self):
         if self.face_cascade is None:
-            face_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-            eye_path = cv2.data.haarcascades + 'haarcascade_eye.xml'
+            face_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            eye_path  = cv2.data.haarcascades + "haarcascade_eye.xml"
             self.face_cascade = cv2.CascadeClassifier(face_path)
-            self.eye_cascade = cv2.CascadeClassifier(eye_path)
-            
-            if self.face_cascade is None or self.face_cascade.empty():
-                logger.error(f"Failed to load face cascade from {face_path}")
+            self.eye_cascade  = cv2.CascadeClassifier(eye_path)
+            if self.face_cascade.empty():
                 self.face_cascade = None
-            if self.eye_cascade is None or self.eye_cascade.empty():
-                logger.error(f"Failed to load eye cascade from {eye_path}")
+            if self.eye_cascade.empty():
                 self.eye_cascade = None
+
+    # ── FaceMesh landmark helpers ────────────────────────────────────────────
+
+    # Face-oval landmark indices (MediaPipe FaceMesh 478-point model)
+    # These form the outer boundary of the face — great for bounding-box extraction.
+    _OVAL_LM = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+                397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+                172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+
+    @staticmethod
+    def _face_centroid_from_landmarks(landmarks, img_w: int, img_h: int):
+        """Return (cx, cy) in pixel coords from FaceMesh oval landmarks."""
+        xs = [landmarks.landmark[i].x * img_w for i in VideoPolishService._OVAL_LM]
+        ys = [landmarks.landmark[i].y * img_h for i in VideoPolishService._OVAL_LM]
+        return float(np.mean(xs)), float(np.mean(ys))
+
+    @staticmethod
+    def _gaussian_smooth(arr: np.ndarray, sigma: float = 8.0) -> np.ndarray:
+        """Apply 1-D Gaussian smoothing to a position array.
+
+        Uses reflect-padding (not zero-padding) so edge values are preserved
+        without being dragged toward zero by the convolution boundary.
+        """
+        kernel_r = int(3 * sigma)
+        kernel_size = 2 * kernel_r + 1
+        x = np.arange(kernel_size) - kernel_r
+        kernel = np.exp(-0.5 * (x / sigma) ** 2)
+        kernel /= kernel.sum()
+        padded = np.pad(arr, kernel_r, mode="reflect")
+        return np.convolve(padded, kernel, mode="valid")
+
+    # ── Main face-tracking crop (MediaPipe FaceMesh, two-pass, smooth XY) ───
 
     async def auto_center_face(self, input_path: Path, output_path: Path) -> bool:
         """
-        Zooms in and centers the face for a better portrait/shorts look.
-        Returns True on success, False on failure (gracefully degrades to copy).
-        """
-        logger.info(f"Auto-centering face for {input_path}")
-        self._load_cascades()
+        Two-pass MediaPipe FaceMesh face-tracking crop with smooth XY trajectory.
 
+        Pass 1: Extract face centroid (cx, cy) for every frame using FaceMesh.
+                Missing detections are linearly interpolated from neighbours.
+        Smooth: Apply Gaussian filter (σ=8 frames) independently over X and Y
+                trajectories — eliminates jitter without introducing lag spikes.
+        Pass 2: Re-read frames, apply per-frame crop at smoothed position, write.
+        FFmpeg: Merge original audio back (cv2.VideoWriter is video-only).
+
+        Falls back to Haar cascade + EMA if MediaPipe is unavailable.
+        """
+        logger.info("🎯 Starting MediaPipe FaceMesh face-tracking crop: %s", input_path.name)
+
+        try:
+            import mediapipe as mp  # noqa: F401
+            _use_mediapipe = True
+        except ImportError:
+            logger.warning("MediaPipe not installed — falling back to Haar cascade crop")
+            _use_mediapipe = False
+
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._center_face_two_pass, input_path, output_path, _use_mediapipe
+        )
+
+    def _center_face_two_pass(
+        self, input_path: Path, output_path: Path, use_mediapipe: bool
+    ) -> bool:
         try:
             cap = cv2.VideoCapture(str(input_path))
             if not cap.isOpened():
-                logger.error(f"Failed to open video: {input_path}")
-                # Fallback: copy original file
-                import shutil
-                shutil.copy(input_path, output_path)
+                import shutil; shutil.copy(input_path, output_path)
                 return False
 
             width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps    = cap.get(cv2.CAP_PROP_FPS)
+            fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            n_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
 
-            if fps <= 0:
-                fps = 30  # Fallback FPS
+            # ── Target dimensions (9:16 portrait) ──────────────────────────
+            target_w = min(int(height * 9 / 16), width)
+            target_h = height
+            target_w -= target_w % 2
+            target_h -= target_h % 2
 
-            # Define output target (usually 9:16 for shorts)
-            target_aspect = 9/16
-            target_w = int(height * target_aspect)
-            if target_w > width:
-                target_w = width
-                target_h = int(width / target_aspect)
-            else:
-                target_h = height
-
-            # Ensure even dimensions for H.264 compatibility
-            target_w = target_w - (target_w % 2)
-            target_h = target_h - (target_h % 2)
-
-            # Use avc1/H.264 fourcc when available; fall back to mp4v
-            fourcc = cv2.VideoWriter_fourcc(*'avc1')
-            out = cv2.VideoWriter(str(output_path), fourcc, fps, (target_w, target_h))
-            if not out.isOpened():
-                # avc1 not available in this OpenCV build — use mp4v
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(str(output_path), fourcc, fps, (target_w, target_h))
-
-            if not out.isOpened():
-                logger.error(f"Failed to open video writer for {output_path} - codec not available")
-                cap.release()
-                # Fallback: copy original file
-                import shutil
-                shutil.copy(input_path, output_path)
-                logger.info(f"Fallback: copied original to {output_path}")
-                return False
-
-            # Smoothed face position tracking — exponential moving average to eliminate
-            # shakycam jitter when face detection flickers between frames.
-            _smooth_cx: float = width / 2.0  # start at center
-            _alpha: float = 0.12             # smoothing factor (lower = smoother, more lag)
-            _face_detected_frames: int = 0
-            _total_frames: int = 0
-
+            # ── PASS 1: Collect face centroids ──────────────────────────────
+            raw_cx = np.full(max(n_frames, 1), width  / 2.0, dtype=np.float32)
+            raw_cy = np.full(max(n_frames, 1), height * 0.35, dtype=np.float32)
+            detected = np.zeros(max(n_frames, 1), dtype=bool)
             frame_count = 0
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                _total_frames += 1
 
-                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                faces = []
-                if self.face_cascade:
-                    faces = self.face_cascade.detectMultiScale(
-                        gray, scaleFactor=1.1, minNeighbors=4,
-                        minSize=(40, 40), maxSize=(int(width * 0.8), int(height * 0.8)),
-                    )
+            if use_mediapipe:
+                import mediapipe as mp
+                mp_fm = mp.solutions.face_mesh  # type: ignore[attr-defined]
+                fm_cfg = dict(
+                    static_image_mode=False, max_num_faces=1,
+                    refine_landmarks=True,
+                    min_detection_confidence=0.4,
+                    min_tracking_confidence=0.4,
+                )
+                with mp_fm.FaceMesh(**fm_cfg) as fm:
+                    while True:
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        idx = frame_count
+                        frame_count += 1
+                        if idx >= len(raw_cx):
+                            raw_cx = np.append(raw_cx, width / 2.0)
+                            raw_cy = np.append(raw_cy, height * 0.35)
+                            detected = np.append(detected, False)
 
-                if len(faces) > 0:
-                    # Pick largest face (most likely the primary speaker)
-                    (x, y, w, h) = max(faces, key=lambda f: f[2] * f[3])
-                    raw_cx = float(x + w // 2)
-                    # Exponential moving average smoothing
-                    _smooth_cx = _alpha * raw_cx + (1.0 - _alpha) * _smooth_cx
-                    _face_detected_frames += 1
-
-                center_x = int(_smooth_cx)
-
-                # Calculate crop boundaries around smoothed face center
-                left = max(0, center_x - target_w // 2)
-                right = left + target_w
-                if right > width:
-                    right = width
-                    left = right - target_w
-                left = max(0, left)
-
-                # Ensure even boundaries for H.264
-                left = left - (left % 2)
-                right = left + target_w
-                right = min(right, width)
-
-                if left >= 0 and right <= width and (right - left) == target_w:
-                    cropped = frame[0:target_h, left:right]
-                    out.write(cropped)
-                else:
-                    # Fallback to center crop
-                    left = (width - target_w) // 2
-                    cropped = frame[0:target_h, left:left+target_w]
-                    out.write(cropped)
-
-                frame_count += 1
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        results = fm.process(rgb)
+                        if results.multi_face_landmarks:
+                            cx, cy = self._face_centroid_from_landmarks(
+                                results.multi_face_landmarks[0], width, height
+                            )
+                            raw_cx[idx] = cx
+                            raw_cy[idx] = cy
+                            detected[idx] = True
+            else:
+                # Haar cascade fallback for pass 1
+                self._load_cascades()
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+                    idx = frame_count
+                    frame_count += 1
+                    if idx >= len(raw_cx):
+                        raw_cx = np.append(raw_cx, width / 2.0)
+                        raw_cy = np.append(raw_cy, height * 0.35)
+                        detected = np.append(detected, False)
+                    if self.face_cascade:
+                        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                        faces = self.face_cascade.detectMultiScale(
+                            gray, 1.1, 4, minSize=(40, 40)
+                        )
+                        if len(faces) > 0:
+                            x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+                            raw_cx[idx] = float(x + w / 2)
+                            raw_cy[idx] = float(y + h * 0.4)
+                            detected[idx] = True
 
             cap.release()
-            out.release()
-            face_pct = int(100 * _face_detected_frames / max(_total_frames, 1))
+            if frame_count == 0:
+                import shutil; shutil.copy(input_path, output_path)
+                return False
+
+            raw_cx = raw_cx[:frame_count]
+            raw_cy = raw_cy[:frame_count]
+            detected = detected[:frame_count]
+
+            # ── Interpolate missing detections ──────────────────────────────
+            if detected.any():
+                det_idx = np.where(detected)[0]
+                raw_cx = np.interp(np.arange(frame_count), det_idx, raw_cx[det_idx])
+                raw_cy = np.interp(np.arange(frame_count), det_idx, raw_cy[det_idx])
+
+            # ── Gaussian smooth XY trajectory ───────────────────────────────
+            sigma = max(4.0, fps * 0.25)   # 0.25 s of smoothing
+            smooth_cx = self._gaussian_smooth(raw_cx, sigma)
+            smooth_cy = self._gaussian_smooth(raw_cy, sigma)
+
+            face_pct = int(100 * detected.sum() / frame_count)
             logger.info(
-                f"✅ Auto-centered face (video-only) written: {frame_count} frames | "
-                f"face detected in {face_pct}% of frames → now merging audio"
+                "Pass 1 done: %d frames, face detected %.0f%%, σ=%.1f",
+                frame_count, face_pct, sigma
             )
 
-            # cv2.VideoWriter writes video-only (no audio track). Use ffmpeg to merge
-            # the original audio stream back into the centered video.
-            temp_noaudio = output_path.with_suffix(".noaudio.mp4")
-            try:
-                os.rename(str(output_path), str(temp_noaudio))
-                ffmpeg_cmd = [
-                    "ffmpeg", "-y",
-                    "-i", str(temp_noaudio),   # video-only from cv2
-                    "-i", str(input_path),      # original clip (for audio)
-                    "-map", "0:v:0",            # take video from cv2 output
-                    "-map", "1:a:0?",           # take audio from original (? = optional)
-                    "-c:v", "copy",             # copy video as-is (fast, no re-encode)
-                    "-c:a", "aac",
-                    "-b:a", "192k",
-                    "-shortest",               # match shortest stream
-                    str(output_path),
-                ]
-                result = subprocess.run(
-                    ffmpeg_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=120,
-                )
-                if result.returncode != 0:
-                    logger.warning(f"ffmpeg audio merge warning: {result.stderr[-300:]}")
-                    # Fallback: at least use the silent video
-                    os.rename(str(temp_noaudio), str(output_path))
-                else:
-                    os.unlink(str(temp_noaudio))
-                    logger.info(f"✅ Audio merged into centered clip: {output_path.name}")
-            except Exception as merge_e:
-                logger.error(f"Audio merge failed: {merge_e}")
-                # Recover: rename noaudio back to output
-                try:
-                    if temp_noaudio.exists() and not output_path.exists():
-                        os.rename(str(temp_noaudio), str(output_path))
-                except Exception as e:
-                    logger.error(f"[POLISH] Failed to recover temp file {temp_noaudio}: {e}", exc_info=True)
+            # ── PASS 2: Write cropped frames ────────────────────────────────
+            cap2 = cv2.VideoCapture(str(input_path))
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+            out = cv2.VideoWriter(str(output_path), fourcc, fps, (target_w, target_h))
+            if not out.isOpened():
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                out = cv2.VideoWriter(str(output_path), fourcc, fps, (target_w, target_h))
 
+            written = 0
+            while True:
+                ret, frame = cap2.read()
+                if not ret:
+                    break
+                idx = min(written, frame_count - 1)
+
+                cx = int(np.clip(smooth_cx[idx], target_w // 2, width - target_w // 2))
+                cy = int(np.clip(smooth_cy[idx], 0, height - target_h))
+
+                # Horizontal crop centred on face X
+                left = cx - target_w // 2
+                left = max(0, min(left, width - target_w))
+                left -= left % 2
+
+                # Vertical crop: face in upper-middle area of frame
+                top = max(0, min(cy - int(target_h * 0.30), height - target_h))
+                top -= top % 2
+
+                cropped = frame[top:top + target_h, left:left + target_w]
+                if cropped.shape[:2] == (target_h, target_w):
+                    out.write(cropped)
+                else:
+                    cl = (width - target_w) // 2
+                    out.write(frame[0:target_h, cl:cl + target_w])
+                written += 1
+
+            cap2.release()
+            out.release()
+            logger.info("Pass 2 done: %d frames written", written)
+
+            # ── FFmpeg: merge original audio ────────────────────────────────
+            temp_v = output_path.with_suffix(".noaudio.mp4")
+            os.rename(str(output_path), str(temp_v))
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-hide_banner",
+                "-i", str(temp_v),
+                "-i", str(input_path),
+                "-map", "0:v:0",
+                "-map", "1:a:0?",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k",
+                "-shortest",
+                str(output_path),
+            ]
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=120)
+            try:
+                os.unlink(str(temp_v))
+            except OSError:
+                pass
+            if result.returncode != 0:
+                logger.warning("ffmpeg audio merge warning: %s", result.stderr[-300:])
+            else:
+                logger.info("✅ FaceMesh face-tracking crop complete: %s", output_path.name)
             return True
 
-        except Exception as e:
-            logger.error(f"❌ Auto-center face failed: {e}")
+        except Exception as exc:
+            logger.error("❌ auto_center_face failed: %s", exc, exc_info=True)
             try:
-                import shutil
-                shutil.copy(input_path, output_path)
-                logger.info(f"Fallback: copied original to {output_path}")
-                return False
-            except Exception as copy_e:
-                logger.error(f"Fallback copy also failed: {copy_e}")
-                return False
+                import shutil; shutil.copy(input_path, output_path)
+            except Exception:
+                pass
+            return False
 
     async def apply_eye_contact_correction(self, input_path: Path, output_path: Path):
         """
@@ -532,3 +595,124 @@ class VideoPolishService:
             except Exception as copy_e:
                 logger.error(f"[POLISH] Fallback copy also failed: {copy_e}", exc_info=True)
             return False
+
+    # ── Portrait Background Blur ─────────────────────────────────────────────
+
+    async def blur_background(
+        self,
+        input_path: Path,
+        output_path: Path,
+        blur_radius: int = 35,
+        process_every_n: int = 3,
+    ) -> bool:
+        """
+        Separate subject from background using MediaPipe Selfie Segmentation
+        and apply a Gaussian blur to the background only.
+
+        Algorithm:
+        1. Pass 1 (Python/OpenCV): For every Nth frame, run SelfieSegmentation
+           (model_selection=1, landscape) to get a soft segmentation mask.
+           Blend: blurred_bg * (1-mask) + original * mask.
+        2. All frames are written to a temp MP4 (no audio).
+        3. FFmpeg merges original audio back into the blurred video.
+
+        Falls back to a simple FFmpeg boxblur pass when MediaPipe is unavailable.
+        """
+        logger.info("🌫️  Starting background blur: %s", input_path.name)
+        BLUR_STR = f"{blur_radius}:{blur_radius}"
+
+        try:
+            import mediapipe as mp
+        except ImportError:
+            logger.info("  MediaPipe unavailable — using FFmpeg boxblur fallback")
+            return await self._ffmpeg_boxblur_fallback(input_path, output_path, BLUR_STR)
+
+        try:
+            cap = cv2.VideoCapture(str(input_path))
+            if not cap.isOpened():
+                raise RuntimeError(f"Cannot open {input_path}")
+
+            width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+            temp_v = output_path.with_suffix(".noaudio.mp4")
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(str(temp_v), fourcc, fps, (width, height))
+
+            seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=1)
+            prev_mask: np.ndarray | None = None
+            frame_idx = 0
+
+            while True:
+                ok, frame = cap.read()
+                if not ok:
+                    break
+
+                if frame_idx % process_every_n == 0:
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    result = seg.process(rgb)
+                    raw_mask = result.segmentation_mask  # float32, 0..1
+                    # Smooth mask edges
+                    prev_mask = cv2.GaussianBlur(raw_mask, (21, 21), 0)
+
+                if prev_mask is not None:
+                    # Blur entire frame then composite using mask
+                    blurred = cv2.GaussianBlur(frame, (blur_radius | 1, blur_radius | 1), 0)
+                    mask3 = np.stack([prev_mask] * 3, axis=-1)
+                    composited = (frame * mask3 + blurred * (1.0 - mask3)).astype(np.uint8)
+                    writer.write(composited)
+                else:
+                    writer.write(frame)
+
+                frame_idx += 1
+
+            cap.release()
+            writer.release()
+            seg.close()
+            logger.info("  Background blur pass done: %d frames", frame_idx)
+
+            # Merge original audio
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-hide_banner",
+                "-i", str(temp_v),
+                "-i", str(input_path),
+                "-map", "0:v:0", "-map", "1:a:0?",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
+                "-shortest", str(output_path),
+            ]
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=180)
+            try:
+                os.unlink(str(temp_v))
+            except OSError:
+                pass
+            if result.returncode != 0:
+                logger.warning("  ffmpeg audio merge warning: %s", result.stderr[-300:])
+            logger.info("✅ Background blur complete: %s", output_path.name)
+            return True
+
+        except Exception as exc:
+            logger.error("❌ blur_background failed: %s", exc, exc_info=True)
+            try:
+                import shutil
+                shutil.copy(input_path, output_path)
+            except Exception:
+                pass
+            return False
+
+    async def _ffmpeg_boxblur_fallback(
+        self, input_path: Path, output_path: Path, blur_str: str
+    ) -> bool:
+        """FFmpeg boxblur on the full frame — fast, no subject isolation."""
+        import asyncio as _asyncio
+        proc = await _asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(input_path),
+            "-vf", f"boxblur={blur_str}",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:a", "copy", str(output_path),
+            stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
+        )
+        _, _ = await _asyncio.wait_for(proc.communicate(), timeout=180.0)
+        return proc.returncode == 0

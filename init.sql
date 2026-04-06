@@ -231,3 +231,43 @@ CREATE TRIGGER update_generated_clips_updated_at BEFORE UPDATE ON generated_clip
 CREATE TRIGGER update_session_updatedAt BEFORE UPDATE ON session FOR EACH ROW EXECUTE FUNCTION update_updatedAt_column();
 CREATE TRIGGER update_account_updatedAt BEFORE UPDATE ON account FOR EACH ROW EXECUTE FUNCTION update_updatedAt_column();
 CREATE TRIGGER update_verification_updatedAt BEFORE UPDATE ON verification FOR EACH ROW EXECUTE FUNCTION update_updatedAt_column();
+
+-- ── Phase 10: Viral polish + A/B variants (idempotent — safe to re-run) ───────
+-- generated_clips
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS strategic_advice        TEXT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS conversion_tips         TEXT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS clip_metadata           TEXT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS thumbnail_path          VARCHAR(500);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_video_id        VARCHAR(50);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_video_id         VARCHAR(50);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_media_id      VARCHAR(50);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_views           INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_likes           INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_comments        INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_watch_time      FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_ctr             FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS youtube_engagement_rate FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_views            INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_likes            INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_comments         INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_shares           INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_completion_rate  FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS tiktok_engagement_rate  FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_impressions   INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_reach         INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_engagement    INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_likes         INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_comments      INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_shares        INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_saves         INTEGER DEFAULT 0;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS instagram_engagement_rate FLOAT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS metrics_last_updated    TIMESTAMP WITH TIME ZONE;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS creative_meta_json      TEXT;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS ab_test_id              VARCHAR(36);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS ab_variant              VARCHAR(50);
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS cta_overlay_applied     BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS emoji_overlays_applied  BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS variants_json           TEXT;
+
+-- tasks: flip auto_center_face default to true
+ALTER TABLE tasks ALTER COLUMN auto_center_face SET DEFAULT TRUE;

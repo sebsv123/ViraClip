@@ -44,21 +44,30 @@ class YouTubeDownloader:
             "outtmpl": str(output_path),
             # Use best available video/audio to avoid quality caps from container constraints.
             "format": "bestvideo*+bestaudio/best",
-            "format_sort": ["res", "fps"],
+            "format_sort": ["res", "fps", "codec:h264"],
             "merge_output_format": "mp4",
             "writesubtitles": False,
             "writeautomaticsub": False,
             "noplaylist": True,
             "overwrites": True,
+            # Speed: parallel fragment downloads (inspired by yt-dlp concurrent downloader)
+            "concurrent_fragment_downloads": 4,
             # Optimized for speed and reliability
             "socket_timeout": 30,
-            "retries": 5,  # Increased retries
+            "retries": 5,
             "fragment_retries": 5,
             "http_chunk_size": 10485760,  # 10MB chunks
             # Quiet operation - only errors/warnings
             "quiet": True,
-            "no_warnings": False,  # Show warnings but not info
+            "no_warnings": False,
             "ignoreerrors": False,
+            # Use the web client extractor (better 403 bypass than mweb)
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["web", "android"],
+                    "skip": ["translated_subs"],
+                }
+            },
             # Enhanced headers to avoid 403 errors
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",

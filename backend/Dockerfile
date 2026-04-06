@@ -142,10 +142,16 @@ COPY fonts/ ./fonts/
 COPY transitions/ ./transitions/
 COPY scripts/ ./scripts/
 
-RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp
+RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \
+    /app/storage/ingested \
+    /app/data \
+    /app/data/creator_profiles
 
 # Pre-generate synthetic SFX so SoundDesignService has assets at startup
 RUN .venv/bin/python /app/scripts/generate_sfx.py || echo "⚠ SFX generation failed — will fall back to loudnorm-only"
+
+# Bootstrap sample LUT files so lut_service has presets available at startup
+RUN mkdir -p /app/luts && .venv/bin/python /app/scripts/bootstrap_luts.py || echo "⚠ LUT bootstrap failed — LUT step will be skipped per-clip"
 
 # TikTok-style subtitle font — Oswald Bold (Google Fonts, OFL license).
 # Saved as TikTokSans-Regular.ttf so existing code finds it without changes.

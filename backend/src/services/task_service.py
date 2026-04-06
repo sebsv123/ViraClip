@@ -789,6 +789,13 @@ class TaskService:
                     face_detected=clip_info.get("face_detected"),
                     # P2.4: hook preview score
                     hook_preview_score=clip_info.get("hook_preview_score", 0),
+                    # Phase 10: viral polish
+                    cta_overlay_applied=clip_info.get("cta_overlay_applied", False),
+                    emoji_overlays_applied=clip_info.get("emoji_overlays_applied", False),
+                    variants_json=(
+                        __import__("json").dumps(clip_info["variants"])
+                        if clip_info.get("variants") else None
+                    ),
                 )
                 await self.db.commit()
                 clip_ids.append(clip_id)
