@@ -11,9 +11,20 @@ Pipeline:
 """
 
 import logging
+import traceback
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Runtime diagnostics flag - set to True to see detailed error traces
+DIAGNOSTIC_MODE = True
+
+def _log_step_error(step_name: str, exc: Exception, critical: bool = False):
+    """Log detailed error information for pipeline step failures."""
+    level = logging.ERROR if critical else logging.WARNING
+    logger.log(level, f"[Creative Pipeline] {step_name} FAILED: {type(exc).__name__}: {exc}")
+    if DIAGNOSTIC_MODE:
+        logger.log(level, f"[Creative Pipeline] {step_name} Full traceback:\n{''.join(traceback.format_exception(type(exc), exc, exc.__traceback__))}")
 
 
 class CreativePipeline:
@@ -78,9 +89,12 @@ class CreativePipeline:
         }
 
         # ── 1. Multimodal event timeline ──────────────────────────────────────
+        logger.info("  [Creative] Step 1/8: Multimodal timeline generation...")
         timeline: list = []
         try:
+            logger.debug("  [Creative] Importing multimodal_detector...")
             from .multimodal_detector import get_multimodal_detector
+            logger.debug("  [Creative] multimodal_detector import OK")
             timeline = await get_multimodal_detector().generate_timeline(
                 video_path=source_video,
                 segment_start=start,
@@ -88,14 +102,19 @@ class CreativePipeline:
                 words=words or [],
             )
             meta["timeline_events"] = len(timeline)
-            logger.info("  [Creative] %d timeline events", len(timeline))
+            logger.info("  [Creative] ✓ Step 1/8: %d timeline events generated", len(timeline))
+        except ImportError as exc:
+            _log_step_error("Step 1 (Timeline) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] Timeline failed: %s", exc)
+            _log_step_error("Step 1 (Timeline)", exc)
 
         # ── 2. Virality prediction ────────────────────────────────────────────
+        logger.info("  [Creative] Step 2/8: Virality prediction...")
         viral_pred = None
         try:
+            logger.debug("  [Creative] Importing virality_engine...")
             from .virality_engine import get_virality_engine
+            logger.debug("  [Creative] virality_engine import OK")
             viral_pred = await get_virality_engine().predict(
                 transcript=transcript,
                 words=words or [],
@@ -110,17 +129,22 @@ class CreativePipeline:
                 "improvements": viral_pred.improvements,
             })
             logger.info(
-                "  [Creative] Score=%.1f hook=%.0f pacing=%.0f emotion=%.0f",
+                "  [Creative] ✓ Step 2/8: Score=%.1f hook=%.0f pacing=%.0f emotion=%.0f",
                 viral_pred.score, viral_pred.hook_score,
                 viral_pred.pacing_score, viral_pred.emotion_score,
             )
+        except ImportError as exc:
+            _log_step_error("Step 2 (Virality) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] Virality prediction failed: %s", exc)
+            _log_step_error("Step 2 (Virality)", exc)
 
         # ── 3. Template selection ─────────────────────────────────────────────
+        logger.info("  [Creative] Step 3/8: Template selection...")
         preset = None
         try:
+            logger.debug("  [Creative] Importing smart_templates...")
             from .smart_templates import get_template_selector
+            logger.debug("  [Creative] smart_templates import OK")
             energy = float((audio_features or {}).get("energy", 0.5) or 0.5)
             preset = get_template_selector().select(
                 platform=platform,
@@ -129,13 +153,18 @@ class CreativePipeline:
                 audio_energy=energy,
             )
             meta["preset_used"] = preset.name
-            logger.info("  [Creative] Template: %s", preset.name)
+            logger.info("  [Creative] ✓ Step 3/8: Template: %s", preset.name)
+        except ImportError as exc:
+            _log_step_error("Step 3 (Template) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] Template selection failed: %s", exc)
+            _log_step_error("Step 3 (Template)", exc)
 
         # ── 4. Hook analysis (informational — no reordering yet) ──────────────
+        logger.info("  [Creative] Step 4/8: Hook analysis...")
         try:
+            logger.debug("  [Creative] Importing hook_engine...")
             from .hook_engine import get_hook_engine
+            logger.debug("  [Creative] hook_engine import OK")
             hook_result = get_hook_engine().find_best_hook(
                 words=words or [],
                 segment_duration=end - start,
@@ -145,11 +174,13 @@ class CreativePipeline:
             if hook_result.hook_text:
                 meta["hook_text"] = hook_result.hook_text
             logger.info(
-                "  [Creative] Hook: score=%.2f optimized=%s",
+                "  [Creative] ✓ Step 4/8: Hook score=%.2f optimized=%s",
                 hook_result.hook_score, hook_result.already_optimized,
             )
+        except ImportError as exc:
+            _log_step_error("Step 4 (Hook) - Import", exc)
         except Exception as exc:
-            logger.debug("  [Creative] Hook analysis failed: %s", exc)
+            _log_step_error("Step 4 (Hook)", exc)
 
         # ── 4.5 Hook-flash reorder ────────────────────────────────────────────
         try:
@@ -182,10 +213,13 @@ class CreativePipeline:
             logger.debug("  [Creative] Hook reorder failed: %s", exc)
 
         # ── 5. B-roll overlay ─────────────────────────────────────────────────
+        logger.info("  [Creative] Step 5/8: B-roll overlay...")
         broll_count = 0
         try:
+            logger.debug("  [Creative] Importing contextual_broll & video_effects...")
             from .contextual_broll import get_contextual_broll
             from .video_effects import overlay_broll_clips
+            logger.debug("  [Creative] B-roll imports OK")
             broll_pairs = await get_contextual_broll().get_for_timeline(
                 timeline, max_assets=3
             )
@@ -223,18 +257,64 @@ class CreativePipeline:
                     clip_path.unlink(missing_ok=True)
                     brolled.rename(clip_path)
                     broll_count = len(broll_pairs)
-                    logger.info("  [Creative] B-roll: %d overlays applied", broll_count)
+                    logger.info("  [Creative] ✓ Step 5/8: B-roll: %d overlays applied", broll_count)
                 else:
                     brolled.unlink(missing_ok=True)
+            else:
+                logger.info("  [Creative] Step 5/8: No B-roll pairs found")
+        except ImportError as exc:
+            _log_step_error("Step 5 (B-roll) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] B-roll overlay failed: %s", exc)
+            _log_step_error("Step 5 (B-roll)", exc)
 
         meta["broll_overlays"] = broll_count
 
+        # ── 5.5. Contextual overlays (viral feature: full-screen with corner bubble) ─
+        logger.info("  [Creative] Step 5.5/8: Contextual overlays...")
+        contextual_overlays = 0
+        try:
+            logger.debug("  [Creative] Importing contextual_overlay_engine...")
+            from .contextual_overlay_engine import get_contextual_overlay_engine
+            logger.debug("  [Creative] contextual_overlay_engine import OK")
+            
+            overlay_engine = get_contextual_overlay_engine()
+            overlayed = clip_path.with_name(f"overlayed_{clip_path.name}")
+            
+            overlay_result = await overlay_engine.apply_overlays(
+                video_path=clip_path,
+                output_path=overlayed,
+                transcript=transcript,
+                word_timings=words or [],
+                audio_features=audio_features or {},
+                virality_score=meta.get("viral_score", 50.0),
+                overlay_frequency="adaptive"
+            )
+            
+            if overlay_result.success and overlayed.exists() and overlayed.stat().st_size > 0:
+                clip_path.unlink(missing_ok=True)
+                overlayed.rename(clip_path)
+                contextual_overlays = overlay_result.overlays_applied
+                logger.info(
+                    "  [Creative] ✓ Step 5.5/8: Contextual overlays: %d applied (%d keywords detected)",
+                    contextual_overlays, overlay_result.keywords_detected
+                )
+            else:
+                overlayed.unlink(missing_ok=True)
+                logger.debug("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
+        except ImportError as exc:
+            _log_step_error("Step 5.5 (Contextual Overlays) - Import", exc)
+        except Exception as exc:
+            _log_step_error("Step 5.5 (Contextual Overlays)", exc)
+        
+        meta["contextual_overlays"] = contextual_overlays
+
         # ── 6. Video effects (zoom punch + color grade from preset) ───────────
+        logger.info("  [Creative] Step 6/8: Video effects (zoom + grade)...")
         try:
             if preset is not None:
+                logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
                 from .video_effects import apply_preset_effects
+                logger.debug("  [Creative] video_effects import OK")
                 peak_events = [e for e in timeline if e.type == "audio_peak"]
                 effected = clip_path.with_name(f"vfx_{clip_path.name}")
                 result = await apply_preset_effects(
@@ -246,19 +326,71 @@ class CreativePipeline:
                     meta["zoom_punch_applied"] = preset.zoom_punch_enabled and bool(peak_events)
                     meta["color_grade_applied"] = bool(preset.extra_vf_filters)
                     logger.info(
-                        "  [Creative] VFX: zoom_punch=%s grade=%s",
+                        "  [Creative] ✓ Step 6/8: VFX: zoom_punch=%s grade=%s",
                         meta["zoom_punch_applied"], meta["color_grade_applied"],
                     )
                 else:
                     effected.unlink(missing_ok=True)
+            else:
+                logger.info("  [Creative] Step 6/8: Skipped (no preset)")
+        except ImportError as exc:
+            _log_step_error("Step 6 (VFX) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] Video effects failed: %s", exc)
+            _log_step_error("Step 6 (VFX)", exc)
 
-        # ── 7. Audio mastering (loudnorm + SFX) ───────────────────────────────
+        # ── 6.5. Speed control (playback speed / dramatic slow-mo) ────────────
+        logger.info("  [Creative] Step 6.5/8: Speed control...")
+        speed_applied = False
+        try:
+            # Check if speed control is needed
+            playback_speed = segment.get("playback_speed", 1.0)
+            dramatic_slowmo = segment.get("dramatic_slowmo", False)
+            
+            if playback_speed != 1.0 or dramatic_slowmo:
+                from .speed_control_service import get_speed_control_service
+                
+                speed_svc = get_speed_control_service()
+                speed_output = clip_path.with_name(f"speed_{clip_path.name}")
+                
+                # Get hook info for dramatic slow-mo
+                hook_start = meta.get("hook_start", 0.0)
+                hook_end = meta.get("hook_end", 3.0)
+                
+                success = await speed_svc.apply_speed_control(
+                    clip_path=clip_path,
+                    output_path=speed_output,
+                    playback_speed=playback_speed,
+                    dramatic_slowmo=dramatic_slowmo,
+                    hook_start=hook_start,
+                    hook_end=hook_end
+                )
+                
+                if success and speed_output.exists() and speed_output.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    speed_output.rename(clip_path)
+                    speed_applied = True
+                    logger.info(
+                        "  [Creative] ✓ Step 6.5/8: Speed control (speed=%.2fx slowmo=%s)",
+                        playback_speed, dramatic_slowmo
+                    )
+                else:
+                    speed_output.unlink(missing_ok=True)
+            else:
+                logger.debug("  [Creative] Step 6.5/8: Skipped (no speed change)")
+        except Exception as exc:
+            _log_step_error("Step 6.5 (Speed Control)", exc)
+        
+        meta["speed_control_applied"] = speed_applied
+
+        # ── 7. Audio mastering (loudnorm + SFX + ducking) ─────────────────────
+        logger.info("  [Creative] Step 7/8: Audio mastering (loudnorm + SFX + ducking)...")
         sfx_count = 0
         loudnorm_applied = False
+        ducking_applied = False
         try:
+            logger.debug("  [Creative] Importing smart_audio...")
             from .smart_audio import get_smart_audio, find_bgm_track
+            logger.debug("  [Creative] smart_audio import OK")
             mastered = clip_path.with_name(f"mastered_{clip_path.name}")
             bgm = find_bgm_track()
             result_path = await get_smart_audio().master(
@@ -272,21 +404,48 @@ class CreativePipeline:
                 mastered.rename(clip_path)
                 loudnorm_applied = True
                 sfx_count = sum(1 for e in timeline if e.strength >= 0.6)
+                
+                # Apply audio ducking if enabled and we have word timings
+                if bgm and words:
+                    try:
+                        from .audio_ducking_service import get_audio_ducking_service
+                        ducked = clip_path.with_name(f"ducked_{clip_path.name}")
+                        duck_result = await get_audio_ducking_service().apply_ducking(
+                            video_path=clip_path,
+                            output_path=ducked,
+                            word_timings=words
+                        )
+                        if duck_result.success and ducked.exists() and ducked.stat().st_size > 0:
+                            clip_path.unlink(missing_ok=True)
+                            ducked.rename(clip_path)
+                            ducking_applied = True
+                            logger.info("  [Creative] ✓ Audio ducking applied (%d voice segments)", duck_result.ducked_segments)
+                        else:
+                            ducked.unlink(missing_ok=True)
+                    except Exception as duck_err:
+                        logger.debug("  [Creative] Audio ducking skipped: %s", duck_err)
+                
                 logger.info(
-                    "  [Creative] Audio mastered (sfx=%d bgm=%s)",
-                    sfx_count, bgm.name if bgm else "none",
+                    "  [Creative] ✓ Step 7/8: Audio mastered (sfx=%d bgm=%s ducking=%s)",
+                    sfx_count, bgm.name if bgm else "none", ducking_applied,
                 )
             else:
                 mastered.unlink(missing_ok=True)
+        except ImportError as exc:
+            _log_step_error("Step 7 (Audio) - Import", exc, critical=True)
         except Exception as exc:
-            logger.warning("  [Creative] Audio mastering failed: %s", exc)
+            _log_step_error("Step 7 (Audio)", exc)
 
         meta["sfx_injected"] = sfx_count
         meta["loudnorm_applied"] = loudnorm_applied
+        meta["audio_ducking_applied"] = ducking_applied
 
         # ── 8. QA + render manifest ───────────────────────────────────────────
+        logger.info("  [Creative] Step 8/8: QA + render manifest...")
         try:
+            logger.debug("  [Creative] Importing learning_loop...")
             from .learning_loop import get_learning_loop
+            logger.debug("  [Creative] learning_loop import OK")
             manifest = await get_learning_loop().post_render_analysis(
                 clip_path=clip_path,
                 source_path=source_video,
@@ -302,9 +461,18 @@ class CreativePipeline:
             meta["qa_passed"] = manifest.qa_passed
             meta["qa_issues"] = manifest.qa_issues
             meta["creative_enhanced"] = True
+            logger.info("  [Creative] ✓ Step 8/8: QA complete (passed=%s)", manifest.qa_passed)
+        except ImportError as exc:
+            _log_step_error("Step 8 (QA) - Import", exc)
         except Exception as exc:
-            logger.warning("  [Creative] QA failed: %s", exc)
+            _log_step_error("Step 8 (QA)", exc)
 
+        logger.info("  [Creative] Pipeline complete: enhanced=%s, %d/%d steps succeeded",
+                    meta["creative_enhanced"],
+                    sum(1 for k in ["timeline_events", "viral_score", "preset_used", 
+                                    "zoom_punch_applied", "loudnorm_applied", "qa_passed"] 
+                        if meta.get(k) not in [None, False, 0]),
+                    8)
         return meta
 
 

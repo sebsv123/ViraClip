@@ -55,3 +55,34 @@ worker_logs.txt
 worker_progress.txt
 backend/worker_logs.txt
 backend/worker_progress.txt
+
+# Audio files (download on setup)
+*.mp3
+backend/music/
+backend/assets/sounds/bgm/*.mp3
+backend/assets/sounds/sfx/*.mp3
+
+# Storage and cache
+backend/storage/
+frontend/.next/
+frontend/out/
+backend/overlay_cache/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+postgres-data/
+
+# Docker volumes
+.docker/
+
+# Test artifacts
+htmlcov/
+.coverage
+.pytest_cache/
+test-results/
+
+# Lockfiles (regenerate on install)
+frontend/bun.lockb
+backend/uv.lock

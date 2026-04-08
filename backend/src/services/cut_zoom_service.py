@@ -1,0 +1,218 @@
+"""
+Cut Zoom Service — Apply zoom transitions at jump cut points.
+
+Integrates with jump_cut_service to add dynamic zoom punches at each cut,
+creating Alex Hormozi / MrBeast style aggressive viral editing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+# Zoom parameters
+DEFAULT_ZOOM_FACTOR = 1.08      # 8% zoom
+DEFAULT_ZOOM_DURATION = 0.3     # seconds per zoom
+DEFAULT_EASING = "ease_in_out"  # zoom easing
+
+
+async def apply_cut_zooms(
+    video_path: str,
+    output_path: str,
+    cut_points: List[float],
+    zoom_factor: float = DEFAULT_ZOOM_FACTOR,
+    zoom_duration: float = DEFAULT_ZOOM_DURATION,
+    fps: int = 30,
+) -> bool:
+    """
+    Apply zoom transitions at cut points.
+    
+    Args:
+        video_path: Input video file
+        output_path: Output video file
+        cut_points: List of timestamps where cuts occur
+        zoom_factor: Zoom intensity (1.0 = no zoom, 1.1 = 10% zoom)
+        zoom_duration: Duration of each zoom in seconds
+        fps: Frame rate
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    if not cut_points:
+        logger.debug("[cut_zoom] No cut points, skipping zoom")
+        return False
+    
+    # Get video dimensions
+    probe_cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "json",
+        video_path,
+    ]
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *probe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        info = json.loads(stdout.decode())
+        stream = info.get("streams", [{}])[0]
+        width = int(stream.get("width", 1080))
+        height = int(stream.get("height", 1920))
+    except Exception as e:
+        logger.warning(f"[cut_zoom] Could not get dimensions: {e}")
+        width, height = 1080, 1920
+    
+    # Build zoompan filter with zoom at each cut point
+    # Use zoompan's time-based expressions
+    zoom_intervals = []
+    for t in cut_points[:10]:  # Limit to 10 zooms max
+        start = max(0, t - zoom_duration / 2)
+        end = t + zoom_duration / 2
+        zoom_intervals.append((start, end))
+    
+    # Create zoom expression: if within any interval, zoom to factor, else 1.0
+    interval_expr = "+".join(
+        f"between(t,{s:.3f},{e:.3f})"
+        for s, e in zoom_intervals
+    )
+    
+    if not interval_expr:
+        logger.debug("[cut_zoom] No valid zoom intervals")
+        return False
+    
+    zoom_expr = f"if(gt({interval_expr},0),{zoom_factor},1)"
+    
+    zoompan_filter = (
+        f"zoompan="
+        f"zoom='{zoom_expr}':"
+        f"x='iw/2-(iw/zoom/2)':"
+        f"y='ih/2-(ih/zoom/2)':"
+        f"d=1:"
+        f"s={width}x{height}:"
+        f"fps={fps}"
+    )
+    
+    # Apply zoom filter
+    cmd = [
+        "ffmpeg", "-y", "-v", "error",
+        "-i", video_path,
+        "-vf", zoompan_filter,
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "copy",
+        output_path,
+    ]
+    
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        
+        if proc.returncode != 0:
+            err = stderr.decode()[-300:]
+            logger.error(f"[cut_zoom] FFmpeg error: {err}")
+            return False
+        
+        logger.info(
+            f"[cut_zoom] Applied {len(zoom_intervals)} zoom transitions at cuts"
+        )
+        return True
+    
+    except Exception as e:
+        logger.error(f"[cut_zoom] Failed to apply zooms: {e}")
+        return False
+
+
+async def apply_jump_cuts_with_zoom(
+    video_path: str,
+    output_path: str,
+    words: Optional[List[Dict[str, Any]]] = None,
+    min_silence_sec: float = 0.3,
+    zoom_on_cuts: bool = True,
+    zoom_factor: float = DEFAULT_ZOOM_FACTOR,
+) -> Dict[str, Any]:
+    """
+    Apply jump cuts AND zoom transitions in one pass.
+    
+    This is optimized for viral editing: aggressive silence removal (0.3s min)
+    with zoom punches at every cut point.
+    
+    Args:
+        video_path: Source video
+        output_path: Output video
+        words: Word-level transcript for filler detection
+        min_silence_sec: Minimum silence gap to remove (0.3s = aggressive)
+        zoom_on_cuts: Whether to add zoom at cut points
+        zoom_factor: Zoom intensity
+        
+    Returns:
+        Dict with cut_count, zoom_count, time_saved, error
+    """
+    from .jump_cut_service import apply_jump_cuts
+    
+    # Step 1: Apply jump cuts
+    temp_cut = Path(output_path).with_suffix(".temp.mp4")
+    
+    result = await apply_jump_cuts(
+        video_path=video_path,
+        output_path=str(temp_cut),
+        words=words,
+        remove_fillers=True,
+        remove_silence=True,
+        silence_min_duration=min_silence_sec,
+    )
+    
+    if result.error or not temp_cut.exists():
+        return {
+            "success": False,
+            "error": result.error or "Jump cut failed",
+            "cut_count": 0,
+            "zoom_count": 0,
+            "time_saved": 0,
+        }
+    
+    # Step 2: Extract cut points from cut_list
+    cut_points = []
+    if result.cut_list:
+        # Cut points are at the end of each kept segment
+        for i, segment in enumerate(result.cut_list):
+            if i < len(result.cut_list) - 1:  # Not last segment
+                cut_points.append(segment["end"])
+    
+    # Step 3: Apply zoom transitions at cuts
+    zoom_success = False
+    if zoom_on_cuts and cut_points:
+        zoom_success = await apply_cut_zooms(
+            video_path=str(temp_cut),
+            output_path=output_path,
+            cut_points=cut_points,
+            zoom_factor=zoom_factor,
+        )
+    
+    # If zoom failed or not requested, just use the jump-cut output
+    if not zoom_success:
+        temp_cut.rename(output_path)
+    else:
+        temp_cut.unlink(missing_ok=True)
+    
+    return {
+        "success": True,
+        "cut_count": result.segments_removed,
+        "zoom_count": len(cut_points) if zoom_success else 0,
+        "time_saved": result.time_saved,
+        "filler_words_removed": result.filler_words_removed,
+        "silence_gaps_removed": result.silence_gaps_removed,
+        "zoom_applied": zoom_success,
+        "error": None,
+    }

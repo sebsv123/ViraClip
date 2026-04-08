@@ -246,6 +246,25 @@ class VideoCoordinator:
                 f"{len(segments)} segments identified"
             )
             
+            # PHASE 2.5: Scene-aware segment refinement
+            if self.config.get("use_scene_detection", True):
+                try:
+                    from pathlib import Path as _Path
+                    from .scene_aware_segmenter import get_scene_aware_segmenter
+                    
+                    await emit_progress(self.task_id, "scoring", 62, "Refining segments with scene detection...")
+                    
+                    segmenter = get_scene_aware_segmenter()
+                    segments = await segmenter.refine_segments_with_scenes(
+                        video_path=_Path(self.video_path),
+                        ai_segments=segments,
+                        use_scene_detection=True
+                    )
+                    
+                    logger.info(f"Scene-aware refinement complete: {len(segments)} segments aligned to scene boundaries")
+                except Exception as scene_err:
+                    logger.warning(f"Scene detection skipped: {scene_err}")
+            
             # PHASE 3: Parallel clip rendering
             await emit_progress(self.task_id, "render", 65, "Rendering clips...")
             
@@ -409,6 +428,10 @@ class VideoCoordinator:
                     **segment,
                     "start_time": _st if _st is not None else segment.get("start"),
                     "end_time":   _et if _et is not None else segment.get("end"),
+                    # Pass speed control params to creative pipeline
+                    "playback_speed": self.config.get("playback_speed", 1.0),
+                    "dramatic_slowmo": self.config.get("dramatic_slowmo", False),
+                    "speed_ramp_enabled": self.config.get("speed_ramp_enabled", True),
                 }
                 
                 # Pre-render validation
@@ -499,6 +522,7 @@ class VideoCoordinator:
                 creative_meta: dict = {}
                 try:
                     from .creative_pipeline import get_creative_pipeline
+                    logger.info(f"[Coordinator] Calling creative pipeline for clip {index}...")
                     creative_meta = await get_creative_pipeline().enhance(
                         clip_path=_Path(clip["path"]),
                         source_video=_Path(self.video_path),
@@ -510,8 +534,13 @@ class VideoCoordinator:
                         platform=self.config.get("target_platform", "tiktok"),
                     )
                     clip.update(creative_meta)
+                    logger.info(f"[Coordinator] Creative pipeline completed for clip {index}: enhanced={creative_meta.get('creative_enhanced', False)}")
+                except ImportError as _ie:
+                    logger.error(f"[Coordinator] CRITICAL: Creative pipeline import failed for clip {index}: {_ie}", exc_info=True)
+                    clip.pop("words", None)
+                    clip.pop("audio_features", None)
                 except Exception as _ce:
-                    logger.warning("Creative pipeline skipped for clip %d: %s", index, _ce)
+                    logger.error(f"[Coordinator] Creative pipeline FAILED for clip {index}: {type(_ce).__name__}: {_ce}", exc_info=True)
                     clip.pop("words", None)
                     clip.pop("audio_features", None)
 
@@ -681,6 +710,47 @@ class VideoCoordinator:
                 except Exception as _ve:
                     logger.debug("Variant generation skipped for clip %d: %s", index, _ve)
 
+                # ── Transition auto-selection ──────────────────────────────────
+                # Select appropriate transition for this clip based on template and energy
+                try:
+                    from .transition_selector import get_transition_selector
+                    
+                    selector = get_transition_selector()
+                    viral_score = vs_segment.get("virality_score", 50.0)
+                    
+                    # Determine if transition should be used
+                    should_transition = selector.should_use_transition(
+                        clip_index=index,
+                        total_clips=len(segments),
+                        viral_score=viral_score
+                    )
+                    
+                    if should_transition:
+                        # Get audio energy for transition selection
+                        _audio_features = clip.get("audio_features", {})
+                        _energy = _audio_features.get("energy", 0.5)
+                        
+                        # Select transition type
+                        transition_type = selector.select_transition(
+                            template_style=self.config.get("viral_template", "viral"),
+                            energy_level=_energy,
+                            use_morph=self.config.get("use_morph_transition", False)
+                        )
+                        
+                        clip["transition_type"] = transition_type.value
+                        clip["transition_enabled"] = True
+                        logger.info(
+                            "  [Transition] Clip %d: %s transition selected (viral_score=%.1f, energy=%.2f)",
+                            index, transition_type.value, viral_score, _energy
+                        )
+                    else:
+                        clip["transition_enabled"] = False
+                        logger.debug("  [Transition] Clip %d: No transition (index=%d, viral_score=%.1f)", index, index, viral_score)
+                
+                except Exception as _tr_e:
+                    logger.debug("Transition selection skipped for clip %d: %s", index, _tr_e)
+                    clip["transition_enabled"] = False
+
                 # ── CTA overlay (last 2 s) ─────────────────────────────────────
                 # "Follow for more 🔥" / "Comment below 👇" injected as drawtext
                 # on the final clip, respecting the platform safe zone.
@@ -769,35 +839,46 @@ class VideoCoordinator:
                     except Exception as _dn_e:
                         logger.debug("Audio denoiser skipped for clip %d: %s", index, _dn_e)
 
-                # ── Jump-cut engine (opt-in: config.jump_cut=True) ───────────
+                # ── Jump-cut engine with zoom transitions (opt-in: config.jump_cut=True) ───────────
                 if self.config.get("jump_cut", False):
                     try:
-                        from .jump_cut_service import apply_jump_cuts as _jump_cut
+                        from .cut_zoom_service import apply_jump_cuts_with_zoom
                         _jc_in = _Path(clip["path"])
                         _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
                         _jc_words = list(clip.get("words") or vs_segment.get("words") or [])
-                        _jc_result = await _jump_cut(
-                            str(_jc_in), str(_jc_out),
+                        
+                        # Viral-style editing: aggressive 0.3s cuts + zoom transitions
+                        _jc_result = await apply_jump_cuts_with_zoom(
+                            video_path=str(_jc_in),
+                            output_path=str(_jc_out),
                             words=_jc_words,
-                            remove_fillers=self.config.get("jump_cut_fillers", True),
-                            remove_silence=self.config.get("jump_cut_silence", True),
+                            min_silence_sec=self.config.get("jump_cut_min_silence", 0.3),  # Aggressive by default
+                            zoom_on_cuts=self.config.get("zoom_on_cuts", True),
+                            zoom_factor=self.config.get("cut_zoom_factor", 1.08),
                         )
-                        if not _jc_result.error and _jc_out.exists() and _jc_out.stat().st_size > 0:
+                        
+                        if _jc_result.get("success") and _jc_out.exists() and _jc_out.stat().st_size > 0:
                             _jc_in.unlink(missing_ok=True)
                             _jc_out.rename(_jc_in)
                             clip["jump_cut_applied"] = True
-                            clip["jump_cut_time_saved"] = _jc_result.time_saved
-                            clip["jump_cut_fillers_removed"] = _jc_result.filler_words_removed
-                            clip["jump_cut_silences_removed"] = _jc_result.silence_gaps_removed
+                            clip["jump_cut_time_saved"] = _jc_result.get("time_saved", 0)
+                            clip["jump_cut_fillers_removed"] = _jc_result.get("filler_words_removed", 0)
+                            clip["jump_cut_silences_removed"] = _jc_result.get("silence_gaps_removed", 0)
+                            clip["zoom_transitions_applied"] = _jc_result.get("zoom_count", 0)
+                            clip["cut_zoom_enabled"] = _jc_result.get("zoom_applied", False)
                             logger.info(
-                                "  [JumpCut] %.1fs saved, %d fillers, %d silences removed",
-                                _jc_result.time_saved, _jc_result.filler_words_removed,
-                                _jc_result.silence_gaps_removed,
+                                "  [JumpCut+Zoom] %.1fs saved, %d cuts, %d zooms, %d fillers, %d silences",
+                                _jc_result.get("time_saved", 0),
+                                _jc_result.get("cut_count", 0),
+                                _jc_result.get("zoom_count", 0),
+                                _jc_result.get("filler_words_removed", 0),
+                                _jc_result.get("silence_gaps_removed", 0),
                             )
                         else:
                             _jc_out.unlink(missing_ok=True)
+                            logger.warning("  [JumpCut+Zoom] Failed: %s", _jc_result.get("error", "unknown"))
                     except Exception as _jc_e:
-                        logger.debug("Jump-cut skipped for clip %d: %s", index, _jc_e)
+                        logger.error("Jump-cut+zoom service failed for clip %d: %s", index, _jc_e, exc_info=True)
 
                 # ── Language detection + locale info ──────────────────────────
                 _transcript_for_lang = vs_segment.get("text", "") or vs_segment.get("transcript", "")
