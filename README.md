@@ -44,11 +44,15 @@ ViraClip was born from this need - a powerful, open-source alternative that puts
 
 ## Quick Start
 
+**📚 New to ViraClip?** See [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md) for complete setup guide.
+
 ### Prerequisites
 
-- Docker and Docker Compose
-- An AssemblyAI API key (for transcription) - [Get one here](https://www.assemblyai.com/)
-- An LLM provider for AI analysis - OpenAI, Google, Anthropic, or Ollama
+- **Docker Desktop** - [Download here](https://www.docker.com/products/docker-desktop/)
+- **Git** - [Download here](https://git-scm.com/downloads)
+- **Optional:** Node.js 20+ and Bun for local frontend development
+
+**No API keys required** - ViraClip works 100% offline with local models!
 
 ### 1. Clone and Configure
 
@@ -207,17 +211,27 @@ Local test runs expect PostgreSQL and Redis to be available. The easiest path is
 
 ## Documentation
 
-Detailed documentation now lives in [`docs/`](docs/README.md).
+### Development & Setup
+- 📚 **[DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md)** - Complete setup guide for new developers
+- 🔑 **[API_KEYS_SETUP.md](API_KEYS_SETUP.md)** - How to get and configure API keys
+- 🌐 **[OFFLINE_MODE.md](OFFLINE_MODE.md)** - Running ViraClip without internet/API keys
 
-Start with:
+### Production & Features
+- 🚀 **[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)** - Production deployment checklist
+- ✅ **[FINAL_SYNC_VERIFICATION.md](FINAL_SYNC_VERIFICATION.md)** - System verification report
+- 🎬 **[VIRAL_FEATURES_COMPLETE.md](VIRAL_FEATURES_COMPLETE.md)** - All viral editing features
+- 📊 **[DEPENDENCY_AUDIT_REPORT.md](DEPENDENCY_AUDIT_REPORT.md)** - Dependency synchronization
 
-- [`docs/setup.md`](docs/setup.md)
-- [`docs/configuration.md`](docs/configuration.md)
-- [`docs/app-guide.md`](docs/app-guide.md)
-- [`docs/architecture.md`](docs/architecture.md)
-- [`docs/api-reference.md`](docs/api-reference.md)
-- [`docs/development.md`](docs/development.md)
-- [`docs/troubleshooting.md`](docs/troubleshooting.md)
+### Original Documentation
+Detailed documentation also lives in [`docs/`](docs/README.md):
+
+- [`docs/setup.md`](docs/setup.md) - Deployment setup
+- [`docs/configuration.md`](docs/configuration.md) - Configuration options
+- [`docs/app-guide.md`](docs/app-guide.md) - User guide
+- [`docs/architecture.md`](docs/architecture.md) - System architecture
+- [`docs/api-reference.md`](docs/api-reference.md) - API documentation
+- [`docs/development.md`](docs/development.md) - Development guide
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues
 
 ## Features
 

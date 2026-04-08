@@ -35,6 +35,19 @@ async def process_video_task(
     url_secondary: Optional[str] = None,
     generate_ab_variants: bool = False,   # P3.5
     num_clips: int = 6,
+    # Viral editing features
+    jump_cut: bool = False,
+    jump_cut_min_silence: float = 0.3,
+    zoom_on_cuts: bool = True,
+    cut_zoom_factor: float = 1.08,
+    denoise_audio: bool = False,
+    contextual_overlays: bool = True,
+    overlay_frequency: str = "adaptive",
+    audio_ducking: bool = True,
+    playback_speed: float = 1.0,
+    dramatic_slowmo: bool = False,
+    speed_ramp_enabled: bool = True,
+    use_scene_detection: bool = True,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -103,6 +116,18 @@ async def process_video_task(
                 url_secondary=url_secondary,
                 generate_ab_variants=generate_ab_variants,
                 num_clips=num_clips,
+                jump_cut=jump_cut,
+                jump_cut_min_silence=jump_cut_min_silence,
+                zoom_on_cuts=zoom_on_cuts,
+                cut_zoom_factor=cut_zoom_factor,
+                denoise_audio=denoise_audio,
+                contextual_overlays=contextual_overlays,
+                overlay_frequency=overlay_frequency,
+                audio_ducking=audio_ducking,
+                playback_speed=playback_speed,
+                dramatic_slowmo=dramatic_slowmo,
+                speed_ramp_enabled=speed_ramp_enabled,
+                use_scene_detection=use_scene_detection,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

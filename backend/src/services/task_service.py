@@ -277,6 +277,19 @@ class TaskService:
         clip_ready_callback: Optional[Callable] = None,
         generate_ab_variants: bool = False,    # P3.5: also render a B variant per clip
         num_clips: int = 6,
+        # Viral editing features
+        jump_cut: bool = False,
+        jump_cut_min_silence: float = 0.3,
+        zoom_on_cuts: bool = True,
+        cut_zoom_factor: float = 1.08,
+        denoise_audio: bool = False,
+        contextual_overlays: bool = True,
+        overlay_frequency: str = "adaptive",
+        audio_ducking: bool = True,
+        playback_speed: float = 1.0,
+        dramatic_slowmo: bool = False,
+        speed_ramp_enabled: bool = True,
+        use_scene_detection: bool = True,
     ) -> Dict[str, Any]:
         """
         Process a task: download video, analyze, create clips.
@@ -598,6 +611,76 @@ class TaskService:
                             )
                             info.pop("words", None)
                             info.pop("audio_features", None)
+                    
+                    # ── Viral Editing: Audio Denoise (opt-in) ────────────────────────
+                    if info is not None and denoise_audio:
+                        try:
+                            from .audio_denoiser import denoise_audio as _denoise
+                            from pathlib import Path as _Path
+                            _dn_in = _Path(info["path"])
+                            _dn_out = _dn_in.with_name(f"dn_{_dn_in.name}")
+                            _dn_result = await _denoise(
+                                str(_dn_in), str(_dn_out),
+                                noise_reduction=True,
+                                voice_isolation=True,
+                                apply_loudnorm=True,
+                            )
+                            if not _dn_result.error and _dn_out.exists() and _dn_out.stat().st_size > 0:
+                                _dn_in.unlink(missing_ok=True)
+                                _dn_out.rename(_dn_in)
+                                info["audio_denoised"] = True
+                                info["audio_lufs_before"] = _dn_result.original_lufs
+                                info["audio_lufs_after"] = _dn_result.output_lufs
+                                logger.info(
+                                    "  [Clip %d] Audio denoised: %.1f→%.1f LUFS",
+                                    i + 1,
+                                    _dn_result.original_lufs or -99,
+                                    _dn_result.output_lufs or -99
+                                )
+                            else:
+                                _dn_out.unlink(missing_ok=True)
+                        except Exception as _dn_e:
+                            logger.debug("Audio denoiser skipped for clip %d: %s", i, _dn_e)
+                    
+                    # ── Viral Editing: Jump Cuts + Zoom Transitions (opt-in) ─────────
+                    if info is not None and jump_cut:
+                        try:
+                            from .cut_zoom_service import apply_jump_cuts_with_zoom
+                            from pathlib import Path as _Path
+                            _jc_in = _Path(info["path"])
+                            _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
+                            _jc_words = info.get("words", []) or segment.get("words", [])
+                            
+                            _jc_result = await apply_jump_cuts_with_zoom(
+                                video_path=str(_jc_in),
+                                output_path=str(_jc_out),
+                                words=_jc_words,
+                                min_silence_sec=jump_cut_min_silence,
+                                zoom_on_cuts=zoom_on_cuts,
+                                zoom_factor=cut_zoom_factor,
+                            )
+                            
+                            if _jc_result.get("success") and _jc_out.exists() and _jc_out.stat().st_size > 0:
+                                _jc_in.unlink(missing_ok=True)
+                                _jc_out.rename(_jc_in)
+                                info["jump_cut_applied"] = True
+                                info["jump_cut_time_saved"] = _jc_result.get("time_saved", 0)
+                                info["jump_cut_fillers_removed"] = _jc_result.get("filler_words_removed", 0)
+                                info["jump_cut_silences_removed"] = _jc_result.get("silence_gaps_removed", 0)
+                                info["zoom_transitions_applied"] = _jc_result.get("zoom_count", 0)
+                                info["cut_zoom_enabled"] = _jc_result.get("zoom_applied", False)
+                                logger.info(
+                                    "  [Clip %d] JumpCut+Zoom: %.1fs saved, %d cuts, %d zooms",
+                                    i + 1,
+                                    _jc_result.get("time_saved", 0),
+                                    _jc_result.get("cut_count", 0),
+                                    _jc_result.get("zoom_count", 0),
+                                )
+                            else:
+                                _jc_out.unlink(missing_ok=True)
+                                logger.warning("  [Clip %d] JumpCut+Zoom failed: %s", i + 1, _jc_result.get("error"))
+                        except Exception as _jc_e:
+                            logger.error("Jump-cut+zoom failed for clip %d: %s", i, _jc_e, exc_info=True)
                     # ─────────────────────────────────────────────────────────────────
 
                     elapsed = round(perf_counter() - t0, 3)

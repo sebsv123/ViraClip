@@ -99,6 +99,96 @@ async def detailed_health(db: AsyncSession = Depends(get_db)):
     return health
 
 
+@router.get("/creative-services")
+async def creative_services_health():
+    """
+    Check if Phase 9 creative services are available and can be imported.
+    
+    Tests:
+    - All service imports
+    - Critical dependencies (librosa, moviepy, etc.)
+    - Service instantiation
+    """
+    health = {
+        "status": "healthy",
+        "services": {},
+        "dependencies": {},
+        "summary": {
+            "services_ok": 0,
+            "services_failed": 0,
+            "dependencies_ok": 0,
+            "dependencies_failed": 0,
+        }
+    }
+    
+    # Test service imports
+    services_to_test = [
+        ("multimodal_detector", "src.services.multimodal_detector", "get_multimodal_detector"),
+        ("virality_engine", "src.services.virality_engine", "get_virality_engine"),
+        ("hook_engine", "src.services.hook_engine", "get_hook_engine"),
+        ("smart_templates", "src.services.smart_templates", "get_template_selector"),
+        ("contextual_broll", "src.services.contextual_broll", "get_contextual_broll"),
+        ("video_effects", "src.services.video_effects", "apply_preset_effects"),
+        ("smart_audio", "src.services.smart_audio", "get_smart_audio"),
+        ("learning_loop", "src.services.learning_loop", "get_learning_loop"),
+        ("creative_pipeline", "src.services.creative_pipeline", "get_creative_pipeline"),
+    ]
+    
+    for name, module_path, func_name in services_to_test:
+        try:
+            module = __import__(module_path, fromlist=[func_name])
+            func = getattr(module, func_name)
+            health["services"][name] = {
+                "status": "ok",
+                "module": module_path,
+                "callable": func_name
+            }
+            health["summary"]["services_ok"] += 1
+        except ImportError as e:
+            health["services"][name] = {
+                "status": "import_error",
+                "error": str(e)
+            }
+            health["summary"]["services_failed"] += 1
+            health["status"] = "degraded"
+        except Exception as e:
+            health["services"][name] = {
+                "status": "error",
+                "error": f"{type(e).__name__}: {e}"
+            }
+            health["summary"]["services_failed"] += 1
+            health["status"] = "degraded"
+    
+    # Test critical dependencies
+    dependencies = ["librosa", "moviepy", "pydantic", "httpx", "numpy", "scipy"]
+    for dep in dependencies:
+        try:
+            __import__(dep)
+            health["dependencies"][dep] = {"status": "installed"}
+            health["summary"]["dependencies_ok"] += 1
+        except ImportError as e:
+            health["dependencies"][dep] = {
+                "status": "missing",
+                "error": str(e)
+            }
+            health["summary"]["dependencies_failed"] += 1
+            health["status"] = "unhealthy"
+    
+    # Check audio/BGM files
+    from pathlib import Path
+    sfx_dir = Path("/app/assets/sounds")
+    bgm_dir = Path("/app/assets/sounds/bgm")
+    
+    health["assets"] = {
+        "sfx_available": sfx_dir.exists() and len(list(sfx_dir.glob("*.mp3"))) > 0,
+        "bgm_available": bgm_dir.exists() and len(list(bgm_dir.glob("*.mp3"))) > 0,
+        "sfx_count": len(list(sfx_dir.glob("*.mp3"))) if sfx_dir.exists() else 0,
+        "bgm_count": len(list(bgm_dir.glob("*.mp3"))) if bgm_dir.exists() else 0,
+    }
+    
+    return health
+
+
 @router.get("/redis")
 async def redis_status():
     """Get Redis connection status and metrics."""

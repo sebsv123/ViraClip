@@ -129,6 +129,48 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
     processing_mode = data.get("processing_mode", config.default_processing_mode)
+    
+    # Viral editing features
+    jump_cut = bool(data.get("jump_cut", False))
+    jump_cut_min_silence = float(data.get("jump_cut_min_silence", 0.3))
+    zoom_on_cuts = bool(data.get("zoom_on_cuts", True))
+    cut_zoom_factor = float(data.get("cut_zoom_factor", 1.08))
+    denoise_audio = bool(data.get("denoise_audio", False))
+    
+    # NEW: Contextual overlays
+    contextual_overlays = bool(data.get("contextual_overlays", True))
+    overlay_frequency = data.get("overlay_frequency", "adaptive")
+    if overlay_frequency not in {"low", "medium", "high", "very_high", "adaptive"}:
+        overlay_frequency = "adaptive"
+    
+    # NEW: Audio ducking
+    audio_ducking = bool(data.get("audio_ducking", True))
+    
+    # NEW: Speed control
+    playback_speed = float(data.get("playback_speed", 1.0))
+    if not (0.5 <= playback_speed <= 2.0):
+        playback_speed = 1.0
+    dramatic_slowmo = bool(data.get("dramatic_slowmo", False))
+    speed_ramp_enabled = bool(data.get("speed_ramp_enabled", True))
+    
+    # NEW: Scene detection
+    use_scene_detection = bool(data.get("use_scene_detection", True))
+    
+    # NEW: Viral template (overrides individual settings if provided)
+    viral_template = data.get("viral_template")
+    if viral_template:
+        from ...services.viral_templates import get_viral_template_service
+        template_params = get_viral_template_service().get_template_config(viral_template)
+        if template_params:
+            # Apply template overrides
+            jump_cut = template_params.get("jump_cut", jump_cut)
+            jump_cut_min_silence = template_params.get("jump_cut_min_silence", jump_cut_min_silence)
+            zoom_on_cuts = template_params.get("zoom_on_cuts", zoom_on_cuts)
+            cut_zoom_factor = template_params.get("zoom_factor", cut_zoom_factor)
+            denoise_audio = template_params.get("denoise_audio", denoise_audio)
+            contextual_overlays = template_params.get("overlay_enabled", contextual_overlays)
+            overlay_frequency = template_params.get("overlay_frequency", overlay_frequency)
+            audio_ducking = template_params.get("audio_ducking", audio_ducking)
     if processing_mode not in {"fast", "balanced", "quality"}:
         processing_mode = config.default_processing_mode
     output_format = data.get("output_format", "vertical")
@@ -205,6 +247,18 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             target_platform,
             generate_ab_variants=generate_ab_variants,  # P3.5
             num_clips=num_clips,
+            jump_cut=jump_cut,  # Viral editing
+            jump_cut_min_silence=jump_cut_min_silence,
+            zoom_on_cuts=zoom_on_cuts,
+            cut_zoom_factor=cut_zoom_factor,
+            denoise_audio=denoise_audio,
+            contextual_overlays=contextual_overlays,  # NEW
+            overlay_frequency=overlay_frequency,
+            audio_ducking=audio_ducking,
+            playback_speed=playback_speed,
+            dramatic_slowmo=dramatic_slowmo,
+            speed_ramp_enabled=speed_ramp_enabled,
+            use_scene_detection=use_scene_detection,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column

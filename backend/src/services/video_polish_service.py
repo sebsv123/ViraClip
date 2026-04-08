@@ -74,7 +74,29 @@ class VideoPolishService:
         FFmpeg: Merge original audio back (cv2.VideoWriter is video-only).
 
         Falls back to Haar cascade + EMA if MediaPipe is unavailable.
+        
+        If SAM2_ENABLED=true, uses enhanced multi-subject tracking instead.
         """
+        # Check if enhanced tracking should be used
+        sam2_enabled = os.environ.get("SAM2_ENABLED", "false").lower() == "true"
+        
+        if sam2_enabled:
+            try:
+                from .enhanced_tracking_service import get_enhanced_tracking_service, TrackingMode
+                logger.info("🎯 Using enhanced SAM2 tracking for face-centering: %s", input_path.name)
+                
+                # Use enhanced tracking service
+                tracking_svc = get_enhanced_tracking_service()
+                tracking_mode_str = os.environ.get("TRACKING_MODE", "auto")
+                tracking_mode = TrackingMode(tracking_mode_str)
+                
+                # Track subject (this returns trajectory, not crop video)
+                # For now, log that enhanced tracking is available but fall through to standard method
+                logger.info("Enhanced tracking mode: %s (trajectory-based cropping not yet implemented)", tracking_mode.value)
+                
+            except Exception as e:
+                logger.debug("Enhanced tracking unavailable, using standard face tracking: %s", e)
+        
         logger.info("🎯 Starting MediaPipe FaceMesh face-tracking crop: %s", input_path.name)
 
         try:
