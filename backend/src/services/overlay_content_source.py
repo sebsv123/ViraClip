@@ -2,7 +2,7 @@
 Overlay Content Source — Contextual Overlay System
 
 Multi-source content fetcher for contextual overlays.
-Priority order: Local cache → Unsplash → Pexels → AI generation
+Priority order: Local cache → Unsplash → Pexels → Google Imagen 3 → Replicate → Stability → DALL-E → AI generation → Fallback
 """
 
 import asyncio
@@ -66,6 +66,17 @@ class OverlayContentSource:
         """
         Get overlay content for a keyword.
         
+        Multi-provider fallback chain:
+        1. Local cache (instant, offline)
+        2. Unsplash (free stock photos)
+        3. Pexels (free stock photos + videos)
+        4. Google Imagen 3 (AI, free 1000/month)
+        5. Replicate Flux.1 (AI, $0.003/img)
+        6. Stability SDXL (AI, $0.002/img)
+        7. DALL-E 3 (AI, $0.04/img)
+        8. ComfyUI local (if GPU available)
+        9. Fallback gradient
+        
         Args:
             keyword: Search keyword
             category: Category hint (nature, money, tech, etc.)
@@ -92,13 +103,35 @@ class OverlayContentSource:
             if pexels_asset:
                 return pexels_asset
         
-        # 4. Try AI generation (if enabled and GPU available)
+        # Only proceed to AI generation for images (not videos)
+        if not prefer_video:
+            # 4. Try Google Imagen 3 (high priority - uses existing GOOGLE_API_KEY)
+            google_asset = await self._generate_google_imagen(keyword, category)
+            if google_asset:
+                return google_asset
+            
+            # 5. Try Replicate Flux.1 (high quality, reasonable cost)
+            replicate_asset = await self._generate_replicate(keyword, category)
+            if replicate_asset:
+                return replicate_asset
+            
+            # 6. Try Stability SDXL (good balance of cost/quality)
+            stability_asset = await self._generate_stability(keyword, category)
+            if stability_asset:
+                return stability_asset
+            
+            # 7. Try DALL-E 3 (most expensive, highest quality)
+            dalle_asset = await self._generate_dalle(keyword, category)
+            if dalle_asset:
+                return dalle_asset
+        
+        # 8. Try ComfyUI local AI generation (if enabled and GPU available)
         if self.ai_enabled:
             ai_asset = await self._generate_ai(keyword, category)
             if ai_asset:
                 return ai_asset
         
-        # 5. Fallback to local placeholder
+        # 9. Fallback to local placeholder
         return await self._create_fallback(keyword)
     
     async def _check_cache(self, keyword: str) -> Optional[OverlayAsset]:
@@ -230,6 +263,136 @@ class OverlayContentSource:
         
         except Exception as e:
             logger.debug(f"Pexels fetch failed for '{keyword}': {e}")
+        
+        return None
+    
+    async def _generate_google_imagen(self, keyword: str, category: str) -> Optional[OverlayAsset]:
+        """Generate image using Google Imagen 3."""
+        try:
+            from .google_imagen_service import get_imagen_service
+            
+            service = get_imagen_service()
+            if not await service.is_available():
+                logger.debug("Google Imagen not available")
+                return None
+            
+            # Enhance prompt with context
+            prompt = service.create_enhanced_prompt(keyword, context=f"{category} theme")
+            
+            # Generate image
+            image_path = await service.generate_image(prompt, aspect_ratio="9:16")
+            
+            if image_path and Path(image_path).exists():
+                logger.info(f"Google Imagen: Generated image for '{keyword}'")
+                return OverlayAsset(
+                    path=str(image_path),
+                    source="google_imagen",
+                    keyword=keyword,
+                    is_video=False,
+                    duration=3.0,
+                    width=1080,
+                    height=1920
+                )
+        except Exception as e:
+            logger.debug(f"Google Imagen generation failed for '{keyword}': {e}")
+        
+        return None
+    
+    async def _generate_replicate(self, keyword: str, category: str) -> Optional[OverlayAsset]:
+        """Generate image using Replicate Flux.1."""
+        try:
+            from .replicate_service import get_replicate_service
+            
+            service = get_replicate_service()
+            if not await service.is_available():
+                logger.debug("Replicate not available")
+                return None
+            
+            # Enhance prompt
+            prompt = service.create_enhanced_prompt(f"{keyword}, {category} themed")
+            
+            # Generate image
+            image_path = await service.generate_image(prompt, aspect_ratio="9:16")
+            
+            if image_path and Path(image_path).exists():
+                logger.info(f"Replicate: Generated image for '{keyword}'")
+                return OverlayAsset(
+                    path=str(image_path),
+                    source="replicate",
+                    keyword=keyword,
+                    is_video=False,
+                    duration=3.0,
+                    width=1080,
+                    height=1920
+                )
+        except Exception as e:
+            logger.debug(f"Replicate generation failed for '{keyword}': {e}")
+        
+        return None
+    
+    async def _generate_stability(self, keyword: str, category: str) -> Optional[OverlayAsset]:
+        """Generate image using Stability AI SDXL."""
+        try:
+            from .stability_service import get_stability_service
+            
+            service = get_stability_service()
+            if not await service.is_available():
+                logger.debug("Stability AI not available")
+                return None
+            
+            # Enhance prompt
+            prompt = service.create_enhanced_prompt(f"{keyword}, {category}")
+            negative_prompt = service.get_default_negative_prompt()
+            
+            # Generate image
+            image_path = await service.generate_image(
+                prompt,
+                aspect_ratio="9:16",
+                negative_prompt=negative_prompt
+            )
+            
+            if image_path and Path(image_path).exists():
+                logger.info(f"Stability AI: Generated image for '{keyword}'")
+                return OverlayAsset(
+                    path=str(image_path),
+                    source="stability",
+                    keyword=keyword,
+                    is_video=False,
+                    duration=3.0,
+                    width=1080,
+                    height=1920
+                )
+        except Exception as e:
+            logger.debug(f"Stability AI generation failed for '{keyword}': {e}")
+        
+        return None
+    
+    async def _generate_dalle(self, keyword: str, category: str) -> Optional[OverlayAsset]:
+        """Generate image using DALL-E 3 (via existing image_gen_service)."""
+        try:
+            from .image_gen_service import ImageGenService
+            
+            service = ImageGenService(provider="dalle")
+            
+            # Create prompt
+            prompt = f"Professional photograph of {keyword}, {category} themed, cinematic lighting, 8k"
+            
+            # Generate image
+            image_path = await service.generate_image(prompt, aspect_ratio="9:16")
+            
+            if image_path and Path(image_path).exists():
+                logger.info(f"DALL-E 3: Generated image for '{keyword}'")
+                return OverlayAsset(
+                    path=str(image_path),
+                    source="dalle",
+                    keyword=keyword,
+                    is_video=False,
+                    duration=3.0,
+                    width=1080,
+                    height=1920
+                )
+        except Exception as e:
+            logger.debug(f"DALL-E 3 generation failed for '{keyword}': {e}")
         
         return None
     
