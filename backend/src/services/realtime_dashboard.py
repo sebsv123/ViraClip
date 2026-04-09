@@ -61,16 +61,22 @@ class RealtimeDashboardService:
         self._connected_clients: Set = set()
         self._user_sessions: Dict[str, Dict[str, Any]] = {}
         self._broadcast_task: Optional[asyncio.Task] = None
+        self._cleanup_task: Optional[asyncio.Task] = None
     
     async def start(self):
         """Start the real-time dashboard service."""
         self._broadcast_task = asyncio.create_task(self._periodic_broadcast())
+        # FIX: Start cleanup task for dead connections
+        self._cleanup_task = asyncio.create_task(self._cleanup_dead_connections_loop())
         logger.info("Real-time dashboard service started")
     
     async def stop(self):
         """Stop the dashboard service."""
         if self._broadcast_task:
             self._broadcast_task.cancel()
+        # FIX: Stop cleanup task
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
         logger.info("Real-time dashboard service stopped")
     
     def register_metric(
@@ -197,8 +203,10 @@ class RealtimeDashboardService:
         
         try:
             await websocket.send_json(state)
-        except:
-            pass
+        except (ConnectionError, RuntimeError, Exception) as e:
+            # FIX: Log error and remove dead connection
+            logger.debug(f"Failed to send initial state: {e}")
+            self._connected_clients.discard(websocket)
     
     async def _broadcast_metric_update(
         self,
@@ -220,7 +228,9 @@ class RealtimeDashboardService:
         for ws in self._connected_clients:
             try:
                 await ws.send_json(message)
-            except:
+            except (ConnectionError, RuntimeError, Exception) as e:
+                # FIX: Better error logging
+                logger.debug(f"Dead connection during broadcast: {e}")
                 disconnected.append(ws)
         
         # Clean up disconnected clients
@@ -252,7 +262,9 @@ class RealtimeDashboardService:
                 for ws in self._connected_clients:
                     try:
                         await ws.send_json(update)
-                    except:
+                    except (ConnectionError, RuntimeError, Exception) as e:
+                        # FIX: Better error logging
+                        logger.debug(f"Dead connection during periodic broadcast: {e}")
                         disconnected.append(ws)
                 
                 # Clean up
@@ -263,6 +275,31 @@ class RealtimeDashboardService:
                 break
             except Exception as e:
                 logger.error(f"Periodic broadcast error: {e}")
+    
+    async def _cleanup_dead_connections_loop(self) -> None:
+        """FIX: Periodically cleanup dead WebSocket connections."""
+        while True:
+            try:
+                await asyncio.sleep(300)  # Every 5 minutes
+                
+                dead = []
+                for ws in self._connected_clients:
+                    try:
+                        # Try a ping to check if alive
+                        await ws.send_json({"type": "ping"})
+                    except Exception:
+                        dead.append(ws)
+                
+                for ws in dead:
+                    self._connected_clients.discard(ws)
+                
+                if dead:
+                    logger.info(f"Cleaned up {len(dead)} dead dashboard connections")
+                    
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Cleanup loop error: {e}")
     
     async def _get_system_status(self) -> Dict[str, Any]:
         """Get current system status."""
