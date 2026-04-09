@@ -74,6 +74,10 @@ class RealtimeCollaborationService:
         self._sessions: Dict[str, CollaborationSession] = {}
         self._user_connections: Dict[str, Set] = {}  # user_id -> WebSocket connections
         self._project_sessions: Dict[str, str] = {}   # project_id -> session_id
+        self._cleanup_task: Optional[asyncio.Task] = None
+        
+        # FIX: Start background cleanup task for dead connections
+        self._start_cleanup_task()
     
     async def create_session(
         self,
@@ -313,12 +317,8 @@ class RealtimeCollaborationService:
             if user_id == exclude_user or not presence.is_active:
                 continue
             
-            if user_id in self._user_connections:
-                for ws in self._user_connections[user_id]:
-                    try:
-                        await ws.send_json(message)
-                    except:
-                        pass
+            # FIX: Use safe broadcast with automatic dead connection cleanup
+            await self._safe_broadcast_to_user(user_id, message)
     
     async def _broadcast_presence_update(
         self,
@@ -349,12 +349,8 @@ class RealtimeCollaborationService:
         
         # Broadcast to all participants
         for uid, p in session.participants.items():
-            if uid in self._user_connections:
-                for ws in self._user_connections[uid]:
-                    try:
-                        await ws.send_json(message)
-                    except:
-                        pass
+            # FIX: Use safe broadcast with automatic dead connection cleanup
+            await self._safe_broadcast_to_user(uid, message)
     
     async def _broadcast_cursor_update(
         self,
@@ -388,12 +384,8 @@ class RealtimeCollaborationService:
             if uid == user_id or not p.is_active:
                 continue
             
-            if uid in self._user_connections:
-                for ws in self._user_connections[uid]:
-                    try:
-                        await ws.send_json(message)
-                    except:
-                        pass
+            # FIX: Use safe broadcast with automatic dead connection cleanup
+            await self._safe_broadcast_to_user(uid, message)
     
     def _assign_user_color(self, index: int) -> str:
         """Assign a color to a user based on index."""
@@ -402,6 +394,69 @@ class RealtimeCollaborationService:
             "#98D8C8", "#F7DC6F", "#BB8FCE", "#85C1E2"
         ]
         return colors[index % len(colors)]
+    
+    async def _safe_broadcast_to_user(self, user_id: str, message: Dict[str, Any]) -> None:
+        """
+        FIX: Safely broadcast message to user's WebSocket connections.
+        Automatically removes dead connections.
+        """
+        if user_id not in self._user_connections:
+            return
+        
+        dead_connections = []
+        for ws in self._user_connections[user_id]:
+            try:
+                await ws.send_json(message)
+            except (ConnectionError, RuntimeError, Exception) as e:
+                # Connection is dead - mark for removal
+                logger.debug(f"Dead WebSocket for user {user_id}: {e}")
+                dead_connections.append(ws)
+        
+        # Remove dead connections
+        for ws in dead_connections:
+            self._user_connections[user_id].discard(ws)
+        
+        # Clean up empty user connection sets
+        if not self._user_connections[user_id]:
+            del self._user_connections[user_id]
+    
+    def _start_cleanup_task(self) -> None:
+        """FIX: Start background task to cleanup dead connections periodically."""
+        async def cleanup_loop():
+            while True:
+                try:
+                    await asyncio.sleep(300)  # Every 5 minutes
+                    await self._cleanup_dead_connections()
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    logger.error(f"Cleanup task error: {e}")
+        
+        self._cleanup_task = asyncio.create_task(cleanup_loop())
+    
+    async def _cleanup_dead_connections(self) -> None:
+        """FIX: Clean up dead WebSocket connections."""
+        total_cleaned = 0
+        
+        for user_id in list(self._user_connections.keys()):
+            dead = []
+            for ws in self._user_connections[user_id]:
+                try:
+                    # Try a ping to check if alive
+                    await ws.send_json({"type": "ping"})
+                except Exception:
+                    dead.append(ws)
+            
+            for ws in dead:
+                self._user_connections[user_id].discard(ws)
+                total_cleaned += 1
+            
+            # Remove empty sets
+            if not self._user_connections[user_id]:
+                del self._user_connections[user_id]
+        
+        if total_cleaned > 0:
+            logger.info(f"Cleaned up {total_cleaned} dead WebSocket connections")
     
     async def end_session(self, session_id: str) -> bool:
         """End a collaboration session."""
@@ -415,12 +470,8 @@ class RealtimeCollaborationService:
         message = {"type": "session_ended", "session_id": session_id}
         
         for user_id in session.participants:
-            if user_id in self._user_connections:
-                for ws in self._user_connections[user_id]:
-                    try:
-                        await ws.send_json(message)
-                    except:
-                        pass
+            # FIX: Use safe broadcast with automatic dead connection cleanup
+            await self._safe_broadcast_to_user(user_id, message)
         
         # Clean up
         if session.project_id in self._project_sessions:
