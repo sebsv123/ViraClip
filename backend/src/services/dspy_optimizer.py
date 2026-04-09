@@ -101,7 +101,13 @@ class DSPyOptimizer:
                 try:
                     pred_json = json.loads(prediction.segments)
                     return "segments" in pred_json and len(pred_json["segments"]) > 0
-                except:
+                except (json.JSONDecodeError, KeyError, TypeError, AttributeError) as e:
+                    # FIX: Invalid JSON or missing attributes
+                    logger.debug(f"Failed to parse prediction segments: {e}")
+                    return False
+                except Exception as e:
+                    # FIX: Unexpected errors
+                    logger.warning(f"Unexpected error validating segments: {e}")
                     return False
             
             # Optimize with few-shot learning

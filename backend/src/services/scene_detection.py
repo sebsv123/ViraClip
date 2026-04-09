@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from ..constants import FFPROBE_TIMEOUT, DEFAULT_SCENE_LENGTH
 import subprocess
 import numpy as np
 
@@ -126,7 +127,13 @@ class SceneDetectionService:
                             
                             current_time = timestamp
                             scene_id += 1
-                    except:
+                    except (ValueError, IndexError, KeyError) as e:
+                        # FIX: Skip malformed scene data but log it
+                        logger.debug(f"Skipping malformed scene data: {e}")
+                        continue
+                    except Exception as e:
+                        # FIX: Log unexpected errors
+                        logger.warning(f"Unexpected error parsing scene: {e}")
                         continue
             
             # Add final segment
@@ -160,13 +167,19 @@ class SceneDetectionService:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=FFPROBE_TIMEOUT
             )
             return float(result.stdout.strip())
-        except:
+        except (ValueError, subprocess.TimeoutExpired) as e:
+            # FIX: Expected errors (invalid duration, timeout)
+            logger.debug(f"Failed to get duration: {e}")
+            return 0.0
+        except Exception as e:
+            # FIX: Unexpected errors
+            logger.warning(f"Unexpected error getting duration: {e}")
             return 0.0
     
-    def _create_uniform_segments(self, duration: float, segment_length: float = 5.0) -> List[SceneSegment]:
+    def _create_uniform_segments(self, duration: float, segment_length: float = DEFAULT_SCENE_LENGTH) -> List[SceneSegment]:
         """Create uniform segments as fallback."""
         segments = []
         num_segments = int(duration / segment_length)

@@ -22,13 +22,15 @@ Environment:
 """
 from __future__ import annotations
 
-import asyncio
+import httpx
 import json
+import asyncio
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
+
+from ..constants import TIKTOK_HASHTAG_LIMIT, YOUTUBE_TITLE_LENGTH
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -399,10 +401,12 @@ class TikTokAutoPublisher:
             try:
                 metadata = json.loads(clip.clip_metadata)
                 if metadata.get("title"):
-                    return metadata["title"][:100]
-            except:
+                    return metadata["title"][:YOUTUBE_TITLE_LENGTH]
+            except (json.JSONDecodeError, KeyError) as e:
+                # FIX: Invalid metadata
+                logger.debug(f"Failed to parse title from metadata: {e}")
                 pass
-        return clip.text[:100] if clip.text else f"Viral Clip #{clip.clip_order}"
+        return clip.text[:YOUTUBE_TITLE_LENGTH] if clip.text else f"Viral Clip #{clip.clip_order}"
     
     def _generate_description(self, clip) -> str:
         """Generate TikTok description with hashtags."""
@@ -415,8 +419,10 @@ class TikTokAutoPublisher:
             try:
                 metadata = json.loads(clip.clip_metadata)
                 if metadata.get("hashtags"):
-                    lines.append("\n" + " ".join(f"#{tag}" for tag in metadata["hashtags"][:10]))
-            except:
+                    lines.append("\n" + " ".join(f"#{tag}" for tag in metadata["hashtags"][:TIKTOK_HASHTAG_LIMIT]))
+            except (json.JSONDecodeError, KeyError) as e:
+                # FIX: Invalid metadata
+                logger.debug(f"Failed to parse hashtags from metadata: {e}")
                 pass
         
         return "\n".join(lines)

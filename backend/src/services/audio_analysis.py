@@ -178,14 +178,18 @@ class AudioAnalysisService:
                 if 'silence_start:' in line:
                     try:
                         silence_start = float(line.split('silence_start:')[1].split()[0])
-                    except:
+                    except (ValueError, IndexError) as e:
+                        # FIX: Malformed ffmpeg output
+                        logger.debug(f"Failed to parse silence_start: {e}")
                         pass
                 elif 'silence_end:' in line and silence_start is not None:
                     try:
                         silence_end = float(line.split('silence_end:')[1].split()[0])
                         silence_periods.append((silence_start, silence_end))
                         silence_start = None
-                    except:
+                    except (ValueError, IndexError) as e:
+                        # FIX: Malformed ffmpeg output
+                        logger.debug(f"Failed to parse silence_end: {e}")
                         pass
             
             # Create segments (non-silence periods)
