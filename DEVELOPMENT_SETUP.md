@@ -105,14 +105,18 @@ UNSPLASH_ACCESS_KEY=your_key_here
 
 # AI Inference (14,000 requests/day free)
 GROQ_API_KEY=your_key_here
+
+# Google AI (for Gemini LLM + Imagen 3 images)
+GOOGLE_API_KEY=your_key_here
 ```
 
 **Get Free API Keys:**
 - Pexels: https://www.pexels.com/api/
 - Unsplash: https://unsplash.com/developers
 - Groq: https://console.groq.com/
+- Google AI: https://makersuite.google.com/app/apikey
 
-#### Optional API Keys
+#### Optional API Keys (Enhanced Features)
 
 ```env
 # Enhanced transcription (60 hours/month free)
@@ -121,8 +125,28 @@ ASSEMBLY_AI_API_KEY=your_key_here
 # Additional LLM options
 OPENAI_API_KEY=your_key_here
 ANTHROPIC_API_KEY=your_key_here
-GOOGLE_API_KEY=your_key_here
+
+# AI Image Generation (Multi-Provider System)
+# Google Imagen 3 (1000 images/month free - uses GOOGLE_API_KEY above)
+USE_GOOGLE_IMAGEN=true
+
+# Pixabay (200,000+ stock + 100 requests/min free)
+PIXABAY_API_KEY=your_key_here
+
+# Replicate (Flux.1, SDXL - ~$0.003/image)
+REPLICATE_API_TOKEN=your_token_here
+
+# Stability AI (SDXL - ~$0.002/image)
+STABILITY_API_KEY=your_key_here
+
+# Provider fallback order
+IMAGE_GEN_PROVIDERS=pexels,google_imagen,replicate,stability,dalle
 ```
+
+**Enhanced Image Generation Keys:**
+- Pixabay: https://pixabay.com/api/docs/
+- Replicate: https://replicate.com/account/api-tokens
+- Stability AI: https://platform.stability.ai/account/keys
 
 ### Step 2: Start Docker Services
 
@@ -175,12 +199,30 @@ bunx prisma migrate deploy
 bunx prisma generate
 ```
 
-### Step 4: Download Audio Library (Optional)
+### Step 4: Expand Audio Library (Recommended)
 
-ViraClip includes 17 audio files. To expand to 50+ files:
+ViraClip includes 17 audio files by default. **NEW:** Auto-expand to 100+ professional tracks:
 
 ```bash
-docker exec viraclip-backend .venv/bin/python /app/scripts/download_audio_simple.py
+# Download 50 BGM + 50 SFX from Pixabay and Mixkit
+docker exec viraclip-backend .venv/bin/python /app/scripts/expand_audio_library_v2.py
+```
+
+This downloads:
+- **50 BGM tracks:** Viral hype, cinematic, lo-fi, corporate, emotional
+- **50 SFX files:** Transitions, impacts, UI sounds, ambient
+
+**Requirements:**
+- Optional `PIXABAY_API_KEY` (100 requests/min free)
+- Mixkit downloads work without API key
+
+**Manual Downloads:**
+```bash
+# Pixabay only
+docker exec viraclip-backend .venv/bin/python /app/scripts/download_pixabay_audio.py
+
+# Mixkit only  
+docker exec viraclip-backend .venv/bin/python /app/scripts/download_mixkit_audio.py
 ```
 
 ---
@@ -433,6 +475,68 @@ SCENE_DETECTION_ENABLED=true
 
 # Audio Ducking
 AUDIO_DUCKING_ENABLED=true
+```
+
+### Enhanced Features (New!)
+
+#### Multi-Provider Image Generation
+
+Eliminates single-source dependency with 9-provider fallback chain:
+
+```env
+# Enable multi-provider image generation
+USE_GOOGLE_IMAGEN=true
+IMAGE_GEN_PROVIDERS=pexels,google_imagen,replicate,stability,dalle
+
+# API Keys (optional, falls back to free providers)
+PIXABAY_API_KEY=your_key          # 100 req/min free
+GOOGLE_API_KEY=your_key           # 1000 imgs/month free
+REPLICATE_API_TOKEN=your_token    # ~$0.003/img
+STABILITY_API_KEY=your_key        # ~$0.002/img
+```
+
+**Test Providers:**
+```bash
+docker exec viraclip-backend .venv/bin/python /app/scripts/test_image_providers.py
+```
+
+#### Structured Reasoning System
+
+Transparent Chain-of-Thought reasoning for AI decisions:
+
+```env
+# Reasoning mode (monolithic=default, structured=5-step COT)
+REASONING_MODE=structured
+
+# Log each reasoning step (verbose debugging)
+REASONING_STEPS_LOGGING=true
+
+# Save reasoning traces for review
+SAVE_REASONING_TRACES=true
+REASONING_TRACE_DIR=/app/data/reasoning_traces
+```
+
+**Demo Reasoning:**
+```bash
+docker exec viraclip-backend .venv/bin/python /app/scripts/demo_reasoning.py
+```
+
+Benefits:
+- ✅ Transparent AI decisions (see each step)
+- ✅ Debuggable reasoning traces
+- ✅ Auditable logs saved to JSON
+- ✅ No additional cost (uses existing LLM)
+
+#### Expanded Audio Library
+
+100+ professional tracks organized by category:
+
+```env
+# Auto-download on first run
+AUTO_DOWNLOAD_AUDIO=true
+AUDIO_SOURCES=pixabay,mixkit
+TARGET_BGM_COUNT=50
+TARGET_SFX_COUNT=50
 ```
 
 ### API Keys (Optional)
