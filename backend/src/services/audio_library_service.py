@@ -3,9 +3,22 @@ import random
 import logging
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, asdict
+
+# FIX: Import file locking modules (cross-platform)
+try:
+    import fcntl  # Unix/Linux/Mac
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+    try:
+        import msvcrt  # Windows
+        HAS_MSVCRT = True
+    except ImportError:
+        HAS_MSVCRT = False
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +74,14 @@ class AudioLibraryService:
         # Legacy cache file for backward compatibility
         self.cache_file = self.base_path / "audio_library_cache.json"
         
+        # FIX: Lock file to prevent race conditions
+        self.lock_file = self.base_path / ".audio_index.lock"
+        
         # In-memory index
         self.bgm_index: Dict[str, List[AudioAsset]] = {}
         self.sfx_index: Dict[str, List[AudioAsset]] = {}
         
-        # Auto-index on init
+        # Auto-index on init (with locking)
         self._load_or_build_index()
 
     def get_bgm_for_niche(self, niche: str) -> Optional[Path]:
@@ -115,6 +131,47 @@ class AudioLibraryService:
             "swoosh": self.get_sfx_path("swoosh"),
             "camera_shutter": self.get_sfx_path("shutter")
         }
+    
+    def _acquire_lock(self, lock_file_handle, timeout=30):
+        """
+        FIX: Acquire file lock (cross-platform).
+        Prevents multiple workers from building index simultaneously.
+        """
+        start_time = time.time()
+        while True:
+            try:
+                if HAS_FCNTL:
+                    # Unix/Linux/Mac - use fcntl
+                    fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    logger.debug("Lock acquired (fcntl)")
+                    return True
+                elif HAS_MSVCRT:
+                    # Windows - use msvcrt
+                    msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    logger.debug("Lock acquired (msvcrt)")
+                    return True
+                else:
+                    # No locking available - proceed anyway (rare case)
+                    logger.warning("File locking not available on this platform")
+                    return True
+            except (IOError, OSError):
+                # Lock is held by another process
+                if time.time() - start_time > timeout:
+                    logger.warning(f"Failed to acquire lock after {timeout}s - proceeding anyway")
+                    return False
+                time.sleep(0.5)  # Wait and retry
+    
+    def _release_lock(self, lock_file_handle):
+        """FIX: Release file lock (cross-platform)."""
+        try:
+            if HAS_FCNTL:
+                fcntl.flock(lock_file_handle.fileno(), fcntl.LOCK_UN)
+                logger.debug("Lock released (fcntl)")
+            elif HAS_MSVCRT:
+                msvcrt.locking(lock_file_handle.fileno(), msvcrt.LK_UNLCK, 1)
+                logger.debug("Lock released (msvcrt)")
+        except Exception as e:
+            logger.warning(f"Failed to release lock: {e}")
     
     def _load_or_build_index(self):
         """Load index from audio_index.json or build new one."""
@@ -195,57 +252,93 @@ class AudioLibraryService:
             except Exception as e:
                 logger.warning(f"Failed to load legacy audio cache: {e}")
         
-        # No index or cache found, rebuild
+        # No index or cache found, rebuild (with locking to prevent race conditions)
         self._rebuild_index()
     
     def _rebuild_index(self):
-        """Rebuild the audio index by scanning directories."""
-        logger.info("Rebuilding audio library index...")
-        
-        self.bgm_index.clear()
-        self.sfx_index.clear()
-        
-        # Index BGM (organized by mood folders)
-        if self.bgm_path.exists():
-            for mood_dir in self.bgm_path.iterdir():
-                if mood_dir.is_dir():
-                    mood = mood_dir.name
-                    for audio_file in mood_dir.glob("*"):
-                        if audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
-                            asset = self._create_asset(audio_file, "bgm", mood)
-                            if mood not in self.bgm_index:
-                                self.bgm_index[mood] = []
-                            self.bgm_index[mood].append(asset)
-        
-        # Index SFX (organized by category folders)
-        if self.sfx_path.exists():
-            for category_dir in self.sfx_path.iterdir():
-                if category_dir.is_dir():
-                    category = category_dir.name
-                    for audio_file in category_dir.glob("*"):
-                        if audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
-                            asset = self._create_asset(audio_file, category, None)
-                            if category not in self.sfx_index:
-                                self.sfx_index[category] = []
-                            self.sfx_index[category].append(asset)
+        """
+        FIX: Rebuild the audio index by scanning directories.
+        Uses file locking to prevent multiple workers from building simultaneously.
+        """
+        # Try to acquire lock
+        lock_handle = None
+        try:
+            lock_handle = open(self.lock_file, 'w')
+            if not self._acquire_lock(lock_handle, timeout=30):
+                logger.warning("Could not acquire lock - another worker may be building index")
+                # Wait a bit and try loading again (another worker might have finished)
+                time.sleep(2)
+                if self.index_file.exists():
+                    logger.info("Index file now exists - loading instead of rebuilding")
+                    self._load_or_build_index()
+                    return
             
-            # Also check root sfx folder for uncategorized files
-            for audio_file in self.sfx_path.glob("*"):
-                if audio_file.is_file() and audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
-                    asset = self._create_asset(audio_file, "general", None)
-                    if "general" not in self.sfx_index:
-                        self.sfx_index["general"] = []
-                    self.sfx_index["general"].append(asset)
+            # Check again if index was created while we waited for lock
+            if self.index_file.exists():
+                logger.info("Index file created by another worker - loading instead")
+                with open(self.index_file, 'r') as f:
+                    index_data = json.load(f)
+                # Load the data (copy logic from _load_or_build_index)
+                self._release_lock(lock_handle)
+                lock_handle.close()
+                self._load_or_build_index()
+                return
+            
+            logger.info("Rebuilding audio library index (lock acquired)...")
+            
+            self.bgm_index.clear()
+            self.sfx_index.clear()
+            
+            # Index BGM (organized by mood folders)
+            if self.bgm_path.exists():
+                for mood_dir in self.bgm_path.iterdir():
+                    if mood_dir.is_dir():
+                        mood = mood_dir.name
+                        for audio_file in mood_dir.glob("*"):
+                            if audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
+                                asset = self._create_asset(audio_file, "bgm", mood)
+                                if mood not in self.bgm_index:
+                                    self.bgm_index[mood] = []
+                                self.bgm_index[mood].append(asset)
+            
+            # Index SFX (organized by category folders)
+            if self.sfx_path.exists():
+                for category_dir in self.sfx_path.iterdir():
+                    if category_dir.is_dir():
+                        category = category_dir.name
+                        for audio_file in category_dir.glob("*"):
+                            if audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
+                                asset = self._create_asset(audio_file, category, None)
+                                if category not in self.sfx_index:
+                                    self.sfx_index[category] = []
+                                self.sfx_index[category].append(asset)
+                
+                # Also check root sfx folder for uncategorized files
+                for audio_file in self.sfx_path.glob("*"):
+                    if audio_file.is_file() and audio_file.suffix.lower() in [".mp3", ".wav", ".ogg", ".m4a"]:
+                        asset = self._create_asset(audio_file, "general", None)
+                        if "general" not in self.sfx_index:
+                            self.sfx_index["general"] = []
+                        self.sfx_index["general"].append(asset)
+            
+            bgm_count = sum(len(assets) for assets in self.bgm_index.values())
+            sfx_count = sum(len(assets) for assets in self.sfx_index.values())
+            
+            logger.info(f"Audio library indexed: {bgm_count} BGM tracks, {sfx_count} SFX files")
+            logger.info(f"BGM moods: {list(self.bgm_index.keys())}")
+            logger.info(f"SFX categories: {list(self.sfx_index.keys())}")
+            
+            # Save cache
+            self._save_cache()
         
-        bgm_count = sum(len(assets) for assets in self.bgm_index.values())
-        sfx_count = sum(len(assets) for assets in self.sfx_index.values())
-        
-        logger.info(f"Audio library indexed: {bgm_count} BGM tracks, {sfx_count} SFX files")
-        logger.info(f"BGM moods: {list(self.bgm_index.keys())}")
-        logger.info(f"SFX categories: {list(self.sfx_index.keys())}")
-        
-        # Save cache
-        self._save_cache()
+        finally:
+            # FIX: Always release lock and close file handle
+            if lock_handle is not None:
+                try:
+                    self._release_lock(lock_handle)
+                    lock_handle.close()
+                except Exception as e:
+                    logger.warning(f"Error releasing lock: {e}")
     
     def _create_asset(self, path: Path, category: str, mood: Optional[str]) -> AudioAsset:
         """Create audio asset with metadata."""
