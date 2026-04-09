@@ -12,6 +12,14 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
+# FIX Bug #7: Auto-load .env when running outside Docker
+try:
+    from load_env import ensure_env_loaded
+    ensure_env_loaded()
+except ImportError:
+    # Running in Docker, .env already loaded
+    pass
+
 # Configurar logging
 import logging
 logging.basicConfig(
@@ -21,10 +29,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Videos de prueba
-VIDEO_URLS = [
-    "https://youtu.be/DHSigj8uPnE",
-    "https://youtu.be/3wgwaxIfUJQ"
+# FIX: Use command-line arguments instead of hardcoded URLs
+# Default: longer videos suitable for generating multiple clips (>2 minutes recommended)
+DEFAULT_VIDEO_URLS = [
+    "https://www.youtube.com/watch?v=jNQXAC9IVRw",  # "Me at the zoo" (19s) - demo only
+    # Add longer videos for real testing:
+    # "https://www.youtube.com/watch?v=dQw4w9WgXcQ",  # Example 3min+ video
+    # "https://www.youtube.com/watch?v=...",  # Your video here
 ]
 
 async def process_video_full(video_url: str, task_id: str):
@@ -166,21 +177,37 @@ async def render_clips_for_segments(task_id: str, video_path: str, segments: lis
     return clips_rendered
 
 async def main():
-    """Entry point"""
+    """Entry point - supports command-line arguments for video URLs"""
+    import argparse
+    
+    # FIX: Parse command-line arguments
+    parser = argparse.ArgumentParser(description='ViraClip AI - Full Pipeline Processor')
+    parser.add_argument('urls', nargs='*', help='YouTube video URLs to process (optional)')
+    parser.add_argument('--quality', action='store_true', help='Use quality mode (slower, better)')
+    parser.add_argument('--fast', action='store_true', help='Use fast mode (faster, lower quality)')
+    args = parser.parse_args()
+    
+    # Use provided URLs or defaults
+    video_urls = args.urls if args.urls else DEFAULT_VIDEO_URLS
+    processing_mode = "quality" if args.quality else ("fast" if args.fast else "quality")
+    
     logger.info("="*70)
     logger.info("VIRACLIP AI - PIPELINE COMPLETO")
     logger.info("="*70)
-    logger.info("Features:")
-    logger.info("  • Transcripción AI (faster-whisper)")
-    logger.info("  • Análisis viral con scoring Ollama")
-    logger.info("  • Detección de hooks y retention")
-    logger.info("  • Subtítulos profesionales (viral_pro)")
-    logger.info("  • B-roll automático")
+    logger.info(f"Timestamp: {datetime.now()}")
+    logger.info(f"Processing mode: {processing_mode}")
+    logger.info(f"Videos a procesar: {len(video_urls)}")
+    for idx, url in enumerate(video_urls, 1):
+        logger.info(f"  {idx}. {url}")
     logger.info("="*70)
+    
+    if not video_urls:
+        logger.error("No videos to process! Provide URLs as arguments or set DEFAULT_VIDEO_URLS")
+        return
     
     results = []
     
-    for i, url in enumerate(VIDEO_URLS, 1):
+    for i, url in enumerate(video_urls, 1):
         task_id = f"video_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         # Procesar video (análisis)
@@ -202,7 +229,7 @@ async def main():
                 result["clips_rendered"] = len(clips)
         
         # Esperar entre videos
-        if i < len(VIDEO_URLS):
+        if i < len(video_urls):
             logger.info("\n[Esperando 5s antes del siguiente video...]")
             await asyncio.sleep(5)
     
