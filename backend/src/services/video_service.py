@@ -395,8 +395,9 @@ class VideoService:
         if processing_mode == "fast":
             speech_model = cfg.fast_mode_transcript_model
 
-        transcript_obj = await run_in_thread(get_video_transcript, video_path, speech_model)
-        transcript = cast(str, transcript_obj)
+        # FIX: get_video_transcript is async - call directly, not in thread
+        transcript_text, transcript_data = await get_video_transcript(video_path, speech_model)
+        transcript = cast(str, transcript_text)
         logger.info(f"Transcript generated: {len(transcript)} characters")
         return transcript
 

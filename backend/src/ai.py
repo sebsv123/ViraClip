@@ -710,9 +710,33 @@ async def get_most_relevant_parts_by_transcript(
         
         result = await agent.run(prompt)
         
+        # FIX: Validate LLM response is not None
+        if result is None:
+            logger.error(f"[LLM CALL] ❌ LLM returned None result! Model: {config.llm}")
+            raise RuntimeError(
+                f"LLM ({config.llm}) returned None. "
+                f"Check: API key is valid, model is accessible, quota not exceeded."
+            )
+        
+        if not hasattr(result, 'output') or result.output is None:
+            logger.error(f"[LLM CALL] ❌ LLM result has no output or output is None! Model: {config.llm}")
+            raise RuntimeError(
+                f"LLM ({config.llm}) returned invalid result structure. "
+                f"Result type: {type(result)}, has output: {hasattr(result, 'output')}"
+            )
+        
         logger.info(f"[LLM CALL] ✅ LLM responded successfully")
         
         analysis = result.output
+        
+        # Validate analysis structure
+        if not hasattr(analysis, 'most_relevant_segments'):
+            logger.error(f"[LLM CALL] ❌ Analysis missing 'most_relevant_segments' attribute")
+            raise RuntimeError(
+                f"LLM ({config.llm}) returned analysis without 'most_relevant_segments'. "
+                f"Analysis type: {type(analysis)}"
+            )
+        
         raw_segments_count = len(analysis.most_relevant_segments)
         logger.info(
             f"[LLM CALL] AI analysis raw output: {raw_segments_count} segments found"
