@@ -4,7 +4,45 @@ Esta guía cubre los problemas más comunes y sus soluciones. **Ejecuta primero 
 
 ---
 
-## 🔍 Diagnóstico Rápido
+## � **Bugs Críticos Arreglados (Abril 2026)**
+
+Si actualizaste recientemente desde `ViraClip-fresh` o una versión anterior, estos bugs críticos **ya están arreglados** en la versión actual:
+
+### ✅ **Bug #1: Async/Await Error** (CRÍTICO)
+**Síntoma:** `TypeError: object of type 'coroutine' has no len()`  
+**Estado:** ✅ ARREGLADO en `video_service.py`  
+**Acción:** Actualiza con `git pull origin version-basica`
+
+### ✅ **Bug #2: NoneType Not Subscriptable** (CRÍTICO)
+**Síntoma:** Pipeline crash con `'NoneType' object is not subscriptable`  
+**Estado:** ✅ ARREGLADO con validación robusta en `ai.py`  
+**Acción:** Si persiste, verifica API keys: `GROQ_API_KEY`, `OPENAI_API_KEY`, etc.
+
+### ✅ **Bug #3: CUDA/cuBLAS Error**
+**Síntoma:** `CUBLAS_STATUS_NOT_SUPPORTED`, `cublas64_12.dll not found`  
+**Estado:** ✅ ARREGLADO - CPU es default ahora  
+**Acción:** Actualiza `.env` con `WHISPER_DEVICE=cpu`
+
+### ✅ **Bug #4: Scripts con URLs Hardcodeadas**
+**Síntoma:** `viraclip_pipeline.py` solo procesa shorts (19s)  
+**Estado:** ✅ ARREGLADO - Ahora acepta argumentos CLI  
+**Uso:** `python viraclip_pipeline.py "https://youtube.com/watch?v=LONG_VIDEO"`
+
+### ✅ **Bug #5: Variables .env No Cargadas**
+**Síntoma:** API keys no funcionan fuera de Docker  
+**Estado:** ✅ ARREGLADO con `load_env.py`  
+**Uso:** `python load_env.py viraclip_pipeline.py`
+
+### ✅ **Bug #6: Docker Lockfile Frozen**
+**Síntoma:** `lockfile had changes, but lockfile is frozen`  
+**Estado:** ✅ ARREGLADO con fallback automático  
+**Acción:** Rebuild: `docker-compose build --no-cache frontend`
+
+**Ver detalles completos en `BUGFIXES.md`**
+
+---
+
+## �🔍 Diagnóstico Rápido
 
 ### Ejecutar Script de Diagnóstico
 
