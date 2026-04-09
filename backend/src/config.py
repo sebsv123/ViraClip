@@ -1,10 +1,12 @@
 from dotenv import load_dotenv
 from typing import Optional
 import os
+import logging
 
 load_dotenv()
 
 _config_override = None
+logger = logging.getLogger(__name__)
 
 
 class Config:
@@ -120,6 +122,38 @@ class Config:
 
         # Admin JWT auth
         self.admin_secret = os.getenv("ADMIN_SECRET", "")
+        
+        # FIX: Validate configuration on startup
+        self._validate_config()
+    
+    def _validate_config(self):
+        """Validate critical configuration and log warnings."""
+        # Check if any LLM API key is configured
+        has_llm = any([
+            self.openai_api_key,
+            self.google_api_key,
+            self.anthropic_api_key,
+            self.groq_api_key,
+        ])
+        
+        if not has_llm:
+            logger.warning(
+                "⚠️  No LLM API key found! Pipeline will use fallback text-based analysis. "
+                "Set GROQ_API_KEY (recommended), OPENAI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY "
+                "for best quality."
+            )
+        
+        # Check Whisper device configuration
+        whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
+        if whisper_device == "cuda":
+            logger.info("🎮 Whisper configured for CUDA/GPU. Ensure CUDA is properly installed.")
+        
+        # Check if critical directories exist (Docker handles this, but warn in standalone mode)
+        if not os.path.exists(self.temp_dir):
+            logger.warning(f"⚠️  Temp directory not found: {self.temp_dir}. Will be created on first use.")
+        
+        # Log configured LLM
+        logger.info(f"🤖 LLM configured: {self.llm}")
 
     @staticmethod
     def _get_optional_env(name: str):
