@@ -57,6 +57,10 @@ def create_app(
         import asyncio
         logger.info("🚀 Starting ViraClip API...")
         try:
+            # FIX: Ensure all required directories exist before starting
+            from .utils.startup import initialize_application
+            initialize_application()
+            
             await init_db()
             logger.info("✅ Database initialized")
 
