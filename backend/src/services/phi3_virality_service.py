@@ -4,6 +4,7 @@ Replaces generalist Ollama models with specialized viral content analysis
 Microsoft Phi-3-mini via Ollama - 3.8B parameters, MIT License
 
 Phase 4.3 Enhancement: Integrates viral trend boosting from trending hashtags/topics
+Enhancement Phase 3: Optional structured reasoning mode for transparent AI decisions
 """
 import httpx
 import json
@@ -22,6 +23,14 @@ try:
 except ImportError:
     TREND_SERVICE_AVAILABLE = False
     logger.warning("Viral trend service not available")
+
+# Import structured reasoning pipeline (Enhancement Phase 3)
+try:
+    from reasoning.virality_pipeline import get_virality_pipeline
+    REASONING_PIPELINE_AVAILABLE = True
+except ImportError:
+    REASONING_PIPELINE_AVAILABLE = False
+    logger.warning("Structured reasoning pipeline not available")
 
 # Phi-3-mini Scroll Stop Test Prompt - The key differentiator
 SCROLL_STOP_TEST_PROMPT = """You are a viral content expert trained on the SCROLL STOP TEST methodology.
@@ -136,6 +145,10 @@ class Phi3ViralityService:
         """
         Score a transcript segment using Phi-3-mini + Scroll Stop Test
         
+        Supports two modes:
+        - REASONING_MODE=monolithic (default): Single prompt to Phi-3
+        - REASONING_MODE=structured: 5-step transparent reasoning pipeline
+        
         Args:
             segment_text: The transcript text to analyze
             duration: Segment duration in seconds
@@ -144,6 +157,15 @@ class Phi3ViralityService:
         Returns:
             ViralityScore with 5-dimension breakdown
         """
+        # Check if structured reasoning mode is enabled
+        reasoning_mode = os.getenv("REASONING_MODE", "monolithic").lower()
+        
+        if reasoning_mode == "structured" and REASONING_PIPELINE_AVAILABLE:
+            return await self._score_with_structured_reasoning(
+                segment_text, duration, audio_features
+            )
+        
+        # Default: monolithic prompt mode
         # Prepare audio context if available
         tempo = audio_features.get("tempo_bpm", 0) if audio_features else 0
         energy_peaks = len(audio_features.get("energy_peaks_timestamps", [])) if audio_features else 0
@@ -230,6 +252,63 @@ class Phi3ViralityService:
             edit_suggestions=["add_captions"],
             hashtag_themes=["#viral"]
         )
+    
+    async def _score_with_structured_reasoning(
+        self,
+        segment_text: str,
+        duration: float,
+        audio_features: Optional[Dict] = None
+    ) -> ViralityScore:
+        """
+        Score using 5-step structured reasoning pipeline.
+        
+        Provides transparent Chain-of-Thought reasoning instead of monolithic prompt.
+        Reasoning trace is logged when REASONING_STEPS_LOGGING=true.
+        
+        Args:
+            segment_text: Transcript text
+            duration: Segment duration
+            audio_features: Audio analysis data
+            
+        Returns:
+            ViralityScore with reasoning trace
+        """
+        try:
+            # Get reasoning pipeline
+            pipeline = get_virality_pipeline()
+            
+            # Analyze with structured reasoning
+            result = await pipeline.analyze_virality(
+                transcript=segment_text,
+                duration=duration,
+                audio_features=audio_features or {}
+            )
+            
+            # Log reasoning trace if verbose mode
+            if os.getenv("REASONING_STEPS_LOGGING", "false").lower() == "true":
+                logger.info("[Structured Reasoning] Trace:")
+                for step in result.get("reasoning_trace", []):
+                    logger.info(f"  {step['step']}: {step['summary']}")
+            
+            # Convert to ViralityScore format
+            return ViralityScore(
+                pattern_interrupt=result.get("pattern_interrupt", 50),
+                curiosity_gap=result.get("curiosity_gap", 50),
+                emotional_spike=result.get("emotional_spike", 50),
+                shareability=result.get("shareability", 50),
+                loop_potential=result.get("loop_potential", 50),
+                total_score=result.get("total_score", 50),
+                primary_hook_type=result.get("primary_hook_type", "unknown"),
+                scroll_stop_probability=result.get("scroll_stop_probability", 0.5),
+                recommended_duration=result.get("recommended_duration", "15-30s"),
+                edit_suggestions=result.get("edit_suggestions", []),
+                hashtag_themes=result.get("hashtag_themes", [])
+            )
+            
+        except Exception as e:
+            logger.error(f"Structured reasoning failed: {e}")
+            # Fallback to heuristic
+            return self._fallback_score(segment_text, duration)
     
     async def score_segment_with_trends(
         self,
