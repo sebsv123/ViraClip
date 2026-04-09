@@ -4,11 +4,13 @@ AI-powered music and SFX recommendation for video clips.
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+
+from ..constants import FFPROBE_TIMEOUT, DEFAULT_VIDEO_DURATION
 
 logger = logging.getLogger(__name__)
 
@@ -390,11 +392,17 @@ class AudioRecommendationService:
             result = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-                capture_output=True, text=True, timeout=10
+                capture_output=True, text=True, timeout=FFPROBE_TIMEOUT
             )
             return float(result.stdout.strip())
-        except:
-            return 30.0
+        except (ValueError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            # FIX: Expected errors - return default duration
+            logger.debug(f"Failed to get video duration, using default: {e}")
+            return DEFAULT_VIDEO_DURATION
+        except Exception as e:
+            # FIX: Unexpected errors
+            logger.warning(f"Unexpected error getting video duration: {e}")
+            return DEFAULT_VIDEO_DURATION
     
     async def _detect_voiceover(self, video_path: Path) -> bool:
         """Detect if video has voiceover."""

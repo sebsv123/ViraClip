@@ -21,12 +21,14 @@ Environment:
 """
 from __future__ import annotations
 
-import asyncio
+import httpx
 import json
+import asyncio
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, Any, Optional, List
+
+from ..constants import INSTAGRAM_HASHTAG_LIMIT
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -379,7 +381,9 @@ class InstagramAutoPublisher:
                     lines.append(metadata["description"])
                 elif metadata.get("title"):
                     lines.append(metadata["title"])
-            except:
+            except (json.JSONDecodeError, KeyError) as e:
+                # FIX: Invalid metadata
+                logger.debug(f"Failed to parse caption from metadata: {e}")
                 pass
         
         if not lines and clip.text:
@@ -391,8 +395,10 @@ class InstagramAutoPublisher:
             try:
                 metadata = json.loads(clip.clip_metadata)
                 if metadata.get("hashtags"):
-                    hashtags = metadata["hashtags"][:20]  # Max 30, stay safe
-            except:
+                    hashtags = metadata["hashtags"][:INSTAGRAM_HASHTAG_LIMIT]
+            except (json.JSONDecodeError, KeyError) as e:
+                # FIX: Invalid metadata
+                logger.debug(f"Failed to parse hashtags from metadata: {e}")
                 pass
         
         if not hashtags:

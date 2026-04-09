@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 import subprocess
 
+from ..constants import FFPROBE_TIMEOUT
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,10 +111,16 @@ class ComputerVisionService:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=FFPROBE_TIMEOUT
             )
             return float(result.stdout.strip())
-        except:
+        except (ValueError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+            # FIX: Expected errors - video might not have duration metadata
+            logger.debug(f"Failed to get frame time: {e}")
+            return None
+        except Exception as e:
+            # FIX: Unexpected errors
+            logger.warning(f"Unexpected error getting frame time: {e}")
             return None
     
     async def _analyze_frame_at(
