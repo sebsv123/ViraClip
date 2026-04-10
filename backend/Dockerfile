@@ -56,6 +56,11 @@ RUN uv pip install --no-cache \
     "scenedetect[opencv]>=0.6.5" \
     "httpx>=0.27.0"
 
+# === Audio: edge-tts (free TTS) + Freesound client ===
+RUN uv pip install --no-cache \
+    "edge-tts>=6.1.9" \
+    "freesound-python>=1.1.0"
+
 # === Nuevos módulos para pipeline viral ===
 # sentence-transformers: B-roll semántico (semantic_broll_service.py)
 # mediapipe: face detection + crop 9:16
