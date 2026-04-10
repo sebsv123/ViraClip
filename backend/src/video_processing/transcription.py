@@ -196,6 +196,16 @@ def get_whisper_model():
         device = device_setting
         if device == "cpu":
             compute_type = "int8"
+        elif device == "cuda":
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    logger.warning("[TRANSCRIPTION] WHISPER_DEVICE=cuda but no CUDA in container — falling back to CPU")
+                    device = "cpu"
+                    compute_type = "int8"
+            except Exception:
+                device = "cpu"
+                compute_type = "int8"
 
     current_config = (model_size, device, compute_type)
     if _whisper_model is not None and _whisper_model_config == current_config:
@@ -204,12 +214,19 @@ def get_whisper_model():
     from faster_whisper import WhisperModel
 
     model_path = model_size
-    _whisper_model = WhisperModel(
-        model_path,
-        device=device,
-        compute_type=compute_type,
-        download_root="/app/models",
-    )
+    try:
+        _whisper_model = WhisperModel(
+            model_path,
+            device=device,
+            compute_type=compute_type,
+            download_root="/app/models",
+        )
+    except Exception as e:
+        if device != "cpu":
+            logger.warning(f"[TRANSCRIPTION] WhisperModel failed on {device} ({e}) — retrying on CPU")
+            device = "cpu"
+            compute_type = "int8"
+            _whisper_model = WhisperModel(model_path, device="cpu", compute_type="int8", download_root="/app/models")
     _whisper_model_config = current_config
     return _whisper_model
 

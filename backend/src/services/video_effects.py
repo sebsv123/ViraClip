@@ -11,6 +11,7 @@ import asyncio
 import logging
 import tempfile
 from pathlib import Path
+from .broll_compositor import compose_overlay_multi
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +120,9 @@ async def overlay_broll_clips(
     Overlay B-roll clips at their keyword event timestamps.
     Each B-roll is shown full-screen for event.duration + 1s seconds.
 
+    Delegates to broll_compositor.compose_overlay_multi for format-adaptive
+    scaling, fade-in/out and AV-safe PTS handling.
+
     Returns output_path on success, None on error or if no pairs.
     """
     if not broll_pairs:
@@ -126,64 +130,16 @@ async def overlay_broll_clips(
 
     pairs = broll_pairs[:_BROLL_MAX]
 
-    # Build FFmpeg command with complex filtergraph
-    inputs: list[str] = ["-i", str(clip_path)]
-    for _, asset in pairs:
-        if _is_image_path(asset.path):
-            inputs += ["-loop", "1", "-i", asset.path]
-        else:
-            inputs += ["-i", asset.path]
+    # Build (timestamp, path, duration) tuples for the compositor
+    compositor_pairs = [
+        (round(event.t, 3), asset.path, round(max(1.0, event.duration + 1.0), 3))
+        for event, asset in pairs
+    ]
 
-    w, h = 1080, 1920  # always 9:16
-
-    filter_parts: list[str] = []
-
-    # Scale + trim each B-roll input
-    for idx, (event, asset) in enumerate(pairs):
-        dur = round(max(1.0, event.duration + 1.0), 3)
-        filter_parts.append(
-            f"[{idx + 1}:v]"
-            f"trim=0:{dur},setpts=PTS-STARTPTS,"
-            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
-            f"crop={w}:{h}"
-            f"[br{idx}]"
-        )
-
-    # Chain overlay nodes: [0:v] → overlay br0 → overlay br1 → ...
-    prev = "0:v"
-    for idx, (event, _) in enumerate(pairs):
-        t_start = round(event.t, 3)
-        t_end   = round(event.t + max(1.0, event.duration + 1.0), 3)
-        out_tag = f"vout{idx}"
-        filter_parts.append(
-            f"[{prev}][br{idx}]"
-            f"overlay=enable='between(t,{t_start},{t_end})':x=0:y=0"
-            f"[{out_tag}]"
-        )
-        prev = out_tag
-
-    filter_complex = ";".join(filter_parts)
-
-    tmp = Path(tempfile.mktemp(suffix=clip_path.suffix, dir=clip_path.parent))
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-hide_banner", "-loglevel", "quiet", "-y",
-            *inputs,
-            "-filter_complex", filter_complex,
-            "-map", f"[{prev}]",
-            "-map", "0:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "copy",
-            str(tmp),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(proc.wait(), timeout=300.0)
-        if tmp.exists() and tmp.stat().st_size > 0:
-            return tmp
-        tmp.unlink(missing_ok=True)
-        return None
-    except (asyncio.TimeoutError, Exception) as exc:
-        logger.debug("overlay_broll_clips failed: %s", exc)
-        tmp.unlink(missing_ok=True)
-        return None
+    ok = await compose_overlay_multi(
+        main_path=clip_path,
+        broll_pairs=compositor_pairs,
+        output_path=output_path,
+        fade=0.3,
+    )
+    return output_path if ok else None

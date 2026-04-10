@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState } from "react";
 import { 
@@ -149,8 +149,8 @@ export default function LandingPage() {
               <Link href="/sign-in">
                 <NeonButton variant="ghost" size="sm">Sign In</NeonButton>
               </Link>
-              <Link href="/dashboard" className="hidden sm:block">
-                <NeonButton size="sm" glowing>🚀 Go to Dashboard</NeonButton>
+              <Link href="/sign-up" className="hidden sm:block">
+                <NeonButton size="sm">Get Started</NeonButton>
               </Link>
             </div>
           </div>
@@ -179,7 +179,7 @@ export default function LandingPage() {
             </p>
 
             <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
-              <Link href="/dashboard">
+              <Link href="/sign-up">
                 <NeonButton size="lg" glowing>
                   <Play className="w-5 h-5" />
                   Start Creating Free
@@ -340,7 +340,7 @@ export default function LandingPage() {
             </div>
             
             <p className="text-sm text-gray-500">
-              © 2026 ViraClip. MIT License.
+              ® 2026 ViraClip. MIT License.
             </p>
           </div>
         </div>

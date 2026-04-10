@@ -490,11 +490,12 @@ The transcript is formatted as one line per timestamped span, for example:
 Follow this workflow:
 1. Scan the entire transcript for the patterns above.
 2. Identify 3-7 potential segments with viral potential.
-3. Score each segment on the 4 criteria (0-10 each).
-4. Select the TOP 3-5 segments with highest total virality scores.
+3. Score each segment on the 4 criteria (0-10 each). SCORES MUST BE DIFFERENTIATED — do NOT give the same score to multiple segments. The best segment must score at least 15 points higher than the weakest selected segment.
+4. Select the TOP 3-5 segments with highest total virality scores. RANK them explicitly: segment 1 is the most viral, segment 2 is second best, etc.
 5. Ensure segments have strong hooks in the first 3 seconds.
 6. Verify each segment has a clear payoff/resolution by the end.
 7. MANDATORY CHECK: verify every selected segment has end_time - start_time >= 10 seconds. If not, extend end_time.
+8. CRITICAL: If all segments seem equally boring, still pick the RELATIVELY best ones and score them differently. The top segment should always score 65+ out of 100.
 
 {broll_instruction}
 

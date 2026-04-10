@@ -189,7 +189,7 @@ class ClipRepository:
                     "reasoning": row_dict["reasoning"],
                     "clip_order": row_dict["clip_order"],
                     "created_at": row_dict["created_at"].isoformat(),
-                    "video_url": f"/clips/{task_id}/{row_dict['filename']}",
+                    "video_url": f"/clips/{task_id}/{__import__('pathlib').Path(row_dict['file_path']).name if row_dict.get('file_path') else row_dict['filename']}",
                     "virality_score": row_dict.get("virality_score") or 0,
                     "hook_score": row_dict.get("hook_score") or 0,
                     "engagement_score": row_dict.get("engagement_score") or 0,
@@ -358,7 +358,7 @@ class ClipRepository:
             "variants_json": row_dict.get("variants_json"),
             "variants": ClipRepository._parse_variants(row_dict.get("variants_json")),
             "created_at": row_dict["created_at"].isoformat(),
-            "video_url": f"/clips/{row_dict['task_id']}/{row_dict['filename']}",
+            "video_url": f"/clips/{row_dict['task_id']}/{__import__('pathlib').Path(row_dict['file_path']).name if row_dict.get('file_path') else row_dict['filename']}",
         }
 
     @staticmethod

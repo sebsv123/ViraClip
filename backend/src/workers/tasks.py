@@ -36,7 +36,7 @@ async def process_video_task(
     generate_ab_variants: bool = False,   # P3.5
     num_clips: int = 6,
     # Viral editing features
-    jump_cut: bool = False,
+    jump_cut: bool = True,
     jump_cut_min_silence: float = 0.3,
     zoom_on_cuts: bool = True,
     cut_zoom_factor: float = 1.08,

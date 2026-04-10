@@ -100,6 +100,11 @@ class Config:
         self.render_concurrency = os.getenv("RENDER_CONCURRENCY", "auto")
         self.pixabay_api_key = os.getenv("PIXABAY_API_KEY", "")
         self.pexels_api_key = os.getenv("PEXELS_API_KEY", "")
+        self.coverr_api_key = os.getenv("COVERR_API_KEY", "")
+        self.replicate_api_token = os.getenv("REPLICATE_API_TOKEN", "")
+        self.freesound_api_key = os.getenv("FREESOUND_API_KEY", "")
+        self.freesound_auto_match = self._get_bool_env("FREESOUND_AUTO_MATCH", True)
+        self.freesound_sfx_enabled = self._get_bool_env("FREESOUND_SFX_ENABLED", True)
         self.broll_enabled = self._get_bool_env("BROLL_ENABLED", False)
         self.sam2_enabled = self._get_bool_env("SAM2_ENABLED", False)
 

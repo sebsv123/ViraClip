@@ -262,7 +262,7 @@ async def denoise_audio(
 def mix_background_music(
     video_path: Path,
     output_path: Path,
-    music_volume: float = 0.12,
+    music_volume: float = 0.22,
     ducking_enabled: bool = True,
     music_path: Optional[Path] = None,
 ) -> bool:
