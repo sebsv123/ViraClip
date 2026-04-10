@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -106,7 +106,7 @@ const STATUS_CONFIG: Record<
   cancelled: {
     label: "Cancelled",
     dotClass: "bg-gray-400",
-    bgClass: "bg-gray-500/10 border-gray-500/20",
+    bgClass: "bg-[#0a0a0f]0/10 border-gray-500/20",
     textClass: "text-gray-400",
   },
 };
@@ -537,7 +537,7 @@ export default function ListPage() {
                   onCheckedChange={handleToggleAllVisible}
                   disabled={activeBatchAction !== null}
                   aria-label="Select all generations"
-                  className="data-[state=indeterminate]:bg-gray-500 data-[state=indeterminate]:border-gray-500 border-white/20"
+                  className="data-[state=indeterminate]:bg-[#0a0a0f]0 data-[state=indeterminate]:border-gray-500 border-white/20"
                 />
                 <span className="text-xs font-medium uppercase tracking-widest text-gray-500">
                   {selectedCount > 0 ? `${selectedCount} of ${tasks.length} selected` : "Select"}
@@ -635,7 +635,7 @@ export default function ListPage() {
               onCheckedChange={handleToggleAllVisible}
               disabled={activeBatchAction !== null}
               aria-label="Select all"
-              className="border-white/20 data-[state=checked]:bg-cyan-500 data-[state=checked]:text-white data-[state=checked]:border-cyan-500 data-[state=indeterminate]:bg-gray-500 data-[state=indeterminate]:border-gray-500"
+              className="border-white/20 data-[state=checked]:bg-cyan-500 data-[state=checked]:text-white data-[state=checked]:border-cyan-500 data-[state=indeterminate]:bg-[#0a0a0f]0 data-[state=indeterminate]:border-gray-500"
             />
             <span className="text-sm font-medium text-white tabular-nums">
               {selectedCount}

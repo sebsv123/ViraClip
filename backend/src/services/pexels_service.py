@@ -11,6 +11,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 import httpx
+from .broll_compositor import compose_overlay
 
 logger = logging.getLogger(__name__)
 
@@ -159,51 +160,31 @@ def overlay_broll_on_clip(
 ) -> bool:
     """
     Overlay B-Roll on the main clip for the interval [broll_start, broll_end]
-    (as fractions of total duration). B-Roll is shown full-screen as a
-    background layer with the main content overlaid at 50% opacity.
+    (as fractions of total duration).
 
-    librosa fallback: default window [0.3, 0.6] of clip duration.
+    Delegates to broll_compositor.compose_overlay for format-adaptive scaling.
     """
     try:
-        # Probe main clip duration
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(main_clip)],
             capture_output=True, text=True, timeout=15,
         )
         duration = float(probe.stdout.strip() or "30")
-        start_s = duration * broll_start
-        end_s = duration * broll_end
-        broll_dur = end_s - start_s
+        start_s  = duration * broll_start
+        broll_dur = duration * (broll_end - broll_start)
 
-        # FFmpeg overlay: show broll from start_s to end_s.
-        # The broll PTS is offset by start_s so that broll frame 0 coincides
-        # with output time start_s (avoids exhausting the stream before the
-        # enable window opens).
-        filter_complex = (
-            f"[0:v]setpts=PTS-STARTPTS[main];"
-            f"[1:v]trim=duration={broll_dur:.2f},"
-            f"setpts=PTS-STARTPTS+{start_s:.2f}/TB[bv];"
-            f"[main][bv]overlay=enable='between(t,{start_s:.2f},{end_s:.2f})':x=0:y=0[out]"
+        ok = compose_overlay(
+            main_path=main_clip,
+            broll_path=broll_clip,
+            output_path=output_path,
+            timestamp=start_s,
+            duration=broll_dur,
+            fade=0.3,
         )
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", str(main_clip),
-            "-i", str(broll_clip),
-            "-filter_complex", filter_complex,
-            "-map", "[out]",
-            "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
-            "-c:a", "copy",
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=180)
-        if result.returncode != 0:
-            logger.error(f"[Pexels] overlay failed: {result.stderr.decode()[:300]}")
-            return False
-        logger.info(f"[Pexels] B-Roll overlaid on {main_clip.name}")
-        return True
+        if ok:
+            logger.info(f"[Pexels] B-Roll overlaid on {main_clip.name}")
+        return ok
     except Exception as exc:
         logger.error(f"[Pexels] overlay_broll_on_clip error: {exc}")
         return False

@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -225,17 +225,51 @@ export default function TaskPage() {
   const hasTriggeredAutoRefresh = useRef(false);
   const notifiedRef = useRef(false);
 
+  // Music picker state
+  const [musicTracks, setMusicTracks] = useState<Array<{id: string; label: string}>>([]);
+  const [musicPickerClipId, setMusicPickerClipId] = useState<string | null>(null);
+  const [selectedTrack, setSelectedTrack] = useState<string>("");
+  const [isApplyingMusic, setIsApplyingMusic] = useState(false);
+  const [musicAppliedClipId, setMusicAppliedClipId] = useState<string | null>(null);
+
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Load available music tracks once
+  useEffect(() => {
+    fetch(`${apiUrl}/clips/music/tracks`)
+      .then(r => r.json())
+      .then(d => { if (d.tracks) setMusicTracks(d.tracks); })
+      .catch(() => {});
+  }, [apiUrl]);
+
+  const handleApplyMusic = async (clipId: string) => {
+    if (!selectedTrack) return;
+    setIsApplyingMusic(true);
+    try {
+      const res = await fetch(`${apiUrl}/clips/${clipId}/apply-music`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ track: selectedTrack }),
+      });
+      if (res.ok) {
+        setMusicAppliedClipId(clipId);
+        setMusicPickerClipId(null);
+        setTimeout(() => setMusicAppliedClipId(null), 3000);
+      }
+    } finally {
+      setIsApplyingMusic(false);
+    }
+  };
 
   const getStatusBadge = (status: string) => {
     const map: Record<string, { label: string; className: string }> = {
-      completed: { label: "Completed", className: "bg-green-100 text-green-800 border-green-200" },
-      processing: { label: "Processing", className: "bg-blue-100 text-blue-800 border-blue-200" },
-      queued: { label: "Queued", className: "bg-yellow-100 text-yellow-800 border-yellow-200" },
-      failed: { label: "Failed", className: "bg-red-100 text-red-800 border-red-200" },
-      error: { label: "Error", className: "bg-red-100 text-red-800 border-red-200" },
+      completed: { label: "Completed", className: "bg-green-500/15 text-green-400 border-green-500/30" },
+      processing: { label: "Processing", className: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
+      queued: { label: "Queued", className: "bg-amber-500/15 text-amber-400 border-amber-500/30" },
+      failed: { label: "Failed", className: "bg-red-500/15 text-red-400 border-red-500/30" },
+      error: { label: "Error", className: "bg-red-500/15 text-red-400 border-red-500/30" },
     };
-    const s = map[status] ?? { label: status, className: "bg-gray-100 text-gray-800 border-gray-200" };
+    const s = map[status] ?? { label: status, className: "bg-white/5 text-gray-300 border-white/10" };
     return (
       <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${s.className}`}>{s.label}</span>
     );
@@ -546,7 +580,7 @@ export default function TaskPage() {
     if (score >= 75) return "bg-orange-500 text-white";
     if (score >= 55) return "bg-amber-400 text-white";
     if (score >= 35) return "bg-yellow-400 text-gray-800";
-    return "bg-gray-200 text-gray-600";
+    return "bg-gray-200 text-gray-400";
   };
 
   const handleEditTitle = async () => {
@@ -1044,7 +1078,7 @@ export default function TaskPage() {
                             <div className="flex items-start justify-between mb-4">
                               <div>
                                 <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                                <div className="flex items-center gap-2 text-sm text-gray-600">
+                                <div className="flex items-center gap-2 text-sm text-gray-400">
                                   <span>{clip.start_time} - {clip.end_time}</span>
                                   <span>•</span>
                                   <span>{formatDuration(clip.duration)}</span>
@@ -1066,13 +1100,13 @@ export default function TaskPage() {
                             {clip.text && (
                               <div className="mb-4">
                                 <h4 className="font-medium text-black mb-2">Transcript</h4>
-                                <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
+                                <p className="text-sm text-gray-300 bg-white/3 p-3 rounded">{clip.text}</p>
                               </div>
                             )}
                             {clip.reasoning && (
                               <div className="mb-4">
                                 <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                                <p className="text-sm text-gray-600">{clip.reasoning}</p>
+                                <p className="text-sm text-gray-400">{clip.reasoning}</p>
                               </div>
                             )}
                             <div className="flex items-center gap-3 flex-wrap">
@@ -1124,7 +1158,7 @@ export default function TaskPage() {
                 <AlertCircle className="w-12 h-12 mx-auto mb-2" />
                 <h2 className="text-xl font-semibold">Processing Failed</h2>
               </div>
-              <p className="text-gray-600 mb-4">There was an error processing your video. Please try again.</p>
+              <p className="text-gray-400 mb-4">There was an error processing your video. Please try again.</p>
               <Link href="/">
                 <Button>
                   <ArrowLeft className="w-4 h-4" />
@@ -1142,7 +1176,7 @@ export default function TaskPage() {
                     <AlertCircle className="w-12 h-12 mx-auto mb-2" />
                     <h2 className="text-xl font-semibold">No Clips Generated</h2>
                   </div>
-                  <p className="text-gray-600 mb-4">
+                  <p className="text-gray-400 mb-4">
                     The task completed but no clips were generated. The video may not have had suitable content for
                     clipping.
                   </p>
@@ -1159,7 +1193,7 @@ export default function TaskPage() {
                     <Clock className="w-8 h-8 text-blue-500 animate-pulse" />
                   </div>
                   <h2 className="text-xl font-semibold text-black mb-2">Still Generating...</h2>
-                  <p className="text-gray-600">
+                  <p className="text-gray-400">
                     Your clips are being generated. This page will refresh automatically when they&apos;re ready.
                   </p>
                 </>
@@ -1274,7 +1308,7 @@ export default function TaskPage() {
                     )}
                   </div>
 
-                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <label className="flex items-center gap-2 text-sm text-gray-300">
                     <input
                       type="checkbox"
                       checked={projectIncludeBroll}
@@ -1316,7 +1350,7 @@ export default function TaskPage() {
                     <div className="p-6 flex-1">
                       <div className="flex items-start justify-between mb-4">
                         <div className="flex-1">
-                          <label className="flex items-center gap-2 text-xs text-gray-600 mb-2">
+                          <label className="flex items-center gap-2 text-xs text-gray-400 mb-2">
                             <input
                               type="checkbox"
                               checked={selectedClipIds.includes(clip.id)}
@@ -1325,7 +1359,7 @@ export default function TaskPage() {
                             Select for merge
                           </label>
                           <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                          <div className="flex items-center gap-2 text-sm text-gray-600">
+                          <div className="flex items-center gap-2 text-sm text-gray-400">
                             <span>
                               {clip.start_time} - {clip.end_time}
                             </span>
@@ -1383,7 +1417,7 @@ export default function TaskPage() {
 
                       {/* Virality Score Breakdown */}
                       {clip.virality_score > 0 && (
-                        <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                        <div className="mb-4 p-3 bg-white/3 rounded-lg">
                           <div className="flex items-center justify-between mb-3">
                             <h4 className="font-medium text-black text-sm flex items-center gap-1">
                               <Zap className="w-4 h-4" />
@@ -1398,7 +1432,7 @@ export default function TaskPage() {
                             {/* Hook Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <MessageSquare className="w-3 h-3" />
                                   Hook
                                 </span>
@@ -1410,7 +1444,7 @@ export default function TaskPage() {
                             {/* Engagement Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <TrendingUp className="w-3 h-3" />
                                   Engagement
                                 </span>
@@ -1422,7 +1456,7 @@ export default function TaskPage() {
                             {/* Value Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <Star className="w-3 h-3" />
                                   Value
                                 </span>
@@ -1434,7 +1468,7 @@ export default function TaskPage() {
                             {/* Shareability Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <Share2 className="w-3 h-3" />
                                   Shareability
                                 </span>
@@ -1457,7 +1491,7 @@ export default function TaskPage() {
                       {clip.text && (
                         <div className="mb-4">
                           <h4 className="font-medium text-black mb-2">Transcript</h4>
-                          <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
+                          <p className="text-sm text-gray-300 bg-white/3 p-3 rounded">{clip.text}</p>
                         </div>
                       )}
 
@@ -1653,7 +1687,7 @@ export default function TaskPage() {
                                 </div>
                                 <div>
                                   <span className="text-[10px] font-bold text-green-500 uppercase leading-none block mb-1">Conversion Tactic</span>
-                                  <p className="text-sm text-gray-700 leading-relaxed italic">
+                                  <p className="text-sm text-gray-300 leading-relaxed italic">
                                     {clip.conversion_tips}
                                   </p>
                                 </div>
@@ -1666,7 +1700,7 @@ export default function TaskPage() {
                       {clip.reasoning && (
                         <div className="mb-4">
                           <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                          <p className="text-sm text-gray-600">{clip.reasoning}</p>
+                          <p className="text-sm text-gray-400">{clip.reasoning}</p>
                         </div>
                       )}
 
@@ -1682,7 +1716,7 @@ export default function TaskPage() {
                                 <span className="text-xs text-gray-500 font-medium">TITLE</span>
                                 <button
                                   onClick={() => navigator.clipboard.writeText(clip.social_title!)}
-                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
                                   title="Copy title"
                                 >
                                   Copy
@@ -1697,13 +1731,13 @@ export default function TaskPage() {
                                 <span className="text-xs text-gray-500 font-medium">DESCRIPTION</span>
                                 <button
                                   onClick={() => navigator.clipboard.writeText(clip.social_description!)}
-                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
                                   title="Copy description"
                                 >
                                   Copy
                                 </button>
                               </div>
-                              <p className="text-sm text-gray-700 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_description}</p>
+                              <p className="text-sm text-gray-300 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_description}</p>
                             </div>
                           )}
                           {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
@@ -1712,7 +1746,7 @@ export default function TaskPage() {
                                 <span className="text-xs text-gray-500 font-medium">HASHTAGS</span>
                                 <button
                                   onClick={() => navigator.clipboard.writeText((clip.suggested_hashtags || []).join(' '))}
-                                  className="text-xs text-purple-600 hover:text-purple-800 font-medium"
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
                                   title="Copy hashtags"
                                 >
                                   Copy
@@ -1791,10 +1825,43 @@ export default function TaskPage() {
                           <Scissors className="w-4 h-4" />
                           Edit
                         </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={musicAppliedClipId === clip.id ? "border-green-500 text-green-400" : ""}
+                          onClick={() => setMusicPickerClipId(musicPickerClipId === clip.id ? null : clip.id)}
+                        >
+                          <Music className="w-4 h-4" />
+                          {musicAppliedClipId === clip.id ? "Applied!" : "Music"}
+                        </Button>
                       </div>
 
+                      {musicPickerClipId === clip.id && (
+                        <div className="mt-3 p-3 border border-purple-500/30 rounded-lg bg-purple-500/5 flex flex-wrap gap-2 items-center">
+                          <Select value={selectedTrack} onValueChange={setSelectedTrack}>
+                            <SelectTrigger className="h-8 w-48">
+                              <SelectValue placeholder="Choose a track…" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {musicTracks.map(t => (
+                                <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            size="sm"
+                            disabled={!selectedTrack || isApplyingMusic}
+                            onClick={() => handleApplyMusic(clip.id)}
+                          >
+                            {isApplyingMusic ? <Loader2 className="w-4 h-4 animate-spin" /> : <Music className="w-4 h-4" />}
+                            {isApplyingMusic ? "Applying…" : "Apply"}
+                          </Button>
+                          <span className="text-xs text-gray-500">Music is mixed with ducking — voice stays clear</span>
+                        </div>
+                      )}
+
                       {editingClipId === clip.id && (
-                        <div className="mt-4 p-3 border rounded-lg space-y-3 bg-gray-50">
+                        <div className="mt-4 p-3 border rounded-lg space-y-3 bg-white/3">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                             <Input
                               value={startOffset}
@@ -1856,9 +1923,9 @@ export default function TaskPage() {
                       )}
 
                       {/* P3.1: AI Refine panel */}
-                      <div className="mt-3 border border-purple-200 rounded-lg bg-purple-50/50">
+                      <div className="mt-3 border border-purple-500/20 rounded-lg bg-purple-500/5">
                         <button
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-700 hover:bg-purple-50 rounded-lg transition-colors"
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-300 hover:bg-purple-500/10 rounded-lg transition-colors"
                           onClick={() => {
                             setRefiningClipId(refiningClipId === clip.id ? null : clip.id);
                             setRefineResult(null);
@@ -1866,13 +1933,13 @@ export default function TaskPage() {
                         >
                           <Sparkles className="w-4 h-4" />
                           AI Refine
-                          <span className="ml-auto text-xs text-purple-500">
+                          <span className="ml-auto text-xs text-purple-400">
                             {refiningClipId === clip.id ? "▲" : "▼"}
                           </span>
                         </button>
                         {refiningClipId === clip.id && (
                           <div className="px-3 pb-3 space-y-2">
-                            <p className="text-xs text-purple-600">
+                            <p className="text-xs text-purple-400">
                               Describe what you want to change: <em>"trim 3 seconds from the start"</em>, <em>"make the hook more energetic"</em>, <em>"use the subtitles template"</em>…
                             </p>
                             <div className="flex gap-2">
@@ -1897,7 +1964,7 @@ export default function TaskPage() {
                               </Button>
                             </div>
                             {refineResult && (
-                              <div className={`text-xs rounded p-2 ${refineResult.action === "error" ? "bg-red-50 text-red-700 border border-red-200" : "bg-green-50 text-green-700 border border-green-200"}`}>
+                              <div className={`text-xs rounded p-2 ${refineResult.action === "error" ? "bg-red-500/10 text-red-400 border border-red-500/30" : "bg-green-500/10 text-green-400 border border-green-500/30"}`}>
                                 <span className="font-semibold capitalize">
                                   {refineResult.action === "noop" ? "No changes needed" : refineResult.action === "error" ? "Error" : `✓ ${refineResult.action.replace("_", " ")}`}
                                 </span>

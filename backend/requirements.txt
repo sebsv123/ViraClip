@@ -44,6 +44,12 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 scenedetect[opencv]>=0.6.5
 
+# === Free TTS ===
+edge-tts>=6.1.9
+
+# === Free Audio (Music + SFX) ===
+freesound-python>=1.1.0
+
 # === AI Services ===
 openai>=1.0.0
 anthropic>=0.7.0

@@ -204,21 +204,35 @@ class VideoService:
             "Alignment, MarginL, MarginR, MarginV, Encoding\n"
             # Fontsize=105, Bold=1, Outline=8, Shadow=4, Alignment=2 (bottom-center)
             f"Style: Viral,{_fontname},105,&H0000FFFF,&H00FFFFFF,{_OUTLINE},"
-            f"{_SHADOW},1,0,0,0,100,100,0,0,1,8,4,2,30,30,250,1\n"
+            f"{_SHADOW},1,0,0,0,100,100,0,0,1,8,4,2,30,30,400,1\n"
             "\n"
             "[Events]\n"
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
 
-        WORDS_PER_LINE = 3  # max 3 words per line — Hormozi/MrBeast style keeps eye moving
+        WORDS_PER_LINE = 3   # max words per group
+        MAX_GAP_S      = 0.6  # break group if gap between consecutive words exceeds this
+        MAX_SPAN_S     = 2.2  # break group if total span exceeds this
         events: List[str] = []
 
-        # Build groups of WORDS_PER_LINE
+        # Build groups by TIME PROXIMITY, not word count.
+        # This prevents a group from spanning a long pause, which causes perceived desync.
+        all_valid = [w for w in words if (w.get("word") or "").strip()]
         groups: List[List[Dict]] = []
-        idx = 0
-        while idx < len(words):
-            groups.append(words[idx: idx + WORDS_PER_LINE])
-            idx += WORDS_PER_LINE
+        current: List[Dict] = []
+        for w in all_valid:
+            if not current:
+                current.append(w)
+                continue
+            gap  = float(w.get("start", 0)) - float(current[-1].get("end", 0))
+            span = float(w.get("end", 0))   - float(current[0].get("start", 0))
+            if len(current) >= WORDS_PER_LINE or gap > MAX_GAP_S or span > MAX_SPAN_S:
+                groups.append(current)
+                current = [w]
+            else:
+                current.append(w)
+        if current:
+            groups.append(current)
 
         for group in groups:
             # Filter out empty word entries
@@ -226,46 +240,35 @@ class VideoService:
             if not valid:
                 continue
 
-            for word_idx, current_word in enumerate(valid):
-                w_text = (current_word.get("word") or "").strip().upper()
-                if not w_text:
+            # ONE event per group — spans from first word start to last word end.
+            # This eliminates per-word pop-in chaos: the group appears once with a
+            # single animation and stays on screen until all words have been spoken.
+            g_start = float(valid[0].get("start", 0.0))
+            g_end   = float(valid[-1].get("end", g_start + 0.4 * len(valid)))
+            if g_end <= g_start:
+                g_end = g_start + 0.4 * len(valid)
+
+            # Color: any emphasis word → red highlight, impact keyword → orange, else yellow
+            parts: List[str] = []
+            for w in valid:
+                t = (w.get("word") or "").strip().upper()
+                if not t:
                     continue
+                if bool(w.get("is_emphasis", False)):
+                    parts.append(f"{{\\c{_RED}}}{t}")
+                elif t.lower() in _IMPACT_WORDS:
+                    parts.append(f"{{\\c{_ORANGE}}}{t}")
+                else:
+                    parts.append(f"{{\\c{_YELLOW}}}{t}")
 
-                w_start = float(current_word.get("start", 0.0))
-                w_end   = float(current_word.get("end",   w_start + 0.4))
-                if w_end <= w_start:
-                    w_end = w_start + 0.4
-
-                is_emph = bool(current_word.get("is_emphasis", False))
-
-                # Build styled line: one \c per word, NO \r resets
-                # (resetting \r also resets \fscx which breaks the pop-in)
-                parts: List[str] = []
-                for j, w in enumerate(valid):
-                    t = (w.get("word") or "").strip().upper()
-                    if not t:
-                        continue
-                    if j == word_idx:
-                        # Active word: red for emphasis, orange for impact keyword, else yellow
-                        if is_emph:
-                            clr = _RED
-                        elif t.lower() in _IMPACT_WORDS:
-                            clr = _ORANGE
-                        else:
-                            clr = _YELLOW
-                        parts.append(f"{{\\c{clr}}}{t}")
-                    else:
-                        parts.append(f"{{\\c{_WHITE}}}{t}")
-
-                if parts:
-                    # Reset colour at end so next group starts clean
-                    line_text = _POPIN + " ".join(parts) + "{\\r}"
-                    events.append(
-                        f"Dialogue: 0,"
-                        f"{VideoService._seconds_to_ass_time(w_start)},"
-                        f"{VideoService._seconds_to_ass_time(w_end)},"
-                        f"Viral,,0,0,0,,{line_text}"
-                    )
+            if parts:
+                line_text = _POPIN + " ".join(parts) + "{\\r}"
+                events.append(
+                    f"Dialogue: 0,"
+                    f"{VideoService._seconds_to_ass_time(g_start)},"
+                    f"{VideoService._seconds_to_ass_time(g_end)},"
+                    f"Viral,,0,0,0,,{line_text}"
+                )
 
         if not events:
             logger.warning("[ASS] 0 Dialogue events produced — skipping subtitle burn")
@@ -276,8 +279,8 @@ class VideoService:
             f.write(ass_content)
 
         logger.info(
-            f"[ASS] {len(events)} word events written ({len(words)} words, "
-            f"{WORDS_PER_LINE} per group, pop-in enabled)"
+            f"[ASS] {len(events)} group events written ({len(all_valid)} words, "
+            f"max {WORDS_PER_LINE}/group, gap<{MAX_GAP_S}s, span<{MAX_SPAN_S}s)"
         )
 
         cmd = [
@@ -1308,7 +1311,7 @@ class VideoService:
                     video_path=output_path,
                     output_path=_music_out,
                     speech_segments=_speech_segs,
-                    bgm_volume=float(os.environ.get("BGM_VOLUME", "0.13")),
+                    bgm_volume=float(os.environ.get("BGM_VOLUME", "0.22")),
                     preferred_category=preferred_music_category or None,
                 )
                 if _bs_result.get("success") and _music_out.exists():
@@ -1329,7 +1332,7 @@ class VideoService:
                     _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
                     if _music_path:
                         _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
-                        if _mix_bg(output_path, _music_tmp, music_volume=0.12, music_path=_music_path):
+                        if _mix_bg(output_path, _music_tmp, music_volume=0.22, music_path=_music_path):
                             if _music_tmp.exists():
                                 _music_tmp.replace(output_path)
                                 logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")

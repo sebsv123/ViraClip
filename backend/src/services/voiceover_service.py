@@ -26,6 +26,19 @@ _VOICE_MODELS = {
     "elevenlabs": "eleven_multilingual_v2",
 }
 
+# edge-tts default voices per language prefix
+EDGE_TTS_VOICES = {
+    "en": "en-US-GuyNeural",
+    "es": "es-ES-AlvaroNeural",
+    "fr": "fr-FR-HenriNeural",
+    "de": "de-DE-ConradNeural",
+    "pt": "pt-BR-AntonioNeural",
+    "it": "it-IT-DiegoNeural",
+    "ja": "ja-JP-KeitaNeural",
+    "ko": "ko-KR-InJoonNeural",
+    "zh": "zh-CN-YunxiNeural",
+}
+
 
 @dataclass
 class VoiceoverResult:
@@ -36,6 +49,37 @@ class VoiceoverResult:
     duration_seconds: float = 0.0
     error: Optional[str] = None
     characters_used: int = 0
+
+
+async def _tts_edge(
+    text: str,
+    output_path: str,
+    voice: str = "en-US-GuyNeural",
+) -> Optional[str]:
+    """Generate speech via Microsoft edge-tts (free, no API key required).
+    Returns output_path on success, raises on failure.
+    """
+    try:
+        import edge_tts
+    except ImportError:
+        raise RuntimeError("edge-tts not installed — run: pip install edge-tts")
+
+    communicate = edge_tts.Communicate(text, voice)
+    await communicate.save(output_path)
+    if not Path(output_path).exists() or Path(output_path).stat().st_size < 500:
+        raise RuntimeError("edge-tts produced no audio output")
+    logger.debug("[voiceover] edge-tts saved: %s", output_path)
+    return output_path
+
+
+def _pick_edge_voice(voice: str) -> str:
+    """Map a generic voice name or language code to an edge-tts voice name."""
+    if voice in OPENAI_VOICES or not voice:
+        return EDGE_TTS_VOICES.get("en", "en-US-GuyNeural")
+    # If caller already passes a full edge-tts voice name (e.g. "es-ES-AlvaroNeural")
+    if "-" in voice and len(voice) > 6:
+        return voice
+    return EDGE_TTS_VOICES.get(voice[:2].lower(), "en-US-GuyNeural")
 
 
 async def _tts_openai(
@@ -205,6 +249,8 @@ async def generate_voiceover(
 
     providers_to_try: List[str] = []
     if provider == "auto":
+        # edge-tts is always tried first (free, no key needed)
+        providers_to_try.append("edge")
         if os.environ.get("OPENAI_API_KEY"):
             providers_to_try.append("openai")
         if os.environ.get("ELEVENLABS_API_KEY"):
@@ -216,13 +262,16 @@ async def generate_voiceover(
         return VoiceoverResult(
             audio_path=None, mixed_video_path=None,
             provider="none", voice=voice,
-            error="No TTS API key configured (set OPENAI_API_KEY or ELEVENLABS_API_KEY)",
+            error="No TTS provider available (edge-tts, OPENAI_API_KEY, or ELEVENLABS_API_KEY)",
         )
 
     last_error = ""
     for prov in providers_to_try:
         try:
-            if prov == "openai":
+            if prov == "edge":
+                edge_voice = _pick_edge_voice(voice)
+                await _tts_edge(text, audio_path, voice=edge_voice)
+            elif prov == "openai":
                 await _tts_openai(text, audio_path, voice=voice, speed=speed)
             elif prov == "elevenlabs":
                 vid = voice_id or "21m00Tcm4TlvDq8ikWAM"

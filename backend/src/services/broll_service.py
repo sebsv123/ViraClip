@@ -21,6 +21,8 @@ import httpx
 
 from ..config import Config, get_config
 from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from .broll_compositor import compose_overlay, probe_duration
+from .scene_broll_placer import get_insert_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ _BROLL_DOWNLOAD_TIMEOUT = 30   # seconds per file
 _MIN_SILENCE_SEC = 1.5         # minimum silence gap to qualify for B-roll insert
 _BROLL_DURATION = 3.0          # seconds of B-roll to overlay
 _FADE_DURATION = 0.3           # fade-in / fade-out length
+_CACHE_TTL_DAYS = 7            # days before cached B-roll is considered stale
 
 
 class BrollService:
@@ -129,28 +132,48 @@ class BrollService:
     # 2. ASSET FETCH (Pexels → Pixabay fallback)
     # ──────────────────────────────────────────────────────────────────────────
 
+    def _is_cache_fresh(self, path: Path) -> bool:
+        """Return True if *path* exists and was modified within _CACHE_TTL_DAYS."""
+        import time as _time
+        if not path.exists() or path.stat().st_size < 1_000:
+            return False
+        age_days = (_time.time() - path.stat().st_mtime) / 86400
+        return age_days <= _CACHE_TTL_DAYS
+
     async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
-        """Fetch and cache a portrait video/photo for *keyword*. Returns local Path or None."""
+        """Fetch and cache a portrait video for *keyword*.
+
+        Queries Pexels, Pixabay and Coverr simultaneously (fastest wins).
+        Falls back to Pexels Photos (static image) as last resort.
+        Cache TTL: 7 days.
+        """
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
-        if cached_video.exists() and cached_video.stat().st_size > 10_000:
+        cached_photo = self.broll_dir / f"{safe}.jpg"
+
+        if self._is_cache_fresh(cached_video):
             logger.info(f"[BRoll] Cache hit (video): {cached_video}")
             return cached_video
-        cached_photo = self.broll_dir / f"{safe}.jpg"
-        if cached_photo.exists() and cached_photo.stat().st_size > 5_000:
+        if self._is_cache_fresh(cached_photo):
             logger.info(f"[BRoll] Cache hit (photo): {cached_photo}")
             return cached_photo
 
-        # Try Pexels video first
-        video_url = await self._search_pexels(keyword)
-        if not video_url:
-            video_url = await self._search_pixabay(keyword)
-        if video_url:
-            result = await self._download(video_url, cached_video)
+        # Parallel search: Pexels + Pixabay + Coverr
+        pexels_task   = asyncio.create_task(self._search_pexels(keyword))
+        pixabay_task  = asyncio.create_task(self._search_pixabay(keyword))
+        coverr_task   = asyncio.create_task(self._search_coverr(keyword))
+
+        results = await asyncio.gather(pexels_task, pixabay_task, coverr_task,
+                                       return_exceptions=True)
+        video_urls = [r for r in results if isinstance(r, str) and r]
+
+        for url in video_urls:
+            result = await self._download(url, cached_video)
             if result:
+                logger.info(f"[BRoll] Downloaded for '{keyword}': {result.name}")
                 return result
 
-        # Fallback: Pexels Photos API (still image)
+        # Fallback: Pexels Photos API (static image)
         photo = await self._search_pexels_photos_and_download(keyword, safe)
         if photo:
             return photo
@@ -214,6 +237,37 @@ class BrollService:
         except Exception as e:
             logger.warning(f"[BRoll] Pexels search error: {e}")
             return None
+
+    async def _search_coverr(self, query: str) -> Optional[str]:
+        """Search Coverr CC0 video library."""
+        key = os.getenv("COVERR_API_KEY", "")
+        if not key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    "https://api.coverr.co/videos",
+                    params={"keywords": query, "token": key, "per_page": 5},
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                for item in data.get("hits", []):
+                    # Prefer clips with portrait dimensions and duration 3-10s
+                    dur = item.get("duration", 0)
+                    w   = item.get("width", 0)
+                    h   = item.get("height", 0)
+                    url = item.get("urls", {}).get("mp4_download") or item.get("url")
+                    if url and 3 <= dur <= 12 and h >= 720:
+                        logger.info(f"[BRoll] Coverr hit for '{query}': {url[:60]}...")
+                        return url
+                # Any clip if none match portrait preference
+                for item in data.get("hits", []):
+                    url = item.get("urls", {}).get("mp4_download") or item.get("url")
+                    if url:
+                        return url
+        except Exception as e:
+            logger.debug(f"[BRoll] Coverr search error: {e}")
+        return None
 
     async def _search_pixabay(self, query: str) -> Optional[str]:
         key = self.config.pixabay_api_key or os.getenv("PIXABAY_API_KEY", "")
@@ -314,48 +368,23 @@ class BrollService:
     ) -> bool:
         """
         Overlay *broll_path* on *video_path* at *timestamp* for *overlay_duration* seconds.
-        Uses ffmpeg overlay filter with fade-in/out of *fade* seconds.
+        Delegates to broll_compositor.compose_overlay for format-adaptive scaling.
         Returns True on success.
         """
-        end_ts = timestamp + overlay_duration
-        fade_out_start = overlay_duration - fade
-
-        filter_complex = (
-            f"[1:v]"
-            f"scale=iw:ih,"
-            f"fade=t=in:st=0:d={fade}:alpha=1,"
-            f"fade=t=out:st={fade_out_start}:d={fade}:alpha=1"
-            f"[bv];"
-            f"[0:v][bv]overlay=x=0:y=0:"
-            f"enable='between(t,{timestamp},{end_ts})'[vout]"
-        )
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", video_path,
-            "-ss", "0", "-t", str(overlay_duration + 1), "-i", broll_path,
-            "-filter_complex", filter_complex,
-            "-map", "[vout]",
-            "-map", "0:a",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            output_path,
-        ]
-
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+            ok = compose_overlay(
+                main_path=video_path,
+                broll_path=broll_path,
+                output_path=output_path,
+                timestamp=timestamp,
+                duration=overlay_duration,
+                fade=fade,
             )
-            _out, _err = await proc.communicate()
-            if proc.returncode == 0:
+            if ok:
                 logger.info(f"[BRoll] ✓ Overlay inserted at t={timestamp:.1f}s → {output_path}")
-                return True
             else:
-                logger.error(f"[BRoll] FFmpeg overlay failed (rc={proc.returncode}): {_err.decode()[:400]}")
-                return False
+                logger.error(f"[BRoll] compose_overlay returned False for {video_path}")
+            return ok
         except Exception as e:
             logger.error(f"[BRoll] insert_broll exception: {e}")
             return False
@@ -453,16 +482,13 @@ class BrollService:
                 logger.info(f"[BRoll] No asset fetched for keywords {keywords} — skipping")
                 return video_path
 
-            # Step 3 — silence detection
-            insert_ts = 5.0  # default: insert at 5 s
-            if audio_path and Path(audio_path).exists():
-                silences = self.detect_silences(audio_path)
-                if silences:
-                    # Pick the first silence that starts after 2 s (avoid immediate intro)
-                    for s_start, s_end in silences:
-                        if s_start >= 2.0:
-                            insert_ts = s_start + 0.1
-                            break
+            # Step 3 — scene-aware insertion timestamps
+            insert_timestamps = get_insert_timestamps(
+                video_path=video_path,
+                max_n=1,
+                clip_duration=clip_duration or None,
+            )
+            insert_ts = insert_timestamps[0] if insert_timestamps else 5.0
 
             # Step 4 — overlay
             overlay_dur = min(_BROLL_DURATION, max(1.0, clip_duration - insert_ts - 0.5))

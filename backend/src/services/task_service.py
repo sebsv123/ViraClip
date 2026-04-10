@@ -952,7 +952,21 @@ class TaskService:
             
             # Cleanup temporary extracted segments to free disk space
             cleanup_extracted_segments(extracted_segment_paths)
-            
+
+            # INTERMEDIATE FILE CLEANUP: Keep only final_* files in clips output dir
+            if len(clip_ids) > 0:
+                try:
+                    kept, removed = 0, 0
+                    for f in clips_output_dir.iterdir():
+                        if f.is_file() and not f.name.startswith("final_"):
+                            f.unlink(missing_ok=True)
+                            removed += 1
+                        else:
+                            kept += 1
+                    logger.info(f"[CLEANUP] Intermediate files removed: {removed}, kept: {kept}")
+                except Exception as _ic_e:
+                    logger.warning(f"[CLEANUP] Intermediate file cleanup failed: {_ic_e}")
+
             # SAFE CLEANUP: Only delete source video when clips were successfully generated
             clips_generated = len(clip_ids)
             if clips_generated > 0 and video_path.exists():

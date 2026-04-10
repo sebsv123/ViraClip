@@ -65,8 +65,24 @@ class CreativePipeline:
         Returns:
             Dict of creative metadata keys merged into the clip result.
         """
-        start = float(segment.get("start_time") or segment.get("start", 0.0))
-        end = float(segment.get("end_time") or segment.get("end", start + 60.0))
+        def _ts(val, default=0.0):
+            if val is None:
+                return default
+            try:
+                return float(val)
+            except (ValueError, TypeError):
+                try:
+                    parts = str(val).split(":")
+                    if len(parts) == 2:
+                        return int(parts[0]) * 60 + float(parts[1])
+                    if len(parts) == 3:
+                        return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                except Exception:
+                    pass
+                return default
+
+        start = _ts(segment.get("start_time") or segment.get("start"), 0.0)
+        end = _ts(segment.get("end_time") or segment.get("end"), start + 60.0)
         transcript = segment.get("transcript", "")
 
         meta: dict = {

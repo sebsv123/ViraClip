@@ -1,35 +1,51 @@
 """
-Text-to-Video B-Roll Generation Service — Phase 3.1
-=====================================================
-Generates short portrait B-roll clips from text prompts using LTX-Video
-(primary) or AnimateLCM (fast 4-step fallback).
+Text-to-Video B-Roll Generation Service — Phase 3.1 (Replicate Edition)
+========================================================================
+Generates short portrait B-roll clips from text prompts via Replicate API.
 
-Models:
-  - LTX-Video 0.9.7  (Lightricks/LTX-Video)  ~5 GB VRAM, 720p, 2-8s
-  - AnimateLCM        (wangfuyun/AnimateLCM)  ~4 GB VRAM, 512px, 4 steps
-  - Wan2.2-1.3B       (Wan-AI/Wan2.2-T2V-1.3B) ~8 GB VRAM, 720p
+GPU constraint: 4 GB VRAM — no local diffusion models are viable.
+All T2V generation is therefore routed through Replicate's hosted endpoints.
 
-Resolution mapping:
-  480p → 480×848,  720p → 720×1280,  1080p → 1080×1920
+Models available via Replicate (zero local VRAM):
+  - thudm/cogvideox-5b          — best quality, ~30s per clip
+  - wan-ai/wan2.1-t2v-720p      — fast, 720p portrait
+  - ali-vilab/i2vgen-xl         — image-to-video (I2V)
+
+Configuration:
+  REPLICATE_API_TOKEN — required (get from replicate.com)
+  T2V_ENABLED         — must be "true" to activate (default: false)
+  T2V_MODEL           — "cogvideox" | "wan21" | "i2vgen" (default: cogvideox)
+  T2V_RESOLUTION      — "480p" | "720p" | "1080p" (default: 720p)
 """
-
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-T2V_MODEL       = os.environ.get("T2V_MODEL", "ltx-video")
+T2V_MODEL       = os.environ.get("T2V_MODEL", "cogvideox")
 T2V_RESOLUTION  = os.environ.get("T2V_RESOLUTION", "720p")
-T2V_CACHE_DIR   = Path(os.environ.get("T2V_CACHE_DIR", "/app/models/t2v"))
 TEMP_DIR        = Path(os.environ.get("TEMP_DIR", "/app/temp/uploads"))
+REPLICATE_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "")
+T2V_ENABLED     = os.environ.get("T2V_ENABLED", "false").lower() == "true"
+
+_REPLICATE_BASE = "https://api.replicate.com/v1"
+_POLL_INTERVAL  = 3.0     # seconds between status polls
+_MAX_WAIT_S     = 300     # max wait for generation to complete
+
+_MODEL_VERSIONS: dict[str, str] = {
+    "cogvideox": "thudm/cogvideox-5b",
+    "wan21":     "wan-ai/wan2.1-t2v-720p",
+    "i2vgen":    "ali-vilab/i2vgen-xl",
+}
 
 _RES_MAP = {
     "480p":  (480, 848),
@@ -37,94 +53,13 @@ _RES_MAP = {
     "1080p": (1080, 1920),
 }
 
-_LOADED: Dict[str, Any] = {}   # module-level model cache
-
-
-def _get_device():
-    try:
-        import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except ImportError:
-        return "cpu"
-
-
-def _load_ltx_pipeline():
-    """Load LTX-Video pipeline (lazy, cached)."""
-    global _LOADED
-    if "ltx" in _LOADED:
-        return _LOADED["ltx"]
-
-    logger.info("[T2V] Loading LTX-Video pipeline …")
-    from diffusers import LTXPipeline
-    import torch
-
-    pipe = LTXPipeline.from_pretrained(
-        "Lightricks/LTX-Video",
-        torch_dtype=torch.float16,
-        cache_dir=str(T2V_CACHE_DIR),
-    )
-    pipe.to(_get_device())
-    pipe.enable_model_cpu_offload()
-    _LOADED["ltx"] = pipe
-    logger.info("[T2V] LTX-Video loaded.")
-    return pipe
-
-
-def _load_animatelcm_pipeline():
-    """Load AnimateLCM pipeline (lazy, cached)."""
-    global _LOADED
-    if "animatelcm" in _LOADED:
-        return _LOADED["animatelcm"]
-
-    logger.info("[T2V] Loading AnimateLCM pipeline …")
-    from diffusers import AnimateDiffPipeline, LCMScheduler, MotionAdapter
-    import torch
-
-    adapter = MotionAdapter.from_pretrained(
-        "wangfuyun/AnimateLCM",
-        torch_dtype=torch.float16,
-        cache_dir=str(T2V_CACHE_DIR),
-    )
-    pipe = AnimateDiffPipeline.from_pretrained(
-        "emilianJR/epiCRealism",
-        motion_adapter=adapter,
-        torch_dtype=torch.float16,
-        cache_dir=str(T2V_CACHE_DIR),
-    )
-    pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config, beta_schedule="linear")
-    pipe.load_lora_weights(
-        "wangfuyun/AnimateLCM",
-        weight_name="AnimateLCM_sd15_t2v_lora.safetensors",
-        adapter_name="lcm-animation",
-    )
-    pipe.set_adapters(["lcm-animation"], [0.8])
-    pipe.to(_get_device())
-    pipe.enable_model_cpu_offload()
-    _LOADED["animatelcm"] = pipe
-    logger.info("[T2V] AnimateLCM loaded.")
-    return pipe
-
-
-def _frames_to_mp4(frames, output_path: Path, fps: int = 8) -> Path:
-    """Write PIL image frames to MP4 via imageio."""
-    import imageio.v3 as iio
-    import numpy as np
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    arr = np.stack([np.array(f) for f in frames])   # (T, H, W, 3)
-    iio.imwrite(str(output_path), arr, fps=fps, codec="libx264",
-                quality=None, output_params=["-preset", "fast", "-crf", "20"])
-    return output_path
-
 
 class T2VBrollService:
     """
-    Generate portrait B-roll clips from text prompts.
+    Generate portrait B-roll clips from text prompts via Replicate API.
 
-    Priority chain:
-      1. LTX-Video 0.9.7 (best quality)
-      2. AnimateLCM      (fast 4-step fallback)
-      3. Raise RuntimeError (caller falls back to Pexels/ComfyUI)
+    Disabled by default (T2V_ENABLED=false). No local model loading occurs.
+    Requires REPLICATE_API_TOKEN env var when enabled.
     """
 
     def __init__(self,
@@ -132,7 +67,6 @@ class T2VBrollService:
                  resolution: str = T2V_RESOLUTION):
         self.model      = model
         self.resolution = resolution
-        self.device     = _get_device()
         self.out_dir    = TEMP_DIR / "broll_generated"
         self.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -147,110 +81,116 @@ class T2VBrollService:
         output_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Generate a B-roll clip from *prompt*.
+        Generate a B-roll clip from *prompt* via Replicate.
 
         Returns:
             {"clip_path": str, "duration": float, "model": str}
+
+        Raises RuntimeError if T2V is disabled or REPLICATE_API_TOKEN not set.
         """
-        res   = resolution or self.resolution
-        mdl   = model or self.model
-        w, h  = _RES_MAP.get(res, (720, 1280))
-        n_fps = 8
-        n_frames = max(8, min(64, int(duration * n_fps)))
+        if not T2V_ENABLED:
+            raise RuntimeError("T2V disabled — set T2V_ENABLED=true to enable")
+        if not REPLICATE_TOKEN:
+            raise RuntimeError("REPLICATE_API_TOKEN not set")
+
+        mdl = model or self.model
+        res = resolution or self.resolution
+        w, h = _RES_MAP.get(res, (720, 1280))
 
         if output_path is None:
-            safe  = "".join(c if c.isalnum() else "_" for c in prompt[:40])
+            safe = "".join(c if c.isalnum() else "_" for c in prompt[:40])
             output_path = str(self.out_dir / f"t2v_{safe}_{int(time.time())}.mp4")
 
-        dest = Path(output_path)
+        full_prompt = (
+            f"Cinematic 4K vertical footage of {prompt}, "
+            f"smooth camera motion, professional quality, portrait orientation, "
+            f"vibrant colors, no text, no watermarks"
+        )
 
-        loop = asyncio.get_event_loop()
-        try:
-            await loop.run_in_executor(
-                None,
-                self._generate_sync,
-                prompt, n_frames, w, h, n_fps, dest, mdl,
-            )
-        except Exception as exc:
-            logger.warning(f"[T2V] Primary model failed ({exc}), trying AnimateLCM fallback …")
-            if mdl != "animatelcm":
-                await loop.run_in_executor(
-                    None,
-                    self._generate_sync,
-                    prompt, n_frames, 512, 512, n_fps, dest, "animatelcm",
-                )
-                mdl = "animatelcm"
-            else:
-                raise
+        model_id = _MODEL_VERSIONS.get(mdl, _MODEL_VERSIONS["cogvideox"])
+        clip_path = await self._generate_via_replicate(
+            prompt=full_prompt,
+            model_id=model_id,
+            output_path=Path(output_path),
+            width=w,
+            height=h,
+            duration=duration,
+        )
 
-        actual_duration = n_frames / n_fps
-        logger.info(f"[T2V] ✓ Generated {dest.name} ({actual_duration:.1f}s, {mdl})")
-        return {"clip_path": str(dest), "duration": actual_duration, "model": mdl}
+        actual_duration = duration
+        logger.info("[T2V] ✓ Replicate generated %s (%.1fs, %s)", clip_path.name, actual_duration, mdl)
+        return {"clip_path": str(clip_path), "duration": actual_duration, "model": f"replicate/{mdl}"}
 
-    # ── Sync generation (runs in executor) ────────────────────────────────────
+    # ── Replicate API ─────────────────────────────────────────────────────────
 
-    def _generate_sync(
+    async def _generate_via_replicate(
         self,
         prompt: str,
-        n_frames: int,
+        model_id: str,
+        output_path: Path,
         width: int,
         height: int,
-        fps: int,
-        dest: Path,
-        model_name: str,
-    ) -> None:
-        full_prompt = (
-            f"{prompt}, cinematic, professional quality, sharp focus, "
-            f"portrait orientation, vibrant colors, high detail, 4K"
-        )
-        negative = (
-            "blurry, low quality, pixelated, distorted, watermark, text, logo, "
-            "black bars, letterbox, horizontal orientation"
-        )
+        duration: float,
+    ) -> Path:
+        """POST to Replicate, poll until done, download output video."""
+        headers = {
+            "Authorization": f"Bearer {REPLICATE_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "version": model_id,
+            "input": {
+                "prompt": prompt,
+                "width": width,
+                "height": height,
+                "num_frames": max(8, int(duration * 8)),
+                "num_inference_steps": 30,
+                "guidance_scale": 6.0,
+            },
+        }
 
-        if model_name in ("ltx-video", "ltx"):
-            self._run_ltx(full_prompt, negative, n_frames, width, height, fps, dest)
-        elif model_name in ("animatelcm", "animatediff"):
-            self._run_animatelcm(full_prompt, n_frames, fps, dest)
-        else:
-            raise ValueError(f"Unknown T2V model: {model_name}")
-
-    def _run_ltx(self, prompt, negative, n_frames, width, height, fps, dest):
-        import torch
-        pipe = _load_ltx_pipeline()
-        with torch.inference_mode():
-            output = pipe(
-                prompt=prompt,
-                negative_prompt=negative,
-                width=width,
-                height=height,
-                num_frames=n_frames,
-                num_inference_steps=25,
-                guidance_scale=3.0,
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Create prediction
+            resp = await client.post(
+                f"{_REPLICATE_BASE}/predictions",
+                headers=headers,
+                json=payload,
             )
-        _frames_to_mp4(output.frames[0], dest, fps=fps)
+            resp.raise_for_status()
+            prediction = resp.json()
+            pred_id = prediction["id"]
+            logger.info("[T2V] Replicate prediction created: %s", pred_id)
 
-    def _run_animatelcm(self, prompt, n_frames, fps, dest):
-        import torch
-        pipe = _load_animatelcm_pipeline()
-        with torch.inference_mode():
-            output = pipe(
-                prompt=prompt,
-                num_frames=n_frames,
-                guidance_scale=1.5,
-                num_inference_steps=4,
-                generator=torch.Generator().manual_seed(42),
-            )
-        _frames_to_mp4(output.frames[0], dest, fps=fps)
+            # Poll for completion
+            poll_url = f"{_REPLICATE_BASE}/predictions/{pred_id}"
+            deadline = time.monotonic() + _MAX_WAIT_S
+            while time.monotonic() < deadline:
+                await asyncio.sleep(_POLL_INTERVAL)
+                poll_resp = await client.get(poll_url, headers=headers)
+                poll_resp.raise_for_status()
+                data = poll_resp.json()
+                status = data.get("status")
+                logger.debug("[T2V] Replicate status: %s", status)
+                if status == "succeeded":
+                    output = data.get("output")
+                    video_url = output if isinstance(output, str) else (output[0] if output else None)
+                    if not video_url:
+                        raise RuntimeError("Replicate returned no output URL")
+                    # Download the video
+                    dl_resp = await client.get(video_url)
+                    dl_resp.raise_for_status()
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_path.write_bytes(dl_resp.content)
+                    return output_path
+                if status in ("failed", "canceled"):
+                    err = data.get("error", "unknown error")
+                    raise RuntimeError(f"Replicate prediction {status}: {err}")
+
+            raise RuntimeError(f"Replicate generation timed out after {_MAX_WAIT_S}s")
 
     # ── Utility ───────────────────────────────────────────────────────────────
 
     @staticmethod
     def is_available() -> bool:
-        """True if at least one T2V model can be loaded (GPU present + diffusers installed)."""
-        try:
-            import torch
-            import diffusers  # noqa: F401
-            return torch.cuda.is_available()
-        except ImportError:
-            return False
+        """True if Replicate API is configured and T2V is enabled."""
+        return T2V_ENABLED and bool(REPLICATE_TOKEN)
