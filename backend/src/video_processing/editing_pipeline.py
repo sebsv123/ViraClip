@@ -324,6 +324,7 @@ def _build_filter_complex(
     beat_pi_ts: Optional[List[float]] = None,
     energy_level: float = 0.5,
     zoom_intensity: str = "medium",
+    grain_override: int = 0,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
@@ -339,9 +340,10 @@ def _build_filter_complex(
     _con    = round(max(1.0, min(1.30, CONTRAST   * (0.88 + energy_level * 0.28))), 3)
     _zoom   = {"off": 1.0, "subtle": 1.06, "medium": ZOOM_FACTOR, "strong": min(1.18, ZOOM_FACTOR * 1.06)}.get(zoom_intensity, ZOOM_FACTOR)
     _pi_int = max(8.0, PI_INTERVAL + (0.5 - energy_level) * 6.0)
-    _grain  = max(0, int(FILM_GRAIN * (0.4 + energy_level * 1.2)))
-    logger.debug("[EP] energy=%.2f → sat=%.2f con=%.2f zoom=%.3f pi_int=%.1f grain=%d",
-                 energy_level, _sat, _con, _zoom, _pi_int, _grain)
+    _grain  = grain_override if grain_override > 0 else max(0, int(FILM_GRAIN * (0.4 + energy_level * 1.2)))
+    logger.debug("[EP] energy=%.2f → sat=%.2f con=%.2f zoom=%.3f pi_int=%.1f grain=%d%s",
+                 energy_level, _sat, _con, _zoom, _pi_int, _grain,
+                 " (cat-override)" if grain_override > 0 else "")
 
     # ── 1. Colour grading: eq + unsharp ──────────────────────────────────────
     eq_f     = f"eq=saturation={_sat}:contrast={_con}:brightness={BRIGHTNESS}"
@@ -624,6 +626,7 @@ class EditingPipeline:
         gpu_settings: Optional[Dict[str, Any]] = None,
         energy_level: float = 0.5,
         zoom_intensity: str = "medium",
+        grain_override: int = 0,
     ) -> Path:
         """
         Run the full editing pipeline.
@@ -669,6 +672,7 @@ class EditingPipeline:
             beat_pi_ts=beat_pi_ts,
             energy_level=energy_level,
             zoom_intensity=zoom_intensity,
+            grain_override=grain_override,
         )
 
         vcodec = ["libx264", "-preset", "veryfast", "-crf", "21"]

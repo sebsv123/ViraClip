@@ -908,15 +908,28 @@ class VideoService:
                         parse_timestamp_to_seconds(segment["end_time"])
                         - parse_timestamp_to_seconds(segment["start_time"])
                     )
-                    _spw = max(0.1, _orig_speech_dur) / max(1, len(_words_list))
-                    for _j, _w in enumerate(_words_list):
+                    # Proportional timing: distribute duration by character length.
+                    # Short filler words (a, the, in…) get 50% of their share.
+                    _FILLER = {"a","an","the","is","in","at","to","of","i","and",
+                               "or","but","on","it","he","she","we","so","do","be"}
+                    _char_weights = [
+                        max(1, len(_w)) * (0.5 if _w.lower() in _FILLER else 1.0)
+                        for _w in _words_list
+                    ]
+                    _total_weight = sum(_char_weights) or 1
+                    _cursor = 0.0
+                    _EMPHASIS_RE = {"secret","truth","never","always","stop","wrong",
+                                    "hack","real","exposed","shocking","actually"}
+                    for _w, _cw in zip(_words_list, _char_weights):
+                        _wdur = max(0.06, _orig_speech_dur * _cw / _total_weight)
                         words_with_confidence.append({
                             "word":       _w,
-                            "start":      _j * _spw,
-                            "end":        (_j + 1) * _spw,
+                            "start":      round(_cursor, 3),
+                            "end":        round(_cursor + _wdur, 3),
                             "confidence": 0.9,
-                            "is_emphasis": False,
+                            "is_emphasis": _w.lower().strip(".,!?") in _EMPHASIS_RE,
                         })
+                        _cursor += _wdur
                     logger.info(
                         f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
                     )
@@ -960,6 +973,18 @@ class VideoService:
 
             output_path = clip_path
             _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
+
+            # Hook-type opening treatment: inject strategic flash at t=0.15s.
+            # scroll_stop / pattern_interrupt → immediate white flash punch.
+            # cliffhanger / dramatic → silence is the tool, no flash.
+            _hook_type_str = (
+                segment.get("phi3_hook_type") or segment.get("hook_type") or ""
+            ).lower().replace(" ", "_")
+            _FLASH_HOOKS = {"scroll_stop", "pattern_interrupt", "curiosity_gap"}
+            _clip_profile_zoom = getattr(_clip_profile, "zoom_intensity", "medium") if _clip_profile else "medium"
+            if _hook_type_str in _FLASH_HOOKS and _clip_profile_zoom != "off":
+                _flash_ts.append(0.15)
+                logger.info("  ✓ Hook flash injected at t=0.15s (hook=%s)", _hook_type_str)
 
             # Step 4.1b: ESRGAN Video Upscaling (Phase 3.3 — GPU only, opt-in)
             _esrgan_enabled = os.environ.get("ESRGAN_ENABLED", "false").lower() == "true"
@@ -1091,6 +1116,7 @@ class VideoService:
                         overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
                         words_with_timestamps=words_with_confidence or None,
                         precomputed_keywords=_broll_kw_override,
+                        broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.25,
                     )
                     if Path(_broll_result).exists() and _broll_result != str(output_path):
                         output_path = Path(_broll_result)
@@ -1266,6 +1292,7 @@ class VideoService:
                     gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
                     energy_level=_clip_profile.energy if _clip_profile else 0.5,
                     zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
+                    grain_override=_clip_profile.grain if _clip_profile else 0,
                 )
                 if _ep_result == _ep_out and _ep_out.exists():
                     output_path = _ep_out

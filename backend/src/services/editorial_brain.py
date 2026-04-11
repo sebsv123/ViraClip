@@ -49,6 +49,7 @@ class CategoryRule:
     broll_themes:    List[str]      # B-roll visual search terms
     mood:            str            # energetic | dramatic | warm | chill | educational | inspirational
     sfx_emphasis:    str
+    broll_fade:      float = 0.25   # B-roll fade-in/out duration in seconds
 
 
 CATEGORY_RULES: Dict[str, CategoryRule] = {
@@ -60,7 +61,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="fast", flash_allowed=True, hook_zoom=True,
         broll_themes=["gym workout", "running athlete", "weight training",
                       "fitness motivation", "muscles", "sweat"],
-        mood="energetic", sfx_emphasis="scroll_stop",
+        mood="energetic", sfx_emphasis="scroll_stop", broll_fade=0.10,
     ),
 
     "finance_investing": CategoryRule(
@@ -70,7 +71,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["stock market chart", "money cash", "laptop office",
                       "financial data", "investment portfolio", "bank"],
-        mood="educational", sfx_emphasis="insight_reveal",
+        mood="educational", sfx_emphasis="insight_reveal", broll_fade=0.30,
     ),
 
     "comedy_entertainment": CategoryRule(
@@ -80,7 +81,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="fast", flash_allowed=True, hook_zoom=True,
         broll_themes=["laughter funny", "comedy reaction", "entertainment",
                       "surprised face", "meme culture"],
-        mood="energetic", sfx_emphasis="pattern_interrupt",
+        mood="energetic", sfx_emphasis="pattern_interrupt", broll_fade=0.10,
     ),
 
     "education_tutorial": CategoryRule(
@@ -90,7 +91,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["learning study", "classroom whiteboard", "books knowledge",
                       "computer screen", "tutorial step by step"],
-        mood="educational", sfx_emphasis="curiosity_gap",
+        mood="educational", sfx_emphasis="curiosity_gap", broll_fade=0.35,
     ),
 
     "motivation_mindset": CategoryRule(
@@ -100,7 +101,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=True, hook_zoom=True,
         broll_themes=["success achievement", "sunrise mountains", "determination",
                       "goal setting", "winner champion", "positive mindset"],
-        mood="inspirational", sfx_emphasis="scroll_stop",
+        mood="inspirational", sfx_emphasis="scroll_stop", broll_fade=0.25,
     ),
 
     "lifestyle_vlog": CategoryRule(
@@ -110,7 +111,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["daily life routine", "coffee morning", "city lifestyle",
                       "friends social", "aesthetic interior"],
-        mood="warm", sfx_emphasis="transition",
+        mood="warm", sfx_emphasis="transition", broll_fade=0.30,
     ),
 
     "cooking_food": CategoryRule(
@@ -120,7 +121,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["food cooking", "ingredients recipe", "restaurant kitchen",
                       "delicious meal", "chef cooking"],
-        mood="warm", sfx_emphasis="insight_reveal",
+        mood="warm", sfx_emphasis="insight_reveal", broll_fade=0.30,
     ),
 
     "travel_adventure": CategoryRule(
@@ -130,7 +131,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=True, hook_zoom=True,
         broll_themes=["landscape nature", "travel destination", "adventure outdoor",
                       "airplane flight", "exotic location", "backpacker"],
-        mood="energetic", sfx_emphasis="scroll_stop",
+        mood="energetic", sfx_emphasis="scroll_stop", broll_fade=0.20,
     ),
 
     "tech_review": CategoryRule(
@@ -140,7 +141,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["smartphone technology", "laptop gadget", "tech product",
                       "innovation future", "coding programming", "AI robot"],
-        mood="educational", sfx_emphasis="insight_reveal",
+        mood="educational", sfx_emphasis="insight_reveal", broll_fade=0.25,
     ),
 
     "drama_storytelling": CategoryRule(
@@ -150,7 +151,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="slow", flash_allowed=False, hook_zoom=False,
         broll_themes=["cinematic drama", "emotional moment", "conflict tension",
                       "storytelling narrative", "dramatic scene"],
-        mood="dramatic", sfx_emphasis="cliffhanger",
+        mood="dramatic", sfx_emphasis="cliffhanger", broll_fade=0.60,
     ),
 
     "beauty_fashion": CategoryRule(
@@ -160,7 +161,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=True, hook_zoom=False,
         broll_themes=["fashion style makeup", "beauty products", "glamour",
                       "aesthetic outfit", "skincare routine"],
-        mood="warm", sfx_emphasis="transition",
+        mood="warm", sfx_emphasis="transition", broll_fade=0.30,
     ),
 
     "business_entrepreneur": CategoryRule(
@@ -170,7 +171,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["business meeting office", "entrepreneur startup",
                       "success corporate", "strategy planning", "leadership"],
-        mood="educational", sfx_emphasis="insight_reveal",
+        mood="educational", sfx_emphasis="insight_reveal", broll_fade=0.30,
     ),
 
     "health_wellness": CategoryRule(
@@ -180,7 +181,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="slow", flash_allowed=False, hook_zoom=False,
         broll_themes=["meditation yoga", "healthy food", "nature wellness",
                       "mental health calm", "sleep rest", "mindfulness"],
-        mood="chill", sfx_emphasis="transition",
+        mood="chill", sfx_emphasis="transition", broll_fade=0.50,
     ),
 
     "gaming": CategoryRule(
@@ -190,7 +191,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="fast", flash_allowed=True, hook_zoom=True,
         broll_themes=["video game gameplay", "gaming setup", "esports",
                       "controller console", "streaming gamer"],
-        mood="energetic", sfx_emphasis="pattern_interrupt",
+        mood="energetic", sfx_emphasis="pattern_interrupt", broll_fade=0.08,
     ),
 
     "news_commentary": CategoryRule(
@@ -200,7 +201,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["news broadcast", "commentary opinion", "current events",
                       "political debate", "media journalism"],
-        mood="educational", sfx_emphasis="curiosity_gap",
+        mood="educational", sfx_emphasis="curiosity_gap", broll_fade=0.20,
     ),
 
     "relationship_social": CategoryRule(
@@ -210,7 +211,7 @@ CATEGORY_RULES: Dict[str, CategoryRule] = {
         cut_rhythm="medium", flash_allowed=False, hook_zoom=False,
         broll_themes=["couple relationship", "friends social", "dating advice",
                       "communication people", "emotions feelings"],
-        mood="warm", sfx_emphasis="insight_reveal",
+        mood="warm", sfx_emphasis="insight_reveal", broll_fade=0.30,
     ),
 }
 
@@ -462,6 +463,8 @@ def apply_category_rules(
         ai_keywords=merged_kw,
         content_category=category_key,
         narrative=narrative,
+        broll_fade_s=rule.broll_fade,
+        grain=rule.grain,
     )
 
 

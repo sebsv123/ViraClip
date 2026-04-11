@@ -123,8 +123,10 @@ class ClipProfile:
     saturation:      float  # EditingPipeline saturation override
     contrast:        float  # EditingPipeline contrast override
     ai_keywords:     List[str] = field(default_factory=list)  # AI-chosen B-roll keywords
-    content_category: str  = field(default="unknown")         # Editorial Brain category
-    narrative:        Any  = field(default=None)               # NarrativeStructure | None
+    content_category: str   = field(default="unknown")        # Editorial Brain category
+    narrative:        Any   = field(default=None)              # NarrativeStructure | None
+    broll_fade_s:     float = field(default=0.25)              # B-roll fade duration (category-specific)
+    grain:            int   = field(default=0)                 # Film grain override (0 = compute from energy)
 
     def describe(self) -> str:
         return (
