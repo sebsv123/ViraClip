@@ -74,8 +74,31 @@ def detect_gpu() -> Tuple[GPUType, Dict[str, Any]]:
     return _gpu_cache
 
 
+def _nvenc_functional() -> bool:
+    """Verify NVENC encoder works at runtime (libnvidia-encode.so.1 must be present)."""
+    try:
+        test = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=black:s=64x64:d=1",
+                "-c:v", "h264_nvenc",
+                "-f", "null", "-"
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if test.returncode != 0:
+            logger.debug(f"h264_nvenc functional test failed: {test.stderr[-200:]}")
+            return False
+        return True
+    except Exception as e:
+        logger.debug(f"h264_nvenc functional test error: {e}")
+        return False
+
+
 def _detect_nvidia() -> Tuple[GPUType, Dict[str, Any]]:
-    """Detect NVIDIA GPU via PyTorch or nvidia-smi."""
+    """Detect NVIDIA GPU via PyTorch or nvidia-smi, with functional NVENC test."""
     # Method 1: Check if PyTorch sees CUDA
     try:
         if torch is None:
@@ -83,7 +106,10 @@ def _detect_nvidia() -> Tuple[GPUType, Dict[str, Any]]:
         if torch.cuda.is_available():
             device_name = torch.cuda.get_device_name(0)
             logger.info(f"NVIDIA GPU: {device_name}")
-            return (GPUType.NVIDIA_NVENC, _get_nvenc_settings())
+            if _nvenc_functional():
+                return (GPUType.NVIDIA_NVENC, _get_nvenc_settings())
+            logger.warning("CUDA available but NVENC encoder failed — falling back to CPU")
+            return (GPUType.CPU_ONLY, {})
     except ImportError:
         pass
     except Exception as e:
@@ -100,7 +126,10 @@ def _detect_nvidia() -> Tuple[GPUType, Dict[str, Any]]:
         if result.returncode == 0 and result.stdout.strip():
             gpu_name = result.stdout.strip().split('\n')[0]
             logger.info(f"NVIDIA GPU (nvidia-smi): {gpu_name}")
-            return (GPUType.NVIDIA_NVENC, _get_nvenc_settings())
+            if _nvenc_functional():
+                return (GPUType.NVIDIA_NVENC, _get_nvenc_settings())
+            logger.warning("nvidia-smi reports GPU but NVENC failed — falling back to CPU")
+            return (GPUType.CPU_ONLY, {})
     except FileNotFoundError:
         pass
     except Exception as e:
