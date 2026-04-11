@@ -120,9 +120,11 @@ class ClipProfile:
     zoom_intensity: str    # off | subtle | medium | strong
     sfx_emphasis:   str    # primary SFX hook type
 
-    saturation:     float  # EditingPipeline saturation override
-    contrast:       float  # EditingPipeline contrast override
-    ai_keywords:    List[str] = field(default_factory=list)  # AI-chosen B-roll keywords
+    saturation:      float  # EditingPipeline saturation override
+    contrast:        float  # EditingPipeline contrast override
+    ai_keywords:     List[str] = field(default_factory=list)  # AI-chosen B-roll keywords
+    content_category: str  = field(default="unknown")         # Editorial Brain category
+    narrative:        Any  = field(default=None)               # NarrativeStructure | None
 
     def describe(self) -> str:
         return (
@@ -396,12 +398,37 @@ async def build_clip_profile_async(
     duration: float,
     clip_index: int,
     caption_template: str = "viral",
+    words: Optional[List[Dict[str, Any]]] = None,
 ) -> ClipProfile:
     """
-    Build a ClipProfile: tries Groq AI brain first, falls back to heuristics.
+    Full intelligence pipeline:
+      1. Groq AI brain → semantic editing decisions (fast, ~300 tokens)
+      2. Editorial Brain → content-category specialization + narrative structure
+      3. Heuristic fallback if either AI step fails
     Always returns a valid ClipProfile — never raises.
     """
+    # Step 1: AI or heuristic base profile
     profile = await _build_clip_profile_ai(segment, duration, clip_index)
+    ai_was_used = profile is not None
     if profile is None:
         profile = build_clip_profile(segment, duration, clip_index, caption_template)
+
+    # Step 2: Editorial Brain — category identification + narrative structure
+    try:
+        from .editorial_brain import analyze_clip, apply_category_rules
+        category, narrative = await analyze_clip(
+            segment=segment,
+            duration=duration,
+            clip_index=clip_index,
+            words=words,
+        )
+        profile = apply_category_rules(
+            profile=profile,
+            category_key=category,
+            narrative=narrative,
+            trust_ai_values=ai_was_used,
+        )
+    except Exception as _eb_e:
+        logger.debug("[ClipIntel] EditorialBrain skipped: %s", _eb_e)
+
     return profile

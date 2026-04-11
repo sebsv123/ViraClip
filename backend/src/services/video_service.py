@@ -1217,6 +1217,24 @@ class VideoService:
                     if 0.5 < t < (duration - 0.5)
                 })
 
+            # Inject narrative strategic moments (payoff flash, hook zoom) from Editorial Brain
+            _narrative = getattr(_clip_profile, "narrative", None) if _clip_profile else None
+            if _narrative:
+                _cat_rule_flash = True  # default allow
+                try:
+                    from .editorial_brain import CATEGORY_RULES as _CAT_RULES
+                    _cat_key = getattr(_clip_profile, "content_category", "")
+                    _cat_rule_flash = _CAT_RULES.get(_cat_key, list(_CAT_RULES.values())[0]).flash_allowed if _cat_key else True
+                except Exception:
+                    pass
+                if _cat_rule_flash and _narrative.flash_moments:
+                    _flash_ts = sorted(set(_flash_ts) | {
+                        t for t in _narrative.flash_moments
+                        if 0.5 < t < (duration - 0.5)
+                    })
+                    logger.info("  ✓ Narrative payoff flash at %s",
+                                [f"{t:.1f}s" for t in _narrative.flash_moments])
+
             # Cap flash timestamps — scale by energy: chill=0, medium=1, high=3.
             _flash_cap = 0 if (_clip_profile and _clip_profile.zoom_intensity == "off") else \
                          1 if (_clip_profile and _clip_profile.energy < 0.45) else \
