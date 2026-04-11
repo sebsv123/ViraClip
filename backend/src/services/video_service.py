@@ -887,7 +887,13 @@ class VideoService:
                 logger.warning("[SUBTITLE-FALLBACK] No cache / Whisper — building from segment.text")
                 _words_list = [w for w in segment["text"].split() if w.strip()]
                 if _words_list:
-                    _spw = duration / max(1, len(_words_list))  # seconds per word
+                    # Use ORIGINAL speech duration (not extended clip duration) to avoid
+                    # subtitles appearing 2-3x slower than the speaker when clips are padded.
+                    _orig_speech_dur = (
+                        parse_timestamp_to_seconds(segment["end_time"])
+                        - parse_timestamp_to_seconds(segment["start_time"])
+                    )
+                    _spw = max(0.1, _orig_speech_dur) / max(1, len(_words_list))
                     for _j, _w in enumerate(_words_list):
                         words_with_confidence.append({
                             "word":       _w,
@@ -1189,6 +1195,19 @@ class VideoService:
                     if 0.5 < t < (duration - 0.5)
                 })
 
+            # Cap flash timestamps: max 2 per clip, minimum 4s gap between flashes.
+            # Without this cap every beat and jump-cut fires a flash, creating a
+            # strobe/flicker effect that is jarring and unprofessional.
+            _flash_ts_capped: List[float] = []
+            _last_flash_t = -10.0
+            for _ft in _flash_ts:
+                if _ft - _last_flash_t >= 4.0:
+                    _flash_ts_capped.append(_ft)
+                    _last_flash_t = _ft
+                if len(_flash_ts_capped) >= 2:
+                    break
+            _flash_ts = _flash_ts_capped
+
             # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
             # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
             # progress bar, loudness normalization (single FFmpeg pass).
@@ -1211,8 +1230,14 @@ class VideoService:
                 logger.warning(f"  EditingPipeline failed: {_ep_e}")
 
             # Step 4.6b: Cinematic LUT color grade (after EditingPipeline basic grade).
-            # Controlled via env LUT_PRESET (default: teal_orange). Set to 'none' to skip.
-            _lut_preset = os.environ.get("LUT_PRESET", "teal_orange")
+            # Rotates between warm/vibrant presets per clip to add variety.
+            # Set LUT_PRESET=none to disable, or set a specific preset name to lock it.
+            _LUT_ROTATION = ["teal_orange", "warm_film", "high_contrast", "warm_film", "teal_orange", "high_contrast"]
+            _lut_env = os.environ.get("LUT_PRESET", "auto")
+            if _lut_env.lower() in ("auto", ""):
+                _lut_preset = _LUT_ROTATION[clip_index % len(_LUT_ROTATION)]
+            else:
+                _lut_preset = _lut_env
             if _lut_preset and _lut_preset.lower() not in ("none", "off", "false", ""):
                 try:
                     from .lut_service import get_lut_service as _get_lut

@@ -65,8 +65,11 @@ class BrollService:
             return await self._apply_yolo_filter(keywords, video_path, clip_duration)
 
         prompt = (
-            "Extract 2-3 short, highly visual search keywords from the following transcript "
-            "that would make great stock video b-roll. Reply with ONLY a JSON array of strings, "
+            "Extract 2-3 short, highly visual English search keywords from the following transcript "
+            "that would make great stock video b-roll. "
+            "Keywords MUST be in English regardless of the transcript language. "
+            "Choose concrete visual concepts (nature, objects, actions, places) — not abstract emotions. "
+            "Reply with ONLY a JSON array of English strings, "
             "e.g. [\"mountain\", \"snow\", \"landscape\"]. No explanation.\n\n"
             f"Transcript: {text[:400]}"
         )
@@ -120,13 +123,10 @@ class BrollService:
 
     @staticmethod
     def _simple_keyword_fallback(text: str) -> List[str]:
-        """Return first 3 non-stopword words as a basic fallback."""
-        stopwords = {"the", "a", "an", "is", "are", "was", "were", "i", "you",
-                     "he", "she", "it", "we", "they", "and", "or", "but", "in",
-                     "on", "at", "to", "of", "for", "with", "this", "that"}
-        words = [w.strip(".,!?\"'") for w in text.split() if w.isalpha()]
-        result = [w.lower() for w in words if w.lower() not in stopwords][:3]
-        return result or ["nature", "landscape"]
+        """Return safe English stock-video keywords as a basic fallback."""
+        # Always return generic English terms — never pass raw transcript words
+        # (which may be in another language and return irrelevant stock footage)
+        return ["nature", "landscape", "people"]
 
     # ──────────────────────────────────────────────────────────────────────────
     # 2. ASSET FETCH (Pexels → Pixabay fallback)
