@@ -119,7 +119,11 @@ def apply_optical_flow_transition(
             return True
         logger.warning("[raft] RAFT transition failed — falling back to xfade")
 
-    return _apply_xfade_transition(clip_a, clip_b, output_path, transition_duration)
+    # Rotate through available xfade effects per output file so adjacent clips
+    # never get the same transition style.
+    _effect_idx = abs(hash(output_path.name)) % len(XFADE_EFFECTS)
+    _effect = XFADE_EFFECTS[_effect_idx]
+    return _apply_xfade_transition(clip_a, clip_b, output_path, transition_duration, effect=_effect)
 
 
 def generate_morph_clip(

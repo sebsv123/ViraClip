@@ -49,6 +49,15 @@ class TransitionService:
         await asyncio.wait_for(proc.wait(), timeout=300.0)
         return TransitionResult(success=proc.returncode == 0, output_path=str(output))
     
+    async def apply_swipe_left(self, clip: Path, output: Path) -> TransitionResult:
+        """Horizontal slide-in from right (30 frame ramp)."""
+        filter_complex = (
+            "[0:v]split=2[base][slide];"
+            "[slide]crop=iw/4:ih:3*iw/4:0,scale=iw*4:ih[sliver];"
+            "[base][sliver]overlay=x='if(lte(n,30), W-n*W/30, 0)':y=0[v]"
+        )
+        return await self._run_ffmpeg(clip, output, filter_complex)
+
     async def apply_morph(self, clip_a: Path, clip_b: Path, output: Path) -> TransitionResult:
         """RAFT optical flow morph."""
         try:
