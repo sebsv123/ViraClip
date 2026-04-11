@@ -801,8 +801,8 @@ class VideoService:
             # Single analysis pass that drives: LUT, caption style, B-roll
             # density/duration, BGM category, SFX emphasis, zoom intensity.
             try:
-                from .clip_intelligence import build_clip_profile as _build_profile
-                _clip_profile = _build_profile(
+                from .clip_intelligence import build_clip_profile_async as _build_profile_async
+                _clip_profile = await _build_profile_async(
                     segment=segment,
                     duration=duration,
                     clip_index=clip_index,
@@ -1079,6 +1079,9 @@ class VideoService:
                     from .broll_service import BrollService
                     _broll_svc = BrollService()
                     _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                    _broll_kw_override = (_clip_profile.ai_keywords
+                                          if _clip_profile and _clip_profile.ai_keywords
+                                          else None)
                     _broll_result = await _broll_svc.process_clip(
                         video_path=str(output_path),
                         output_path=str(_broll_out),
@@ -1087,6 +1090,7 @@ class VideoService:
                         max_overlays=_clip_profile.broll_count if _clip_profile else 3,
                         overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
                         words_with_timestamps=words_with_confidence or None,
+                        precomputed_keywords=_broll_kw_override,
                     )
                     if Path(_broll_result).exists() and _broll_result != str(output_path):
                         output_path = Path(_broll_result)

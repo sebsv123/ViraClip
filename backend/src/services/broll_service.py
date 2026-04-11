@@ -403,33 +403,36 @@ class BrollService:
         max_overlays: int = 3,
         overlay_duration_s: float = _BROLL_DURATION,
         words_with_timestamps: Optional[List[Dict]] = None,
+        precomputed_keywords: Optional[List[str]] = None,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
 
-        1. Extract keywords from *segment_text*
-        2. Fetch the best matching stock video
-        3. Detect silences (if *audio_path* provided)
-        4. Insert B-roll overlay
+        1. Extract keywords (or use precomputed_keywords from AI brain)
+        2. Fetch the best matching stock video per keyword
+        3. Insert B-roll overlays at spoken-word timestamps or scene boundaries
 
         Returns *output_path* on success, *video_path* (original) on failure.
         """
         try:
-            # Step 1 — keywords (LLM extraction + optional YOLO visual augmentation)
-            keywords = await self.extract_keywords(segment_text)
+            # Step 1 — keywords: use AI brain's choices if available, else NLP extraction
+            if precomputed_keywords:
+                keywords = list(precomputed_keywords)
+                logger.info(f"[BRoll] Using AI keywords: {keywords}")
+            else:
+                keywords = await self.extract_keywords(segment_text)
 
-            # YOLO augmentation: detect objects actually visible in the clip
-            try:
-                from ..video_processing.object_detection import detect_objects_in_video
-                yolo_kws = await detect_objects_in_video(video_path, max_frames=4)
-                if yolo_kws:
-                    # Prepend YOLO keywords so visually grounded terms are tried first
-                    for kw in reversed(yolo_kws[:2]):
-                        if kw not in keywords:
-                            keywords.insert(0, kw)
-                    logger.info(f"[BRoll] YOLO augmented keywords: {keywords}")
-            except Exception as _yolo_e:
-                logger.debug(f"[BRoll] YOLO augmentation skipped: {_yolo_e}")
+                # YOLO augmentation: detect objects actually visible in the clip
+                try:
+                    from ..video_processing.object_detection import detect_objects_in_video
+                    yolo_kws = await detect_objects_in_video(video_path, max_frames=4)
+                    if yolo_kws:
+                        for kw in reversed(yolo_kws[:2]):
+                            if kw not in keywords:
+                                keywords.insert(0, kw)
+                        logger.info(f"[BRoll] YOLO augmented keywords: {keywords}")
+                except Exception as _yolo_e:
+                    logger.debug(f"[BRoll] YOLO augmentation skipped: {_yolo_e}")
 
             if not keywords:
                 return video_path

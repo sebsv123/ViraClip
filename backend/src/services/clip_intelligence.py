@@ -11,9 +11,11 @@ through to every feature that supports per-clip configuration.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -120,6 +122,7 @@ class ClipProfile:
 
     saturation:     float  # EditingPipeline saturation override
     contrast:       float  # EditingPipeline contrast override
+    ai_keywords:    List[str] = field(default_factory=list)  # AI-chosen B-roll keywords
 
     def describe(self) -> str:
         return (
@@ -243,4 +246,162 @@ def build_clip_profile(
         sfx_emphasis=sfx_emphasis, saturation=saturation, contrast=contrast,
     )
     logger.info("[ClipIntel] clip=%d %s", clip_index + 1, profile.describe())
+    return profile
+
+
+# ── AI Brain (Groq) ──────────────────────────────────────────────────────────
+
+_VALID_LUTS      = {"teal_orange", "warm_film", "cold_blue", "vintage", "high_contrast", "flat"}
+_VALID_CAPTIONS  = {"tiktok", "highlight", "neon", "minimal", "karaoke"}
+_VALID_MOODS     = set(_MOOD_LUTS.keys())
+_VALID_BGM       = {"hype", "upbeat", "midtempo", "slow"}
+_VALID_ZOOM      = {"off", "subtle", "medium", "strong"}
+_VALID_SFX       = {"curiosity_gap", "cliffhanger", "pattern_interrupt",
+                    "scroll_stop", "insight_reveal", "transition", "emphasis_word"}
+
+_AI_SYSTEM_PROMPT = """You are a professional viral video editor for TikTok, Reels, and YouTube Shorts.
+You receive a video transcript and metadata, and you return a JSON object with precise editing decisions.
+Your decisions must match the TONE and CONTENT of the clip — not just generic settings.
+Return ONLY a valid JSON object, no markdown, no explanation."""
+
+_AI_USER_TEMPLATE = """Analyze this video clip and decide how to edit it.
+
+Transcript: \"{text}\"
+Duration: {duration:.0f}s
+Virality score: {virality:.0f}/100
+Hook type: {hook_type}
+
+Return a JSON object with EXACTLY these fields:
+{{
+  "mood": "energetic|dramatic|chill|warm|educational|inspirational",
+  "energy": <float 0.0-1.0>,
+  "lut": "teal_orange|warm_film|cold_blue|vintage|high_contrast|flat",
+  "caption_style": "tiktok|highlight|neon|minimal|karaoke",
+  "broll_keywords": [<3-5 specific visual concepts to illustrate the speech>],
+  "bgm_category": "hype|upbeat|midtempo|slow",
+  "zoom_intensity": "off|subtle|medium|strong",
+  "sfx_emphasis": "curiosity_gap|cliffhanger|pattern_interrupt|scroll_stop|insight_reveal|transition",
+  "saturation": <float 1.0-1.5>,
+  "contrast": <float 1.0-1.3>
+}}"""
+
+
+async def _build_clip_profile_ai(
+    segment: Dict[str, Any],
+    duration: float,
+    clip_index: int,
+) -> Optional[ClipProfile]:
+    """
+    Ask Groq (llama-3.1-8b-instant) for semantic editing decisions.
+    Returns None on any failure — caller falls back to heuristics.
+    """
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key:
+        return None
+
+    text      = (segment.get("text") or "")[:600].strip()
+    virality  = float(segment.get("virality_score", 50))
+    hook_type = (segment.get("hook_type") or "insight_reveal").lower()
+
+    if not text:
+        return None
+
+    user_msg = _AI_USER_TEMPLATE.format(
+        text=text.replace('"', "'"),
+        duration=duration,
+        virality=virality,
+        hook_type=hook_type,
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=9.0) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}",
+                          "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [
+                        {"role": "system", "content": _AI_SYSTEM_PROMPT},
+                        {"role": "user",   "content": user_msg},
+                    ],
+                    "max_tokens": 320,
+                    "temperature": 0.25,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        if resp.status_code != 200:
+            logger.debug("[ClipIntel/AI] Groq HTTP %d", resp.status_code)
+            return None
+
+        parsed: Dict[str, Any] = resp.json()["choices"][0]["message"]["content"]
+        if isinstance(parsed, str):
+            parsed = json.loads(parsed)
+
+        # ── Validate & clamp every field ─────────────────────────────────────
+        mood          = parsed.get("mood", "warm")
+        if mood not in _VALID_MOODS: mood = "warm"
+
+        energy        = max(0.0, min(1.0, float(parsed.get("energy", 0.5))))
+
+        lut           = parsed.get("lut", "teal_orange")
+        if lut not in _VALID_LUTS: lut = _MOOD_LUTS.get(mood, ["teal_orange"])[0]
+
+        caption_style = parsed.get("caption_style", "tiktok")
+        if caption_style not in _VALID_CAPTIONS: caption_style = "tiktok"
+
+        bgm_category  = parsed.get("bgm_category", "upbeat")
+        if bgm_category not in _VALID_BGM: bgm_category = _MOOD_BGM.get(mood, "upbeat")
+
+        zoom_intensity = parsed.get("zoom_intensity", "medium")
+        if zoom_intensity not in _VALID_ZOOM: zoom_intensity = "medium"
+
+        sfx_emphasis  = parsed.get("sfx_emphasis", "insight_reveal")
+        if sfx_emphasis not in _VALID_SFX: sfx_emphasis = "insight_reveal"
+
+        saturation    = max(1.0, min(1.5, float(parsed.get("saturation", 1.25))))
+        contrast      = max(1.0, min(1.3, float(parsed.get("contrast",   1.10))))
+
+        ai_keywords   = [str(k) for k in (parsed.get("broll_keywords") or []) if k][:5]
+
+        # Derive broll count from mood interval
+        interval    = _MOOD_BROLL_INTERVAL.get(mood, 7.0)
+        broll_count = max(1, min(5, math.ceil(duration / interval)))
+        broll_dur   = 3.5 if energy < 0.4 else (2.8 if energy < 0.7 else 2.2)
+        wps         = len(text.split()) / max(1.0, duration)
+        pace        = "fast" if wps > 3.5 else ("medium" if wps > 2.0 else "slow")
+
+        profile = ClipProfile(
+            mood=mood, energy=energy, pace=pace, virality=virality,
+            lut=lut, caption_style=caption_style,
+            broll_count=broll_count, broll_duration=broll_dur,
+            bgm_category=bgm_category, zoom_intensity=zoom_intensity,
+            sfx_emphasis=sfx_emphasis, saturation=saturation, contrast=contrast,
+            ai_keywords=ai_keywords,
+        )
+        logger.info(
+            "[ClipIntel/AI] clip=%d %s | broll_kw=%s",
+            clip_index + 1, profile.describe(), ai_keywords,
+        )
+        return profile
+
+    except Exception as exc:
+        logger.debug("[ClipIntel/AI] Groq failed: %s", exc)
+        return None
+
+
+async def build_clip_profile_async(
+    segment: Dict[str, Any],
+    duration: float,
+    clip_index: int,
+    caption_template: str = "viral",
+) -> ClipProfile:
+    """
+    Build a ClipProfile: tries Groq AI brain first, falls back to heuristics.
+    Always returns a valid ClipProfile — never raises.
+    """
+    profile = await _build_clip_profile_ai(segment, duration, clip_index)
+    if profile is None:
+        profile = build_clip_profile(segment, duration, clip_index, caption_template)
     return profile
