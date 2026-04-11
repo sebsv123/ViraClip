@@ -266,12 +266,12 @@ def segment_words_into_lines(
 
     wts = [
         WordTimestamp(
-            text=re.sub(r"[^\w\s''-]", "", w.get("text", "")).strip(),
+            text=re.sub(r"[^\w\s''-]", "", (w.get("text") or w.get("word") or "")).strip(),
             start=float(w.get("start", 0)),
             end=float(w.get("end", 0)),
         )
         for w in words
-        if w.get("text", "").strip()
+        if (w.get("text") or w.get("word") or "").strip()
     ]
 
     lines: List[CaptionLine] = []

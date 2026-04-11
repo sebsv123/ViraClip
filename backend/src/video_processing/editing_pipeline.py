@@ -36,7 +36,7 @@ SHARPNESS       = float(os.environ.get("EP_SHARPNESS",       "0.8"))
 ZOOM_FACTOR     = float(os.environ.get("EP_ZOOM_FACTOR",     "1.12"))
 ZOOM_FRAMES     = int(os.environ.get("EP_ZOOM_FRAMES",       "8"))     # ~0.27s @ 30fps
 KB_ZOOM_RATE    = float(os.environ.get("EP_KB_ZOOM_RATE",    "0.00004"))  # Ken Burns per-frame growth
-PI_INTERVAL     = float(os.environ.get("EP_PI_INTERVAL",     "3.5"))   # Pattern interrupt interval (s)
+PI_INTERVAL     = float(os.environ.get("EP_PI_INTERVAL",     "12.0"))  # Pattern interrupt interval (s)
 PI_ZOOM         = float(os.environ.get("EP_PI_ZOOM",         "1.04"))  # Pattern interrupt peak zoom
 PI_FRAMES       = int(os.environ.get("EP_PI_FRAMES",         "12"))    # Pattern interrupt ramp frames
 PROGRESS_H      = int(os.environ.get("EP_PROGRESS_H",        "6"))
@@ -97,7 +97,7 @@ def _probe_video(path: Path) -> Tuple[int, int, float, float]:
 
 
 def _emphasis_items(
-    words: List[Dict[str, Any]], max_zooms: int = 4
+    words: List[Dict[str, Any]], max_zooms: int = 1
 ) -> List[Tuple[float, str]]:
     """Return up to max_zooms (timestamp, word_text) pairs for zoom + callout effects."""
     hits: List[Tuple[float, float, str]] = []
@@ -116,7 +116,7 @@ def _emphasis_items(
     hits.sort(key=lambda x: -x[1])
     selected: List[Tuple[float, str]] = []
     for ts, _, word in hits:
-        if all(abs(ts - s) > 2.0 for s, _ in selected):
+        if all(abs(ts - s) > 8.0 for s, _ in selected):
             selected.append((ts, word))
         if len(selected) >= max_zooms:
             break
@@ -627,7 +627,7 @@ class EditingPipeline:
         if dur <= 0:
             return video_path
 
-        emphasis_items = _emphasis_items(words or [], max_zooms=4)
+        emphasis_items = _emphasis_items(words or [], max_zooms=1)
         emphasis_ts    = [ts for ts, _ in emphasis_items]
         has_audio      = await self._check_has_audio(video_path)
 
