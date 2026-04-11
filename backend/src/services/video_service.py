@@ -1297,6 +1297,8 @@ class VideoService:
             # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
             # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
             # progress bar, loudness normalization (single FFmpeg pass).
+            _lut_preset_ep = ""  # pre-init so always defined even if EP try block fails early
+            _lut_vf_ep = ""
             try:
                 _ep = EditingPipeline()
                 _ep_out = output_path.with_name(f"ep_{output_path.name}")

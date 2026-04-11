@@ -687,7 +687,7 @@ class EditingPipeline:
             denoise_audio=denoise_audio,
         )
 
-        vcodec = ["libx264", "-preset", "ultrafast", "-crf", "23"]
+        vcodec = ["libx264", "-preset", "fast", "-crf", "19"]  # final video quality - BGM/SFX use -c:v copy after this
         if gpu_settings:
             enc = gpu_settings.get("codec")  # gpu_detection.py uses "codec" key
             if enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"):
