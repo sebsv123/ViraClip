@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-BGM_LIBRARY_DIR = Path(os.environ.get("BGM_LIBRARY_DIR", "/app/sfx_library/bgm"))
+BGM_LIBRARY_DIR = Path(os.environ.get("BGM_LIBRARY_DIR", "/app/assets/sounds/bgm"))
 SFX_LIBRARY_DIR = Path(os.environ.get("SFX_LIBRARY_DIR", "/app/sfx_library"))
 
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"}
