@@ -797,6 +797,21 @@ class VideoService:
                 logger.warning(f"  Narrative cut detection failed: {cut_e}")
                 cut_points = []
 
+            # ── Clip Intelligence Profile ────────────────────────────────────
+            # Single analysis pass that drives: LUT, caption style, B-roll
+            # density/duration, BGM category, SFX emphasis, zoom intensity.
+            try:
+                from .clip_intelligence import build_clip_profile as _build_profile
+                _clip_profile = _build_profile(
+                    segment=segment,
+                    duration=duration,
+                    clip_index=clip_index,
+                    caption_template=caption_template or "viral",
+                )
+            except Exception as _ci_e:
+                logger.debug(f"  ClipIntelligence skipped: {_ci_e}")
+                _clip_profile = None
+
             # PASO 4: Word-level confidence subtitles (Fase 3 del plan)
             words_with_confidence = []
             
@@ -1069,6 +1084,8 @@ class VideoService:
                         output_path=str(_broll_out),
                         segment_text=segment.get("text", ""),
                         clip_duration=duration,
+                        max_overlays=_clip_profile.broll_count if _clip_profile else 3,
+                        overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
                     )
                     if Path(_broll_result).exists() and _broll_result != str(output_path):
                         output_path = Path(_broll_result)
@@ -1089,7 +1106,7 @@ class VideoService:
                 try:
                     from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
                     logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
-                    _cap_style  = _CS.style_for_template(caption_template, target_platform)
+                    _cap_style  = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
                     subtitled_path = output_path.with_name(f"sub_{output_path.name}")
                     _cap_ok = await _burn_caps(
                         output_path, subtitled_path,
@@ -1232,10 +1249,9 @@ class VideoService:
             # Step 4.6b: Cinematic LUT color grade (after EditingPipeline basic grade).
             # Rotates between warm/vibrant presets per clip to add variety.
             # Set LUT_PRESET=none to disable, or set a specific preset name to lock it.
-            _LUT_ROTATION = ["teal_orange", "warm_film", "cold_blue", "vintage", "high_contrast", "warm_film", "cold_blue", "teal_orange"]
             _lut_env = os.environ.get("LUT_PRESET", "auto")
             if _lut_env.lower() in ("auto", ""):
-                _lut_preset = _LUT_ROTATION[clip_index % len(_LUT_ROTATION)]
+                _lut_preset = _clip_profile.lut if _clip_profile else "teal_orange"
             else:
                 _lut_preset = _lut_env
             if _lut_preset and _lut_preset.lower() not in ("none", "off", "false", ""):
@@ -1337,7 +1353,7 @@ class VideoService:
                     output_path=_music_out,
                     speech_segments=_speech_segs,
                     bgm_volume=float(os.environ.get("BGM_VOLUME", "0.35")),
-                    preferred_category=preferred_music_category or None,
+                    preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
                 )
                 if _bs_result.get("success") and _music_out.exists():
                     _music_out.replace(output_path)
