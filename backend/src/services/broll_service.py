@@ -431,15 +431,15 @@ class BrollService:
             if not keywords:
                 return video_path
 
-            # Step 2 — fetch asset (try keywords in order until one succeeds)
-            broll_asset: Optional[Path] = None
-            for kw in keywords:
-                broll_asset = await self.fetch_broll_asset(kw)
-                if broll_asset:
-                    break
+            # Step 2 — fetch one asset per keyword (up to 3 distinct clips)
+            broll_assets: List[Path] = []
+            for kw in keywords[:3]:
+                asset = await self.fetch_broll_asset(kw)
+                if asset and asset not in broll_assets:
+                    broll_assets.append(asset)
 
-            if not broll_asset:
-                # Primary GPU path: LTX-Video / AnimateLCM T2V (Phase 3.1)
+            # GPU T2V fallback if no stock assets found
+            if not broll_assets:
                 try:
                     from .t2v_broll_service import T2VBrollService
                     if T2VBrollService.is_available():
@@ -452,7 +452,7 @@ class BrollService:
                             output_path=str(_t2v_out),
                         )
                         if _t2v_res and _t2v_out.exists():
-                            broll_asset = _t2v_out
+                            broll_assets.append(_t2v_out)
                             logger.info(
                                 f"[BRoll] ✓ T2V ({_t2v_res.get('model', 'ltx')}) generated "
                                 f"B-Roll for: {_t2v_prompt[:40]}"
@@ -460,8 +460,7 @@ class BrollService:
                 except Exception as _t2v_e:
                     logger.debug(f"[BRoll] T2V generation skipped: {_t2v_e}")
 
-            if not broll_asset and COMFYUI_ENABLED:
-                # Secondary GPU path: ComfyUI AnimateDiff fallback
+            if not broll_assets and COMFYUI_ENABLED:
                 try:
                     _cfy = ComfyUIBridge()
                     _gen_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
@@ -473,32 +472,47 @@ class BrollService:
                     )
                     await _cfy.close()
                     if _gen_result and _gen_out.exists():
-                        broll_asset = _gen_out
+                        broll_assets.append(_gen_out)
                         logger.info(f"[BRoll] ✓ AnimateDiff generated B-Roll for: {_gen_prompt[:40]}")
                 except Exception as _gen_e:
                     logger.debug(f"[BRoll] AnimateDiff fallback skipped: {_gen_e}")
 
-            if not broll_asset:
-                logger.info(f"[BRoll] No asset fetched for keywords {keywords} — skipping")
+            if not broll_assets:
+                logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")
                 return video_path
 
-            # Step 3 — scene-aware insertion timestamps
+            # Step 3 — scene-aware insertion timestamps (one per asset)
             insert_timestamps = get_insert_timestamps(
                 video_path=video_path,
-                max_n=1,
+                max_n=len(broll_assets),
                 clip_duration=clip_duration or None,
             )
-            insert_ts = insert_timestamps[0] if insert_timestamps else 5.0
 
-            # Step 4 — overlay
-            overlay_dur = min(_BROLL_DURATION, max(1.0, clip_duration - insert_ts - 0.5))
-            ok = await self.insert_broll(
-                video_path=video_path,
-                output_path=output_path,
-                broll_path=str(broll_asset),
-                timestamp=insert_ts,
-                overlay_duration=overlay_dur,
-            )
+            # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
+            broll_pairs: List[Tuple[float, str, float]] = []
+            for ts, asset in zip(insert_timestamps, broll_assets):
+                dur = min(_BROLL_DURATION, max(1.5, (clip_duration or _BROLL_DURATION + ts + 1) - ts - 0.5))
+                broll_pairs.append((ts, str(asset), dur))
+
+            if len(broll_pairs) == 1:
+                ts, asset_path, dur = broll_pairs[0]
+                ok = await self.insert_broll(
+                    video_path=video_path,
+                    output_path=output_path,
+                    broll_path=asset_path,
+                    timestamp=ts,
+                    overlay_duration=dur,
+                )
+            else:
+                from .broll_compositor import compose_overlay_multi
+                ok = await compose_overlay_multi(
+                    main_path=video_path,
+                    broll_pairs=broll_pairs,
+                    output_path=output_path,
+                )
+
+            if ok:
+                logger.info(f"[BRoll] ✓ {len(broll_pairs)} overlays applied: {[f't={t:.1f}s' for t,_,_ in broll_pairs]}")
             return output_path if ok else video_path
 
         except Exception as e:

@@ -1232,7 +1232,7 @@ class VideoService:
             # Step 4.6b: Cinematic LUT color grade (after EditingPipeline basic grade).
             # Rotates between warm/vibrant presets per clip to add variety.
             # Set LUT_PRESET=none to disable, or set a specific preset name to lock it.
-            _LUT_ROTATION = ["teal_orange", "warm_film", "high_contrast", "warm_film", "teal_orange", "high_contrast"]
+            _LUT_ROTATION = ["teal_orange", "warm_film", "cold_blue", "vintage", "high_contrast", "warm_film", "cold_blue", "teal_orange"]
             _lut_env = os.environ.get("LUT_PRESET", "auto")
             if _lut_env.lower() in ("auto", ""):
                 _lut_preset = _LUT_ROTATION[clip_index % len(_LUT_ROTATION)]
@@ -1247,33 +1247,6 @@ class VideoService:
                         logger.info(f"  ✓ Cinematic LUT applied: {_lut_preset}")
                 except Exception as _lut_e:
                     logger.debug(f"  LUT skipped: {_lut_e}")
-
-            # Step 4.6c: Entrance transition effect — rotates per clip_index for variety.
-            # Each clip gets a different style: glitch → blur → flash → swipe → (repeat).
-            _TRANSITION_ROTATION = ["glitch", "blur", "flash_white", "swipe_left", "blur"]
-            _trans_type = _TRANSITION_ROTATION[clip_index % len(_TRANSITION_ROTATION)]
-            try:
-                from .transition_service import get_transition_service as _get_ts
-                _ts = _get_ts()
-                _trans_out = output_path.with_name(f"trans_{output_path.name}")
-                if _trans_type == "glitch":
-                    _trans_result = await _ts.apply_glitch(output_path, _trans_out)
-                elif _trans_type == "blur":
-                    _trans_result = await _ts.apply_blur(output_path, _trans_out)
-                elif _trans_type == "flash_white":
-                    _trans_result = await _ts.apply_flash(output_path, _trans_out, color="white")
-                elif _trans_type == "swipe_left":
-                    _trans_result = await _ts.apply_swipe_left(output_path, _trans_out)
-                else:
-                    _trans_result = await _ts.apply_blur(output_path, _trans_out)
-                if _trans_result.success and _trans_out.exists() and _trans_out.stat().st_size > 0:
-                    output_path.unlink(missing_ok=True)
-                    _trans_out.rename(output_path)
-                    logger.info(f"  ✓ Entrance transition: {_trans_type} (clip {clip_index + 1})")
-                else:
-                    _trans_out.unlink(missing_ok=True)
-            except Exception as _trans_e:
-                logger.debug(f"  Transition effect skipped: {_trans_e}")
 
             # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
             if COMFYUI_ENABLED:
