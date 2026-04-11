@@ -677,14 +677,17 @@ class VideoService:
                 )
                 return None
 
-            # PASO 1: Phi-3-mini Scroll Stop Test (Fase 2 del plan)
+            # PASO 1: Phi-3-mini Scroll Stop Test — hard 5s timeout to prevent Ollama hangs
             logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
             try:
                 phi3_service = get_phi3_service()
-                virality_result = await phi3_service.score_segment(
-                    segment_text=segment.get("text", ""),
-                    duration=duration,
-                    audio_features=None  # Se llenará después
+                virality_result = await asyncio.wait_for(
+                    phi3_service.score_segment(
+                        segment_text=segment.get("text", ""),
+                        duration=duration,
+                        audio_features=None,
+                    ),
+                    timeout=5.0,
                 )
                 
                 # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
@@ -717,46 +720,28 @@ class VideoService:
                 logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
                 virality_result = None
             
-            # PASO 2: Audio spectral analysis (Fase 1 del plan)
-            logger.info(f"[Clip {clip_index+1}] Step 2: Audio spectral analysis...")
+            # PASO 2: Audio spectral analysis — skipped when segment text exists (saves 1-3 min)
+            # The Groq AI brain already infers energy/mood from transcript text semantically.
             audio_features = {}
-            try:
-                # Extraer audio del segmento
-                from tempfile import NamedTemporaryFile
-                import subprocess
-                
-                audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
-                audio_temp.close()
-                
-                # Extraer audio con ffmpeg
-                # Bug fix: si el input ya es un segmento pre-extraído, buscar desde 0
-                audio_ss = 0.0 if use_extracted_segment else start_seconds
-                from ..video_processing.ffmpeg_guard import validate_segment_call
-                validate_segment_call(
-                    source_path=str(video_path),
-                    ss=audio_ss,
-                    to=audio_ss + duration,
-                    context=f"clip_{clip_index+1}_audio_step2",
-                )
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-ss", str(audio_ss), "-i", str(video_path),
-                    "-t", str(duration),
-                    "-vn", "-acodec", "pcm_s16le",
-                    "-ar", "16000", "-ac", "1",
-                    audio_temp.name
-                ]
-                subprocess.run(cmd, capture_output=True, timeout=60)
-                
-                # Analizar
-                if Path(audio_temp.name).exists():
-                    audio_features = analyze_audio_virality(audio_temp.name)
-                    Path(audio_temp.name).unlink()
-                    
-                    logger.info(f"  ✓ Tempo: {audio_features.get('tempo_bpm', 0):.1f} BPM, "
-                               f"{audio_features.get('dramatic_pauses', 0)} pauses")
-            except Exception as audio_e:
-                logger.warning(f"  Audio analysis failed: {audio_e}")
+            _has_transcript = bool(segment.get("text", "").strip())
+            if not _has_transcript:
+                logger.info(f"[Clip {clip_index+1}] Step 2: Audio spectral analysis (no transcript)...")
+                try:
+                    from tempfile import NamedTemporaryFile
+                    audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
+                    audio_temp.close()
+                    audio_ss = 0.0 if use_extracted_segment else start_seconds
+                    cmd = ["ffmpeg", "-y", "-ss", str(audio_ss), "-i", str(video_path),
+                           "-t", str(duration), "-vn", "-acodec", "pcm_s16le",
+                           "-ar", "16000", "-ac", "1", audio_temp.name]
+                    subprocess.run(cmd, capture_output=True, timeout=60)
+                    if Path(audio_temp.name).exists():
+                        audio_features = analyze_audio_virality(audio_temp.name)
+                        Path(audio_temp.name).unlink()
+                except Exception as audio_e:
+                    logger.warning(f"  Audio analysis failed: {audio_e}")
+            else:
+                logger.info(f"[Clip {clip_index+1}] Step 2: Audio analysis skipped (transcript available)")
             
             # PASO 3: Detectar cortes narrativos inteligentes (Capa A)
             logger.info(f"[Clip {clip_index+1}] Step 3: Narrative cut detection...")
@@ -858,10 +843,53 @@ class VideoService:
                 except Exception as _aai_e:
                     logger.warning(f"  AssemblyAI cache lookup failed: {_aai_e}")
 
-                # ── Priority 2: faster-whisper re-transcription (fallback) ──
+                # ── Priority 1.5: Groq Whisper API — fast cloud transcription (5s vs 5min) ──
                 if not words_with_confidence:
                     try:
-                        subtitle_gen = ConfidenceSubtitleGenerator(model_size="base", device="cpu")
+                        _gw_key = os.environ.get("GROQ_API_KEY", "")
+                        _audio_for_groq = output_dir / f"audio_gw_{clip_index}.wav"
+                        _audio_ss_gw = 0.0 if use_extracted_segment else start_seconds
+                        _cmd_gw = [
+                            "ffmpeg", "-y",
+                            "-ss", str(_audio_ss_gw), "-i", str(video_path),
+                            "-t", str(min(duration, 60.0)),
+                            "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                            str(_audio_for_groq),
+                        ]
+                        subprocess.run(_cmd_gw, capture_output=True, timeout=30)
+                        if _gw_key and _audio_for_groq.exists():
+                            import httpx as _httpx
+                            with open(str(_audio_for_groq), "rb") as _af:
+                                _audio_bytes = _af.read()
+                            async with _httpx.AsyncClient(timeout=25.0) as _gwc:
+                                _gwr = await _gwc.post(
+                                    "https://api.groq.com/openai/v1/audio/transcriptions",
+                                    headers={"Authorization": f"Bearer {_gw_key}"},
+                                    files={"file": ("audio.wav", _audio_bytes, "audio/wav")},
+                                    data={
+                                        "model": "whisper-large-v3-turbo",
+                                        "response_format": "verbose_json",
+                                        "timestamp_granularities": "word",
+                                    },
+                                )
+                            if _gwr.status_code == 200:
+                                for _gw in _gwr.json().get("words", []):
+                                    words_with_confidence.append({
+                                        "word":       _gw.get("word", "").strip(),
+                                        "start":      float(_gw.get("start", 0)),
+                                        "end":        float(_gw.get("end", 0)),
+                                        "confidence": 0.95,
+                                        "is_emphasis": False,
+                                    })
+                                logger.info(f"  ✅ {len(words_with_confidence)} words from Groq Whisper API")
+                        _audio_for_groq.unlink(missing_ok=True)
+                    except Exception as _gw_e:
+                        logger.warning(f"  Groq Whisper failed: {_gw_e}")
+
+                # ── Priority 2: faster-whisper local (last resort) ──────────────
+                if not words_with_confidence:
+                    try:
+                        subtitle_gen = ConfidenceSubtitleGenerator(model_size="tiny", device="cpu")
                         audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
                         audio_ss2 = 0.0 if use_extracted_segment else start_seconds
                         cmd_extract = [
