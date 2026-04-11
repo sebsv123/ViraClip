@@ -176,7 +176,7 @@ def _get_nvenc_settings() -> Dict[str, Any]:
         "audio_bitrate": "192k",
         # NVENC-specific params
         "ffmpeg_params": [
-            "-rc:v", "vbr",  # Variable bitrate
+            "-rc", "vbr",    # Variable bitrate
             "-cq:v", "23",   # Constant quality (lower = better, 23 is good default)
             "-b:v", "5M",    # Max bitrate
             "-profile:v", "high",
