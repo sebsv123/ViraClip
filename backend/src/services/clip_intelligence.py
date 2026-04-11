@@ -242,12 +242,17 @@ def build_clip_profile(
     saturation = round(1.10 + energy * 0.30, 3)   # 1.10–1.40
     contrast   = round(1.03 + energy * 0.22, 3)   # 1.03–1.25
 
+    # Basic grain/fade heuristics for fallback path
+    _h_grain = int(5 + energy * 12)   # 5 (chill) → 17 (high energy)
+    _h_fade  = 0.35 - energy * 0.20   # 0.35 (chill) → 0.15 (energetic)
+
     profile = ClipProfile(
         mood=mood, energy=energy, pace=pace, virality=virality,
         lut=lut, caption_style=caption_style,
         broll_count=broll_count, broll_duration=broll_dur,
         bgm_category=bgm_category, zoom_intensity=zoom_intensity,
         sfx_emphasis=sfx_emphasis, saturation=saturation, contrast=contrast,
+        grain=_h_grain, broll_fade_s=round(_h_fade, 2),
     )
     logger.info("[ClipIntel] clip=%d %s", clip_index + 1, profile.describe())
     return profile
@@ -319,13 +324,15 @@ async def _build_clip_profile_ai(
 
     try:
         import httpx
+        _groq_model = os.environ.get("GROQ_EDIT_MODEL",
+            os.environ.get("LLM", "llama-3.3-70b-versatile").replace("groq:", ""))
         async with httpx.AsyncClient(timeout=9.0) as client:
             resp = await client.post(
                 "https://api.groq.com/openai/v1/chat/completions",
                 headers={"Authorization": f"Bearer {api_key}",
                           "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.1-8b-instant",
+                    "model": _groq_model,
                     "messages": [
                         {"role": "system", "content": _AI_SYSTEM_PROMPT},
                         {"role": "user",   "content": user_msg},
@@ -433,4 +440,19 @@ async def build_clip_profile_async(
     except Exception as _eb_e:
         logger.debug("[ClipIntel] EditorialBrain skipped: %s", _eb_e)
 
+    logger.info(
+        "[BRAIN] clip=%d | cat=%s | mood=%s | energy=%.2f | lut=%s | "
+        "caption=%s | bgm=%s | zoom=%s | grain=%d | broll=%dx%.1fs | "
+        "broll_fade=%.2fs | sat=%.2f | con=%.2f | kw=%s",
+        clip_index + 1,
+        getattr(profile, "content_category", "?"),
+        profile.mood, profile.energy,
+        profile.lut, profile.caption_style,
+        profile.bgm_category, profile.zoom_intensity,
+        getattr(profile, "grain", 0),
+        profile.broll_count, profile.broll_duration,
+        getattr(profile, "broll_fade_s", 0.25),
+        profile.saturation, profile.contrast,
+        getattr(profile, "ai_keywords", [])[:3],
+    )
     return profile
