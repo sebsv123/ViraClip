@@ -1478,6 +1478,7 @@ class VideoService:
                     speech_segments=_speech_segs,
                     bgm_volume=float(os.environ.get("BGM_VOLUME", "0.35")),
                     preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
+                    word_timings=words_with_confidence or None,
                 )
                 if _bs_result.get("success") and _music_out.exists():
                     _music_out.replace(output_path)
@@ -1497,7 +1498,7 @@ class VideoService:
                     _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
                     if _music_path:
                         _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
-                        if _mix_bg(output_path, _music_tmp, music_volume=0.22, music_path=_music_path):
+                        if _mix_bg(output_path, _music_tmp, music_volume=0.22, music_path=_music_path, word_timings=words_with_confidence or None):
                             if _music_tmp.exists():
                                 _music_tmp.replace(output_path)
                                 logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
