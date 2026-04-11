@@ -404,6 +404,7 @@ class BrollService:
         overlay_duration_s: float = _BROLL_DURATION,
         words_with_timestamps: Optional[List[Dict]] = None,
         precomputed_keywords: Optional[List[str]] = None,
+        broll_fade_s: float = 0.25,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
@@ -519,6 +520,19 @@ class BrollService:
 
             insert_timestamps.sort()
 
+            # Protect hook (0–2s) and CTA (last 2s): never overlay B-roll there.
+            _hook_guard = 2.0
+            _cta_guard  = max(0.0, (clip_duration or 0) - 2.0)
+            if _cta_guard > _hook_guard:
+                insert_timestamps = [
+                    t for t in insert_timestamps
+                    if _hook_guard <= t <= _cta_guard
+                ]
+            if not insert_timestamps and broll_assets:
+                # Fallback: midpoint is always safe
+                _mid = (clip_duration or 10.0) / 2.0
+                insert_timestamps = [_mid]
+
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []
             for ts, asset in zip(insert_timestamps, broll_assets):
@@ -529,6 +543,7 @@ class BrollService:
                 ts, asset_path, dur = broll_pairs[0]
                 ok = await self.insert_broll(
                     video_path=video_path,
+                    fade=broll_fade_s,
                     output_path=output_path,
                     broll_path=asset_path,
                     timestamp=ts,
@@ -537,6 +552,7 @@ class BrollService:
             else:
                 from .broll_compositor import compose_overlay_multi
                 ok = await compose_overlay_multi(
+                    fade=broll_fade_s,
                     main_path=video_path,
                     broll_pairs=broll_pairs,
                     output_path=output_path,
