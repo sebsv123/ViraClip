@@ -1086,6 +1086,7 @@ class VideoService:
                         clip_duration=duration,
                         max_overlays=_clip_profile.broll_count if _clip_profile else 3,
                         overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
+                        words_with_timestamps=words_with_confidence or None,
                     )
                     if Path(_broll_result).exists() and _broll_result != str(output_path):
                         output_path = Path(_broll_result)
@@ -1212,16 +1213,18 @@ class VideoService:
                     if 0.5 < t < (duration - 0.5)
                 })
 
-            # Cap flash timestamps: max 2 per clip, minimum 4s gap between flashes.
-            # Without this cap every beat and jump-cut fires a flash, creating a
-            # strobe/flicker effect that is jarring and unprofessional.
+            # Cap flash timestamps — scale by energy: chill=0, medium=1, high=3.
+            _flash_cap = 0 if (_clip_profile and _clip_profile.zoom_intensity == "off") else \
+                         1 if (_clip_profile and _clip_profile.energy < 0.45) else \
+                         2 if (_clip_profile and _clip_profile.energy < 0.70) else 3
+            _flash_min_gap = 5.0 if (_clip_profile and _clip_profile.energy < 0.5) else 4.0
             _flash_ts_capped: List[float] = []
             _last_flash_t = -10.0
             for _ft in _flash_ts:
-                if _ft - _last_flash_t >= 4.0:
+                if _ft - _last_flash_t >= _flash_min_gap:
                     _flash_ts_capped.append(_ft)
                     _last_flash_t = _ft
-                if len(_flash_ts_capped) >= 2:
+                if len(_flash_ts_capped) >= _flash_cap:
                     break
             _flash_ts = _flash_ts_capped
 
@@ -1239,6 +1242,8 @@ class VideoService:
                     segment_text=_ep_segment_text,
                     flash_timestamps=_flash_ts if _flash_ts else None,
                     gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
+                    energy_level=_clip_profile.energy if _clip_profile else 0.5,
+                    zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
                 )
                 if _ep_result == _ep_out and _ep_out.exists():
                     output_path = _ep_out

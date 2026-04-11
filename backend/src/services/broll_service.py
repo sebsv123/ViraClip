@@ -402,6 +402,7 @@ class BrollService:
         clip_duration: float = 0.0,
         max_overlays: int = 3,
         overlay_duration_s: float = _BROLL_DURATION,
+        words_with_timestamps: Optional[List[Dict]] = None,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
@@ -483,13 +484,37 @@ class BrollService:
                 logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")
                 return video_path
 
-            # Step 3 — scene-aware insertion timestamps (up to max_overlays)
+            # Step 3 — find timestamps: prefer exact spoken moment for each keyword
             n_wanted = min(len(broll_assets), max_overlays)
-            insert_timestamps = get_insert_timestamps(
-                video_path=video_path,
-                max_n=n_wanted,
-                clip_duration=clip_duration or None,
-            )
+            insert_timestamps: List[float] = []
+
+            if words_with_timestamps:
+                # Map keyword → timestamp where it is spoken in the clip
+                for kw in keywords[:n_wanted]:
+                    kw_lower = kw.lower().strip()
+                    for w in words_with_timestamps:
+                        w_text = (w.get("word") or w.get("text") or "").lower().strip(".,!?-'\"")
+                        if kw_lower == w_text or kw_lower in w_text or w_text in kw_lower:
+                            ts = float(w.get("start", 0))
+                            # Don't place B-roll in the first 0.8s (protect hook)
+                            if ts >= 0.8 and all(abs(ts - t) > 2.5 for t in insert_timestamps):
+                                insert_timestamps.append(ts)
+                            break
+                logger.info("[BRoll] Keyword→spoken timestamps: %s",
+                            [f"{t:.1f}s" for t in insert_timestamps])
+
+            # Fill remaining slots with scene-detected timestamps
+            if len(insert_timestamps) < n_wanted:
+                scene_ts = get_insert_timestamps(
+                    video_path=video_path,
+                    max_n=n_wanted - len(insert_timestamps),
+                    clip_duration=clip_duration or None,
+                )
+                for ts in scene_ts:
+                    if all(abs(ts - t) > 2.5 for t in insert_timestamps):
+                        insert_timestamps.append(ts)
+
+            insert_timestamps.sort()
 
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []
