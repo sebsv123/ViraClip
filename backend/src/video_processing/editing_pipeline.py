@@ -322,6 +322,8 @@ def _build_filter_complex(
     face_cx_norm: float = 0.5,
     face_cy_norm: float = 0.5,
     beat_pi_ts: Optional[List[float]] = None,
+    energy_level: float = 0.5,
+    zoom_intensity: str = "medium",
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
@@ -332,8 +334,17 @@ def _build_filter_complex(
     # ── 0. Determine clip theme for adaptive grade + audio EQ ──────────────────
     theme = _classify_theme(segment_text) if segment_text else "neutral"
 
+    # ── Per-clip energy overrides (scale module globals by energy_level) ───────
+    _sat    = round(max(1.0, min(1.50, SATURATION * (0.82 + energy_level * 0.40))), 3)
+    _con    = round(max(1.0, min(1.30, CONTRAST   * (0.88 + energy_level * 0.28))), 3)
+    _zoom   = {"off": 1.0, "subtle": 1.06, "medium": ZOOM_FACTOR, "strong": min(1.18, ZOOM_FACTOR * 1.06)}.get(zoom_intensity, ZOOM_FACTOR)
+    _pi_int = max(8.0, PI_INTERVAL + (0.5 - energy_level) * 6.0)
+    _grain  = max(0, int(FILM_GRAIN * (0.4 + energy_level * 1.2)))
+    logger.debug("[EP] energy=%.2f → sat=%.2f con=%.2f zoom=%.3f pi_int=%.1f grain=%d",
+                 energy_level, _sat, _con, _zoom, _pi_int, _grain)
+
     # ── 1. Colour grading: eq + unsharp ──────────────────────────────────────
-    eq_f     = f"eq=saturation={SATURATION}:contrast={CONTRAST}:brightness={BRIGHTNESS}"
+    eq_f     = f"eq=saturation={_sat}:contrast={_con}:brightness={BRIGHTNESS}"
     sharp_f  = f"unsharp=5:5:{SHARPNESS}:5:5:0"
     filters.append(f"[0:v]{eq_f},{sharp_f}[vgrade]")
 
@@ -370,8 +381,8 @@ def _build_filter_complex(
 
     # ── 3.5. Film grain (cinematic texture) ───────────────────────────────────
     # noise=alls: strength 0-100; allf=t: temporal (varies per-frame like real grain)
-    if FILM_GRAIN > 0:
-        filters.append(f"{prev_v}noise=alls={FILM_GRAIN}:allf=t[vgrain]")
+    if _grain > 0:
+        filters.append(f"{prev_v}noise=alls={_grain}:allf=t[vgrain]")
         prev_v = "[vgrain]"
 
     # ── 4. Zoom: emphasis punch-in OR Ken Burns + pattern interrupts ────────────
@@ -382,14 +393,14 @@ def _build_filter_complex(
     y_expr = f"(ih-ih/zoom)*{face_cy_norm:.4f}"
 
     emphasis_ts = [ts for ts, _ in emphasis_items]
-    if emphasis_ts:
-        z_expr = _build_zoom_expr(emphasis_ts, fps, ZOOM_FACTOR, ZOOM_FRAMES)
-    elif dur >= 4.0:
+    if emphasis_ts and zoom_intensity != "off":
+        z_expr = _build_zoom_expr(emphasis_ts, fps, _zoom, ZOOM_FRAMES)
+    elif dur >= 4.0 and zoom_intensity != "off":
         # Prefer beat-synced PI; fall back to evenly-spaced
         if beat_pi_ts:
             pi_ts = beat_pi_ts
-        elif dur >= PI_INTERVAL * 2:
-            pi_ts = _pattern_interrupt_timestamps(dur, PI_INTERVAL)
+        elif dur >= _pi_int * 2:
+            pi_ts = _pattern_interrupt_timestamps(dur, _pi_int)
         else:
             pi_ts = []
         z_expr = _build_ken_burns_zoom(fps, dur, pi_ts)
@@ -611,6 +622,8 @@ class EditingPipeline:
         segment_text: str = "",
         flash_timestamps: Optional[List[float]] = None,
         gpu_settings: Optional[Dict[str, Any]] = None,
+        energy_level: float = 0.5,
+        zoom_intensity: str = "medium",
     ) -> Path:
         """
         Run the full editing pipeline.
@@ -654,6 +667,8 @@ class EditingPipeline:
             face_cx_norm=face_cx_norm,
             face_cy_norm=face_cy_norm,
             beat_pi_ts=beat_pi_ts,
+            energy_level=energy_level,
+            zoom_intensity=zoom_intensity,
         )
 
         vcodec = ["libx264", "-preset", "veryfast", "-crf", "21"]
