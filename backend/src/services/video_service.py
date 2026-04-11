@@ -210,9 +210,9 @@ class VideoService:
             "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
         )
 
-        WORDS_PER_LINE = 3   # max words per group
-        MAX_GAP_S      = 0.6  # break group if gap between consecutive words exceeds this
-        MAX_SPAN_S     = 2.2  # break group if total span exceeds this
+        WORDS_PER_LINE = 3    # max words per group
+        MAX_GAP_S      = 0.35  # REDUCIDO: romper grupo en pausas más cortas (antes 0.6)
+        MAX_SPAN_S     = 1.8   # REDUCIDO: grupos más cortos = mejor sync (antes 2.2)
         events: List[str] = []
 
         # Build groups by TIME PROXIMITY, not word count.
@@ -220,13 +220,21 @@ class VideoService:
         all_valid = [w for w in words if (w.get("word") or "").strip()]
         groups: List[List[Dict]] = []
         current: List[Dict] = []
-        for w in all_valid:
+        _all_valid_list = list(all_valid)
+        for _wi, w in enumerate(_all_valid_list):
             if not current:
                 current.append(w)
                 continue
             gap  = float(w.get("start", 0)) - float(current[-1].get("end", 0))
             span = float(w.get("end", 0))   - float(current[0].get("start", 0))
-            if len(current) >= WORDS_PER_LINE or gap > MAX_GAP_S or span > MAX_SPAN_S:
+            # Detectar inicio de oración: próxima palabra empieza con mayúscula y hay pausa
+            _word_text = (w.get("word") or "").strip()
+            _is_sentence_start = bool(_word_text) and _word_text[0].isupper()
+            _has_natural_pause = gap > 0.2  # 200ms = pausa natural de oración
+            if (len(current) >= WORDS_PER_LINE
+                    or gap > MAX_GAP_S
+                    or span > MAX_SPAN_S
+                    or (_is_sentence_start and _has_natural_pause)):
                 groups.append(current)
                 current = [w]
             else:
@@ -247,6 +255,11 @@ class VideoService:
             g_end   = float(valid[-1].get("end", g_start + 0.4 * len(valid)))
             if g_end <= g_start:
                 g_end = g_start + 0.4 * len(valid)
+            # Compensacion de latencia de renderizado ASS (-33ms)
+            # FFmpeg introduce ~33ms de delay al renderizar el filtro 'ass'
+            _ASS_RENDER_OFFSET = -0.033
+            g_start = max(0.0, g_start + _ASS_RENDER_OFFSET)
+            g_end   = max(g_start + 0.1, g_end + _ASS_RENDER_OFFSET)
 
             # Color: any emphasis word → red highlight, impact keyword → orange, else yellow
             parts: List[str] = []
@@ -646,19 +659,21 @@ class VideoService:
             end_seconds = parse_timestamp_to_seconds(segment["end_time"])
             duration = end_seconds - start_seconds
 
-            # Virality-based dynamic duration then platform cap
+            # Platform minimum enforcement — respect the LLM's natural speech boundary.
+            # Only extend clips that are genuinely too short (< 30s); never pad a
+            # well-bounded segment just because it has a high virality score.
             _vscore_pre = segment.get("virality_score", 50)
-            if _vscore_pre >= 70:
-                _target_dur = 90.0
-            elif _vscore_pre >= 50:
-                _target_dur = 60.0
-            else:
-                _target_dur = 45.0
-            _target_dur = max(45.0, min(120.0, _target_dur))
-            if duration < _target_dur:
+            _FLOOR = 30.0  # hard platform minimum
+            if duration < _FLOOR:
+                if _vscore_pre >= 70:
+                    _target_dur = min(60.0, duration * 2)
+                elif _vscore_pre >= 50:
+                    _target_dur = min(45.0, duration * 2)
+                else:
+                    _target_dur = _FLOOR
                 end_seconds = start_seconds + _target_dur
                 duration = _target_dur
-                logger.info(f"  Dynamic duration: {duration:.0f}s (virality_pre={_vscore_pre})")
+                logger.info(f"  Duration extended to {duration:.0f}s (was too short, virality={_vscore_pre})")
 
             # Platform duration cap (TikTok=60s, Reels=90s, Shorts=60s)
             _platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
@@ -889,7 +904,8 @@ class VideoService:
                 # ── Priority 2: faster-whisper local (last resort) ──────────────
                 if not words_with_confidence:
                     try:
-                        subtitle_gen = ConfidenceSubtitleGenerator(model_size="tiny", device="cpu")
+                        _whisper_device = os.environ.get("WHISPER_DEVICE", "cpu")
+                        subtitle_gen = ConfidenceSubtitleGenerator(model_size="tiny", device=_whisper_device)
                         audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
                         audio_ss2 = 0.0 if use_extracted_segment else start_seconds
                         cmd_extract = [
@@ -1001,6 +1017,37 @@ class VideoService:
 
             output_path = clip_path
             _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
+
+            # ── Step 4.0b: Re-alineacion precisa de subtitulos ──────────────
+            # Re-transcribir el clip ya cortado para eliminar drift acumulado
+            # del video original. Solo si hay words_with_confidence disponibles.
+            _realign_enabled = os.environ.get("SUBTITLE_REALIGN_ENABLED", "true").lower() == "true"
+            if _realign_enabled and words_with_confidence and os.path.exists(str(output_path)):
+                try:
+                    _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "small")
+                    _whisper_device = os.environ.get("WHISPER_DEVICE", "auto")
+                    _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "-50"))
+
+                    from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+                    _realigner = ConfidenceSubtitleGenerator(
+                        model_size=_realign_model,
+                        device=_whisper_device
+                    )
+                    _realigned = _realigner.realign_on_segment(
+                        segment_video_path=str(output_path),
+                        original_words=words_with_confidence,
+                        language=target_language,
+                        anticipation_offset_ms=_anticipation_ms
+                    )
+                    if _realigned:
+                        logger.info(
+                            f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras"
+                        )
+                        words_with_confidence = _realigned
+                    else:
+                        logger.warning("[CLIP] Re-alineacion retorno vacio, manteniendo originales")
+                except Exception as e:
+                    logger.warning(f"[CLIP] Re-alineacion fallo ({e}), manteniendo originales")
 
             # Hook-type opening treatment: inject strategic flash at t=0.15s.
             # scroll_stop / pattern_interrupt → immediate white flash punch.
@@ -1115,32 +1162,7 @@ class VideoService:
                 except Exception as _jc_e:
                     logger.debug(f"  Silence handling skipped: {_jc_e}")
 
-            # Step 4.3: B-Roll overlay (opt-in via BROLL_ENABLED=true)
-            from ..config import get_config as _get_cfg_broll
-            if _get_cfg_broll().broll_enabled:
-                try:
-                    from .broll_service import BrollService
-                    _broll_svc = BrollService()
-                    _broll_out = output_path.with_name(f"broll_{output_path.name}")
-                    _broll_kw_override = (_clip_profile.ai_keywords
-                                          if _clip_profile and _clip_profile.ai_keywords
-                                          else None)
-                    _broll_result = await _broll_svc.process_clip(
-                        video_path=str(output_path),
-                        output_path=str(_broll_out),
-                        segment_text=segment.get("text", ""),
-                        clip_duration=duration,
-                        max_overlays=_clip_profile.broll_count if _clip_profile else 3,
-                        overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
-                        words_with_timestamps=words_with_confidence or None,
-                        precomputed_keywords=_broll_kw_override,
-                        broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.25,
-                    )
-                    if Path(_broll_result).exists() and _broll_result != str(output_path):
-                        output_path = Path(_broll_result)
-                        logger.info(f"  ✓ B-roll overlay applied")
-                except Exception as _broll_e:
-                    logger.warning(f"  B-roll overlay failed: {_broll_e}")
+            # Step 4.3: B-Roll overlay — moved to after EditingPipeline (see below).
 
             # Step 4.9: Crop already handled — create_optimized_clip applies
             # crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920 via _PLATFORM_VF
@@ -1148,37 +1170,7 @@ class VideoService:
             # Re-running face-detection crop on 1080×1920 generates wrong
             # dimensions and adds black bars — do NOT apply a second crop here.
 
-            # Step 4.4: ASS Karaoke captions via CaptionService
-            # Auto-selects style based on caption_template + platform safe zones.
-            # Falls back to legacy _burn_subtitles_word_level on any error.
-            if add_subtitles and words_with_confidence:
-                try:
-                    from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
-                    logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
-                    _cap_style  = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
-                    subtitled_path = output_path.with_name(f"sub_{output_path.name}")
-                    _cap_ok = await _burn_caps(
-                        output_path, subtitled_path,
-                        words_with_confidence,
-                        style=_cap_style,
-                        platform=target_platform,
-                    )
-                    if _cap_ok and subtitled_path.exists():
-                        output_path = subtitled_path
-                        logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
-                    else:
-                        raise RuntimeError("caption_service returned False")
-                except Exception as burn_e:
-                    logger.warning(f"  CaptionService failed ({burn_e}), falling back to legacy subtitles")
-                    try:
-                        subtitled_path = output_path.with_name(f"sub_{output_path.name}")
-                        await VideoService._burn_subtitles_word_level(
-                            str(output_path), words_with_confidence, str(subtitled_path)
-                        )
-                        if subtitled_path.exists():
-                            output_path = subtitled_path
-                    except Exception as _fb_e:
-                        logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
+            # Step 4.4: ASS Karaoke captions — moved to after EditingPipeline (see below).
 
             # Step 4.5: Advanced Polish (Auto-centering, Eye Contact, Background Blur)
             if auto_center_face or eye_contact_correction:
@@ -1338,6 +1330,63 @@ class VideoService:
             # Step 4.6b: LUT now merged into EditingPipeline — standalone pass removed.
             if _lut_vf_ep:
                 logger.info(f"  ✓ LUT '{_lut_preset_ep}' baked into EditingPipeline pass")
+
+            # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
+            from ..config import get_config as _get_cfg_broll
+            if _get_cfg_broll().broll_enabled:
+                try:
+                    from .broll_service import BrollService
+                    _broll_svc = BrollService()
+                    _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                    _broll_kw_override = (_clip_profile.ai_keywords
+                                          if _clip_profile and _clip_profile.ai_keywords
+                                          else None)
+                    _broll_result = await _broll_svc.process_clip(
+                        video_path=str(output_path),
+                        output_path=str(_broll_out),
+                        segment_text=segment.get("text", ""),
+                        clip_duration=duration,
+                        max_overlays=_clip_profile.broll_count if _clip_profile else 3,
+                        overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
+                        words_with_timestamps=words_with_confidence or None,
+                        precomputed_keywords=_broll_kw_override,
+                        broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.25,
+                    )
+                    if Path(_broll_result).exists() and _broll_result != str(output_path):
+                        output_path = Path(_broll_result)
+                        logger.info(f"  ✓ B-roll overlay applied (post-EP)")
+                except Exception as _broll_e:
+                    logger.warning(f"  B-roll overlay failed: {_broll_e}")
+
+            # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
+            if add_subtitles and words_with_confidence:
+                try:
+                    from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
+                    logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
+                    _cap_style  = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
+                    subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                    _cap_ok = await _burn_caps(
+                        output_path, subtitled_path,
+                        words_with_confidence,
+                        style=_cap_style,
+                        platform=target_platform,
+                    )
+                    if _cap_ok and subtitled_path.exists():
+                        output_path = subtitled_path
+                        logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
+                    else:
+                        raise RuntimeError("caption_service returned False")
+                except Exception as burn_e:
+                    logger.warning(f"  CaptionService failed ({burn_e}), falling back to legacy subtitles")
+                    try:
+                        subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                        await VideoService._burn_subtitles_word_level(
+                            str(output_path), words_with_confidence, str(subtitled_path)
+                        )
+                        if subtitled_path.exists():
+                            output_path = subtitled_path
+                    except Exception as _fb_e:
+                        logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
 
             # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
             if COMFYUI_ENABLED:
@@ -2038,7 +2087,7 @@ class VideoService:
             raw_segments = relevant_parts.most_relevant_segments
             segments_json: List[Dict[str, Any]] = []
 
-            def _enforce_min_duration_dict(seg: Dict[str, Any], min_secs: float = 45.0) -> Dict[str, Any]:
+            def _enforce_min_duration_dict(seg: Dict[str, Any], min_secs: float = 30.0) -> Dict[str, Any]:
                 """Apply 45s minimum duration to cached dict segments (Pydantic validator skipped for dicts)."""
                 def _ts(ts: str) -> float:
                     try:
@@ -2127,7 +2176,7 @@ class VideoService:
                     f"[SEGMENT-PAD] AI returned only {len(segments_json)} segments "
                     f"(need {num_clips}). Generating {needed} synthetic fallback segments."
                 )
-                _seg_dur = 45.0
+                _seg_dur = 30.0
                 _spacing = file_duration / (needed + 1)
                 def _fmt_ts(s: float) -> str:
                     return f"{int(s) // 60:02d}:{int(s) % 60:02d}"
