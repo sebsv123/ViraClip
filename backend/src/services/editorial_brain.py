@@ -299,7 +299,7 @@ async def categorize_clip_with_ai(text: str, hook_type: str) -> Optional[str]:
                 headers={"Authorization": f"Bearer {api_key}",
                           "Content-Type": "application/json"},
                 json={
-                    "model": "llama-3.1-8b-instant",
+                    "model": "llama-3.1-8b-instant",  # fast: only outputs one word
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 20,
                     "temperature": 0.1,
