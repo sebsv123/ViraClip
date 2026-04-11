@@ -1365,7 +1365,9 @@ class VideoService:
                     logger.warning(f"  All music paths skipped: {_fb_music_e}")
 
             # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task started at render launch)
-            if _broll_prefetch_task is not None:
+            # Skip if Step 4.3 (BrollService) already applied B-roll — prevents double overlay.
+            _step43_ran = _get_cfg_broll().broll_enabled
+            if _broll_prefetch_task is not None and not _step43_ran:
                 try:
                     from .pexels_service import overlay_broll_on_clip
                     _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
