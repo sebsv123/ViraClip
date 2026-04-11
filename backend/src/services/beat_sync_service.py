@@ -229,6 +229,7 @@ async def mix_bgm_beat_synced(
     fade_in: float = 1.5,
     fade_out: float = 2.0,
     preferred_category: Optional[str] = None,
+    word_timings: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Mix beat-synced BGM into a video.
@@ -264,10 +265,33 @@ async def mix_bgm_beat_synced(
             logger.warning("[beat_sync] No BGM tracks found in %s", BGM_LIBRARY_DIR)
             return {"success": False, "bpm": bpm, "reason": "no bgm tracks found"}
 
-    # Step 3: Build volume filter
-    vol_filter = _build_speech_duck_filter(
-        speech_segments or [], bgm_volume, fade_in, fade_out
-    )
+    # Step 3: Build volume filter (predictivo si hay word_timings, simplificado si no)
+    if word_timings:
+        try:
+            from .audio_ducking_service import build_word_aware_ducking_filter
+            _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
+            if _ducking_mode == "predictive":
+                vol_filter = build_word_aware_ducking_filter(
+                    words=word_timings,
+                    music_base_volume=bgm_volume,
+                    voice_duck_ratio=float(os.environ.get("DUCKING_VOICE_RATIO", "0.45")),
+                    long_pause_boost=float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "2.0")),
+                    short_pause_boost=float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.2")),
+                )
+                logger.info("[beat_sync] Ducking: PREDICTIVO (word timestamps)")
+            else:
+                vol_filter = _build_speech_duck_filter(
+                    speech_segments or [], bgm_volume, fade_in, fade_out
+                )
+        except Exception as _duck_e:
+            logger.warning("[beat_sync] Predictive ducking failed (%s), usando fallback", _duck_e)
+            vol_filter = _build_speech_duck_filter(
+                speech_segments or [], bgm_volume, fade_in, fade_out
+            )
+    else:
+        vol_filter = _build_speech_duck_filter(
+            speech_segments or [], bgm_volume, fade_in, fade_out
+        )
 
     # Step 4: FFmpeg amix
     try:

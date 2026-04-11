@@ -212,6 +212,115 @@ class AudioDuckingService:
             return False
 
 
+def build_word_aware_ducking_filter(
+    words: List[Dict],
+    music_base_volume: float = 0.22,
+    voice_duck_ratio: float = 0.45,
+    short_pause_boost: float = 1.2,
+    long_pause_boost: float = 2.0,
+    fade_duration: float = 0.20,
+    long_pause_threshold: float = 1.0,
+    short_pause_threshold: float = 0.35
+) -> str:
+    """
+    Genera filtro FFmpeg volume con keyframes basados en timestamps de palabras.
+
+    En vez de sidechain reactivo, este es PREDICTIVO - sabe exactamente
+    cuando hay voz y cuando hay silencio.
+
+    Args:
+        words: Lista de palabras con 'start' y 'end' en SEGUNDOS
+        music_base_volume: Volumen base de la musica (0.22 = 22%)
+        voice_duck_ratio: Multiplicador durante voz (0.45 = musica al 45% del base = ~10%)
+        short_pause_boost: Multiplicador en pausas cortas
+        long_pause_boost: Multiplicador en pausas largas (musica sube)
+        fade_duration: Duracion del fade entre niveles (segundos)
+        long_pause_threshold: Segundos para considerar pausa larga
+        short_pause_threshold: Segundos para considerar pausa corta
+
+    Returns:
+        String para usar en FFmpeg: volume='...'
+    """
+    if not words:
+        return f"volume={music_base_volume}"
+
+    voice_vol       = music_base_volume * voice_duck_ratio
+    short_pause_vol = music_base_volume * short_pause_boost
+    long_pause_vol  = music_base_volume * long_pause_boost
+
+    # Construir segmentos de voz desde timestamps de palabras
+    voice_segments = []
+    for word in words:
+        w_start = word.get('start', 0)
+        w_end   = word.get('end', w_start + 0.3)
+        # Si los timestamps vienen en ms, convertir a segundos
+        if w_start > 1000:
+            w_start = w_start / 1000.0
+            w_end   = w_end   / 1000.0
+        # Expandir levemente para cubrir coarticulacion
+        voice_segments.append((
+            max(0.0, w_start - 0.05),
+            w_end + 0.05
+        ))
+
+    # Mergear segmentos de voz cercanos (gap < short_pause_threshold)
+    merged_voice: list = []
+    for seg in voice_segments:
+        if merged_voice and seg[0] - merged_voice[-1][1] < short_pause_threshold:
+            merged_voice[-1] = (merged_voice[-1][0], seg[1])
+        else:
+            merged_voice.append(list(seg))
+
+    if not merged_voice:
+        return f"volume={music_base_volume}"
+
+    # Construir condicion de voz: sum of between(t,start,end) > 0
+    voice_checks = "+".join(
+        f"between(t,{s:.3f},{e:.3f})" for s, e in merged_voice
+    )
+
+    # Calcular tipo de pausa entre cada par de segmentos de voz
+    pause_checks = []
+    for i in range(len(merged_voice) - 1):
+        pause_start = merged_voice[i][1]
+        pause_end   = merged_voice[i + 1][0]
+        pause_dur   = pause_end - pause_start
+
+        if pause_dur >= long_pause_threshold:
+            vol = long_pause_vol
+        elif pause_dur >= short_pause_threshold:
+            vol = short_pause_vol
+        else:
+            vol = voice_vol  # Pausa muy corta: mantener bajo
+
+        pause_checks.append(
+            f"between(t,{pause_start:.3f},{pause_end:.3f})*{vol:.4f}"
+        )
+
+    # Expresion final
+    if pause_checks:
+        pause_expr = "+".join(pause_checks)
+        expr = (
+            f"if(gt({voice_checks},0),"
+            f"{voice_vol:.4f},"
+            f"if(gt({pause_expr},0),"
+            f"({pause_expr}),"
+            f"{music_base_volume:.4f}))"
+        )
+    else:
+        expr = (
+            f"if(gt({voice_checks},0),"
+            f"{voice_vol:.4f},"
+            f"{music_base_volume:.4f})"
+        )
+
+    logger.info(
+        f"[DUCKING] Generado filtro predictivo: {len(merged_voice)} segmentos de voz, "
+        f"vol_voz={voice_vol:.3f}, vol_pausa_larga={long_pause_vol:.3f}"
+    )
+    return f"volume='{expr}'"
+
+
 # Singleton
 _ducking_instance: Optional[AudioDuckingService] = None
 

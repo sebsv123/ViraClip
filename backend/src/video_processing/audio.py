@@ -265,13 +265,15 @@ def mix_background_music(
     music_volume: float = 0.22,
     ducking_enabled: bool = True,
     music_path: Optional[Path] = None,
+    word_timings: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """
     Mix a background music track into a video at low volume (default 12%).
     Uses ffmpeg for fast, high-quality audio mixing.
 
-    If music_path is provided it is used directly; otherwise a random local
-    track is selected via _get_background_music_path().
+    If word_timings is provided and ducking_enabled=True, uses PREDICTIVE ducking
+    based on word timestamps (more precise than sidechain).
+    Falls back to sidechain ducking if no word_timings are available.
 
     Returns True on success, False on failure.
     """
@@ -283,14 +285,42 @@ def mix_background_music(
 
     logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume")
     try:
-        if ducking_enabled:
-            # [music_loop] = signal to compress, [0:a] = sidechain trigger (voice)
-            # When voice is loud the music is ducked down; music recovers in 800ms
+        if ducking_enabled and word_timings:
+            # Ducking PREDICTIVO basado en timestamps de palabras
+            from ..services.audio_ducking_service import build_word_aware_ducking_filter
+            _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
+            if _ducking_mode == "predictive":
+                _voice_ratio      = float(os.environ.get("DUCKING_VOICE_RATIO", "0.45"))
+                _long_boost       = float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "2.0"))
+                _short_boost      = float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.2"))
+                ducking_filter = build_word_aware_ducking_filter(
+                    words=word_timings,
+                    music_base_volume=music_volume,
+                    voice_duck_ratio=_voice_ratio,
+                    long_pause_boost=_long_boost,
+                    short_pause_boost=_short_boost,
+                )
+                filter_complex = (
+                    f"[1:a]{ducking_filter},aloop=loop=-1:size=2000000000[music_ducked];"
+                    "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
+                )
+                logger.info("[DUCKING] Modo: PREDICTIVO (word timestamps)")
+            else:
+                # Sidechain cuando se pide explicitamente
+                filter_complex = (
+                    f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
+                    "[music_loop][0:a]sidechaincompress=threshold=0.015:ratio=6:attack=50:release=800[music_ducked];"
+                    "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
+                )
+                logger.info("[DUCKING] Modo: SIDECHAIN (reactivo)")
+        elif ducking_enabled:
+            # Fallback: sidechain cuando no hay word_timings
             filter_complex = (
                 f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
                 "[music_loop][0:a]sidechaincompress=threshold=0.015:ratio=6:attack=50:release=800[music_ducked];"
                 "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
             )
+            logger.info("[DUCKING] Modo: SIDECHAIN fallback (sin word_timings)")
         else:
             filter_complex = (
                 f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
