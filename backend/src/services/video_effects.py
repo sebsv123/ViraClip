@@ -25,7 +25,7 @@ def _is_image_path(path: str) -> bool:
 
 _PUNCH_ZOOM    = 1.04   # 4% zoom for punch
 _PUNCH_DUR_S   = 0.25   # duration of each punch in seconds
-_MAX_PUNCHES   = 6      # cap to keep filtergraph readable
+_MAX_PUNCHES   = 1      # cap to keep filtergraph readable
 _BROLL_MAX     = 3      # max B-roll overlays per clip
 
 
