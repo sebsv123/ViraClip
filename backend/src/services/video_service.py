@@ -1022,6 +1022,11 @@ class VideoService:
             # Re-transcribir el clip ya cortado para eliminar drift acumulado
             # del video original. Solo si hay words_with_confidence disponibles.
             _realign_enabled = os.environ.get("SUBTITLE_REALIGN_ENABLED", "true").lower() == "true"
+            logger.info(
+                f"[RE-ALIGN] Check: enabled={_realign_enabled} "
+                f"words={len(words_with_confidence) if words_with_confidence else 0} "
+                f"path_exists={os.path.exists(str(output_path))}"
+            )
             if _realign_enabled and words_with_confidence and os.path.exists(str(output_path)):
                 try:
                     _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "small")
