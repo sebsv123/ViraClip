@@ -400,6 +400,8 @@ class BrollService:
         segment_text: str,
         audio_path: Optional[str] = None,
         clip_duration: float = 0.0,
+        max_overlays: int = 3,
+        overlay_duration_s: float = _BROLL_DURATION,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
@@ -431,9 +433,9 @@ class BrollService:
             if not keywords:
                 return video_path
 
-            # Step 2 — fetch one asset per keyword (up to 3 distinct clips)
+            # Step 2 — fetch one asset per keyword (up to max_overlays distinct clips)
             broll_assets: List[Path] = []
-            for kw in keywords[:3]:
+            for kw in keywords[:max(3, max_overlays)]:
                 asset = await self.fetch_broll_asset(kw)
                 if asset and asset not in broll_assets:
                     broll_assets.append(asset)
@@ -481,17 +483,18 @@ class BrollService:
                 logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")
                 return video_path
 
-            # Step 3 — scene-aware insertion timestamps (one per asset)
+            # Step 3 — scene-aware insertion timestamps (up to max_overlays)
+            n_wanted = min(len(broll_assets), max_overlays)
             insert_timestamps = get_insert_timestamps(
                 video_path=video_path,
-                max_n=len(broll_assets),
+                max_n=n_wanted,
                 clip_duration=clip_duration or None,
             )
 
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []
             for ts, asset in zip(insert_timestamps, broll_assets):
-                dur = min(_BROLL_DURATION, max(1.5, (clip_duration or _BROLL_DURATION + ts + 1) - ts - 0.5))
+                dur = min(overlay_duration_s, max(1.5, (clip_duration or overlay_duration_s + ts + 1) - ts - 0.5))
                 broll_pairs.append((ts, str(asset), dur))
 
             if len(broll_pairs) == 1:
