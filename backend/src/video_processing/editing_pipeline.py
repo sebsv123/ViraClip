@@ -325,6 +325,8 @@ def _build_filter_complex(
     energy_level: float = 0.5,
     zoom_intensity: str = "medium",
     grain_override: int = 0,
+    lut_vf: str = "",
+    denoise_audio: bool = True,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
@@ -575,6 +577,11 @@ def _build_filter_complex(
         )
         prev_v = "[vfade]"
 
+    # ── 10.5. Cinematic LUT (merged in — eliminates a separate FFmpeg pass) ─────
+    if lut_vf:
+        filters.append(f"{prev_v}{lut_vf}[vlut]")
+        prev_v = "[vlut]"
+
     # rename last video label to [vout]
     if prev_v != "[vout]":
         filters.append(f"{prev_v}null[vout]")
@@ -591,15 +598,16 @@ def _build_filter_complex(
                 theme_eq = "lowshelf=g=2:f=150:width_type=s:width=200,"
             elif theme == "cool":
                 theme_eq = "highshelf=g=2:f=6000:width_type=s:width=2000,"
+        _dn = "afftdn=nf=-25," if denoise_audio else ""
         if VOICE_COMPRESS_ON:
             filters.append(
-                f"[0:a]highpass=f=80,{theme_eq}"
+                f"[0:a]{_dn}highpass=f=80,{theme_eq}"
                 f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
             )
         else:
             filters.append(
-                f"[0:a]{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
+                f"[0:a]{_dn}{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
             )
         return ";".join(filters), "[vout]", "[aout]"
     else:
@@ -627,6 +635,8 @@ class EditingPipeline:
         energy_level: float = 0.5,
         zoom_intensity: str = "medium",
         grain_override: int = 0,
+        lut_vf: str = "",
+        denoise_audio: bool = True,
     ) -> Path:
         """
         Run the full editing pipeline.
@@ -673,6 +683,8 @@ class EditingPipeline:
             energy_level=energy_level,
             zoom_intensity=zoom_intensity,
             grain_override=grain_override,
+            lut_vf=lut_vf,
+            denoise_audio=denoise_audio,
         )
 
         vcodec = ["libx264", "-preset", "ultrafast", "-crf", "23"]
