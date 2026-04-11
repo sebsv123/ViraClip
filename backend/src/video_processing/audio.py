@@ -194,14 +194,22 @@ async def apply_voice_enhancement(
     except (ImportError, FileNotFoundError) as _rvc_e:
         logger.debug(f"[RVC] Unavailable ({_rvc_e}) — using FFmpeg vocal EQ fallback")
 
-    # Fallback: vocal presence boost + de-essing via FFmpeg
+    # Fallback: pipeline profesional de voice enhancement via FFmpeg
+    _noise_gate_db  = os.environ.get("VOICE_NOISE_GATE_THRESHOLD", "-35")
+    _presence_boost = os.environ.get("VOICE_PRESENCE_BOOST", "2.5")
+    _enhancement_chain = (
+        "highpass=f=80,"                                              # Cortar rumble de baja
+        f"agate=threshold={_noise_gate_db}dB:ratio=4:attack=5:release=50,"  # Noise gate
+        "equalizer=f=200:t=h:w=100:g=-2,"                            # Reducir mud
+        f"equalizer=f=3000:t=h:w=1000:g={_presence_boost},"          # Presencia vocal
+        "equalizer=f=5000:t=h:w=2000:g=1,"                           # Claridad
+        "equalizer=f=8000:t=h:w=3000:g=-1.5,"                        # Reducir harshness
+        "acompressor=threshold=-20dB:ratio=3:attack=10:release=100:makeup=2dB,"  # Compresion
+        "alimiter=limit=0.95:attack=1:release=10"                     # Prevenir clipping
+    )
     cmd = [
         "ffmpeg", "-y", "-i", video_path,
-        "-af",
-        "equalizer=f=3000:width_type=o:width=2:g=2,"
-        "equalizer=f=7500:width_type=o:width=2:g=-3,"
-        "compand=attacks=0.05:decays=0.2:points=-70/-70|-24/-12|0/-6:soft-knee=0.1,"
-        "afftdn=nf=-20",
+        "-af", _enhancement_chain,
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
         output_path,
