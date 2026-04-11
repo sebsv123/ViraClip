@@ -125,6 +125,22 @@ class Config:
         self.notifications_enabled = self._get_bool_env("NOTIFICATIONS_ENABLED", False)
         self.music_ducking_enabled = self._get_bool_env("MUSIC_DUCKING_ENABLED", True)
 
+        # Subtitle Re-alignment
+        self.subtitle_realign_enabled = self._get_bool_env("SUBTITLE_REALIGN_ENABLED", True)
+        self.subtitle_realign_model = os.getenv("SUBTITLE_REALIGN_MODEL", "small")
+        self.subtitle_anticipation_ms = float(os.getenv("SUBTITLE_ANTICIPATION_MS", "-50"))
+
+        # Audio Ducking Adaptativo
+        self.ducking_mode = os.getenv("DUCKING_MODE", "predictive")
+        self.ducking_voice_ratio = float(os.getenv("DUCKING_VOICE_RATIO", "0.45"))
+        self.ducking_long_pause_boost = float(os.getenv("DUCKING_LONG_PAUSE_BOOST", "2.0"))
+        self.ducking_short_pause_boost = float(os.getenv("DUCKING_SHORT_PAUSE_BOOST", "1.2"))
+
+        # Voice Enhancement
+        self.voice_enhancement_enabled = self._get_bool_env("VOICE_ENHANCEMENT_ENABLED", True)
+        self.voice_noise_gate_threshold = float(os.getenv("VOICE_NOISE_GATE_THRESHOLD", "-35"))
+        self.voice_presence_boost = float(os.getenv("VOICE_PRESENCE_BOOST", "2.5"))
+
         # Admin JWT auth
         self.admin_secret = os.getenv("ADMIN_SECRET", "")
         
