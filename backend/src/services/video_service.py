@@ -1036,18 +1036,8 @@ class VideoService:
                 except Exception as _esr_e:
                     logger.debug(f"  ESRGAN skipped: {_esr_e}")
 
-            # Step 4.2: Audio denoising (afftdn — built-in FFmpeg, no model needed)
-            try:
-                _denoise_out = output_path.with_name(f"dn_{output_path.name}")
-                _denoise_ok = await denoise_audio(
-                    str(output_path), str(_denoise_out),
-                    noise_floor_db=float(os.environ.get("DENOISE_NOISE_FLOOR_DB", "-25")),
-                )
-                if _denoise_ok and _denoise_out.exists():
-                    output_path = _denoise_out
-                    logger.info("  ✓ Audio denoised")
-            except Exception as _dn_e:
-                logger.debug(f"  Denoising skipped: {_dn_e}")
+            # Step 4.2: Audio denoising — now merged into EditingPipeline (afftdn in filter_complex)
+            # Standalone pass removed to save one full FFmpeg re-encode.
 
             # Step 4.2b: RVC Voice Enhancement (Phase 3.2 — vocal clarity + presence boost)
             _rvc_enabled = os.environ.get("RVC_ENABLED", "false").lower() == "true"
@@ -1311,6 +1301,19 @@ class VideoService:
                 _ep = EditingPipeline()
                 _ep_out = output_path.with_name(f"ep_{output_path.name}")
                 _ep_segment_text = segment.get("text", "")[:60] if segment else ""
+                # Resolve LUT filter string here so EP can bake it in one pass
+                _lut_preset_ep = (
+                    (_clip_profile.lut if _clip_profile else None)
+                    or os.environ.get("LUT_PRESET", "teal_orange")
+                )
+                _lut_vf_ep = ""
+                if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
+                    try:
+                        from .lut_service import get_lut_vf_filter as _get_lut_vf
+                        _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
+                    except Exception:
+                        _lut_vf_ep = ""
+
                 _ep_result = await _ep.apply(
                     video_path=output_path,
                     words=words_with_confidence,
@@ -1321,6 +1324,8 @@ class VideoService:
                     energy_level=_clip_profile.energy if _clip_profile else 0.5,
                     zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
                     grain_override=_clip_profile.grain if _clip_profile else 0,
+                    lut_vf=_lut_vf_ep,
+                    denoise_audio=True,
                 )
                 if _ep_result == _ep_out and _ep_out.exists():
                     output_path = _ep_out
@@ -1328,23 +1333,9 @@ class VideoService:
             except Exception as _ep_e:
                 logger.warning(f"  EditingPipeline failed: {_ep_e}")
 
-            # Step 4.6b: Cinematic LUT color grade (after EditingPipeline basic grade).
-            # Rotates between warm/vibrant presets per clip to add variety.
-            # Set LUT_PRESET=none to disable, or set a specific preset name to lock it.
-            _lut_env = os.environ.get("LUT_PRESET", "auto")
-            if _lut_env.lower() in ("auto", ""):
-                _lut_preset = _clip_profile.lut if _clip_profile else "teal_orange"
-            else:
-                _lut_preset = _lut_env
-            if _lut_preset and _lut_preset.lower() not in ("none", "off", "false", ""):
-                try:
-                    from .lut_service import get_lut_service as _get_lut
-                    _lut_out = output_path.with_name(f"lut_{output_path.name}")
-                    if await _get_lut().apply_lut(output_path, _lut_out, lut_id=_lut_preset):
-                        output_path = _lut_out
-                        logger.info(f"  ✓ Cinematic LUT applied: {_lut_preset}")
-                except Exception as _lut_e:
-                    logger.debug(f"  LUT skipped: {_lut_e}")
+            # Step 4.6b: LUT now merged into EditingPipeline — standalone pass removed.
+            if _lut_vf_ep:
+                logger.info(f"  ✓ LUT '{_lut_preset_ep}' baked into EditingPipeline pass")
 
             # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
             if COMFYUI_ENABLED:
@@ -1388,30 +1379,30 @@ class VideoService:
             except Exception as sound_e:
                 logger.warning(f"  Sound design failed: {sound_e}")
 
-            # Step 4.10: Export with Platform Profile
-            try:
-                platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
-                                Platform.REELS if target_platform == "reels" else \
-                                Platform.SHORTS if target_platform == "shorts" else \
-                                Platform.UNIVERSAL
-
-                export_service = ExportService()
-                profile = export_service.get_profile(platform_enum)
-                
-                final_path = output_path.with_name(f"final_{output_path.name}")
-                cmd = export_service.build_ffmpeg_command(
-                    str(output_path),
-                    str(final_path),
-                    platform_enum,
-                    burn_subtitles=segment.get("colored_subtitle_path")
-                )
-                import subprocess
-                subprocess.run(cmd, capture_output=True, timeout=300)
-                if Path(final_path).exists():
-                    output_path = final_path
-                    logger.info(f"  ✓ Exported with {profile.name} profile")
-            except Exception as export_e:
-                logger.warning(f"  Platform export failed: {export_e}")
+            # Step 4.10: Platform export — only re-encode when burning hardsubs.
+            # When no subtitle file exists use stream copy (near-instant, no quality loss).
+            _sub_path = segment.get("colored_subtitle_path")
+            if _sub_path and Path(str(_sub_path)).exists():
+                try:
+                    platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
+                                    Platform.REELS if target_platform == "reels" else \
+                                    Platform.SHORTS if target_platform == "shorts" else \
+                                    Platform.UNIVERSAL
+                    export_service = ExportService()
+                    final_path = output_path.with_name(f"final_{output_path.name}")
+                    cmd = export_service.build_ffmpeg_command(
+                        str(output_path), str(final_path), platform_enum,
+                        burn_subtitles=_sub_path,
+                    )
+                    import subprocess as _sp
+                    _sp.run(cmd, capture_output=True, timeout=300)
+                    if Path(final_path).exists():
+                        output_path = final_path
+                        logger.info("  ✓ Platform export with hardsubs")
+                except Exception as export_e:
+                    logger.warning(f"  Platform export failed: {export_e}")
+            else:
+                logger.info("  ✓ Platform export: skipped (no hardsubs) — stream copy used in BGM pass")
 
             # Step 4.6: Translation & Dubbing
             if target_language and target_language != "eng":
