@@ -114,7 +114,7 @@ class TaskService:
         config_params = {
             "min_duration": getattr(cfg, 'min_clip_duration', 5),
             "max_duration": getattr(cfg, 'max_clip_duration', 45),
-            "prompt_version": "v2",  # Increment this when you change LLM prompts in ai.py
+            "prompt_version": "v3",  # Increment this when you change LLM prompts in ai.py
             "llm_model": getattr(cfg, 'llm', 'ollama:qwen2.5:7b'),
         }
         
@@ -953,12 +953,22 @@ class TaskService:
             # Cleanup temporary extracted segments to free disk space
             cleanup_extracted_segments(extracted_segment_paths)
 
-            # INTERMEDIATE FILE CLEANUP: Keep only final_* files in clips output dir
+            # INTERMEDIATE FILE CLEANUP: Remove temp files but preserve final delivered clips
             if len(clip_ids) > 0:
                 try:
+                    # Collect filenames of clips saved to DB so we never delete them
+                    # NOTE: use 'path' (final file) not 'filename' (original name before
+                    # pipeline prefixes like sub_, broll_, ep_, jc_ are added)
+                    _saved_filenames = set()
+                    for _, _ci, _ in render_results:
+                        if _ci is not None and _ci.get("path"):
+                            _saved_filenames.add(Path(_ci["path"]).name)
+                        if _ci is not None and _ci.get("thumbnail_filename"):
+                            _saved_filenames.add(_ci["thumbnail_filename"])
+
                     kept, removed = 0, 0
                     for f in clips_output_dir.iterdir():
-                        if f.is_file() and not f.name.startswith("final_"):
+                        if f.is_file() and f.name not in _saved_filenames:
                             f.unlink(missing_ok=True)
                             removed += 1
                         else:

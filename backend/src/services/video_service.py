@@ -1695,7 +1695,7 @@ class VideoService:
 
             return {
                 "clip_id": clip_index + 1,
-                "filename": clip_filename,
+                "filename": output_path.name,
                 "path": str(output_path),
                 "start_time": segment["start_time"],
                 "end_time": segment["end_time"],
