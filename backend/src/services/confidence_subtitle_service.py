@@ -229,6 +229,144 @@ class ConfidenceSubtitleGenerator:
         
         logger.info(f"Found {len(moments)} high-impact moments with rare words")
         return moments
+    
+    def realign_on_segment(
+        self,
+        segment_video_path: str,
+        original_words: Optional[List[Dict]] = None,
+        language: Optional[str] = None,
+        anticipation_offset_ms: float = -50.0
+    ) -> List[Dict[str, Any]]:
+        """
+        Re-transcribe un clip ya cortado para obtener timestamps exactos.
+
+        El video original puede tener drift de 200-500ms en transcripciones largas.
+        Al re-transcribir solo el segmento (15-60s), faster-whisper da timestamps
+        con precision de +-30ms.
+
+        Args:
+            segment_video_path: Ruta al clip ya cortado (el .mp4 que sale de create_optimized_clip)
+            original_words: Palabras remapeadas del video original (para validacion)
+            language: Codigo de idioma ('es', 'en', etc.)
+            anticipation_offset_ms: Offset en ms para que subtitulos aparezcan
+                                    ligeramente ANTES de la palabra (-50ms = aparece 50ms antes)
+
+        Returns:
+            Lista de dicts compatibles con words_with_confidence:
+            [{"word": str, "start": float_seconds, "end": float_seconds,
+              "confidence": float, "is_emphasis": bool}]
+        """
+        import subprocess
+        import tempfile
+
+        logger.info(f"[RE-ALIGN] Transcribiendo segmento: {segment_video_path}")
+
+        # Normalizar codigo ISO 639-3 → ISO 639-1 (faster-whisper solo acepta 2 letras)
+        _ISO3_TO_ISO1 = {
+            "eng": "en", "spa": "es", "fra": "fr", "deu": "de", "ita": "it",
+            "por": "pt", "rus": "ru", "zho": "zh", "jpn": "ja", "kor": "ko",
+            "ara": "ar", "hin": "hi", "nld": "nl", "pol": "pl", "tur": "tr",
+            "vie": "vi", "tha": "th", "swe": "sv", "nor": "no", "dan": "da",
+        }
+        if language and len(language) == 3:
+            language = _ISO3_TO_ISO1.get(language.lower(), None)
+
+        # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
+        tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp_audio_path = tmp_audio.name
+        tmp_audio.close()
+
+        try:
+            extract_cmd = [
+                'ffmpeg', '-y', '-i', segment_video_path,
+                '-vn',                    # Sin video
+                '-acodec', 'pcm_s16le',   # WAV sin compresion
+                '-ar', '16000',           # 16kHz (optimo Whisper)
+                '-ac', '1',               # Mono
+                tmp_audio_path
+            ]
+            result = subprocess.run(extract_cmd, capture_output=True, timeout=30)
+            if result.returncode != 0:
+                logger.error(f"[RE-ALIGN] FFmpeg fallo: {result.stderr.decode()}")
+                return original_words or []
+
+            # Paso 2: Transcribir con faster-whisper (self.model ya esta cargado)
+            self._load_model()
+            segments_iter, info = self.model.transcribe(
+                tmp_audio_path,
+                language=language,
+                word_timestamps=True,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=300),
+                beam_size=5
+            )
+
+            # Paso 3: Construir lista de palabras con offset de anticipacion
+            offset_s = anticipation_offset_ms / 1000.0  # Convertir a segundos
+            realigned_words = []
+
+            for segment in segments_iter:
+                if not segment.words:
+                    continue
+                for word in segment.words:
+                    word_text = word.word.strip()
+                    if not word_text:
+                        continue
+                    realigned_words.append({
+                        'word': word_text,
+                        'text': word_text,  # Ambos campos por compatibilidad
+                        'start': max(0.0, round(word.start + offset_s, 3)),
+                        'end': round(word.end + offset_s, 3),
+                        'confidence': round(word.probability, 3),
+                        'is_emphasis': word.probability < 0.80
+                    })
+
+            logger.info(f"[RE-ALIGN] {len(realigned_words)} palabras re-alineadas")
+
+            # Paso 4: Validacion contra palabras originales (si las hay)
+            if original_words and realigned_words:
+                orig_text = ' '.join(
+                    w.get('word', w.get('text', '')) for w in original_words
+                ).lower().strip()
+                new_text = ' '.join(w['word'] for w in realigned_words).lower().strip()
+
+                from difflib import SequenceMatcher
+                similarity = SequenceMatcher(None, orig_text, new_text).ratio()
+                logger.info(f"[RE-ALIGN] Similitud texto: {similarity:.1%}")
+
+                if similarity < 0.70:
+                    logger.warning(
+                        f"[RE-ALIGN] Similitud muy baja ({similarity:.1%}). "
+                        "Usando palabras originales como fallback."
+                    )
+                    return original_words
+
+            # Paso 5: Transferir flags de emphasis del original si los tiene
+            if original_words:
+                _transfer_emphasis_flags(realigned_words, original_words)
+
+            return realigned_words
+
+        except Exception as e:
+            logger.error(f"[RE-ALIGN] Error: {e}")
+            return original_words or []
+        finally:
+            Path(tmp_audio_path).unlink(missing_ok=True)
+
+
+def _transfer_emphasis_flags(realigned: List[Dict], original: List[Dict]):
+    """
+    Copia is_emphasis del original al realineado cuando las palabras coinciden.
+    Usa matching por texto, no por posicion (pueden diferir en cantidad).
+    """
+    orig_emphasis = set()
+    for w in original:
+        if w.get('is_emphasis', False):
+            orig_emphasis.add(w.get('word', w.get('text', '')).lower().strip())
+
+    for w in realigned:
+        if w['word'].lower().strip() in orig_emphasis:
+            w['is_emphasis'] = True
 
 
 def create_confidence_colored_subtitles(
