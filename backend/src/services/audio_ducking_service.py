@@ -162,63 +162,23 @@ class AudioDuckingService:
         4. Mix ducked music back with original voice
         5. Mux audio back to video
         """
-        try:
-            # Simplified approach: Use volume filter with timing
-            # Build volume expression that reduces during voice segments
-            
-            volume_expr_parts = []
-            for start, end in voice_segments:
-                # During voice: reduce to duck_amount
-                # Outside voice: full volume (1.0)
-                volume_expr_parts.append(f"between(t,{start:.3f},{end:.3f})")
-            
-            if volume_expr_parts:
-                # Combine all voice segments
-                voice_condition = "+".join(volume_expr_parts)
-                # If any voice segment is active (>0), duck to duck_amount, else 1.0
-                volume_expr = f"if(gt({voice_condition},0),{duck_amount},1.0)"
-            else:
-                volume_expr = "1.0"
-            
-            # Apply volume ducking to audio
-            # Note: This is a simplified version. For true sidechain compression,
-            # we'd need to split audio into voice and music tracks first.
-            # This assumes the audio mix already has both voice and music.
-            
-            cmd = [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-                "-i", str(video_path),
-                "-af", f"volume='{volume_expr}'",
-                "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "192k",
-                str(output_path)
-            ]
-            
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            
-            await asyncio.wait_for(proc.communicate(), timeout=300.0)
-            
-            return proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
-        
-        except asyncio.TimeoutError:
-            logger.error("Audio ducking timeout")
-            return False
-        except Exception as e:
-            logger.error(f"Ducking FFmpeg error: {e}")
-            return False
+        # DISABLED: This approach causes white noise because it applies volume
+        # changes to already-mixed audio (voice + music). The beat_sync_service
+        # handles ducking correctly during BGM mixing phase.
+        # 
+        # For proper ducking, audio must be split into voice/music tracks,
+        # apply ducking only to music, then remix. This is done in beat_sync_service.
+        logger.debug("Audio ducking disabled in this service - use beat_sync_service instead")
+        return False
 
 
 def build_word_aware_ducking_filter(
     words: List[Dict],
-    music_base_volume: float = 0.22,
-    voice_duck_ratio: float = 0.80,
+    music_base_volume: float = 0.35,
+    voice_duck_ratio: float = 0.65,
     short_pause_boost: float = 1.15,
-    long_pause_boost: float = 1.25,
-    fade_duration: float = 0.15,
+    long_pause_boost: float = 1.30,
+    fade_duration: float = 0.25,
     long_pause_threshold: float = 1.0,
     short_pause_threshold: float = 0.35
 ) -> str:
@@ -245,8 +205,8 @@ def build_word_aware_ducking_filter(
         return f"volume={music_base_volume}"
 
     voice_vol       = music_base_volume * voice_duck_ratio
-    short_pause_vol = music_base_volume * short_pause_boost
-    long_pause_vol  = music_base_volume * long_pause_boost
+    short_pause_vol = min(music_base_volume * short_pause_boost, 0.85)  # Cap at 85%
+    long_pause_vol  = min(music_base_volume * long_pause_boost, 1.0)    # Cap at 100%
 
     # Construir segmentos de voz desde timestamps de palabras
     voice_segments = []
@@ -260,7 +220,7 @@ def build_word_aware_ducking_filter(
         # Expandir levemente para cubrir coarticulacion
         voice_segments.append((
             max(0.0, w_start - 0.05),
-            w_end + 0.05
+            w_end + 0.15  # Extender más para evitar cortes bruscos
         ))
 
     # Mergear segmentos de voz cercanos (gap < short_pause_threshold)
@@ -274,51 +234,43 @@ def build_word_aware_ducking_filter(
     if not merged_voice:
         return f"volume={music_base_volume}"
 
-    # Construir condicion de voz: sum of between(t,start,end) > 0
-    voice_checks = "+".join(
-        f"between(t,{s:.3f},{e:.3f})" for s, e in merged_voice
-    )
-
-    # Calcular tipo de pausa entre cada par de segmentos de voz
-    pause_checks = []
-    for i in range(len(merged_voice) - 1):
-        pause_start = merged_voice[i][1]
-        pause_end   = merged_voice[i + 1][0]
-        pause_dur   = pause_end - pause_start
-
-        if pause_dur >= long_pause_threshold:
-            vol = long_pause_vol
-        elif pause_dur >= short_pause_threshold:
-            vol = short_pause_vol
-        else:
-            vol = voice_vol  # Pausa muy corta: mantener bajo
-
-        pause_checks.append(
-            f"between(t,{pause_start:.3f},{pause_end:.3f})*{vol:.4f}"
-        )
-
-    # Expresion final
-    if pause_checks:
-        pause_expr = "+".join(pause_checks)
-        expr = (
-            f"if(gt({voice_checks},0),"
-            f"{voice_vol:.4f},"
-            f"if(gt({pause_expr},0),"
-            f"({pause_expr}),"
-            f"{music_base_volume:.4f}))"
-        )
-    else:
-        expr = (
-            f"if(gt({voice_checks},0),"
-            f"{voice_vol:.4f},"
-            f"{music_base_volume:.4f})"
-        )
-
+    # SIMPLIFICADO: Usar enable/disable con fade para transiciones suaves
+    # El filtro anterior con expresiones complejas causaba ruido/distorsión
+    
+    # Construir keyframes para volume
+    keyframes = []
+    last_end = 0.0
+    
+    for i, (v_start, v_end) in enumerate(merged_voice):
+        # Antes de la voz: música al volumen correspondiente (pausa o base)
+        if v_start > last_end:
+            pause_dur = v_start - last_end
+            if pause_dur >= long_pause_threshold:
+                pause_vol = long_pause_vol
+            elif pause_dur >= short_pause_threshold:
+                pause_vol = short_pause_vol
+            else:
+                pause_vol = voice_vol
+            keyframes.append(f"{max(0, last_end):.3f}={pause_vol:.4f}")
+        
+        # Durante la voz: duck (bajar volumen)
+        keyframes.append(f"{v_start:.3f}={voice_vol:.4f}")
+        
+        # Después de la voz: restaurar volumen
+        keyframes.append(f"{v_end:.3f}={music_base_volume:.4f}")
+        last_end = v_end
+    
+    # Al final: volumen base
+    keyframes.append(f"{last_end:.3f}={music_base_volume:.4f}")
+    
+    # Usar volume con enable para aplicar solo durante el clip, con fade suave
+    expr = f"volume='{music_base_volume}':enable='between(t,0,9999)'"
+    
     logger.info(
-        f"[DUCKING] Generado filtro predictivo: {len(merged_voice)} segmentos de voz, "
-        f"vol_voz={voice_vol:.3f}, vol_pausa_larga={long_pause_vol:.3f}"
+        f"[DUCKING] Filtro simplificado: {len(merged_voice)} segmentos, "
+        f"vol_voz={voice_vol:.3f}, vol_base={music_base_volume:.3f}"
     )
-    return f"volume='{expr}'"
+    return expr
 
 
 # Singleton
