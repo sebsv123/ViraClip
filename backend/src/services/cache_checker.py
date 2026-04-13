@@ -22,7 +22,8 @@ class CacheChecker:
         self,
         task_id: str,
         video_path: str,
-        min_clips: int = 1
+        min_clips: int = 1,
+        force_fresh: bool = False
     ) -> Optional[List[dict]]:
         """
         Check if clips already exist for this task and are newer than source video.
@@ -31,10 +32,20 @@ class CacheChecker:
             task_id: Task identifier
             video_path: Path to source video file
             min_clips: Minimum number of clips to consider cache valid
+            force_fresh: If True, always return None to force reprocessing (for testing improvements)
             
         Returns:
             List of clip metadata dicts if cache is valid, None otherwise
         """
+        # CACHE DISABLED: Always process fresh clips
+        logger.info(f"🔄 Cache disabled for task {task_id}: processing fresh clips")
+        return None
+        
+        # FORCE FRESH: Skip cache entirely when comparing improvements
+        if force_fresh:
+            logger.info(f"🔄 Force fresh enabled for task {task_id}: skipping cache check")
+            return None
+        
         try:
             # Get video file mtime
             video_mtime = os.path.getmtime(video_path)

@@ -66,6 +66,23 @@ class ClipValidator:
         warnings = []
         metadata = {}
 
+        # Normalize timestamps: accept "MM:SS", "HH:MM:SS" strings or numeric types
+        def _to_seconds(t) -> float:
+            if isinstance(t, (int, float)):
+                return float(t)
+            try:
+                parts = str(t).strip().split(":")
+                if len(parts) == 2:
+                    return int(parts[0]) * 60 + float(parts[1])
+                elif len(parts) == 3:
+                    return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                return float(t)
+            except (ValueError, TypeError):
+                return float(t)
+
+        start_time = _to_seconds(start_time)
+        end_time = _to_seconds(end_time)
+
         # Check file existence
         if not video_path.exists():
             issues.append(f"Source video not found: {video_path}")

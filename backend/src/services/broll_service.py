@@ -26,11 +26,13 @@ from .scene_broll_placer import get_insert_timestamps
 
 logger = logging.getLogger(__name__)
 
-_BROLL_DOWNLOAD_TIMEOUT = 30   # seconds per file
-_MIN_SILENCE_SEC = 1.5         # minimum silence gap to qualify for B-roll insert
-_BROLL_DURATION = 3.0          # seconds of B-roll to overlay
-_FADE_DURATION = 0.3           # fade-in / fade-out length
-_CACHE_TTL_DAYS = 7            # days before cached B-roll is considered stale
+# Configuraciones B-roll via environment variables para fácil tuning
+_BROLL_DOWNLOAD_TIMEOUT = int(os.environ.get("BROLL_DOWNLOAD_TIMEOUT", "30"))   # seconds per file
+_MIN_SILENCE_SEC = float(os.environ.get("BROLL_MIN_SILENCE_SEC", "1.5"))       # minimum silence gap
+_BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "4.5"))               # seconds of B-roll - más largo para presencia
+_FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))             # fade-in / fade-out length - suave
+_CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))               # cache stale days
+_BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "3"))             # max overlays per clip
 
 
 class BrollService:
@@ -65,13 +67,15 @@ class BrollService:
             return await self._apply_yolo_filter(keywords, video_path, clip_duration)
 
         prompt = (
-            "Extract 2-3 short, highly visual English search keywords from the following transcript "
-            "that would make great stock video b-roll. "
-            "Keywords MUST be in English regardless of the transcript language. "
-            "Choose concrete visual concepts (nature, objects, actions, places) — not abstract emotions. "
-            "Reply with ONLY a JSON array of English strings, "
-            "e.g. [\"mountain\", \"snow\", \"landscape\"]. No explanation.\n\n"
-            f"Transcript: {text[:400]}"
+            "You are a video editor choosing B-roll footage. "
+            "Read this transcript and extract 2-3 SPECIFIC English search terms for stock video footage. "
+            "Rules:\n"
+            "- Keywords MUST directly match a noun/action/place MENTIONED in the transcript\n"
+            "- NO generic motivational words (success, winner, achievement, determination)\n"
+            "- Choose the most VISUAL and CONCRETE thing the speaker is talking about\n"
+            "- Must be searchable on a stock video site (e.g. Pexels, Pixabay)\n"
+            "- Reply with ONLY a JSON array, e.g. [\"stock market chart\", \"office meeting\", \"coffee cup\"]\n\n"
+            f"Transcript: {text[:500]}"
         )
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -141,27 +145,22 @@ class BrollService:
         return age_days <= _CACHE_TTL_DAYS
 
     async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
-        """Fetch and cache a portrait video for *keyword*.
+        """Fetch the most relevant B-roll asset for *keyword*.
 
-        Queries Pexels, Pixabay and Coverr simultaneously (fastest wins).
-        Falls back to Pexels Photos (static image) as last resort.
-        Cache TTL: 7 days.
+        Strategy: API-first for maximum relevance.
+        1. Query Pexels + Pixabay + Coverr in parallel (best result for this keyword)
+        2. If all APIs fail → fall back to Pexels Photos (static image via API)
+        3. If all APIs are unavailable (no keys / network error) → use local cache
+        Cache is a safety net, not the primary source.
         """
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
 
-        if self._is_cache_fresh(cached_video):
-            logger.info(f"[BRoll] Cache hit (video): {cached_video}")
-            return cached_video
-        if self._is_cache_fresh(cached_photo):
-            logger.info(f"[BRoll] Cache hit (photo): {cached_photo}")
-            return cached_photo
-
-        # Parallel search: Pexels + Pixabay + Coverr
-        pexels_task   = asyncio.create_task(self._search_pexels(keyword))
-        pixabay_task  = asyncio.create_task(self._search_pixabay(keyword))
-        coverr_task   = asyncio.create_task(self._search_coverr(keyword))
+        # ── 1. API-first: query all video sources in parallel ─────────────────
+        pexels_task  = asyncio.create_task(self._search_pexels(keyword))
+        pixabay_task = asyncio.create_task(self._search_pixabay(keyword))
+        coverr_task  = asyncio.create_task(self._search_coverr(keyword))
 
         results = await asyncio.gather(pexels_task, pixabay_task, coverr_task,
                                        return_exceptions=True)
@@ -170,15 +169,24 @@ class BrollService:
         for url in video_urls:
             result = await self._download(url, cached_video)
             if result:
-                logger.info(f"[BRoll] Downloaded for '{keyword}': {result.name}")
+                logger.info(f"[BRoll] API → downloaded video for '{keyword}': {result.name}")
                 return result
 
-        # Fallback: Pexels Photos API (static image)
+        # ── 2. Fallback: Pexels Photos API (static image) ─────────────────────
         photo = await self._search_pexels_photos_and_download(keyword, safe)
         if photo:
+            logger.info(f"[BRoll] API → downloaded photo for '{keyword}': {photo.name}")
             return photo
 
-        logger.warning(f"[BRoll] No asset found for keyword '{keyword}'")
+        # ── 3. Last resort: local cache (APIs down / no keys) ─────────────────
+        if self._is_cache_fresh(cached_video):
+            logger.info(f"[BRoll] Cache fallback (video): {cached_video}")
+            return cached_video
+        if self._is_cache_fresh(cached_photo):
+            logger.info(f"[BRoll] Cache fallback (photo): {cached_photo}")
+            return cached_photo
+
+        logger.warning(f"[BRoll] No asset found for keyword '{keyword}' (APIs + cache exhausted)")
         return None
 
     async def _search_pexels_photos_and_download(self, keyword: str, safe_name: str) -> Optional[Path]:
@@ -423,6 +431,26 @@ class BrollService:
             else:
                 keywords = await self.extract_keywords(segment_text)
 
+                # Enhanced B-roll: análisis de contexto visual para keywords más precisos
+                try:
+                    from .enhanced_broll_service import EnhancedBrollService
+                    _ebs = EnhancedBrollService()
+                    _opportunities = await _ebs.analyze_broll_opportunities(
+                        transcript=segment_text,
+                        video_path=Path(video_path),
+                        clip_duration=clip_duration,
+                    )
+                    if _opportunities:
+                        _enhanced_kws = [
+                            kw for opp in _opportunities[:2]
+                            for kw in opp.suggested_keywords[:2]
+                            if kw not in keywords
+                        ]
+                        keywords = _enhanced_kws + keywords
+                        logger.info(f"[BRoll] Enhanced context keywords: {_enhanced_kws}")
+                except Exception as _ebs_e:
+                    logger.debug(f"[BRoll] Enhanced B-roll analysis skipped: {_ebs_e}")
+
                 # YOLO augmentation: detect objects actually visible in the clip
                 try:
                     from ..video_processing.object_detection import detect_objects_in_video
@@ -434,6 +462,22 @@ class BrollService:
                         logger.info(f"[BRoll] YOLO augmented keywords: {keywords}")
                 except Exception as _yolo_e:
                     logger.debug(f"[BRoll] YOLO augmentation skipped: {_yolo_e}")
+
+            # Semantic B-roll: Pexels + sentence-transformers para un asset semántico extra
+            try:
+                from .semantic_broll_service import create_semantic_broll_service
+                _sbs = create_semantic_broll_service()
+                _sem_result = await _sbs.find_broll_for_segment(
+                    transcript_segment=segment_text,
+                    segment_duration=clip_duration or 4.5,
+                )
+                if _sem_result and _sem_result.get("keywords"):
+                    _sem_kws = [k for k in _sem_result["keywords"] if k not in keywords]
+                    if _sem_kws:
+                        keywords = _sem_kws[:2] + keywords
+                        logger.info(f"[BRoll] Semantic keywords added: {_sem_kws[:2]}")
+            except Exception as _sbs_e:
+                logger.debug(f"[BRoll] Semantic B-roll skipped: {_sbs_e}")
 
             if not keywords:
                 return video_path
@@ -532,6 +576,41 @@ class BrollService:
                 # Fallback: midpoint is always safe
                 _mid = (clip_duration or 10.0) / 2.0
                 insert_timestamps = [_mid]
+
+            # Step 3.5 — BrollEffectsEngine: apply cinematic effect (ken burns / pan) per asset
+            _enhanced_assets: List[Path] = []
+            try:
+                from .broll_effects_engine import get_smart_broll_effect, build_broll_effect_filter
+                import subprocess as _sp
+                for _ba in broll_assets:
+                    try:
+                        _effect = get_smart_broll_effect(
+                            is_image=_ba.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"),
+                        )
+                        _efx_filter = build_broll_effect_filter(
+                            effect_type=_effect,
+                            width=1080, height=1920,
+                            duration=overlay_duration_s,
+                        )
+                        _efx_out = _ba.with_name(f"efx_{_ba.name}")
+                        _efx_cmd = [
+                            "ffmpeg", "-y", "-i", str(_ba),
+                            "-vf", _efx_filter,
+                            "-t", str(overlay_duration_s),
+                            "-c:v", "libx264", "-preset", "ultrafast", "-an",
+                            str(_efx_out),
+                        ]
+                        _efx_res = _sp.run(_efx_cmd, capture_output=True, timeout=30)
+                        if _efx_res.returncode == 0 and _efx_out.exists():
+                            _enhanced_assets.append(_efx_out)
+                            logger.info(f"[BRoll] ✓ Effect {_effect.value} applied to {_ba.name}")
+                        else:
+                            _enhanced_assets.append(_ba)
+                    except Exception:
+                        _enhanced_assets.append(_ba)
+                broll_assets = _enhanced_assets
+            except Exception as _bee_e:
+                logger.debug(f"[BRoll] Effects engine skipped: {_bee_e}")
 
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []

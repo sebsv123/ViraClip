@@ -48,6 +48,7 @@ async def process_video_task(
     dramatic_slowmo: bool = False,
     speed_ramp_enabled: bool = True,
     use_scene_detection: bool = True,
+    force_fresh: bool = False,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -128,6 +129,7 @@ async def process_video_task(
                 dramatic_slowmo=dramatic_slowmo,
                 speed_ramp_enabled=speed_ramp_enabled,
                 use_scene_detection=use_scene_detection,
+                force_fresh=force_fresh,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

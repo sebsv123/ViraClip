@@ -121,17 +121,37 @@ def fetch_pixabay_music(niche: str = "general", api_key: Optional[str] = None) -
         return None
 
 
-def get_background_music_for_niche(niche: str = "general", config_obj=None) -> Optional[Path]:
+def get_background_music_for_niche(niche: str = "general", config_obj=None, video_path: Optional[Path] = None) -> Optional[Path]:
     """
     Get background music for a specific niche, trying:
     1. Local music folder (user-placed)
     2. Pixabay API (auto-downloaded, cached)
-    3. Any available track from cache
+    3. Freesound API (mood-matched)
+    4. Any available track from cache
+
+    If video_path is provided, AudioAnalysisService detects actual mood and refines niche.
     """
     from ..config import get_config as _get_cfg_inner
 
     _cfg = config_obj or _get_cfg_inner()
     import random as _random
+
+    # 0. AudioAnalysisService: detect actual audio mood to refine niche
+    if video_path and video_path.exists():
+        try:
+            import asyncio as _asyncio
+            from ..services.audio_analysis import get_audio_analysis_service
+            _aa = get_audio_analysis_service()
+            _loop = _asyncio.new_event_loop()
+            _audio_data = _loop.run_until_complete(_aa.analyze_audio(video_path, extract_music_info=False))
+            _loop.close()
+            _stats = _audio_data.get("statistics", {})
+            _mood = _stats.get("dominant_mood") or _stats.get("mood")
+            if _mood and isinstance(_mood, str):
+                niche = _mood
+                logger.info(f"[music] AudioAnalysis detected mood='{niche}' — using for BGM selection")
+        except Exception as _aa_e:
+            logger.debug(f"[music] AudioAnalysis mood detection skipped: {_aa_e}")
 
     # 1. Check local music folder (multiple candidate paths, bgm/ preferred to avoid SFX)
     for music_dir in [
@@ -152,7 +172,55 @@ def get_background_music_for_niche(niche: str = "general", config_obj=None) -> O
     if pixabay_track:
         return pixabay_track
 
-    # 3. Fallback: any cached track
+    # 2.5. BackgroundMusicService: Pixabay mood-search with adaptive volume metadata
+    try:
+        import asyncio as _asyncio2
+        from ..services.background_music_service import BackgroundMusicService as _BMS
+        _bms = _BMS()
+        _bms_loop = _asyncio2.new_event_loop()
+        _bms_tracks = _bms_loop.run_until_complete(_bms.search_music(mood=niche, duration=30))
+        _bms_loop.close()
+        if _bms_tracks:
+            _bms_track = _bms_tracks[0]
+            _bms_cache = Path(_cfg.temp_dir) / "bgm_service"
+            _bms_cache.mkdir(parents=True, exist_ok=True)
+            _bms_out = str(_bms_cache / f"{_bms_track.id}_{niche}.mp3")
+            _bms_ok = _bms.download_music(_bms_track, _bms_out)
+            if _bms_ok and Path(_bms_out).exists():
+                logger.info(f"[music] BackgroundMusicService track: {Path(_bms_out).name}")
+                return Path(_bms_out)
+    except Exception as _bms_e:
+        logger.debug(f"[music] BackgroundMusicService skipped: {_bms_e}")
+
+    # 3. Try Freesound API (mood-matched background music)
+    if os.environ.get("FREESOUND_API_KEY", "") and os.environ.get("FREESOUND_AUTO_MATCH", "true").lower() == "true":
+        try:
+            import asyncio as _asyncio
+            from ..services.freesound_service import FreesoundService as _FS
+            _fs_svc = _FS()
+            _fs_cache = Path(_cfg.temp_dir) / "freesound_bgm"
+            _fs_cache.mkdir(parents=True, exist_ok=True)
+            _cached = list(_fs_cache.glob("*.mp3")) + list(_fs_cache.glob("*.wav"))
+            if _cached:
+                chosen = _random.choice(_cached)
+                logger.info(f"[music] Freesound cache hit: {chosen.name}")
+                return chosen
+            # Async search — only works when called from async context
+            loop = _asyncio.get_event_loop()
+            if loop.is_running():
+                import concurrent.futures as _cf
+                _future = _asyncio.ensure_future(
+                    _fs_svc.search_music(mood=niche, duration_max=15.0, limit=3)
+                )
+                _results = loop.run_until_complete(_future) if not loop.is_running() else None
+                if _results:
+                    _track_path = _fs_cache / f"{_results[0].sound_id}.mp3"
+                    if _asyncio.get_event_loop().run_until_complete(_fs_svc.download(_results[0], _track_path)):
+                        return _track_path
+        except Exception as _fs_e:
+            logger.debug(f"[music] Freesound skipped: {_fs_e}")
+
+    # 4. Fallback: any cached track
     if _PIXABAY_MUSIC_CACHE.exists():
         any_tracks = list(_PIXABAY_MUSIC_CACHE.glob("*.mp3"))
         if any_tracks:
@@ -270,13 +338,13 @@ async def denoise_audio(
 def mix_background_music(
     video_path: Path,
     output_path: Path,
-    music_volume: float = 0.22,
+    music_volume: float = 0.50,  # 50% volumen base - audible como ambiente con ducking suave
     ducking_enabled: bool = True,
     music_path: Optional[Path] = None,
     word_timings: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """
-    Mix a background music track into a video at low volume (default 12%).
+    Mix a background music track into a video as ambient background.
     Uses ffmpeg for fast, high-quality audio mixing.
 
     If word_timings is provided and ducking_enabled=True, uses PREDICTIVE ducking
@@ -298,9 +366,9 @@ def mix_background_music(
             from ..services.audio_ducking_service import build_word_aware_ducking_filter
             _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
             if _ducking_mode == "predictive":
-                _voice_ratio      = float(os.environ.get("DUCKING_VOICE_RATIO", "0.45"))
-                _long_boost       = float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "2.0"))
-                _short_boost      = float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.2"))
+                _voice_ratio      = float(os.environ.get("DUCKING_VOICE_RATIO", "0.80"))
+                _long_boost       = float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "1.25"))
+                _short_boost      = float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.15"))
                 ducking_filter = build_word_aware_ducking_filter(
                     words=word_timings,
                     music_base_volume=music_volume,
@@ -317,7 +385,7 @@ def mix_background_music(
                 # Sidechain cuando se pide explicitamente
                 filter_complex = (
                     f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                    "[music_loop][0:a]sidechaincompress=threshold=0.015:ratio=6:attack=50:release=800[music_ducked];"
+                    "[music_loop][0:a]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"  # Muy suave - música ambiente audible
                     "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
                 )
                 logger.info("[DUCKING] Modo: SIDECHAIN (reactivo)")
@@ -325,7 +393,7 @@ def mix_background_music(
             # Fallback: sidechain cuando no hay word_timings
             filter_complex = (
                 f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                "[music_loop][0:a]sidechaincompress=threshold=0.015:ratio=6:attack=50:release=800[music_ducked];"
+                "[music_loop][0:a]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"  # Muy suave - música ambiente audible
                 "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
             )
             logger.info("[DUCKING] Modo: SIDECHAIN fallback (sin word_timings)")

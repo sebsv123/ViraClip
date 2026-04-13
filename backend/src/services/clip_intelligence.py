@@ -62,10 +62,10 @@ _LUT_FALLBACK = "teal_orange"
 _MOOD_CAPTIONS: Dict[str, List[str]] = {
     "energetic":     ["tiktok", "highlight", "neon", "tiktok"],
     "dramatic":      ["highlight", "neon", "tiktok", "highlight"],
-    "warm":          ["karaoke", "tiktok", "minimal", "karaoke"],
-    "chill":         ["minimal", "karaoke", "tiktok", "minimal"],
-    "educational":   ["minimal", "karaoke", "minimal", "tiktok"],
-    "inspirational": ["tiktok", "karaoke", "minimal", "tiktok"],
+    "warm":          ["karaoke", "tiktok", "karaoke", "tiktok"],
+    "chill":         ["tiktok", "karaoke", "tiktok", "karaoke"],
+    "educational":   ["tiktok", "karaoke", "highlight", "tiktok"],
+    "inspirational": ["tiktok", "karaoke", "highlight", "tiktok"],
 }
 
 # ── Mood → BGM category ───────────────────────────────────────────────────────
@@ -93,9 +93,9 @@ _MOOD_BROLL_INTERVAL: Dict[str, float] = {
 # ── Template explicit overrides ───────────────────────────────────────────────
 
 _TEMPLATE_CAPTION: Dict[str, str] = {
-    "tutorial":   "minimal",
-    "interview":  "minimal",
-    "education":  "minimal",
+    "tutorial":   "tiktok",
+    "interview":  "karaoke",
+    "education":  "tiktok",
     "neon":       "neon",
     "highlight":  "highlight",
     "karaoke":    "karaoke",

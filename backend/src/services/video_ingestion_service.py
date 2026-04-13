@@ -60,6 +60,21 @@ def detect_platform(url: str) -> str:
     return "unknown"
 
 
+def _ytdlp_bin() -> str:
+    """Resolve yt-dlp binary: venv first, then PATH, then python -m fallback."""
+    import shutil
+    # 1. venv binary (always present after Dockerfile install)
+    venv_bin = Path("/app/.venv/bin/yt-dlp")
+    if venv_bin.exists():
+        return str(venv_bin)
+    # 2. System PATH
+    which = shutil.which("yt-dlp")
+    if which:
+        return which
+    # 3. python -m yt_dlp (module-only install)
+    return "python3 -m yt_dlp"  # subprocess.exec splits on space, handled below
+
+
 def _build_ytdlp_opts(
     output_dir: str,
     max_height: int = 1080,
@@ -68,8 +83,9 @@ def _build_ytdlp_opts(
 ) -> List[str]:
     """Build yt-dlp CLI arguments."""
     template = str(Path(output_dir) / "%(id)s.%(ext)s")
-    args = [
-        "yt-dlp",
+    _bin = _ytdlp_bin()
+    _bin_parts = _bin.split() if " " in _bin else [_bin]
+    args = _bin_parts + [
         "--no-playlist",
         "--no-warnings",
         "--quiet",
@@ -203,12 +219,21 @@ async def ingest_multiple(
 def is_ytdlp_available() -> bool:
     """Check whether yt-dlp is installed and callable."""
     import shutil
-    return shutil.which("yt-dlp") is not None
+    if Path("/app/.venv/bin/yt-dlp").exists():
+        return True
+    if shutil.which("yt-dlp"):
+        return True
+    try:
+        import yt_dlp  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 async def get_video_info(url: str) -> Dict[str, Any]:
     """Fetch metadata for a URL without downloading (yt-dlp --dump-json)."""
-    cmd = ["yt-dlp", "--no-playlist", "--dump-json", "--quiet", url]
+    _bin = _ytdlp_bin()
+    cmd = _bin.split() + ["--no-playlist", "--dump-json", "--quiet", url]
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE

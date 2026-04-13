@@ -156,6 +156,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     # NEW: Scene detection
     use_scene_detection = bool(data.get("use_scene_detection", True))
     
+    # NEW: Force fresh - skip cache for testing improvements
+    force_fresh = bool(data.get("force_fresh", False))
+    
     # NEW: Viral template (overrides individual settings if provided)
     viral_template = data.get("viral_template")
     if viral_template:
@@ -212,6 +215,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             auto_center_face=auto_center_face,
             eye_contact_correction=eye_contact_correction,
             split_screen=split_screen,
+            force_fresh=force_fresh,
         )
 
         # Get source type for worker
@@ -259,6 +263,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             dramatic_slowmo=dramatic_slowmo,
             speed_ramp_enabled=speed_ramp_enabled,
             use_scene_detection=use_scene_detection,
+            force_fresh=force_fresh,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
@@ -273,6 +278,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     "source_type": source_type,
                     "output_format": output_format,
                     "add_subtitles": add_subtitles,
+                    "force_fresh": force_fresh,
                 }),
                 ex=60 * 60 * 24 * 7,
             )

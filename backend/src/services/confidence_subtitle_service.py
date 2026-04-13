@@ -48,8 +48,20 @@ class ConfidenceSubtitleGenerator:
     Inverted logic: low confidence = visually highlighted
     """
     
-    def __init__(self, model_size: str = "large-v3", device: str = "cuda"):
+    def __init__(self, model_size: str = "large-v3", device: str = "auto"):
         self.model_size = model_size
+        # Resolve device: "auto" → detect; "cuda" → validate CUDA available first
+        if device in ("auto", "cuda"):
+            import os as _os
+            _env_dev = _os.environ.get("WHISPER_DEVICE", "cpu").lower()
+            if _env_dev == "cuda":
+                try:
+                    import torch as _torch
+                    device = "cuda" if _torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    device = "cpu"
+            else:
+                device = _env_dev if _env_dev in ("cpu", "cuda") else "cpu"
         self.device = device
         self.model = None
         

@@ -411,6 +411,37 @@ class CompetitorAnalysisService:
         return "\n".join(lines)
 
 
+    # ── Category-aware gap analysis ───────────────────────────────────────────
+
+    # Features competitors excel at per content category
+    _CATEGORY_FOCUS: Dict[str, List[str]] = {
+        "fitness":       ["auto_editing", "pattern_recognition"],
+        "finance":       ["engagement_prediction", "hook_detection"],
+        "comedy":        ["pattern_recognition", "trend_analysis"],
+        "education":     ["hook_detection", "engagement_prediction"],
+        "motivational":  ["auto_editing", "hook_detection"],
+        "default":       ["hook_detection", "auto_editing"],
+    }
+
+    def get_feature_gaps_for_category(self, category: str) -> List[str]:
+        """
+        Return features where competitors outperform us for a given category.
+        Used by EditorialBrain to apply compensating enhancements.
+        """
+        focus_features = self._CATEGORY_FOCUS.get(category, self._CATEGORY_FOCUS["default"])
+        gaps = []
+        for feature in focus_features:
+            our_score = self.OUR_FEATURES.get(feature, 50)
+            competitor_max = max(
+                (data["virality_features"].get(feature, 0)
+                 for data in self.COMPETITOR_DATA.values()),
+                default=0
+            )
+            if competitor_max > our_score:
+                gaps.append(f"{feature} (us={our_score} vs best={competitor_max})")
+        return gaps
+
+
 # Global instance
 _competitor_service: Optional[CompetitorAnalysisService] = None
 

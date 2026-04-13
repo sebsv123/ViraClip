@@ -15,20 +15,24 @@ class VideoPolishService:
     """Service for advanced video processing — MediaPipe-powered face tracking."""
 
     def __init__(self):
-        self.face_cascade = None   # kept for Haar fallback only
-        self.eye_cascade = None
-        self.gaze_model = None
+        self.face_cascade        = None   # frontal face
+        self.face_profile_casc   = None   # side/profile face
+        self.eye_cascade         = None   # standard eyes
+        self.eye_glasses_casc    = None   # eyes with glasses
+        self.gaze_model          = None
 
     def _load_cascades(self):
-        if self.face_cascade is None:
-            face_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-            eye_path  = cv2.data.haarcascades + "haarcascade_eye.xml"
-            self.face_cascade = cv2.CascadeClassifier(face_path)
-            self.eye_cascade  = cv2.CascadeClassifier(eye_path)
-            if self.face_cascade.empty():
-                self.face_cascade = None
-            if self.eye_cascade.empty():
-                self.eye_cascade = None
+        if self.face_cascade is not None:
+            return
+        d = cv2.data.haarcascades
+        def _load(name):
+            c = cv2.CascadeClassifier(d + name)
+            return None if c.empty() else c
+        self.face_cascade      = _load("haarcascade_frontalface_default.xml")
+        self.face_profile_casc = _load("haarcascade_profileface.xml")
+        self.eye_cascade       = _load("haarcascade_eye.xml")
+        # haarcascade_eye_tree_eyeglasses detects eyes WITH glasses much better
+        self.eye_glasses_casc  = _load("haarcascade_eye_tree_eyeglasses.xml")
 
     # ── FaceMesh landmark helpers ────────────────────────────────────────────
 
@@ -101,7 +105,10 @@ class VideoPolishService:
 
         try:
             import mediapipe as mp  # noqa: F401
-            _use_mediapipe = True
+            # MediaPipe 0.10+ removed mp.solutions — check before enabling
+            _use_mediapipe = hasattr(mp, "solutions") and hasattr(mp.solutions, "face_mesh")
+            if not _use_mediapipe:
+                logger.warning("MediaPipe installed but mp.solutions unavailable (v0.10+) — using Haar cascade")
         except ImportError:
             logger.warning("MediaPipe not installed — falling back to Haar cascade crop")
             _use_mediapipe = False
@@ -291,218 +298,260 @@ class VideoPolishService:
 
     async def apply_eye_contact_correction(self, input_path: Path, output_path: Path):
         """
-        Applies subtle gaze correction so the speaker appears to look at camera.
+        Gaze correction using OpenCV only (no MediaPipe required).
 
         Algorithm:
-        1. Read video frame-by-frame with OpenCV.
-        2. Use MediaPipe FaceMesh (refine_landmarks=True) to get iris centers.
-           Landmark 468 = left iris center, 473 = right iris center.
-           Eye corners give us the "ideal" look-at-camera iris position.
-        3. For each detected iris, apply a local circular warp using cv2.remap
-           that nudges the iris toward the eye center by CORRECTION_FACTOR (≈35%).
-        4. Audio is copied separately with ffmpeg (cv2.VideoWriter has no audio).
+        1. Detect face + eye regions with Haar cascades.
+        2. Within each eye ROI: detect iris/pupil center with HoughCircles on the
+           grayscale ROI — works even with glasses (finds dark circular pupil).
+        3. Compute target = center of the eye bounding box (= camera-aligned position).
+        4. Apply a local rubber-sheet warp (cv2.remap) to nudge iris toward target.
+        5. Glasses glare reduction: in each eye ROI, detect bright specular highlights
+           (top 1% luminance) and blend them down with the surrounding skin tone.
+        6. Audio merged back via FFmpeg.
 
-        Falls back to pass-through if MediaPipe is unavailable or fails.
+        Falls back to pass-through if face detection fails entirely.
         """
-        logger.info(f"👁 Applying MediaPipe eye contact correction to {input_path}")
+        logger.info(f"👁 Applying OpenCV gaze correction to {input_path.name}")
 
-        # Correction strength: 0.0 = no change, 1.0 = full center alignment.
-        # 0.35 is subtle enough to look natural, strong enough to be noticeable.
-        CORRECTION_FACTOR = 0.35
-        # Iris warp radius in pixels (relative to frame height, scaled later)
-        IRIS_RADIUS_FRAC = 0.018
-        # Process every Nth frame for speed; interpolate between processed frames
-        PROCESS_EVERY_N = 2
+        CORRECTION_FACTOR = 0.30   # 0=no change, 1=full center; 0.30 = subtle
+        IRIS_RADIUS_FRAC  = 0.020  # iris warp radius as fraction of frame height
+        PROCESS_EVERY_N   = 3      # run detection every N frames, interpolate rest
+        GLARE_PERCENTILE  = 99     # luminance threshold for glare detection
 
         try:
-            import mediapipe as mp
             import shutil
-
-            mp_face_mesh = mp.solutions.face_mesh  # type: ignore[attr-defined]
-
-            # MediaPipe FaceMesh iris landmark indices (refined model)
-            # 468=left iris center, 469-472=left iris ring
-            # 473=right iris center, 474-477=right iris ring
-            # Eye corners: 33=left inner, 133=left outer, 362=right inner, 263=right outer
-            # Upper/lower lid midpoints:  159=left upper, 145=left lower, 386=right upper, 374=right lower
-            L_IRIS = 468
-            R_IRIS = 473
-            L_EYE_INNER, L_EYE_OUTER = 133, 33
-            R_EYE_INNER, R_EYE_OUTER = 362, 263
-            L_EYE_TOP, L_EYE_BOT = 159, 145
-            R_EYE_TOP, R_EYE_BOT = 386, 374
+            self._load_cascades()
+            if self.face_cascade is None:
+                raise RuntimeError("Haar cascades unavailable")
 
             cap = cv2.VideoCapture(str(input_path))
             if not cap.isOpened():
-                raise RuntimeError(f"cv2.VideoCapture failed: {input_path}")
+                raise RuntimeError(f"VideoCapture failed: {input_path}")
 
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            fps    = cap.get(cv2.CAP_PROP_FPS) or 30.0
+            width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            # Iris warp radius in pixels
             iris_radius = max(10, int(height * IRIS_RADIUS_FRAC))
 
-            # Temp file for silent corrected video
             tmp_video = output_path.parent / f"_ecc_tmp_{output_path.stem}.mp4"
-
-            # cv2.VideoWriter_fourcc (NOT VideoWriter.fourcc) is the correct API in OpenCV 4.x
             fourcc = cv2.VideoWriter_fourcc(*"mp4v")
             writer = cv2.VideoWriter(str(tmp_video), fourcc, fps, (width, height))
 
-            def _warp_iris(
-                frame: np.ndarray,
-                cx: float, cy: float,  # current iris center (float px)
-                tx: float, ty: float,  # target iris center (float px)
-                radius: int,
-            ) -> np.ndarray:
-                """
-                Local rubber-sheet warp: pixels within `radius` of the iris
-                center are shifted by the correction vector using cv2.remap.
-                Pixels outside the radius are unchanged (smooth blend at edge).
-                """
+            # ── helpers ────────────────────────────────────────────────────────
+
+            def _warp_iris(frame, cx, cy, tx, ty, radius, strength=1.0):
+                """Rubber-sheet local warp: nudge iris toward target.
+                `strength` scales the correction (0=none, 1=full CORRECTION_FACTOR)."""
+                if strength <= 0.01:
+                    return frame
                 h, w = frame.shape[:2]
-                # Build identity maps
                 map_x = np.tile(np.arange(w, dtype=np.float32), (h, 1))
                 map_y = np.repeat(np.arange(h, dtype=np.float32)[:, None], w, axis=1)
-
-                dx = tx - cx  # correction offset
-                dy = ty - cy
-
-                # Region of interest: only update pixels within radius
-                x0 = max(0, int(cx) - radius)
-                x1 = min(w, int(cx) + radius + 1)
-                y0 = max(0, int(cy) - radius)
-                y1 = min(h, int(cy) + radius + 1)
-
-                # Pixel coords in the patch
+                dx = (tx - cx) * strength
+                dy = (ty - cy) * strength
+                x0, x1 = max(0, int(cx)-radius), min(w, int(cx)+radius+1)
+                y0, y1 = max(0, int(cy)-radius), min(h, int(cy)+radius+1)
                 xs = np.arange(x0, x1, dtype=np.float32)
                 ys = np.arange(y0, y1, dtype=np.float32)
                 gx, gy = np.meshgrid(xs, ys)
-
-                # Distance from iris center
-                dist = np.sqrt((gx - cx) ** 2 + (gy - cy) ** 2)
-                # Smooth blend weight: 1 at center → 0 at edge
+                dist = np.sqrt((gx - cx)**2 + (gy - cy)**2)
                 weight = np.clip(1.0 - dist / radius, 0, 1)
-
                 map_x[y0:y1, x0:x1] -= dx * weight
                 map_y[y0:y1, x0:x1] -= dy * weight
-
                 return cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR,
                                  borderMode=cv2.BORDER_REPLICATE)
 
-            def _landmark_px(lm, w, h):
-                return lm.x * w, lm.y * h
+            def _reduce_glare(frame, ex, ey, ew, eh):
+                """Reduce specular glare (glasses lens reflections) using local blending."""
+                if ew <= 0 or eh <= 0:
+                    return frame
+                roi = frame[ey:ey+eh, ex:ex+ew].copy()
+                gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+                thresh = np.percentile(gray_roi, GLARE_PERCENTILE)
+                if thresh >= 250:   # whole area is bright — skip to avoid over-processing
+                    return frame
+                glare_mask = (gray_roi > thresh).astype(np.uint8) * 255
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+                glare_mask = cv2.dilate(glare_mask, kernel, iterations=1)
+                if glare_mask.sum() == 0:
+                    return frame
+                blurred = cv2.GaussianBlur(roi, (15, 15), 0)
+                mask_3c = cv2.cvtColor(glare_mask, cv2.COLOR_GRAY2BGR).astype(np.float32) / 255.0
+                roi_out = (roi.astype(np.float32) * (1 - mask_3c * 0.55) +
+                           blurred.astype(np.float32) * (mask_3c * 0.55)).astype(np.uint8)
+                result = frame.copy()
+                result[ey:ey+eh, ex:ex+ew] = roi_out
+                return result
 
-            processed_count = 0
-            skipped_count = 0
-            frame_idx = 0
-            prev_correction: list = []  # reuse last known correction
+            def _detect_iris_hough(eye_roi_gray):
+                """Detect iris/pupil center using HoughCircles — works with glasses."""
+                h, w = eye_roi_gray.shape
+                blurred = cv2.GaussianBlur(eye_roi_gray, (7, 7), 1.5)
+                min_r = max(3, w // 8)
+                max_r = max(min_r + 2, w // 3)
+                circles = cv2.HoughCircles(
+                    blurred, cv2.HOUGH_GRADIENT, dp=1,
+                    minDist=w // 2,
+                    param1=50, param2=15,
+                    minRadius=min_r, maxRadius=max_r,
+                )
+                if circles is not None:
+                    c = circles[0][0]
+                    return float(c[0]), float(c[1])
+                # Fallback: darkest region centroid (pupil is darkest even through glass)
+                _, thresh = cv2.threshold(blurred, 0, 255,
+                                          cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+                M = cv2.moments(thresh)
+                if M["m00"] > 0:
+                    return M["m10"] / M["m00"], M["m01"] / M["m00"]
+                return float(w // 2), float(h // 2)
 
-            with mp_face_mesh.FaceMesh(
-                static_image_mode=False,
-                max_num_faces=1,
-                refine_landmarks=True,  # needed for iris landmarks (468+)
-                min_detection_confidence=0.5,
-                min_tracking_confidence=0.5,
-            ) as face_mesh:
+            def _detect_face_and_eyes(gray):
+                """
+                Detect face + eyes, returning a list of corrections and a frontality score.
 
-                while True:
-                    ret, frame = cap.read()
-                    if not ret:
-                        break
+                Frontality score (0.0–1.0):
+                  - Estimated from face aspect ratio (w/h): a fully frontal face
+                    has w/h ≈ 0.75–0.85. Very narrow = profile = low frontality.
+                  - Profile cascade hit with no frontal hit → frontality = 0 (no correction).
+                  - Score is used to scale CORRECTION_FACTOR so side-facing frames
+                    get little or no gaze correction (would look unnatural).
 
-                    frame_idx += 1
-                    corrected = frame
+                Eye cascade priority:
+                  1. haarcascade_eye_tree_eyeglasses (glasses-aware, if available)
+                  2. haarcascade_eye (standard)
+                """
+                corrections = []
 
-                    # Only run MediaPipe on every Nth frame for speed
-                    run_mp = (frame_idx % PROCESS_EVERY_N == 0)
+                # 1. Try frontal detection
+                faces_frontal = self.face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60)
+                ) if self.face_cascade else []
 
-                    if run_mp:
-                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        results = face_mesh.process(rgb)
+                # 2. Try profile if no frontal hit
+                faces_profile = []
+                if len(faces_frontal) == 0 and self.face_profile_casc:
+                    faces_profile = self.face_profile_casc.detectMultiScale(
+                        gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50)
+                    )
+                    # Mirror image and try again (profile cascade is one-directional)
+                    if len(faces_profile) == 0:
+                        faces_profile = self.face_profile_casc.detectMultiScale(
+                            cv2.flip(gray, 1), scaleFactor=1.1, minNeighbors=4, minSize=(50, 50)
+                        )
 
-                        corrections = []
-                        if results.multi_face_landmarks:
-                            lms = results.multi_face_landmarks[0].landmark
+                is_profile = len(faces_frontal) == 0 and len(faces_profile) > 0
+                all_faces  = list(faces_frontal) if len(faces_frontal) > 0 else list(faces_profile)
 
-                            for iris_idx, inner_idx, outer_idx, top_idx, bot_idx in [
-                                (L_IRIS, L_EYE_INNER, L_EYE_OUTER, L_EYE_TOP, L_EYE_BOT),
-                                (R_IRIS, R_EYE_INNER, R_EYE_OUTER, R_EYE_TOP, R_EYE_BOT),
-                            ]:
-                                if iris_idx >= len(lms):
-                                    continue
-                                ix, iy = _landmark_px(lms[iris_idx], width, height)
-                                # Eye bounding box center = "camera-aligned" target
-                                ex_l, _ = _landmark_px(lms[inner_idx], width, height)
-                                ex_r, _ = _landmark_px(lms[outer_idx], width, height)
-                                _, ey_t = _landmark_px(lms[top_idx], width, height)
-                                _, ey_b = _landmark_px(lms[bot_idx], width, height)
-                                eye_cx = (ex_l + ex_r) / 2
-                                eye_cy = (ey_t + ey_b) / 2
-                                # Target = partial move toward eye center
-                                tx = ix + (eye_cx - ix) * CORRECTION_FACTOR
-                                ty = iy + (eye_cy - iy) * CORRECTION_FACTOR
-                                corrections.append((ix, iy, tx, ty))
+                if len(all_faces) == 0:
+                    return corrections, 0.0
 
-                        prev_correction = corrections
+                fx, fy, fw, fh = max(all_faces, key=lambda r: r[2]*r[3])
 
-                    # Apply last known correction
-                    for (ix, iy, tx, ty) in prev_correction:
-                        corrected = _warp_iris(corrected, ix, iy, tx, ty, iris_radius)
+                # Frontality score: ratio of face width to height
+                # Frontal ≈ 0.75–0.90 aspect; profile ≈ 0.4–0.6
+                aspect = fw / max(fh, 1)
+                if is_profile:
+                    frontality = 0.0   # side view — no correction
+                else:
+                    # Linearly map aspect 0.55→0.0 .. 0.80→1.0
+                    frontality = float(np.clip((aspect - 0.55) / (0.80 - 0.55), 0.0, 1.0))
 
-                    writer.write(corrected)
-                    processed_count += 1
+                if frontality < 0.05:
+                    return corrections, frontality  # too side-on, skip
+
+                face_gray = gray[fy:fy+fh, fx:fx+fw]
+                upper_h   = int(fh * 0.60)  # eyes are in upper 60% of face
+
+                # Choose best eye cascade (glasses-aware preferred)
+                eye_casc = self.eye_glasses_casc or self.eye_cascade
+                if eye_casc is None:
+                    return corrections, frontality
+
+                eyes = eye_casc.detectMultiScale(
+                    face_gray[:upper_h], scaleFactor=1.1,
+                    minNeighbors=3, minSize=(18, 18)
+                )
+                # If glasses cascade found nothing, try standard cascade as backup
+                if len(eyes) == 0 and self.eye_glasses_casc and self.eye_cascade:
+                    eyes = self.eye_cascade.detectMultiScale(
+                        face_gray[:upper_h], scaleFactor=1.1,
+                        minNeighbors=3, minSize=(18, 18)
+                    )
+
+                for (ex, ey, ew, eh) in eyes[:2]:
+                    abs_ex, abs_ey = fx + ex, fy + ey
+                    eye_cx = abs_ex + ew / 2.0
+                    eye_cy = abs_ey + eh / 2.0
+                    eye_roi = gray[abs_ey:abs_ey+eh, abs_ex:abs_ex+ew]
+                    if eye_roi.size == 0:
+                        continue
+                    lx, ly = _detect_iris_hough(eye_roi)
+                    ix, iy = abs_ex + lx, abs_ey + ly
+                    tx = ix + (eye_cx - ix) * CORRECTION_FACTOR
+                    ty = iy + (eye_cy - iy) * CORRECTION_FACTOR
+                    corrections.append((ix, iy, tx, ty, abs_ex, abs_ey, ew, eh))
+
+                return corrections, frontality
+
+            # ── main processing loop ───────────────────────────────────────────
+            frame_idx        = 0
+            prev_corrections: list = []
+            prev_frontality  = 1.0
+            processed_count  = 0
+
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                frame_idx += 1
+                corrected = frame.copy()
+
+                if frame_idx % PROCESS_EVERY_N == 0:
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.equalizeHist(gray)
+                    prev_corrections, prev_frontality = _detect_face_and_eyes(gray)
+
+                # Scale correction by frontality: side-facing → less/no correction
+                for (ix, iy, tx, ty, abs_ex, abs_ey, ew, eh) in prev_corrections:
+                    corrected = _reduce_glare(corrected, abs_ex, abs_ey, ew, eh)
+                    corrected = _warp_iris(corrected, ix, iy, tx, ty,
+                                           iris_radius, strength=prev_frontality)
+
+                writer.write(corrected)
+                processed_count += 1
 
             cap.release()
             writer.release()
+            logger.info(f"👁 Gaze correction: {processed_count} frames processed")
 
-            logger.info(
-                f"👁 Eye contact: processed {processed_count} frames "
-                f"(MediaPipe ran on every {PROCESS_EVERY_N} frames)"
-            )
-
-            # Merge audio from original back into corrected video
+            # Merge original audio back
             ffmpeg_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(tmp_video),
                 "-i", str(input_path),
-                "-c:v", "copy",
-                "-c:a", "aac",
-                "-map", "0:v:0",
-                "-map", "1:a:0?",  # ? = optional, skip if no audio
-                "-shortest",
-                str(output_path),
+                "-c:v", "copy", "-c:a", "aac",
+                "-map", "0:v:0", "-map", "1:a:0?",
+                "-shortest", str(output_path),
             ]
-            result = subprocess.run(
-                ffmpeg_cmd, capture_output=True, text=True, timeout=600
-            )
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
-                # Audio merge failed — use silent corrected video as fallback
-                logger.warning(f"Audio merge failed: {result.stderr[:200]} — using silent output")
-                import shutil
+                logger.warning(f"Audio merge failed — using silent output")
                 shutil.copy(tmp_video, output_path)
-
-            # Clean up temp file
             try:
                 tmp_video.unlink()
-            except Exception as e:
-                logger.warning(f"[POLISH] Failed to delete temp file {tmp_video}: {e}")
+            except Exception:
+                pass
+            logger.info(f"✅ Gaze correction done: {output_path.name}")
 
-            logger.info(f"✅ Eye contact correction done: {output_path}")
-
-        except ImportError:
-            logger.warning("MediaPipe not installed — eye contact correction skipped (pass-through)")
-            import shutil
-            shutil.copy(input_path, output_path)
         except Exception as e:
-            logger.error(f"❌ Eye contact correction failed: {e} — falling back to pass-through")
+            logger.error(f"❌ Gaze correction failed: {e} — pass-through")
             import shutil
             try:
                 shutil.copy(input_path, output_path)
-            except Exception as e:
-                logger.error(f"[POLISH] Fallback copy failed {input_path} → {output_path}: {e}", exc_info=True)
+            except Exception as ce:
+                logger.error(f"Pass-through copy failed: {ce}", exc_info=True)
 
     async def apply_pattern_interrupts(self, input_path: Path, output_path: Path, viral_cues: list) -> bool:
         """

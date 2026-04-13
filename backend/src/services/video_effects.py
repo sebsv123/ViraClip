@@ -132,7 +132,7 @@ async def overlay_broll_clips(
 
     # Build (timestamp, path, duration) tuples for the compositor
     compositor_pairs = [
-        (round(event.t, 3), asset.path, round(max(1.0, event.duration + 1.0), 3))
+        (round(event.t, 3), asset.path, round(max(3.5, event.duration + 2.0), 3))
         for event, asset in pairs
     ]
 
@@ -140,6 +140,6 @@ async def overlay_broll_clips(
         main_path=clip_path,
         broll_pairs=compositor_pairs,
         output_path=output_path,
-        fade=0.3,
+        fade=0.6,
     )
     return output_path if ok else None

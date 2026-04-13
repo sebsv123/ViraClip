@@ -270,18 +270,23 @@ class OnnxInferenceService:
     def _load_sessions(self) -> None:
         try:
             import onnxruntime as ort
+            try:
+                from gpu_utils import onnx_providers
+                providers = onnx_providers()
+            except ImportError:
+                providers = ["CPUExecutionProvider"]
 
             if VIRAL_SCORER_ONNX.exists():
                 self._viral_session = ort.InferenceSession(
                     str(VIRAL_SCORER_ONNX),
-                    providers=["CPUExecutionProvider"],
+                    providers=providers,
                 )
-                logger.info(f"[onnx] viral_scorer loaded")
+                logger.info(f"[onnx] viral_scorer loaded with {providers[0]}")
 
             if ENGAGEMENT_ONNX.exists():
                 self._engagement_session = ort.InferenceSession(
                     str(ENGAGEMENT_ONNX),
-                    providers=["CPUExecutionProvider"],
+                    providers=providers,
                 )
                 # Load scaler
                 try:

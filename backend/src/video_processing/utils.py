@@ -62,14 +62,19 @@ def get_safe_vertical_position(video_height: int, position: str = "bottom") -> i
     return int(video_height * 0.5)
 
 
-def parse_timestamp_to_seconds(timestamp: str) -> float:
-    """Parse MM:SS or HH:MM:SS timestamp to seconds."""
-    parts = timestamp.split(":")
+def parse_timestamp_to_seconds(timestamp) -> float:
+    """Parse MM:SS or HH:MM:SS timestamp to seconds. Accepts float/int directly."""
+    if isinstance(timestamp, (int, float)):
+        return float(timestamp)
+    parts = str(timestamp).split(":")
     if len(parts) == 2:
         return int(parts[0]) * 60 + float(parts[1])
     elif len(parts) == 3:
         return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-    return 0.0
+    try:
+        return float(parts[0])
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def adaptive_word_groups(words: List[Dict], max_group_size: int = 3, max_gap: float = 0.5) -> List[List[Dict]]:
@@ -128,8 +133,8 @@ def get_safe_vertical_position(
     return max(min_top_padding, min(desired_y, max_y))
 
 
-def parse_timestamp_to_seconds(timestamp_str: str) -> float:
-    """Parse timestamp string to seconds.
+def parse_timestamp_to_seconds(timestamp_str) -> float:  # type: ignore[misc]
+    """Parse timestamp string to seconds. Accepts float/int directly.
     
     Supports formats:
     - MM:SS
@@ -137,7 +142,9 @@ def parse_timestamp_to_seconds(timestamp_str: str) -> float:
     - SS (plain seconds)
     """
     try:
-        timestamp_str = timestamp_str.strip()
+        if isinstance(timestamp_str, (int, float)):
+            return float(timestamp_str)
+        timestamp_str = str(timestamp_str).strip()
         parts = timestamp_str.split(":")
         
         if len(parts) == 1:

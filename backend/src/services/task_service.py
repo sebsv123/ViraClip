@@ -169,6 +169,7 @@ class TaskService:
         split_screen: bool = False,
         url_secondary: Optional[str] = None,
         batch_id: Optional[str] = None,          # P3.4: batch group identifier
+        force_fresh: bool = False,              # Force reprocessing for testing
     ) -> str:
         """
         Create a new task with associated source.
@@ -290,18 +291,25 @@ class TaskService:
         dramatic_slowmo: bool = False,
         speed_ramp_enabled: bool = True,
         use_scene_detection: bool = True,
+        force_fresh: bool = False,
     ) -> Dict[str, Any]:
         """
         Process a task: download video, analyze, create clips.
         Returns processing results.
         """
         try:
-            logger.info(f"Starting processing for task {task_id}")
+            logger.info(f"Starting processing for task {task_id} (force_fresh={force_fresh})")
             started_at = datetime.now(timezone.utc)
             stage_timings: Dict[str, float] = {}
             cache_key = self._build_cache_key(url, source_type, processing_mode)
 
-            cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
+            # FORCE FRESH: Delete cache entry if forcing reprocessing
+            if force_fresh:
+                await self.cache_repo.delete_cache(self.db, cache_key)
+                logger.info(f"🔄 Force fresh: cache invalidated for {cache_key}")
+                cache_entry = None
+            else:
+                cache_entry = await self.cache_repo.get_cache(self.db, cache_key)
             
             # CACHE GUARD: Verify source video exists before using cache
             # Prevents desync when video was cleaned but cache still valid
@@ -882,6 +890,19 @@ class TaskService:
                 )
                 await self.db.commit()
                 clip_ids.append(clip_id)
+
+                # Auto-copy clip to unified exports folder for local sync
+                try:
+                    import shutil as _shutil
+                    _exports_dir = Path("/app/exports/clips")
+                    _exports_dir.mkdir(parents=True, exist_ok=True)
+                    _src = Path(clip_info["path"])
+                    if _src.exists():
+                        _dst = _exports_dir / _src.name
+                        _shutil.copy2(_src, _dst)
+                        logger.info(f"  ✓ Copied clip to exports: {_src.name}")
+                except Exception as _cp_e:
+                    logger.warning(f"  exports copy failed: {_cp_e}")
 
                 # Notify frontend via SSE immediately
                 if clip_ready_callback:

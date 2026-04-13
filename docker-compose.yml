@@ -68,7 +68,7 @@ services:
       - ./backend/tests:/app/tests
       - ./backend/scripts:/app/scripts
       - uploads:/app/temp/uploads
-      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -97,9 +97,9 @@ services:
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
@@ -132,6 +132,8 @@ services:
       - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
       - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
+      - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
+      - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
       - ADMIN_SECRET=${ADMIN_SECRET:-change_me_admin_secret}
       - ADMIN_ENABLED=${ADMIN_ENABLED:-false}
@@ -218,6 +220,13 @@ services:
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
     depends_on:
       postgres:
@@ -242,7 +251,7 @@ services:
     volumes:
       - ./backend/src:/app/src
       - uploads:/app/temp/uploads
-      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -272,14 +281,14 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=${RENDER_CONCURRENCY:-1}
+      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -299,7 +308,80 @@ services:
       - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
       - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
+      - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
+      - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
+      - COMFYUI_PORT=${COMFYUI_PORT:-8188}
+      - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
+      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - T2V_MODEL=${T2V_MODEL:-cogvideox}
+      - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
+      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
+      - T2V_CACHE_DIR=${T2V_CACHE_DIR:-/app/models/t2v}
+      - RVC_ENABLED=${RVC_ENABLED:-false}
+      - RVC_MODEL_PATH=${RVC_MODEL_PATH:-/app/models/rvc/model.pth}
+      - ESRGAN_ENABLED=${ESRGAN_ENABLED:-false}
+      - ESRGAN_SCALE=${ESRGAN_SCALE:-2}
+      - UPSCALING_MODEL=${UPSCALING_MODEL:-realesrgan-x2}
+      - UPSCALING_MODELS_DIR=${UPSCALING_MODELS_DIR:-/app/models/esrgan}
+      - TTS_NARRATION_ENABLED=${TTS_NARRATION_ENABLED:-false}
+      - TTS_MODEL=${TTS_MODEL:-xtts-v2}
+      - TTS_LANGUAGE=${TTS_LANGUAGE:-en}
+      - TTS_SNR_THRESHOLD_DB=${TTS_SNR_THRESHOLD_DB:-15.0}
+      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
+      - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
+      - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
+      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
+      # ── Silence / Speed-ramp ─────────────────────────────────────────
+      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
+      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
+      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
+      # ── EditingPipeline tuning ────────────────────────────────────────
+      - EP_SATURATION=${EP_SATURATION:-1.25}
+      - EP_CONTRAST=${EP_CONTRAST:-1.10}
+      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
+      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
+      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
+      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
+      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
+      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
+      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
+      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
+      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
+      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
+      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
+      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
+      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
+      # ── EditingPipeline — new effects ─────────────────────────────────────────
+      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
+      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
+      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
+      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
+      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
+      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
+      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
+      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_FADE_ON=${EP_FADE_ON:-true}
+      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
+      - EP_CTA_ON=${EP_CTA_ON:-false}
+      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
+      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
+      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
+      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
+      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
+      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
+      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
+      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
+      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
+      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
+      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
+      # ── Hook slow-motion ─────────────────────────────────────────────
+      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
+      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
+      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
@@ -381,6 +463,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 
   worker-2:
@@ -390,7 +479,7 @@ services:
     volumes:
       - ./backend/src:/app/src
       - uploads:/app/temp/uploads
-      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -420,14 +509,14 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=${RENDER_CONCURRENCY:-1}
+      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -446,7 +535,9 @@ services:
       - SCENE_DETECTION_ENABLED=${SCENE_DETECTION_ENABLED:-true}
       - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
       - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
-      - BROLL_ENABLED=${BROLL_ENABLED:-false}
+      - BROLL_ENABLED=${BROLL_ENABLED:-true}
+      - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
+      - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
@@ -529,6 +620,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 
   worker-3:
@@ -538,7 +636,7 @@ services:
     volumes:
       - ./backend/src:/app/src
       - uploads:/app/temp/uploads
-      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -568,14 +666,14 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-int8}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=${RENDER_CONCURRENCY:-1}
+      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -594,7 +692,7 @@ services:
       - SCENE_DETECTION_ENABLED=${SCENE_DETECTION_ENABLED:-true}
       - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
       - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
-      - BROLL_ENABLED=${BROLL_ENABLED:-false}
+      - BROLL_ENABLED=${BROLL_ENABLED:-true}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
       - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
@@ -671,6 +769,13 @@ services:
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: always
     depends_on:
       postgres:
@@ -692,7 +797,7 @@ services:
     volumes:
       - ./backend/src:/app/src
       - uploads:/app/temp/uploads
-      - ${CLIPS_EXPORT_PATH:-./exports/clips}:/app/temp/uploads/clips
+      - viraclip_clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -941,7 +1046,6 @@ volumes:
     driver: local
   llm_datasets:
     driver: local
-
 
 networks:
   default:
