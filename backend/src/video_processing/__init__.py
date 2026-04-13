@@ -45,6 +45,9 @@ from .audio import (
     mix_background_music,
     get_background_music_for_niche,
     fetch_pixabay_music,
+    AUDIO_NORMALIZE_FILTER,
+    build_music_mix_filter,
+    _validate_audio_stream,
 )
 
 from .clip_creation import (
@@ -144,6 +147,9 @@ __all__ = [
     "mix_background_music",
     "get_background_music_for_niche",
     "fetch_pixabay_music",
+    "AUDIO_NORMALIZE_FILTER",
+    "build_music_mix_filter",
+    "_validate_audio_stream",
     # Clip creation
     "create_optimized_clip",
     "create_clips_from_segments",
