@@ -12,9 +12,16 @@ logger = logging.getLogger(__name__)
 class TransitionType(str, Enum):
     GLITCH = "glitch"
     SWIPE_LEFT = "swipe_left"
+    SWIPE_RIGHT = "swipe_right"
     BLUR = "blur"
     FLASH_WHITE = "flash_white"
+    FLASH_BLACK = "flash_black"
     MORPH = "morph"
+    ZOOM_IN = "zoom_in"
+    ZOOM_OUT = "zoom_out"
+    FADE = "fade"
+    SLIDE_UP = "slide_up"
+    SLIDE_DOWN = "slide_down"
 
 
 @dataclass
@@ -49,6 +56,42 @@ class TransitionService:
         await asyncio.wait_for(proc.wait(), timeout=300.0)
         return TransitionResult(success=proc.returncode == 0, output_path=str(output))
     
+    async def _run_ffmpeg(self, clip: Path, output: Path, filter_complex: str, extra_args: list = None) -> TransitionResult:
+        """Helper to run FFmpeg with filter_complex for transitions."""
+        try:
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(clip),
+                "-filter_complex", filter_complex,
+                "-map", "[v]" if "[v]" in filter_complex else "0:v",
+                "-map", "0:a",
+                "-c:v", "libx264", "-preset", "ultrafast",
+                "-crf", "22",
+                "-c:a", "aac", "-b:a", "192k",
+                str(output)
+            ]
+            if extra_args:
+                cmd.extend(extra_args)
+            
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            
+            if proc.returncode != 0:
+                logger.warning(f"FFmpeg transition failed: {stderr.decode()[:200]}")
+                return TransitionResult(success=False, error=f"FFmpeg error: {proc.returncode}")
+            
+            return TransitionResult(success=True, output_path=str(output))
+        except asyncio.TimeoutError:
+            logger.error("FFmpeg transition timeout")
+            return TransitionResult(success=False, error="Timeout")
+        except Exception as e:
+            logger.error(f"FFmpeg transition error: {e}")
+            return TransitionResult(success=False, error=str(e))
+    
     async def apply_swipe_left(self, clip: Path, output: Path) -> TransitionResult:
         """Horizontal slide-in from right (30 frame ramp)."""
         filter_complex = (
@@ -56,6 +99,25 @@ class TransitionService:
             "[slide]crop=iw/4:ih:3*iw/4:0,scale=iw*4:ih[sliver];"
             "[base][sliver]overlay=x='if(lte(n,30), W-n*W/30, 0)':y=0[v]"
         )
+        return await self._run_ffmpeg(clip, output, filter_complex)
+    
+    async def apply_swipe_right(self, clip: Path, output: Path) -> TransitionResult:
+        """Horizontal slide-in from left."""
+        filter_complex = (
+            "[0:v]split=2[base][slide];"
+            "[slide]crop=iw/4:ih:0:0,scale=iw*4:ih[sliver];"
+            "[base][sliver]overlay=x='if(lte(n,30), -W+n*W/30, 0)':y=0[v]"
+        )
+        return await self._run_ffmpeg(clip, output, filter_complex)
+    
+    async def apply_zoom_in(self, clip: Path, output: Path) -> TransitionResult:
+        """Zoom in transition."""
+        filter_complex = "[0:v]zoompan=z='min(zoom+0.05,2)':d=30:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        return await self._run_ffmpeg(clip, output, filter_complex)
+    
+    async def apply_fade(self, clip: Path, output: Path) -> TransitionResult:
+        """Simple fade in/out."""
+        filter_complex = "[0:v]fade=t=in:st=0:d=0.3,fade=t=out:st=3:d=0.3"
         return await self._run_ffmpeg(clip, output, filter_complex)
 
     async def apply_morph(self, clip_a: Path, clip_b: Path, output: Path) -> TransitionResult:

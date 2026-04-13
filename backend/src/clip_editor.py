@@ -6,11 +6,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import Iterable, List, Any
 import uuid
 import subprocess
 
 from moviepy import VideoFileClip, concatenate_videoclips, CompositeVideoClip, TextClip
+
+try:
+    from gpu_utils import get_ffmpeg_video_codec_args
+except ImportError:
+    def get_ffmpeg_video_codec_args(q="high"):
+        return {"codec": "h264_nvenc", "preset": "slow", "extra_args": ["-crf", "18"]}
 
 
 @dataclass
@@ -48,16 +54,15 @@ def _source_fps(clip: VideoFileClip) -> float:
 
 
 def _high_quality_encode_options(fps: float) -> dict[str, object]:
+    enc = get_ffmpeg_video_codec_args("high")
     return {
-        "codec": "libx264",
+        "codec": enc["codec"],
         "audio_codec": "aac",
         "audio_bitrate": "256k",
-        "preset": "slow",
+        "preset": enc["preset"],
         "logger": None,
         "fps": fps,
-        "ffmpeg_params": [
-            "-crf",
-            "18",
+        "ffmpeg_params": enc["extra_args"] + [
             "-pix_fmt",
             "yuv420p",
             "-profile:v",
@@ -198,6 +203,7 @@ def export_with_preset(input_path: Path, output_dir: Path, preset_name: str) -> 
         "force_original_aspect_ratio=decrease:flags=lanczos,"
         f"pad={preset.width}:{preset.height}:(ow-iw)/2:(oh-ih)/2"
     )
+    enc = get_ffmpeg_video_codec_args("high")
     command = [
         "ffmpeg",
         "-y",
@@ -206,11 +212,10 @@ def export_with_preset(input_path: Path, output_dir: Path, preset_name: str) -> 
         "-vf",
         scale_filter,
         "-c:v",
-        "libx264",
+        enc["codec"],
         "-preset",
-        "slow",
-        "-crf",
-        "18",
+        enc["preset"],
+        *enc["extra_args"],
         "-maxrate",
         preset.video_bitrate,
         "-bufsize",

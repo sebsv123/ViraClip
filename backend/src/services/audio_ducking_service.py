@@ -215,10 +215,10 @@ class AudioDuckingService:
 def build_word_aware_ducking_filter(
     words: List[Dict],
     music_base_volume: float = 0.22,
-    voice_duck_ratio: float = 0.45,
-    short_pause_boost: float = 1.2,
-    long_pause_boost: float = 2.0,
-    fade_duration: float = 0.20,
+    voice_duck_ratio: float = 0.80,
+    short_pause_boost: float = 1.15,
+    long_pause_boost: float = 1.25,
+    fade_duration: float = 0.15,
     long_pause_threshold: float = 1.0,
     short_pause_threshold: float = 0.35
 ) -> str:

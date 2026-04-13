@@ -189,10 +189,11 @@ class VideoCoordinator:
     3. Parallel: Render all clips simultaneously
     """
     
-    def __init__(self, task_id: str, video_path: str, config: dict):
+    def __init__(self, task_id: str, video_path: str, config: dict, force_fresh: bool = False):
         self.task_id = task_id
         self.video_path = video_path
         self.config = config
+        self.force_fresh = force_fresh
         self.clips_generated: List[dict] = []
         self.errors: List[Exception] = []
     
@@ -207,12 +208,13 @@ class VideoCoordinator:
         from .cache_checker import get_cache_checker
         
         try:
-            # PHASE 0: Check cache BEFORE launching pipeline
+            # PHASE 0: Check cache BEFORE launching pipeline (skip if force_fresh)
             cache_checker = get_cache_checker()
             cached = await cache_checker.check_existing_clips(
                 task_id=self.task_id,
                 video_path=self.video_path,
-                min_clips=1
+                min_clips=1,
+                force_fresh=self.force_fresh
             )
             
             if cached:
@@ -304,7 +306,7 @@ class VideoCoordinator:
             (transcript, vision_data) tuple
         """
         from .video_service import VideoService
-        from .vision_service import analyze_video_frames
+        from .vision_service import analyze_clip_visually as analyze_video_frames
         from ..config import get_config
         
         config = get_config()
@@ -320,7 +322,7 @@ class VideoCoordinator:
         tasks = [get_transcript()]
         
         if config.vision_analysis_enabled:
-            tasks.append(analyze_video_frames(self.video_path))
+            tasks.append(analyze_video_frames(Path(self.video_path), transcript=""))
         else:
             tasks.append(asyncio.sleep(0))  # Dummy task that returns None
         
@@ -421,13 +423,23 @@ class VideoCoordinator:
                 output_dir.mkdir(parents=True, exist_ok=True)
 
                 # ViralSegment uses 'start'/'end'; VideoService.create_single_clip
-                # expects 'start_time'/'end_time' — adapt here
-                _st = segment.get("start_time")
-                _et = segment.get("end_time")
+                # expects 'start_time'/'end_time' as "MM:SS" strings — preserve original format
+                _raw_st = segment.get("start_time") if segment.get("start_time") is not None else segment.get("start")
+                _raw_et = segment.get("end_time")   if segment.get("end_time")   is not None else segment.get("end")
+
+                def _to_mmss(v) -> str:
+                    """Convert float seconds or MM:SS string to MM:SS string."""
+                    if v is None:
+                        return "00:00"
+                    if isinstance(v, (int, float)):
+                        total = int(v)
+                        return f"{total // 60:02d}:{total % 60:02d}"
+                    return str(v)
+
                 vs_segment = {
                     **segment,
-                    "start_time": _st if _st is not None else segment.get("start"),
-                    "end_time":   _et if _et is not None else segment.get("end"),
+                    "start_time": _to_mmss(_raw_st),
+                    "end_time":   _to_mmss(_raw_et),
                     # Pass speed control params to creative pipeline
                     "playback_speed": self.config.get("playback_speed", 1.0),
                     "dramatic_slowmo": self.config.get("dramatic_slowmo", False),
@@ -496,7 +508,19 @@ class VideoCoordinator:
                 # Post-render validation
                 clip_path = _Path(clip.get("path", ""))
                 if clip_path.exists():
-                    expected_duration = vs_segment["end_time"] - vs_segment["start_time"]
+                    def _ts_to_s(v) -> float:
+                        if isinstance(v, (int, float)):
+                            return float(v)
+                        try:
+                            parts = str(v).strip().split(":")
+                            if len(parts) == 2:
+                                return int(parts[0]) * 60 + float(parts[1])
+                            elif len(parts) == 3:
+                                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                            return float(v)
+                        except (ValueError, TypeError):
+                            return float(v)
+                    expected_duration = _ts_to_s(vs_segment["end_time"]) - _ts_to_s(vs_segment["start_time"])
                     post_validation = await validator.validate_output(
                         output_path=clip_path,
                         expected_duration=expected_duration,
@@ -933,6 +957,52 @@ class VideoCoordinator:
                             )
                 except Exception as _dbe:
                     logger.warning("Creative meta DB persist failed for clip %d: %s", index, _dbe)
+
+                # ── Cleanup intermediate files, keep only the final clip ──────
+                try:
+                    _final_path = _Path(clip["path"])
+                    _final_dir = _final_path.parent
+                    # Rename final to a clean name: final_clip_N_<stem>.mp4
+                    # Strip all known prefixes from the name so it's human-readable
+                    _PREFIXES = ("sub_", "broll_", "ep_", "jc_", "centered_",
+                                 "music_fb_", "music_", "duck_", "tp_", "emo_",
+                                 "cta_", "brand_", "dn_", "gaze_", "efx_")
+                    _clean = _final_path.name
+                    for _p in _PREFIXES:
+                        _clean = _clean.replace(_p, "")
+                    _clean_name = f"final_clip_{index + 1}_{_clean}"
+                    _clean_path = _final_dir / _clean_name
+                    if not _clean_path.exists():
+                        _final_path.rename(_clean_path)
+                        clip["path"] = str(_clean_path)
+                        clip["filename"] = _clean_name
+
+                    # ── Copy to unified exports folder ────────────────────────────
+                    import shutil as _shutil
+                    _exports_dir = _Path("/app/exports/clips")
+                    _exports_dir.mkdir(parents=True, exist_ok=True)
+                    _exports_path = _exports_dir / _clean_name
+                    if _clean_path.exists():
+                        _shutil.copy2(_clean_path, _exports_path)
+                        logger.info("  [Export] Copied to unified folder: %s", _exports_path)
+
+                    # Delete all intermediate files for this clip index
+                    # Match by clip_X_viral pattern (timestamps vary per intermediate)
+                    import re as _re
+                    _clip_match = _re.search(r'clip_(\d+)_viral_\d+_\d{4}-\d{4}', _clean)
+                    _removed_intermediates = 0
+                    if _clip_match:
+                        _clip_pattern = f"clip_{_clip_match.group(1)}_viral_"  # e.g. "clip_1_viral_"
+                        for _f in _final_dir.iterdir():
+                            if _f.is_file() and _f.name != _clean_name:
+                                # Delete files with same clip_X_viral pattern but different prefix or timestamp
+                                if _clip_pattern in _f.name and _f.suffix in (".mp4", ".mov", ".jpg", ".wav", ".png"):
+                                    _f.unlink(missing_ok=True)
+                                    _removed_intermediates += 1
+                    if _removed_intermediates:
+                        logger.info("  [Cleanup] %d intermediate files deleted for clip %d", _removed_intermediates, index)
+                except Exception as _cl_e:
+                    logger.debug("Intermediate cleanup skipped for clip %d: %s", index, _cl_e)
 
                 await emit_clip_generated(
                     task_id=self.task_id,

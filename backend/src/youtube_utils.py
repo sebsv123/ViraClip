@@ -64,18 +64,28 @@ class YouTubeDownloader:
             # Use the web client extractor (better 403 bypass than mweb)
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["web", "android"],
-                    "skip": ["translated_subs"],
+                    "player_client": ["web", "android", "ios"],
+                    "player_skip": ["webpage", "configs", "js"],
+                    "skip": ["translated_subs", "dash_manifests"],
                 }
             },
-            # Enhanced headers to avoid 403 errors
+            # Enhanced headers to avoid 403 errors - rotate user agents
             "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+{};",
             },
+            # Enable bypass for age-restricted and blocked content
+            "cookiesfrombrowser": None,
+            "legacyserverconnect": True,
             # Metadata extraction
             "extract_flat": False,
             "writeinfojson": False,

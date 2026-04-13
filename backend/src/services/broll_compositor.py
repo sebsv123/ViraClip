@@ -1,26 +1,46 @@
 """
-B-Roll Compositor — Format-Adaptive Overlay Engine
+B-Roll Compositor — Format-Adaptive Overlay Engine con Efectos Inteligentes
 
 Single source of truth for all B-roll compositing in ViraClip.
-Replaces the three hardcoded scale=1080:1920 blocks scattered across
-broll_service.py, pexels_service.py and video_effects.py.
+Integra sistema de efectos variados para evitar repetición.
 
 Supported output formats (auto-probed from main clip):
   9:16  portrait  — 1080×1920, 720×1280
   1:1   square    — 1080×1080
   16:9  landscape — 1920×1080  (rare, kept for completeness)
+
+Efectos inteligentes:
+  - 13 tipos de efectos diferentes (Ken Burns, Pan, Rotate, Pulse, etc.)
+  - Selección automática basada en contexto
+  - Rotación para evitar repetición
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import subprocess
+import sys
+sys.path.insert(0, "/app/src") if "/app/src" not in sys.path else None
+try:
+    from gpu_utils import ffmpeg_codec_flags as _gpu_codec
+except ImportError:
+    def _gpu_codec(quality="high"):
+        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22" if quality == "high" else "24"]
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Importar motor de efectos inteligentes
+try:
+    from .broll_effects_engine import get_smart_broll_effect, build_broll_effect_filter
+    SMART_EFFECTS_AVAILABLE = True
+except ImportError:
+    SMART_EFFECTS_AVAILABLE = False
+    logger.warning("Smart effects engine not available, using classic Ken Burns")
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 _FFPROBE_TIMEOUT = 15   # seconds
@@ -82,15 +102,16 @@ def normalize_broll(
     target_w: int,
     target_h: int,
     duration: float,
-    fade: float = 0.3,
+    fade: float = 0.6,
     output_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """
     Produce a normalised B-roll clip:
       - Scaled and center-cropped to target_w × target_h
       - Trimmed to *duration* seconds
-      - Fade-in and fade-out of *fade* seconds
+      - Fade-in and fade-out of *fade* seconds (default 0.6s for smooth transitions)
       - Audio muted (B-roll is silent by design)
+      - Ken Burns effect for static images (subtle zoom + pan)
 
     Works for both video files and static images (image → looped video).
     Returns the output Path on success, None on failure.
@@ -107,13 +128,39 @@ def normalize_broll(
 
     fade_out_start = max(0.0, duration - fade)
 
-    vf = (
-        f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-        f"crop={target_w}:{target_h},"
-        f"setsar=1,"
-        f"fade=t=in:st=0:d={fade},"
-        f"fade=t=out:st={fade_out_start:.3f}:d={fade}"
-    )
+    # Sistema de efectos inteligentes - varía automáticamente
+    if is_image and SMART_EFFECTS_AVAILABLE:
+        # Seleccionar efecto inteligente
+        effect_type = get_smart_broll_effect(is_image=True, context=None)
+        effect_filter = build_broll_effect_filter(
+            effect_type=effect_type,
+            width=target_w,
+            height=target_h,
+            duration=duration,
+            fps=30
+        )
+        vf = (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
+            f"setsar=1,"
+            f"{effect_filter}"
+        )
+        logger.info(f"🎨 B-roll effect applied: {effect_type.value}")
+    elif is_image:
+        # Fallback: Ken Burns clásico sin fade negro
+        vf = (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
+            f"setsar=1,"
+            f"zoompan=z='min(zoom+0.0008,1.08)':d={int(duration*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}"
+        )
+    else:
+        # Videos: sin fade negro, imagen limpia
+        vf = (
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
+            f"setsar=1"
+        )
 
     if is_image:
         cmd = [
@@ -122,7 +169,7 @@ def normalize_broll(
             "-t", str(duration),
             "-vf", vf,
             "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            *_gpu_codec("medium"),
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
@@ -134,7 +181,7 @@ def normalize_broll(
             "-t", str(duration),
             "-vf", vf,
             "-an",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            *_gpu_codec("medium"),
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
@@ -168,8 +215,8 @@ def compose_overlay(
     broll_path: Path | str,
     output_path: Path | str,
     timestamp: float,
-    duration: float = 3.0,
-    fade: float = 0.3,
+    duration: float = 4.5,
+    fade: float = 0.6,
 ) -> bool:
     """
     Overlay *broll_path* on *main_path* starting at *timestamp* for *duration* seconds.
@@ -187,17 +234,18 @@ def compose_overlay(
 
     w, h, _fps = probe_dimensions(main_path)
 
-    # Normalise B-roll to a temp file
-    norm_path = normalize_broll(broll_path, w, h, duration=duration + 0.5, fade=fade)
+    # Normalise B-roll — sin fade negro para no oscurecer la imagen
+    norm_path = normalize_broll(broll_path, w, h, duration=duration, fade=fade)
     if norm_path is None:
         logger.error("[BrollCompositor] compose_overlay: normalise step failed")
         return False
 
     end_ts = timestamp + duration
+    # Overlay limpio: el B-roll tapa el video en el rango dado, audio del main continúa.
+    # Sin fade negro — imagen del B-roll tal cual, sin filtros de oscurecimiento.
     filter_complex = (
         f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
-        f"[0:v][bv]overlay=enable='between(t,{timestamp:.3f},{end_ts:.3f})'"
-        f":x=0:y=0[out]"
+        f"[0:v][bv]overlay=enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':x=0:y=0[out]"
     )
 
     cmd = [
@@ -207,7 +255,7 @@ def compose_overlay(
         "-filter_complex", filter_complex,
         "-map", "[out]",
         "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+        *_gpu_codec("high"),
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
@@ -238,7 +286,7 @@ async def compose_overlay_multi(
     main_path: Path | str,
     broll_pairs: list,          # [(timestamp, broll_path, duration), ...]
     output_path: Path | str,
-    fade: float = 0.3,
+    fade: float = 0.6,
 ) -> bool:
     """
     Apply multiple B-roll overlays in a single FFmpeg pass.
@@ -263,7 +311,7 @@ async def compose_overlay_multi(
     for ts, bp, dur in broll_pairs:
         np_ = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda bp=bp, dur=dur: normalize_broll(Path(bp), w, h, duration=dur + 0.5, fade=fade),
+            lambda bp=bp, dur=dur: normalize_broll(Path(bp), w, h, duration=dur, fade=fade),
         )
         if np_:
             norm_paths.append(np_)
@@ -284,7 +332,7 @@ async def compose_overlay_multi(
         out_tag = f"vout{idx}"
         filter_parts.append(
             f"[{prev}][{idx + 1}:v]"
-            f"overlay=enable='between(t,{ts:.3f},{end_ts:.3f})':x=0:y=0"
+            f"overlay=enable='between(t\\,{ts:.3f}\\,{end_ts:.3f})':x=0:y=0"
             f"[{out_tag}]"
         )
         prev = out_tag
@@ -297,7 +345,7 @@ async def compose_overlay_multi(
         "-filter_complex", filter_complex,
         "-map", f"[{prev}]",
         "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *_gpu_codec("high"),
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",

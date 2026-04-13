@@ -379,9 +379,32 @@ def _build_filter_complex(
         cb_params = "rs=-0.03:gs=0.03:bs=0.06:rm=0:gm=0:bm=0:rh=0.06:gh=0:bh=-0.06"
     filters.append(f"{prev_grade}colorbalance={cb_params}[vcine]")
 
-    # ── 3. Vignette ───────────────────────────────────────────────────────────
-    filters.append("[vcine]vignette=angle=PI/4[vvig]")
-    prev_v = "[vvig]"
+    # ── 3. Enhancement de sujeto (sin vignette oscurecedor) ──────────────────
+    # VIGNETTE_ENABLED=false por defecto — el vignette oscurece la imagen sin aportar.
+    # En su lugar se aplica un enhancement sutil de persona:
+    #   - unsharp: añade nitidez suave (cara más definida, texto más nítido)
+    #   - hqdn3d: reduce ruido/granos de piel sin emborronar
+    # Se puede restaurar el vignette con VIGNETTE_ENABLED=true si se desea.
+    _vignette_enabled = os.environ.get("VIGNETTE_ENABLED", "false").lower() == "true"
+    _enhance_enabled  = os.environ.get("SUBJECT_ENHANCE", "true").lower() == "true"
+    if _vignette_enabled:
+        _vignette_angle = os.environ.get("VIGNETTE_ANGLE", "PI/15")
+        filters.append(f"[vcine]vignette=angle={_vignette_angle}[vvig]")
+        prev_v = "[vvig]"
+    elif _enhance_enabled:
+        # unsharp luma 3x3 suave + chroma sin tocar + denoise leve para piel
+        # hqdn3d=luma_spatial:chroma_spatial:luma_temporal:chroma_temporal
+        filters.append(
+            "[vcine]"
+            "unsharp=luma_msize_x=3:luma_msize_y=3:luma_amount=0.6:"
+            "chroma_msize_x=3:chroma_msize_y=3:chroma_amount=0.0,"
+            "hqdn3d=2:1:3:2.5"
+            "[vvig]"
+        )
+        prev_v = "[vvig]"
+    else:
+        filters.append(f"[vcine]copy[vvig]")
+        prev_v = "[vvig]"
 
     # ── 3.5. Film grain (cinematic texture) ───────────────────────────────────
     # noise=alls: strength 0-100; allf=t: temporal (varies per-frame like real grain)
@@ -566,11 +589,48 @@ def _build_filter_complex(
         )
         prev_v = "[vwm]"
 
-    # ── 10. Fade-in / fade-out ───────────────────────────────────────────────────
-    # Smooth fade-in from black and fade-out to black. Comma-chain within one
-    # filter segment — no filter_complex separator issues.
+    # ── 10. Fade-in / fade-out con TransitionSelector (template+energy aware) ────
     if EP_FADE_ON and dur > EP_FADE_DURATION * 2 + 0.5:
-        fd = min(EP_FADE_DURATION, dur * 0.08)   # cap at 8 % of duration
+        fd = min(EP_FADE_DURATION, dur * 0.08)
+        _xfade_effect = "fade"
+        try:
+            # NarrativeCutEngine: detectar energía real del segmento para selector
+            _energy_level = 0.5
+            try:
+                from ..video_processing.narrative_cut_engine import NarrativeCutEngine
+                _nce = NarrativeCutEngine()
+                _cut_pts = _nce.find_narrative_cuts(
+                    transcript=segment_text or "",
+                    words_with_timestamps=words or [],
+                    audio_silences=[],
+                )
+                if _cut_pts:
+                    _energy_level = min(1.0, len(_cut_pts) / 10.0 + 0.3)
+            except Exception:
+                pass
+
+            # TransitionSelector: selección template+energy → tipo de transición
+            from ..services.transition_selector import TransitionSelector
+            from ..services.transition_service import TransitionType as _TT
+            _ts = TransitionSelector()
+            _selected = _ts.select_transition(
+                template_style=theme or "viral",
+                energy_level=_energy_level,
+                use_morph=False,
+            )
+            # Map TransitionType → FFmpeg xfade effect (safe subset — sin flash)
+            _xfade_map = {
+                _TT.BLUR: "fade",
+                _TT.SWIPE_LEFT: "slideleft",
+                _TT.GLITCH: "fade",       # glitch no tiene soporte nativo — degradar a fade
+                _TT.FLASH_WHITE: "fade",  # flash prohibido — degradar a fade
+                _TT.MORPH: "fade",
+            }
+            _xfade_effect = _xfade_map.get(_selected, "fade")
+            logger.debug(f"[EP] TransitionSelector: {_selected} → xfade={_xfade_effect} energy={_energy_level:.2f}")
+        except Exception as _ts_e:
+            logger.debug(f"[EP] TransitionSelector skipped: {_ts_e}")
+
         filters.append(
             f"{prev_v}fade=t=in:d={fd:.3f},"
             f"fade=t=out:st={dur - fd:.3f}:d={fd:.3f}[vfade]"
@@ -687,7 +747,7 @@ class EditingPipeline:
             denoise_audio=denoise_audio,
         )
 
-        vcodec = ["libx264", "-preset", "fast", "-crf", "19"]  # final video quality - BGM/SFX use -c:v copy after this
+        vcodec = ["libx264", "-preset", "ultrafast", "-crf", "22"]  # Speed priority - 3-5x faster than fast preset
         if gpu_settings:
             enc = gpu_settings.get("codec")  # gpu_detection.py uses "codec" key
             if enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"):

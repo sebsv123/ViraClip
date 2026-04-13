@@ -194,7 +194,7 @@ class TranscriptSegment(BaseModel):
         # Regla 2: duración mínima 30s (con límite de video_duration)
         # TODO(future): contar cuántas veces se dispara por vídeo/modelo.
         # Si un LLM concreto lo dispara siempre → ajustar el prompt, no el validator.
-        MIN_DURATION = 45.0
+        MIN_DURATION = 30.0
         duration = end - start
         if duration < MIN_DURATION:
             logger.warning(
@@ -314,18 +314,19 @@ Identify 2-4 moments in each segment where B-roll footage could enhance the vide
 - Use simple, searchable keywords (e.g., "coffee shop", "laptop coding", "money stack")
 
 TIMING RULES — MANDATORY, NON-NEGOTIABLE:
-- RULE 1: Every segment MUST have end_time - start_time >= 45 seconds. No exceptions.
-- RULE 2: If a natural segment is shorter than 45 seconds, extend end_time until the difference is >= 45. Include more of the surrounding context to complete the idea.
-- RULE 3: Maximum segment length is 120 seconds. Let the idea determine the length — never truncate mid-thought to hit an artificial cap. A 90-second revelation is better than a 20-second fragment.
+- RULE 1: Every segment MUST have end_time - start_time >= 30 seconds. No exceptions.
+- RULE 2: If a natural segment is shorter than 30 seconds, extend end_time until the difference is >= 30. Include enough context to complete the thought — do NOT pull in unrelated content past natural speech boundaries.
+- RULE 3: Maximum segment length is 90 seconds. Let the idea determine the length — never truncate mid-thought. A tight 35-second insight beats a padded 90-second monologue.
 - RULE 4: You MUST return between 6 and 12 segments. Never return 0 segments.
 - RULE 5: If the transcript seems short or low quality, still return the best available segments (minimum 3).
+- RULE 6: STOP the segment at the natural end of the spoken thought. Do NOT extend past a topic change or silence just to hit the minimum — instead choose a longer span that starts earlier.
 
 TIMESTAMP FORMAT REQUIREMENTS:
 - Format MUST be MM:SS (examples: "00:12", "03:45", "12:05")
 - start_time MUST be strictly less than end_time
-- (end_time minutes * 60 + end_time seconds) - (start_time minutes * 60 + start_time seconds) MUST be >= 45
-- VALID example:   start_time="02:10", end_time="03:00"  → 50 seconds ✅
-- INVALID example: start_time="02:10", end_time="02:30"  → 20 seconds ❌ EXTEND end_time to "03:00"
+- (end_time minutes * 60 + end_time seconds) - (start_time minutes * 60 + start_time seconds) MUST be >= 30
+- VALID example:   start_time="02:10", end_time="02:50"  → 40 seconds ✅
+- INVALID example: start_time="02:10", end_time="02:30"  → 20 seconds ❌ EXTEND end_time to "02:45" or earlier start_time
 - INVALID example: start_time="02:10", end_time="02:10"  → 0 seconds ❌ REJECTED
 
 SCORING AND OUTPUT RULES:
@@ -344,11 +345,11 @@ Categorize each segment into a viral theme:
 EDITING SUGGESTIONS:
 Provide specific cues like "Zoom in on the surprise", "Add fast cuts here", "Use bright yellow captions".
 
-Find 6-12 compelling segments of 30-120s each that would work well as standalone clips. Quality over quantity: choose segments that are accurate, self-contained, have proper time ranges, and score high on virality metrics. A complete thought needs as many seconds as it takes.
+Find 6-12 compelling segments of 30-90s each that would work well as standalone clips. Quality over quantity: choose segments that are accurate, self-contained, have proper time ranges, and score high on virality metrics. A 35-second tight insight outperforms a padded 90-second clip — end the segment where the thought ends.
 
 FINAL CHECKLIST before returning your answer:
 ☑ I returned at least 6 segments (mandatory minimum)
-☑ Every segment has end_time - start_time >= 45 seconds
+☑ Every segment has end_time - start_time >= 30 seconds
 ☑ No two segments have identical start_time and end_time
 ☑ All timestamps use MM:SS format and exist in the transcript"""
 

@@ -503,4 +503,16 @@ async def analyze_clip(
         category,
         CATEGORY_RULES.get(category, CATEGORY_RULES[_DEFAULT_CATEGORY]).name,
     )
+
+    # Competitor benchmark: log which features competitors lead on for this category
+    # so the pipeline can apply compensating effects (no hard dependency — pure advisory)
+    try:
+        from .competitor_analysis import CompetitorAnalysisService
+        _ca = CompetitorAnalysisService()
+        _gaps = _ca.get_feature_gaps_for_category(category)
+        if _gaps:
+            logger.info("[EditorialBrain] Competitor gaps to compensate: %s", _gaps[:3])
+    except Exception:
+        pass
+
     return category, narrative

@@ -25,6 +25,7 @@ Usage:
 """
 
 import logging
+import os
 import subprocess
 import tempfile
 import uuid
@@ -64,9 +65,12 @@ def _get_raft_model():
         weights = Raft_Small_Weights.DEFAULT
         model = raft_small(weights=weights, progress=False)
         model.eval()
+        # Move to CUDA if available — RTX 3050 handles RAFT-small easily
+        _device = "cuda" if torch.cuda.is_available() and os.environ.get("RAFT_ENABLED", "true").lower() == "true" else "cpu"
+        model = model.to(_device)
         _raft_model = model
         _raft_available = True
-        logger.info("[raft] RAFT-small model loaded via torchvision")
+        logger.info(f"[raft] RAFT-small loaded on {_device.upper()}")
 
     except (ImportError, AttributeError):
         # Try torchvision < 0.14 (no optical_flow module)
@@ -248,16 +252,17 @@ def _raft_morph_clip(
                 img[:, :, ::-1].copy().astype(np.float32) / 255.0
             ).permute(2, 0, 1).unsqueeze(0)
 
-        t_a = to_tensor(img_a_r)
-        t_b = to_tensor(img_b_r)
+        _dev = next(model.parameters()).device
+        t_a = to_tensor(img_a_r).to(_dev)
+        t_b = to_tensor(img_b_r).to(_dev)
 
-        # RAFT inference (CPU)
+        # RAFT inference (GPU if available)
         with torch.no_grad():
             # torchvision RAFT expects [0, 255] range uint8 tensors
             t_a_uint = (t_a * 255).byte()
             t_b_uint = (t_b * 255).byte()
             list_of_flows = model(t_a_uint, t_b_uint)
-            flow = list_of_flows[-1][0]  # (2, H, W)
+            flow = list_of_flows[-1][0]  # (2, H, W) — still on _dev
 
         # Build interpolated frames via flow warping
         frames = []
@@ -267,8 +272,8 @@ def _raft_morph_clip(
             # Forward warp: from A towards B
             partial_flow = flow * alpha
             grid_y, grid_x = torch.meshgrid(
-                torch.arange(h_even, dtype=torch.float32),
-                torch.arange(w_even, dtype=torch.float32),
+                torch.arange(h_even, dtype=torch.float32, device=_dev),
+                torch.arange(w_even, dtype=torch.float32, device=_dev),
                 indexing="ij",
             )
             # Normalize to [-1, 1] for grid_sample
@@ -280,9 +285,9 @@ def _raft_morph_clip(
                 t_a, grid, mode="bilinear", padding_mode="border", align_corners=True
             )
 
-            # Blend warped A + B
+            # Blend warped A + B — move to CPU for numpy
             frame = ((1 - alpha) * warped_a + alpha * t_b).clamp(0, 1)
-            frame_np = (frame[0].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+            frame_np = (frame[0].permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
             frame_bgr = frame_np[:, :, ::-1]
             frames.append(cv2.resize(frame_bgr, (w, h)))
 

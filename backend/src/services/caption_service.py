@@ -115,9 +115,9 @@ _STYLE_DEFS: Dict[str, str] = {
         "-1,0,0,0,100,100,1,0,1,4,2,2,10,10,MARGINV,1"
     ),
     "minimal": (
-        "Default,Montserrat-Bold,54,"
-        f"{_WHITE},{_WHITE},{_BLACK},{_TRANSP},"
-        "0,0,0,0,100,100,0,0,1,2,0,2,10,10,MARGINV,1"
+        "Default,Montserrat-Bold,64,"  # 54→64 más grande
+        f"{_WHITE},{_WHITE},{_BLACK},{_SEMI_BG},"  # TRANSP→SEMI_BG fondo visible
+        "-1,0,0,0,100,100,0,0,3,2,0,2,10,10,MARGINV,1"  # BorderStyle 1→3 para caja
     ),
     "neon": (
         "Default,Montserrat-Bold,66,"
@@ -132,9 +132,9 @@ _TEMPLATE_STYLE_MAP: Dict[str, str] = {
     "reels_drama":    "highlight",
     "youtube_shorts": "karaoke",
     "high_energy":    "highlight",
-    "tutorial":       "minimal",
-    "interview":      "minimal",
-    "education":      "minimal",
+    "tutorial":       "highlight",  # minimal era invisible - cambiado
+    "interview":      "highlight",  # minimal era invisible - cambiado
+    "education":      "highlight",  # minimal era invisible - cambiado
 }
 
 

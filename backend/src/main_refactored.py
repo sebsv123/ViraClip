@@ -84,6 +84,19 @@ def create_app(
                         logger.debug(f"Vision model pull skipped: {e}")
                 asyncio.create_task(_pull_vision_model())
 
+            # LUTService: auto-download Film-Luts on first run if no .cube files present
+            try:
+                from .services.lut_service import get_lut_service as _get_lut_svc
+                _lut = _get_lut_svc()
+                _lut_info = _lut.get_info()
+                if _lut_info["cube_files_present"] == 0:
+                    logger.info("[LUT] No .cube files — downloading Film-Luts repo in background...")
+                    asyncio.create_task(_lut.download_luts())
+                else:
+                    logger.info(f"[LUT] {_lut_info['cube_files_present']} LUT presets ready in {_lut_info['lut_dir']}")
+            except Exception as _lut_startup_e:
+                logger.debug(f"[LUT] startup check skipped: {_lut_startup_e}")
+
             yield
         finally:
             logger.info("🛑 Shutting down ViraClip API...")
@@ -437,6 +450,35 @@ def create_app(
     app.include_router(watermark_search_share_router)  # NEW: Watermark config + transcript search + share links
     app.include_router(collections_summary_compare_router)  # NEW: Clip collections + AI summary + clip comparison
     app.include_router(flagging_compression_analytics_router)  # NEW: Flagging + compression + analytics aggregation
+
+    # YouTube Feedback Service — close virality prediction loop with real performance data
+    try:
+        from fastapi import APIRouter as _YTFB_AR
+        _yt_router = _YTFB_AR(prefix="/feedback", tags=["feedback"])
+
+        @_yt_router.get("/youtube/{video_id}")
+        async def get_youtube_feedback(video_id: str):
+            from .services.youtube_feedback_service import YouTubeFeedbackService
+            svc = YouTubeFeedbackService()
+            metrics = await svc.get_video_metrics(video_id)
+            return metrics.__dict__ if metrics else {"error": "No metrics — check YOUTUBE_DATA_API_KEY"}
+
+        @_yt_router.post("/youtube/record")
+        async def record_youtube_feedback(payload: dict):
+            from .services.youtube_feedback_service import YouTubeFeedbackService, ViralityPrediction
+            svc = YouTubeFeedbackService()
+            video_id = payload["video_id"]
+            prediction = ViralityPrediction(**payload.get("prediction", {}))
+            performance = await svc.get_video_metrics(video_id)
+            if not performance:
+                return {"error": "Could not fetch YouTube metrics"}
+            result = svc.compare_prediction_vs_reality(prediction, performance)
+            return result.__dict__ if result else {"error": "Feedback not recorded"}
+
+        app.include_router(_yt_router)
+        logger.info("✓ YouTube Feedback router registered at /feedback/youtube")
+    except Exception as _ytfb_e:
+        logger.warning(f"YouTube Feedback router skipped: {_ytfb_e}")
 
     # Add middleware
     app.add_middleware(MetricsMiddleware)

@@ -46,7 +46,7 @@ PRESETS: "dict[str, RenderPreset]" = {
         cut_density="high",
         max_duration_s=60,
         aspect_ratio="9:16",
-        extra_vf_filters=["vignette=PI/6", "eq=brightness=0.03:saturation=1.1"],
+        extra_vf_filters=["eq=brightness=0.03:saturation=1.1"],  # sin vignette
     ),
     "reels_drama": RenderPreset(
         name="Reels Drama",
@@ -63,7 +63,7 @@ PRESETS: "dict[str, RenderPreset]" = {
         cut_density="high",
         max_duration_s=90,
         aspect_ratio="9:16",
-        extra_vf_filters=["vignette=PI/5", "eq=contrast=1.05:saturation=1.15"],
+        extra_vf_filters=["eq=contrast=1.05:saturation=1.15"],  # sin vignette
     ),
     "youtube_shorts": RenderPreset(
         name="YouTube Shorts",
@@ -148,7 +148,7 @@ PRESETS: "dict[str, RenderPreset]" = {
         cut_density="high",
         max_duration_s=45,
         aspect_ratio="9:16",
-        extra_vf_filters=["vignette=PI/4", "eq=contrast=1.1:saturation=1.2:brightness=0.05"],
+        extra_vf_filters=["eq=contrast=1.1:saturation=1.2:brightness=0.05"],  # sin vignette
     ),
 }
 

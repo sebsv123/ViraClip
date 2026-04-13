@@ -134,47 +134,16 @@ class VideoProcessor:
         self, target_quality: str = "high"
     ) -> Dict[str, Any]:
         """
-        Get optimal encoding settings with high-quality audio and video.
-        Uses libx264 (CPU) — stable and verified.
-
-        Quality improvements:
-        - CRF values optimized for short-form video virality
-        - AAC audio at high bitrates (192k min) for clarity
-        - Hardware profiles for modern devices
-        - Optimized presets for speed vs. quality tradeoff
+        Get optimal encoding settings — GPU (h264_nvenc) when available, CPU fallback.
         """
-        use_nvenc = False
-        logger.info("🎬 Using CPU encoding (libx264) with optimized audio — high quality for viral shorts")
-
-        settings = {
-            "high": {
-                "codec": "libx264",
-                "audio_codec": "aac",
-                "preset": "fast",       # fast: 2-3x faster than medium, visually identical
-                "ffmpeg_params": [
-                    "-crf", "21",       # IMPROVED: 21 instead of 23 — noticeably better for TikTok/Reels
-                    "-pix_fmt", "yuv420p",
-                    "-profile:v", "main",  # NEW: Main profile for broad device compatibility
-                    "-level", "4.0",    # NEW: Level 4.0 for HD+ on all devices
-                    "-b:a", "256k",     # IMPROVED: 256k instead of 192k — richer audio
-                    "-ar", "48000",     # NEW: 48kHz audio (standard for video)
-                ],
-            },
-            "medium": {
-                "codec": "libx264",
-                "audio_codec": "aac",
-                "preset": "veryfast",
-                "ffmpeg_params": [
-                    "-crf", "24",       # IMPROVED: 24 instead of 26 — better quality
-                    "-pix_fmt", "yuv420p",
-                    "-profile:v", "main",
-                    "-level", "4.0",
-                    "-b:a", "192k",     # 192k audio
-                    "-ar", "48000",
-                ],
-            },
+        from gpu_utils import get_ffmpeg_video_codec_args
+        enc = get_ffmpeg_video_codec_args(target_quality)
+        return {
+            "codec": enc["codec"],
+            "audio_codec": "aac",
+            "preset": enc["preset"],
+            "ffmpeg_params": enc["extra_args"],
         }
-        return settings.get(target_quality, settings["high"])
 
 
 # === Singleton model cache for faster-whisper (avoid reloading per video) ===
@@ -2562,7 +2531,7 @@ def create_optimized_clip(
                     with guard.manage():
                         kb_clip = create_ken_burns_clip(
                             ai_broll_path,
-                            duration=3.0, # Standard B-roll duration
+                            duration=4.5, # Standard B-roll duration - más largo para mejor presencia
                             target_res=(target_width, target_height)
                         )
                         # Position it to cover the main video partially or fully

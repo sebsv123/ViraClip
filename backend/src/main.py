@@ -62,6 +62,20 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("⚠️ Redis unavailable - rate limiting and caching disabled")
         
+        # LUTService: auto-download film LUTs if not present
+        try:
+            from .services.lut_service import get_lut_service as _get_lut
+            _lut_svc = _get_lut()
+            _lut_info = _lut_svc.get_info()
+            if _lut_info["cube_files_present"] == 0:
+                logger.info("[LUT] No .cube files found — downloading Film-Luts (background)...")
+                import asyncio as _aio
+                _aio.create_task(_lut_svc.download_luts())
+            else:
+                logger.info(f"[LUT] {_lut_info['cube_files_present']} LUT presets ready")
+        except Exception as _lut_e:
+            logger.debug(f"[LUT] Auto-download skipped: {_lut_e}")
+
         yield
     finally:
         await close_db()
@@ -108,6 +122,59 @@ from .api.routes.health import router as health_router
 app.include_router(admin_router)
 app.include_router(ai_metrics_router)
 app.include_router(health_router)
+
+# Autopilot — end-to-end automation pipeline
+try:
+    from .api.routes.autopilot import router as autopilot_router
+    app.include_router(autopilot_router)
+except Exception as _ap_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Autopilot router skipped: {_ap_e}")
+
+# Workflow Automation — visual workflow builder
+try:
+    from .api.routes.workflows import router as workflows_router
+    app.include_router(workflows_router)
+except Exception as _wf_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Workflows router skipped: {_wf_e}")
+
+# LUT Service — cinematic color grading management
+try:
+    from fastapi import APIRouter as _AR2
+    _lut_router = _AR2(prefix="/luts", tags=["luts"])
+
+    @_lut_router.get("/")
+    def list_luts():
+        from .services.lut_service import get_lut_service
+        return get_lut_service().get_info()
+
+    @_lut_router.post("/download")
+    async def download_luts():
+        from .services.lut_service import get_lut_service
+        result = await get_lut_service().download_luts()
+        return result
+
+    app.include_router(_lut_router)
+except Exception as _lut_re:
+    import logging as _log; _log.getLogger(__name__).warning(f"LUT router skipped: {_lut_re}")
+
+# Competitor Analysis — benchmarking endpoint
+try:
+    from fastapi import APIRouter as _AR
+    _comp_router = _AR(prefix="/competitor", tags=["competitor"])
+
+    @_comp_router.get("/analysis")
+    def get_competitor_analysis():
+        from .services.competitor_analysis import get_competitive_analysis
+        return get_competitive_analysis()
+
+    @_comp_router.get("/report")
+    def get_competitor_report():
+        from .services.competitor_analysis import generate_competitor_report
+        return {"report": generate_competitor_report()}
+
+    app.include_router(_comp_router)
+except Exception as _ca_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Competitor router skipped: {_ca_e}")
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"
