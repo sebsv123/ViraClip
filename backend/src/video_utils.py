@@ -62,6 +62,11 @@ from .video_processing import (
     # Transitions (migrated from video_utils)
     get_available_transitions,
     apply_transition_effect,
+    # Phase 3: AI Context-Aware Transition Selection
+    TransitionType,
+    TransitionContext,
+    TransitionSelector,
+    create_context_aware_transition,
     
     # B-Roll (consolidated from broll.py)
     BRollVideo,
@@ -73,6 +78,11 @@ from .video_processing import (
     BRollOverlayEngine,
     BRollDecisionEngine,
     insert_broll_into_clip,
+    
+    # Editing pipeline
+    EditingPipeline,
+    OrchestratedEditingPipeline,
+    orchestrated_edit,
     
     # Utils
     format_ms_to_timestamp,
@@ -125,6 +135,16 @@ __all__ = [
     # Transitions
     "get_available_transitions",
     "apply_transition_effect",
+    # Phase 3: AI Context-Aware Transition Selection
+    "TransitionType",
+    "TransitionContext",
+    "TransitionSelector",
+    "create_context_aware_transition",
+    
+    # Editing pipeline
+    "EditingPipeline",
+    "OrchestratedEditingPipeline",
+    "orchestrated_edit",
     
     # B-Roll
     "BRollVideo",
