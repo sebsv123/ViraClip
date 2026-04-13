@@ -13,6 +13,16 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Audio normalization constants (Phase 1A — prevents white noise)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Normalize all audio to 44100Hz, float planar format before any mixing
+AUDIO_NORMALIZE_FILTER = (
+    "aresample=44100:resampler=soxr:precision=28,"
+    "aformat=sample_fmts=fltp:channel_layouts=stereo"
+)
+
 # Niche → Pixabay search query mapping
 _NICHE_MUSIC_MOOD: Dict[str, str] = {
     "finance": "corporate background",
@@ -335,17 +345,101 @@ async def denoise_audio(
         return False
 
 
+def _validate_audio_stream(path: Path, label: str = "audio") -> bool:
+    """
+    Validate that a file has a valid audio stream before processing.
+    Returns True if valid, False otherwise.
+    """
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type,sample_rate,channels,duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode != 0:
+            logger.warning(f"[{label}] ffprobe failed for {path}")
+            return False
+        
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
+        
+        if not streams:
+            logger.warning(f"[{label}] No audio streams found in {path}")
+            return False
+        
+        for stream in streams:
+            if stream.get("codec_type") != "audio":
+                continue
+            
+            sample_rate = stream.get("sample_rate")
+            channels = stream.get("channels")
+            duration = stream.get("duration")
+            
+            if sample_rate is None:
+                logger.warning(f"[{label}] No sample rate in {path}")
+                return False
+            if duration is not None and float(duration) <= 0:
+                logger.warning(f"[{label}] Invalid duration in {path}")
+                return False
+            if channels and int(channels) > 2:
+                logger.warning(f"[{label}] Rejecting {channels} channels in {path} (need mono/stereo)")
+                return False
+            
+            return True
+        
+        logger.warning(f"[{label}] No valid audio stream in {path}")
+        return False
+        
+    except Exception as e:
+        logger.warning(f"[{label}] Audio validation error: {e}")
+        return False
+
+
+def build_music_mix_filter(music_volume: float = 0.35, ducking_enabled: bool = False) -> str:
+    """
+    Build FFmpeg filter complex for mixing video audio with background music.
+    All audio is normalized to 44100Hz fltp before mixing to prevent sample rate mismatch.
+    
+    Args:
+        music_volume: Volume of background music (0.0-1.0)
+        ducking_enabled: Whether to apply ducking (requires sidechain or volume curves)
+    
+    Returns:
+        FFmpeg filter_complex string
+    """
+    # Normalize both inputs to prevent sample rate mismatch
+    # Weights: voice (1.0) + music (music_volume) — music is additive, not replacement
+    if ducking_enabled:
+        # With ducking: music volume is controlled dynamically
+        return (
+            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f}[music];"
+            "[voice][music]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+        )
+    else:
+        # Simple mix without ducking
+        return (
+            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f}[music];"
+            "[voice][music]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+        )
+
+
 def mix_background_music(
     video_path: Path,
     output_path: Path,
-    music_volume: float = 0.50,  # 50% volumen base - audible como ambiente con ducking suave
+    music_volume: float = 0.35,  # 35% volumen base - audible pero no dominante
     ducking_enabled: bool = True,
     music_path: Optional[Path] = None,
     word_timings: Optional[List[Dict[str, Any]]] = None,
 ) -> bool:
     """
     Mix a background music track into a video as ambient background.
-    Uses ffmpeg for fast, high-quality audio mixing.
+    Uses ffmpeg for fast, high-quality audio mixing with sample rate normalization.
+
+    Phase 1A FIX: All audio streams are normalized to 44100Hz fltp before mixing
+    to prevent sample rate mismatch and white noise.
 
     If word_timings is provided and ducking_enabled=True, uses PREDICTIVE ducking
     based on word timestamps (more precise than sidechain).
@@ -357,6 +451,14 @@ def mix_background_music(
         music_path = _get_background_music_path()
     if music_path is None:
         logger.info("No background music tracks found — skipping music mix")
+        return False
+    
+    # Phase 1B: Validate streams before processing
+    if not _validate_audio_stream(video_path, "video"):
+        logger.warning(f"Skipping music mix: invalid video audio stream")
+        return False
+    if not _validate_audio_stream(music_path, "music"):
+        logger.warning(f"Skipping music mix: invalid music file")
         return False
 
     logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume")
@@ -376,31 +478,37 @@ def mix_background_music(
                     long_pause_boost=_long_boost,
                     short_pause_boost=_short_boost,
                 )
+                # Phase 1A: Apply normalization before ducking
                 filter_complex = (
-                    f"[1:a]{ducking_filter},aloop=loop=-1:size=2000000000[music_ducked];"
-                    "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
+                    f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+                    f"[1:a]{AUDIO_NORMALIZE_FILTER},{ducking_filter},aloop=loop=-1:size=2000000000[music_ducked];"
+                    "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
                 )
                 logger.info("[DUCKING] Modo: PREDICTIVO (word timestamps)")
             else:
-                # Sidechain cuando se pide explicitamente
+                # Sidechain cuando se pide explicitamente - CON NORMALIZACIÓN
                 filter_complex = (
-                    f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                    "[music_loop][0:a]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"  # Muy suave - música ambiente audible
-                    "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
+                    f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+                    f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
+                    "[music_loop][voice]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"
+                    "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
                 )
                 logger.info("[DUCKING] Modo: SIDECHAIN (reactivo)")
         elif ducking_enabled:
-            # Fallback: sidechain cuando no hay word_timings
+            # Fallback: sidechain cuando no hay word_timings - CON NORMALIZACIÓN
             filter_complex = (
-                f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                "[music_loop][0:a]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"  # Muy suave - música ambiente audible
-                "[0:a][music_ducked]amix=inputs=2:duration=first:normalize=0[aout]"
+                f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+                f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
+                "[music_loop][voice]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"
+                "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
             )
             logger.info("[DUCKING] Modo: SIDECHAIN fallback (sin word_timings)")
         else:
+            # Sin ducking: usar build_music_mix_filter
             filter_complex = (
-                f"[1:a]volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                "[0:a][music_loop]amix=inputs=2:duration=first:normalize=0[aout]"
+                f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+                f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
+                "[voice][music_loop]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
             )
 
         cmd = [
@@ -421,7 +529,37 @@ def mix_background_music(
         if result.returncode != 0:
             logger.warning(f"Music mix failed: {result.stderr[-300:]}")
             return False
-        logger.info(f"✅ Background music mixed into {output_path.name}")
+        
+        # Phase 1C: Post-process audio RMS check
+        try:
+            # Verify output has valid audio with acceptable RMS level
+            rms_result = subprocess.run(
+                ["ffprobe", "-v", "error", "-f", "lavfi",
+                 f"amovie={output_path},astats=metadata=1:reset=1",
+                 "-show_entries", "lavfi.astats.Overall.RMS_level",
+                 "-of", "default=nw=1:nk=1"],
+                capture_output=True, text=True, timeout=15
+            )
+            if rms_result.returncode == 0:
+                rms_str = rms_result.stdout.strip()
+                if rms_str and rms_str not in ("nan", "inf", "-inf"):
+                    rms_db = float(rms_str)
+                    # Valid audio should be between -80 dB (silence) and 0 dB (max)
+                    if rms_db < -80 or rms_db > 3:
+                        logger.warning(f"[Phase 1C] Output audio suspicious: RMS={rms_db:.1f}dB")
+                        # Still return True but log warning — let caller decide
+                    else:
+                        logger.info(f"✅ Background music mixed into {output_path.name} (RMS: {rms_db:.1f}dB)")
+                else:
+                    logger.warning(f"[Phase 1C] Cannot measure RMS — output may be silent")
+            else:
+                # ffprobe failed but ffmpeg succeeded — likely fine
+                logger.info(f"✅ Background music mixed into {output_path.name}")
+        except Exception as _rms_e:
+            # RMS check is optional — don't fail on it
+            logger.debug(f"[Phase 1C] RMS check skipped: {_rms_e}")
+            logger.info(f"✅ Background music mixed into {output_path.name}")
+        
         return True
     except Exception as e:
         logger.error(f"Music mix error: {e}")

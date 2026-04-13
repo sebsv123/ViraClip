@@ -56,6 +56,8 @@ from .video_processing import (
     mix_background_music,
     get_background_music_for_niche,
     fetch_pixabay_music,
+    AUDIO_NORMALIZE_FILTER,
+    build_music_mix_filter,
     
     # Transitions (migrated from video_utils)
     get_available_transitions,
@@ -112,6 +114,8 @@ __all__ = [
     "mix_background_music",
     "get_background_music_for_niche",
     "fetch_pixabay_music",
+    "AUDIO_NORMALIZE_FILTER",
+    "build_music_mix_filter",
     
     # Transitions
     "get_available_transitions",
