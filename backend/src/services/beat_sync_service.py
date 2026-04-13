@@ -271,12 +271,14 @@ async def mix_bgm_beat_synced(
             from .audio_ducking_service import build_word_aware_ducking_filter
             _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
             if _ducking_mode == "predictive":
+                # Ajustado: voice_duck_ratio 0.65 = música al 65% durante voz (audible)
+                # long_pause_boost 1.3 = música sube un 30% en pausas largas (no 2x que distorsiona)
                 vol_filter = build_word_aware_ducking_filter(
                     words=word_timings,
                     music_base_volume=bgm_volume,
-                    voice_duck_ratio=float(os.environ.get("DUCKING_VOICE_RATIO", "0.45")),
-                    long_pause_boost=float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "2.0")),
-                    short_pause_boost=float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.2")),
+                    voice_duck_ratio=float(os.environ.get("DUCKING_VOICE_RATIO", "0.65")),
+                    long_pause_boost=float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "1.30")),
+                    short_pause_boost=float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.15")),
                 )
                 logger.info("[beat_sync] Ducking: PREDICTIVO (word timestamps)")
             else:
@@ -338,28 +340,21 @@ def _build_speech_duck_filter(
     """
     Build an FFmpeg audio volume filter that:
       - Fades in at the start
-      - Ducks to base_vol during speech segments
-      - Rises to 3× base_vol during non-speech gaps
+      - Applies consistent base volume (no complex ducking that causes noise)
       - Fades out at the end
+    
+    NOTE: Complex if/between expressions with many segments cause white noise.
+    Simplified to use consistent volume with smooth fades only.
     """
-    high_vol = min(0.60, base_vol * 3.5)
-
-    if not speech_segments:
-        return (
-            f"afade=t=in:d={fade_in},"
-            f"volume={base_vol}"
-        )
-
-    # Build if/between expression
-    duck_conds = "+".join(
-        f"between(t,{s.get('start', 0):.2f},{s.get('end', 0):.2f})"
-        for s in speech_segments
-    )
-    vol_expr = f"if(gt({duck_conds},0),{base_vol},{high_vol})"
-
+    # Cap volume to prevent distortion
+    safe_vol = min(base_vol, 0.50)
+    
+    # Simple: fade in, constant volume, fade out
+    # Volume curve: music always present at audible level
     return (
-        f"afade=t=in:d={fade_in},"
-        f"volume='{vol_expr}':eval=frame"
+        f"afade=t=in:st=0:d={fade_in},"
+        f"volume={safe_vol},"
+        f"afade=t=out:st=999:d={fade_out}"
     )
 
 

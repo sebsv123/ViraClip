@@ -1115,23 +1115,6 @@ class VideoService:
         # Step 4.2: Audio denoising — now merged into EditingPipeline (afftdn in filter_complex)
         # Step 4.3: B-Roll overlay — moved to after EditingPipeline (see below).
 
-        # Step 4.3a: B-Roll overlay (post-EP) — insert contextual B-roll assets.
-        _broll_enabled_env = os.environ.get("BROLL_ENABLED", "true").lower() == "true"
-        if _broll_enabled_env and _clip_profile and _clip_profile.broll_count > 0:
-            try:
-                from .broll_service import BrollService
-                broll_svc = BrollService()
-                broll_out = output_path.with_name(f"broll_{output_path.name}")
-                broll_ok = await broll_svc.add_broll_to_video(
-                    str(output_path), str(broll_out),
-                    _clip_profile.broll_count, _clip_profile.broll_duration
-                )
-                if broll_ok and broll_out.exists():
-                    output_path = broll_out
-                    logger.info("  ✓ B-Roll overlay added")
-            except Exception as broll_e:
-                logger.debug(f"  B-Roll overlay skipped: {broll_e}")
-
         # Step 4.2b: RVC Voice Enhancement (Phase 3.2 — vocal clarity + presence boost)
         _rvc_enabled = os.environ.get("RVC_ENABLED", "false").lower() == "true"
         if _rvc_enabled:
@@ -1616,7 +1599,7 @@ class VideoService:
                 video_path=output_path,
                 output_path=_music_out,
                 speech_segments=_speech_segs,
-                bgm_volume=float(os.environ.get("BGM_VOLUME", "0.35")),
+                bgm_volume=float(os.environ.get("BGM_VOLUME", "0.40")),  # Aumentado para audibilidad
                 preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
                 word_timings=words_with_confidence or None,
             )
@@ -1638,7 +1621,7 @@ class VideoService:
                 _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
                 if _music_path:
                     _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
-                    if _mix_bg(output_path, _music_tmp, music_volume=0.22, music_path=_music_path, word_timings=words_with_confidence or None):
+                    if _mix_bg(output_path, _music_tmp, music_volume=0.35, music_path=_music_path, word_timings=words_with_confidence or None):  # Aumentado de 0.22
                         if _music_tmp.exists():
                             _music_tmp.replace(output_path)
                             logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
