@@ -106,6 +106,11 @@ from .broll_overlay import (
 from .optical_flow_transitions import (
     get_available_transitions,
     apply_transition_effect,
+    # Phase 3: AI Context-Aware Transition Selection
+    TransitionType,
+    TransitionContext,
+    TransitionSelector,
+    create_context_aware_transition,
 )
 
 # Import generate_clip_thumbnail from correct location
@@ -115,6 +120,12 @@ except ImportError:
     # Fallback if service not available
     def generate_clip_thumbnail(*args, **kwargs):
         return False
+
+from .editing_pipeline import (
+    EditingPipeline,
+    OrchestratedEditingPipeline,
+    orchestrated_edit,
+)
 
 from .utils import (
     format_ms_to_timestamp,
@@ -186,6 +197,11 @@ __all__ = [
     # Transitions (migrated from video_utils)
     "get_available_transitions",
     "apply_transition_effect",
+    # Phase 3: AI Context-Aware Transition Selection
+    "TransitionType",
+    "TransitionContext",
+    "TransitionSelector",
+    "create_context_aware_transition",
     # B-Roll (consolidated from broll.py)
     "BRollVideo",
     "BRollSuggestion",
@@ -196,6 +212,10 @@ __all__ = [
     "BRollOverlayEngine",
     "BRollDecisionEngine",
     "insert_broll_into_clip",
+    # Editing pipeline
+    "EditingPipeline",
+    "OrchestratedEditingPipeline",
+    "orchestrated_edit",
     # Utils
     "format_ms_to_timestamp",
     "parse_timestamp_to_seconds",

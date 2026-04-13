@@ -680,3 +680,401 @@ def apply_transition_effect(
                     clip.close()
                 except Exception:
                     pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TransitionSelector — AI Context-Aware Transition Selection (Phase 3)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional, Dict, Any
+import random
+
+
+class TransitionType(Enum):
+    """Available transition types."""
+    FADE = auto()
+    DISSOLVE = auto()
+    WIPE_LEFT = auto()
+    WIPE_RIGHT = auto()
+    WIPE_UP = auto()
+    WIPE_DOWN = auto()
+    ZOOM_IN = auto()
+    ZOOM_OUT = auto()
+    SLIDE_LEFT = auto()
+    SLIDE_RIGHT = auto()
+    OPTICAL_FLOW = auto()  # RAFT-based morph
+    GLITCH = auto()
+    FLASH = auto()
+
+
+@dataclass
+class TransitionContext:
+    """Context for AI transition selection."""
+    segment_a_text: str = ""           # Previous segment transcript
+    segment_b_text: str = ""           # Next segment transcript  
+    segment_a_mood: str = "neutral"    # Mood of previous segment
+    segment_b_mood: str = "neutral"    # Mood of next segment
+    topic_shift: bool = False          # Is there a topic change?
+    emotional_shift: bool = False      # Is there an emotional shift?
+    is_hook_boundary: bool = False     # Is this a hook → content boundary?
+    video_style: str = "default"       # Style: viral, cinematic, minimal
+
+
+class TransitionSelector:
+    """
+    AI-driven transition selection based on context.
+    
+    Rules:
+    - Emotional shifts → Dramatic transitions (flash, glitch, zoom)
+    - Topic changes → Smooth transitions (fade, dissolve, wipe)
+    - Similar content → Minimal/no transition
+    - Fast-paced content → Quick transitions (wipe, slide)
+    - Cinematic content → Smooth optical flow or dissolves
+    """
+    
+    # Transition categories by mood/context
+    TRANSITION_CATEGORIES = {
+        "dramatic": [TransitionType.FLASH, TransitionType.GLITCH, TransitionType.ZOOM_IN],
+        "smooth": [TransitionType.FADE, TransitionType.DISSOLVE, TransitionType.OPTICAL_FLOW],
+        "energetic": [TransitionType.WIPE_LEFT, TransitionType.WIPE_RIGHT, TransitionType.SLIDE_LEFT],
+        "subtle": [TransitionType.FADE, TransitionType.ZOOM_OUT],
+        "topic_change": [TransitionType.WIPE_LEFT, TransitionType.WIPE_RIGHT, TransitionType.DISSOLVE],
+    }
+    
+    def __init__(self):
+        self.available_transitions = self._scan_available_transitions()
+    
+    def _scan_available_transitions(self) -> Dict[TransitionType, bool]:
+        """Scan for available transition types (files, models, etc.)."""
+        # Check for optical flow capability
+        has_optical_flow = _get_raft_model() is not None
+        
+        # Check for transition video files
+        transitions_dir = Path(__file__).parent.parent.parent / "transitions"
+        has_transition_files = transitions_dir.exists() and list(transitions_dir.glob("*.mp4"))
+        
+        return {
+            TransitionType.FADE: True,  # Always available (FFmpeg)
+            TransitionType.DISSOLVE: True,
+            TransitionType.WIPE_LEFT: True,
+            TransitionType.WIPE_RIGHT: True,
+            TransitionType.WIPE_UP: True,
+            TransitionType.WIPE_DOWN: True,
+            TransitionType.ZOOM_IN: True,
+            TransitionType.ZOOM_OUT: True,
+            TransitionType.SLIDE_LEFT: True,
+            TransitionType.SLIDE_RIGHT: True,
+            TransitionType.OPTICAL_FLOW: has_optical_flow,
+            TransitionType.GLITCH: has_transition_files,
+            TransitionType.FLASH: True,  # Can generate programmatically
+        }
+    
+    def select_transition(
+        self,
+        context: TransitionContext,
+        duration: float = 0.5,
+    ) -> Optional[TransitionType]:
+        """
+        Select the best transition type based on context.
+        
+        Args:
+            context: TransitionContext with segment information
+            duration: Desired transition duration (seconds)
+        
+        Returns:
+            Selected TransitionType or None for no transition (cut)
+        """
+        # Rule 1: No transition for very similar content
+        if not context.topic_shift and not context.emotional_shift:
+            if context.video_style in ("minimal", "viral_fast"):
+                logger.debug("[Transition] Similar content + minimal style → no transition")
+                return None
+        
+        candidates = []
+        
+        # Rule 2: Emotional shifts → dramatic
+        if context.emotional_shift:
+            candidates.extend(self.TRANSITION_CATEGORIES["dramatic"])
+        
+        # Rule 3: Topic changes → smooth directional
+        elif context.topic_shift:
+            candidates.extend(self.TRANSITION_CATEGORIES["topic_change"])
+        
+        # Rule 4: Hook boundaries → energetic
+        elif context.is_hook_boundary:
+            candidates.extend(self.TRANSITION_CATEGORIES["energetic"])
+        
+        # Rule 5: Default based on style
+        else:
+            if context.video_style == "cinematic":
+                candidates.extend(self.TRANSITION_CATEGORIES["smooth"])
+            elif context.video_style == "viral_fast":
+                candidates.extend(self.TRANSITION_CATEGORIES["energetic"])
+            else:
+                candidates.extend(self.TRANSITION_CATEGORIES["subtle"])
+        
+        # Filter by availability
+        available = [t for t in candidates if self.available_transitions.get(t, False)]
+        
+        if not available:
+            # Fallback to always-available transitions
+            available = [TransitionType.FADE, TransitionType.DISSOLVE]
+        
+        # Weighted random selection (prefer first candidates)
+        weights = [len(available) - i for i in range(len(available))]
+        selected = random.choices(available, weights=weights, k=1)[0]
+        
+        logger.info(f"[Transition] Selected {selected.name} for context: {self._context_summary(context)}")
+        return selected
+    
+    def _context_summary(self, context: TransitionContext) -> str:
+        """Generate a summary string for logging."""
+        parts = []
+        if context.topic_shift:
+            parts.append("topic_change")
+        if context.emotional_shift:
+            parts.append("emotional")
+        if context.is_hook_boundary:
+            parts.append("hook")
+        parts.append(f"style={context.video_style}")
+        return ", ".join(parts) if parts else "default"
+    
+    def get_transition_duration(
+        self,
+        transition_type: TransitionType,
+        base_duration: float = 0.5,
+        context: Optional[TransitionContext] = None,
+    ) -> float:
+        """
+        Get optimal transition duration based on type and context.
+        
+        Args:
+            transition_type: The selected transition type
+            base_duration: Base duration in seconds
+            context: Optional context for adjustment
+        
+        Returns:
+            Recommended duration in seconds
+        """
+        # Adjust based on transition type
+        multipliers = {
+            TransitionType.FADE: 1.0,
+            TransitionType.DISSOLVE: 1.2,
+            TransitionType.OPTICAL_FLOW: 1.5,
+            TransitionType.FLASH: 0.3,
+            TransitionType.GLITCH: 0.4,
+            TransitionType.ZOOM_IN: 0.8,
+            TransitionType.ZOOM_OUT: 0.8,
+        }
+        
+        multiplier = multipliers.get(transition_type, 1.0)
+        duration = base_duration * multiplier
+        
+        # Adjust for style
+        if context:
+            if context.video_style == "viral_fast":
+                duration *= 0.7  # Faster transitions
+            elif context.video_style == "cinematic":
+                duration *= 1.3  # Slower, more deliberate
+        
+        return round(duration, 2)
+
+
+def create_context_aware_transition(
+    clip1_path: Path,
+    clip2_path: Path,
+    output_path: Path,
+    segment_a_text: str = "",
+    segment_b_text: str = "",
+    video_style: str = "default",
+) -> bool:
+    """
+    High-level function to create a context-aware transition between clips.
+    
+    Args:
+        clip1_path: First clip
+        clip2_path: Second clip
+        output_path: Output path
+        segment_a_text: Transcript of first segment
+        segment_b_text: Transcript of second segment
+        video_style: Style preference (viral_fast, cinematic, minimal, default)
+    
+    Returns:
+        True on success
+    """
+    # Build context
+    context = TransitionContext(
+        segment_a_text=segment_a_text,
+        segment_b_text=segment_b_text,
+        video_style=video_style,
+        topic_shift=_detect_topic_shift(segment_a_text, segment_b_text),
+        emotional_shift=_detect_emotional_shift(segment_a_text, segment_b_text),
+    )
+    
+    # Select transition
+    selector = TransitionSelector()
+    transition_type = selector.select_transition(context)
+    
+    if transition_type is None:
+        # No transition needed — simple concatenate
+        return _simple_concatenate(clip1_path, clip2_path, output_path)
+    
+    # Get duration
+    duration = selector.get_transition_duration(transition_type, context=context)
+    
+    # Apply transition based on type
+    if transition_type == TransitionType.OPTICAL_FLOW:
+        return apply_optical_flow_transition(clip1_path, clip2_path, output_path, duration)
+    elif transition_type in (TransitionType.FADE, TransitionType.DISSOLVE):
+        # Use xfade filter
+        return _apply_xfade_transition(clip1_path, clip2_path, output_path, transition_type, duration)
+    else:
+        # Use transition video if available
+        transition_file = _get_transition_file(transition_type)
+        if transition_file:
+            return apply_transition_effect(clip1_path, clip2_path, transition_file, output_path)
+        else:
+            # Fallback to simple fade
+            return _apply_xfade_transition(clip1_path, clip2_path, output_path, TransitionType.FADE, duration)
+
+
+def _detect_topic_shift(text_a: str, text_b: str) -> bool:
+    """Detect if there's a topic shift between segments."""
+    # Simple heuristic: compare keyword overlap
+    words_a = set(text_a.lower().split())
+    words_b = set(text_b.lower().split())
+    
+    if not words_a or not words_b:
+        return False
+    
+    overlap = len(words_a & words_b)
+    total = len(words_a | words_b)
+    
+    if total == 0:
+        return False
+    
+    similarity = overlap / total
+    return similarity < 0.3  # Less than 30% overlap = topic shift
+
+
+def _detect_emotional_shift(text_a: str, text_b: str) -> bool:
+    """Detect emotional shift between segments."""
+    # Simple keyword-based detection
+    emotional_markers = [
+        "wow", "amazing", "incredible", "shocking", "surprising",
+        "terrible", "awful", "fantastic", "unbelievable", "omg"
+    ]
+    
+    has_emotion_a = any(marker in text_a.lower() for marker in emotional_markers)
+    has_emotion_b = any(marker in text_b.lower() for marker in emotional_markers)
+    
+    return has_emotion_a != has_emotion_b
+
+
+def _simple_concatenate(clip1: Path, clip2: Path, output: Path) -> bool:
+    """Simple concatenation without transitions."""
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(clip1),
+            "-i", str(clip2),
+            "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[outv][outa]",
+            "-map", "[outv]", "-map", "[outa]",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        return result.returncode == 0
+    except Exception as e:
+        logger.error(f"Simple concatenate failed: {e}")
+        return False
+
+
+def _apply_xfade_transition(
+    clip1: Path,
+    clip2: Path,
+    output: Path,
+    transition_type: TransitionType,
+    duration: float,
+) -> bool:
+    """Apply FFmpeg xfade transition."""
+    try:
+        # Map TransitionType to xfade transition name
+        xfade_map = {
+            TransitionType.FADE: "fade",
+            TransitionType.DISSOLVE: "fadeblack",
+            TransitionType.WIPE_LEFT: "wipeleft",
+            TransitionType.WIPE_RIGHT: "wiperight",
+            TransitionType.WIPE_UP: "wipeup",
+            TransitionType.WIPE_DOWN: "wipedown",
+        }
+        
+        transition_name = xfade_map.get(transition_type, "fade")
+        
+        # Get clip1 duration for transition offset
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", str(clip1)
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=10)
+        clip1_duration = float(probe_result.stdout.strip())
+        
+        offset = max(0, clip1_duration - duration)
+        
+        filter_complex = (
+            f"[0:v]format=pix_fmts=yuv420p[va];"
+            f"[1:v]format=pix_fmts=yuv420p[vb];"
+            f"[va][vb]xfade=transition={transition_name}:duration={duration}:offset={offset}[vout];"
+            f"[0:a][1:a]acrossfade=d={duration}[aout]"
+        )
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(clip1),
+            "-i", str(clip2),
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            "-c:a", "aac", "-b:a", "192k",
+            str(output)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        
+        if result.returncode == 0:
+            logger.info(f"✅ xfade transition applied: {transition_name}, dur={duration:.2f}s")
+            return True
+        else:
+            logger.error(f"xfade failed: {result.stderr[-300:]}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"xfade transition error: {e}")
+        return False
+
+
+def _get_transition_file(transition_type: TransitionType) -> Optional[Path]:
+    """Get path to transition video file if available."""
+    transitions_dir = Path(__file__).parent.parent.parent / "transitions"
+    if not transitions_dir.exists():
+        return None
+    
+    # Map transition type to filename pattern
+    pattern_map = {
+        TransitionType.GLITCH: "*glitch*.mp4",
+        TransitionType.FLASH: "*flash*.mp4",
+        TransitionType.ZOOM_IN: "*zoom*.mp4",
+    }
+    
+    pattern = pattern_map.get(transition_type)
+    if not pattern:
+        return None
+    
+    matches = list(transitions_dir.glob(pattern))
+    if matches:
+        return matches[0]
+    
+    return None

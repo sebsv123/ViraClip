@@ -828,3 +828,274 @@ class EditingPipeline:
             return b"audio" in stdout
         except Exception:
             return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# OrchestratedEditingPipeline — Phase 3 Final Integration
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class OrchestratedEditingPipeline:
+    """
+    Phase 3 orchestrated pipeline that coordinates:
+    1. Clip enhancement (existing EP.apply())
+    2. B-roll insertion (Phase 2)
+    3. Context-aware transitions (Phase 3)
+    4. Audio mixing with normalization (Phase 1)
+    
+    Strict step ordering with graceful degradation.
+    """
+    
+    def __init__(self):
+        self.ep = EditingPipeline()
+        self.logger = logging.getLogger(__name__ + ".orchestrator")
+    
+    async def process_clip(
+        self,
+        clip_path: Path,
+        output_path: Path,
+        # Segment info
+        segment_text: str = "",
+        segment_start: float = 0.0,
+        segment_duration: float = 0.0,
+        keywords: Optional[List[str]] = None,
+        words_with_timestamps: Optional[List[Dict]] = None,
+        # Features
+        enable_broll: bool = True,
+        enable_transitions: bool = False,  # For standalone clips, usually False
+        enable_music: bool = True,
+        video_style: str = "default",
+        music_volume: float = 0.35,
+    ) -> Optional[Path]:
+        """
+        Process a single clip through the full pipeline.
+        
+        Pipeline steps (in order):
+        1. Apply visual enhancement (EditingPipeline.apply)
+        2. Insert B-roll (if enabled and keywords available)
+        3. Mix background music (if enabled)
+        
+        Args:
+            clip_path: Source clip
+            output_path: Final output path
+            segment_text: Transcript text
+            segment_start: Start time in original video
+            segment_duration: Segment duration
+            keywords: Visual keywords for B-roll
+            words_with_timestamps: For ducking
+            enable_broll: Enable B-roll insertion
+            enable_transitions: Enable transitions (usually for multi-clip)
+            enable_music: Enable background music
+            video_style: 'viral_fast', 'cinematic', 'minimal', 'default'
+            music_volume: Background music volume (0.0-1.0)
+        
+        Returns:
+            Path to processed clip or None on failure
+        """
+        import tempfile
+        from .broll_overlay import BRollDecisionEngine, insert_broll_into_clip
+        from .audio import mix_background_music, _validate_audio_stream
+        
+        current_path = clip_path
+        temp_files = []
+        
+        try:
+            # ─────────────────────────────────────────────────────────────────
+            # STEP 1: Visual Enhancement
+            # ─────────────────────────────────────────────────────────────────
+            self.logger.info(f"[Pipeline] Step 1: Visual enhancement for {clip_path.name}")
+            
+            step1_output = Path(tempfile.mktemp(suffix=".mp4"))
+            temp_files.append(step1_output)
+            
+            enhanced_path = await self.ep.apply(
+                video_path=current_path,
+                output_path=step1_output,
+                words=words_with_timestamps or [],
+                speaker_name="",
+            )
+            
+            if enhanced_path and enhanced_path.exists():
+                current_path = enhanced_path
+                self.logger.info(f"[Pipeline] ✅ Step 1 complete")
+            else:
+                self.logger.warning(f"[Pipeline] Step 1 failed, using original")
+                current_path = clip_path
+            
+            # ─────────────────────────────────────────────────────────────────
+            # STEP 2: B-Roll Insertion (optional)
+            # ─────────────────────────────────────────────────────────────────
+            if enable_broll and keywords:
+                self.logger.info(f"[Pipeline] Step 2: B-roll insertion ({len(keywords)} keywords)")
+                
+                # Create decision engine
+                decision_engine = BRollDecisionEngine()
+                decisions = decision_engine.analyze_segment(
+                    segment_text=segment_text,
+                    segment_start=segment_start,
+                    segment_duration=segment_duration,
+                    keywords=keywords,
+                )
+                
+                if decisions:
+                    step2_output = Path(tempfile.mktemp(suffix=".mp4"))
+                    temp_files.append(step2_output)
+                    
+                    success = insert_broll_into_clip(
+                        clip_path=current_path,
+                        decisions=decisions,
+                        output_path=step2_output,
+                    )
+                    
+                    if success:
+                        current_path = step2_output
+                        self.logger.info(f"[Pipeline] ✅ Step 2 complete ({len(decisions)} B-rolls)")
+                    else:
+                        self.logger.warning(f"[Pipeline] Step 2 failed, continuing without B-roll")
+                else:
+                    self.logger.info(f"[Pipeline] Step 2: No B-roll decisions")
+            
+            # ─────────────────────────────────────────────────────────────────
+            # STEP 3: Audio Mixing (optional)
+            # ─────────────────────────────────────────────────────────────────
+            if enable_music:
+                self.logger.info(f"[Pipeline] Step 3: Audio mixing")
+                
+                # Validate audio stream before mixing (Phase 1B)
+                if not _validate_audio_stream(current_path, "clip"):
+                    self.logger.warning(f"[Pipeline] Invalid audio stream, skipping music mix")
+                else:
+                    step3_output = Path(tempfile.mktemp(suffix=".mp4"))
+                    temp_files.append(step3_output)
+                    
+                    success = mix_background_music(
+                        video_path=current_path,
+                        output_path=step3_output,
+                        music_volume=music_volume,
+                        ducking_enabled=True,
+                        word_timings=words_with_timestamps,
+                    )
+                    
+                    if success:
+                        current_path = step3_output
+                        self.logger.info(f"[Pipeline] ✅ Step 3 complete")
+                    else:
+                        self.logger.warning(f"[Pipeline] Step 3 failed, continuing without music")
+            
+            # ─────────────────────────────────────────────────────────────────
+            # FINAL: Copy to output location
+            # ─────────────────────────────────────────────────────────────────
+            import shutil
+            shutil.copy(current_path, output_path)
+            
+            self.logger.info(f"✅ [Pipeline] Complete: {output_path.name}")
+            return output_path
+            
+        except Exception as e:
+            self.logger.error(f"[Pipeline] Fatal error: {e}")
+            # Return original on failure
+            return None
+        finally:
+            # Cleanup temp files (except current_path which might be output)
+            for temp_file in temp_files:
+                try:
+                    if temp_file.exists() and temp_file != current_path:
+                        temp_file.unlink()
+                except Exception:
+                    pass
+    
+    async def process_clips_batch(
+        self,
+        clips: List[Dict[str, Any]],
+        output_dir: Path,
+        enable_broll: bool = True,
+        enable_music: bool = True,
+        video_style: str = "default",
+    ) -> List[Path]:
+        """
+        Process multiple clips in parallel.
+        
+        Args:
+            clips: List of dicts with keys: path, text, start, duration, keywords, words
+            output_dir: Directory for output files
+            enable_broll: Enable B-roll
+            enable_music: Enable music
+            video_style: Video style preference
+        
+        Returns:
+            List of successfully processed clip paths
+        """
+        import asyncio
+        
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        async def process_one(idx: int, clip_info: Dict) -> Optional[Path]:
+            output_path = output_dir / f"clip_{idx:03d}.mp4"
+            
+            return await self.process_clip(
+                clip_path=Path(clip_info["path"]),
+                output_path=output_path,
+                segment_text=clip_info.get("text", ""),
+                segment_start=clip_info.get("start", 0.0),
+                segment_duration=clip_info.get("duration", 0.0),
+                keywords=clip_info.get("keywords"),
+                words_with_timestamps=clip_info.get("words"),
+                enable_broll=enable_broll,
+                enable_music=enable_music,
+                video_style=video_style,
+            )
+        
+        # Process with limited concurrency
+        semaphore = asyncio.Semaphore(3)  # Max 3 concurrent
+        
+        async def process_with_limit(idx: int, clip_info: Dict) -> Optional[Path]:
+            async with semaphore:
+                return await process_one(idx, clip_info)
+        
+        tasks = [
+            process_with_limit(i, clip)
+            for i, clip in enumerate(clips)
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Filter successful results
+        successful = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                self.logger.error(f"[Pipeline] Clip {i} failed: {result}")
+            elif result is not None:
+                successful.append(result)
+        
+        self.logger.info(f"[Pipeline] Batch complete: {len(successful)}/{len(clips)} clips")
+        return successful
+
+
+# Convenience function for simple usage
+async def orchestrated_edit(
+    clip_path: Path,
+    output_path: Path,
+    segment_text: str = "",
+    keywords: Optional[List[str]] = None,
+    enable_broll: bool = True,
+    enable_music: bool = True,
+) -> Optional[Path]:
+    """
+    Simple interface to the orchestrated pipeline.
+    
+    Example:
+        result = await orchestrated_edit(
+            clip_path=Path("input.mp4"),
+            output_path=Path("output.mp4"),
+            segment_text="Talking about productivity...",
+            keywords=["office", "computer"],
+        )
+    """
+    pipeline = OrchestratedEditingPipeline()
+    return await pipeline.process_clip(
+        clip_path=clip_path,
+        output_path=output_path,
+        segment_text=segment_text,
+        keywords=keywords,
+        enable_broll=enable_broll,
+        enable_music=enable_music,
+    )
