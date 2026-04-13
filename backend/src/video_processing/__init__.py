@@ -49,6 +49,8 @@ from .audio import (
 
 from .clip_creation import (
     create_optimized_clip,
+    create_clips_from_segments,
+    create_clips_with_transitions,
 )
 
 # NEW: Viral analysis modules
@@ -81,17 +83,19 @@ from .viral_effects import (
     get_effects_for_content,
 )
 
-# TEMPORARY: Re-export functions still in video_utils during migration.
-# Suppress the module-level DeprecationWarning until these three functions
-# are moved into video_processing sub-modules.
-import warnings as _warnings
-with _warnings.catch_warnings():
-    _warnings.simplefilter("ignore", DeprecationWarning)
-    from ..video_utils import (
-        get_available_transitions,
-        apply_transition_effect,
-        create_clips_with_transitions,
-    )
+# B-Roll (consolidated from broll.py)
+from .broll import (
+    BRollVideo,
+    BRollSuggestion,
+    search_broll_videos,
+    get_best_broll_video,
+)
+
+# Transition functions (migrated from video_utils)
+from .optical_flow_transitions import (
+    get_available_transitions,
+    apply_transition_effect,
+)
 
 # Import generate_clip_thumbnail from correct location
 try:
@@ -142,6 +146,8 @@ __all__ = [
     "fetch_pixabay_music",
     # Clip creation
     "create_optimized_clip",
+    "create_clips_from_segments",
+    "create_clips_with_transitions",
     # NEW: Viral analysis
     "analyze_segment_virality",
     "compare_hook_strength",
@@ -163,11 +169,14 @@ __all__ = [
     "EffectPresets",
     "analyze_content_type_for_effects",
     "get_effects_for_content",
-    # TEMPORARY: Functions still in video_utils during migration
+    # Transitions (migrated from video_utils)
     "get_available_transitions",
     "apply_transition_effect",
-    "generate_clip_thumbnail",
-    "create_clips_with_transitions",
+    # B-Roll (consolidated from broll.py)
+    "BRollVideo",
+    "BRollSuggestion",
+    "search_broll_videos",
+    "get_best_broll_video",
     # Utils
     "format_ms_to_timestamp",
     "parse_timestamp_to_seconds",

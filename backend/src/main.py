@@ -936,7 +936,7 @@ async def get_caption_templates():
 async def search_broll(query: str, count: int = 5, orientation: str = "portrait"):
     """Search for B-roll videos from Pexels"""
     try:
-        from .broll import search_broll_videos, get_video_download_url
+        from .video_processing.broll import search_broll_videos, get_video_download_url
 
         if not config.pexels_api_key:
             raise HTTPException(

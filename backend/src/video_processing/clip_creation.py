@@ -480,3 +480,189 @@ def create_optimized_clip(
                 logger.debug(f"🧹 Cleaned up temp segment: {temp_segment_path.name}")
             except Exception as cleanup_err:
                 logger.warning(f"Failed to cleanup temp segment: {cleanup_err}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Batch Clip Creation (Migrated from video_utils.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import zipfile
+from concurrent.futures import ProcessPoolExecutor, as_completed
+import multiprocessing
+
+
+def _render_segment_task(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Worker task for parallel clip rendering."""
+    try:
+        from ..spacetimedb.schema import broadcast_telemetry
+        
+        result = create_optimized_clip(
+            video_path=task["video_path"],
+            start_seconds=task["start_seconds"],
+            end_seconds=task["end_seconds"],
+            output_path=task["clip_path"],
+            add_subtitles=task["add_subtitles"],
+            font_family=task["font_family"],
+            font_size=task["font_size"],
+            font_color=task["font_color"],
+            caption_template=task["caption_template"],
+            output_format=task["output_format"],
+            task_id=task["task_id"],
+        )
+        
+        if result:
+            segment = task["segment"]
+            return {
+                "clip_id": task["index"] + 1,
+                "filename": task["clip_path"].name,
+                "path": str(task["clip_path"]),
+                "start_time": segment["start_time"],
+                "end_time": segment["end_time"],
+                "text": segment.get("text", ""),
+                "virality": segment.get("virality_score"),
+                "hook_type": segment.get("hook_type"),
+            }
+        return None
+    except Exception as e:
+        logger.error(f"Parallel task failed: {e}")
+        return None
+
+
+def create_clips_from_segments(
+    video_path: Path,
+    segments: List[Dict[str, Any]],
+    output_dir: Path,
+    font_family: str = "THEBOLDFONT",
+    font_size: int = 24,
+    font_color: str = "#FFFFFF",
+    caption_template: str = "default",
+    output_format: str = "vertical",
+    add_subtitles: bool = True,
+    task_id: str = "unknown",
+) -> List[Dict[str, Any]]:
+    """Create optimized video clips from segments with parallel multi-processing."""
+    logger.info(
+        f"Parallel Engine: Creating {len(segments)} clips [Subtitles={add_subtitles}]"
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    clips_info = []
+    
+    # We limit workers to avoid memory starvation on small VMs/Docker containers
+    cpu_count = multiprocessing.cpu_count()
+    max_workers = min(len(segments), max(2, cpu_count - 1))
+    
+    tasks = []
+    for i, segment in enumerate(segments):
+        from .utils import parse_timestamp_to_seconds
+        start_seconds = parse_timestamp_to_seconds(segment["start_time"])
+        end_seconds = parse_timestamp_to_seconds(segment["end_time"])
+        
+        if (end_seconds - start_seconds) <= 0:
+            continue
+            
+        clip_filename = f"clip_{i + 1}_{segment['start_time'].replace(':', '')}-{segment['end_time'].replace(':', '')}.mp4"
+        clip_path = output_dir / clip_filename
+        
+        tasks.append({
+            "video_path": video_path,
+            "start_seconds": start_seconds,
+            "end_seconds": end_seconds,
+            "clip_path": clip_path,
+            "add_subtitles": add_subtitles,
+            "font_family": font_family,
+            "font_size": font_size,
+            "font_color": font_color,
+            "caption_template": caption_template,
+            "output_format": output_format,
+            "segment": segment,
+            "index": i,
+            "task_id": task_id
+        })
+
+    logger.info(f"Spawning {max_workers} render workers...")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_clip = {executor.submit(_render_segment_task, task): task for task in tasks}
+        for future in as_completed(future_to_clip):
+            result = future.result()
+            if result:
+                clips_info.append(result)
+                logger.info(f"Finished clip {result['clip_id']}")
+
+    # Sort results to maintain original order
+    clips_info.sort(key=lambda x: x["clip_id"])
+    logger.info(f"Rendering Finished: {len(clips_info)}/{len(segments)} clips successful")
+
+    # Generate thumbnails for each clip
+    try:
+        from ..services.thumbnail_service import generate_viral_thumbnail
+        for clip in clips_info:
+            thumbnail_filename = clip["filename"].replace(".mp4", ".png")
+            thumbnail_path = output_dir / "thumbnails" / thumbnail_filename
+            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+
+            # Get first 3 words for thumbnail text
+            words = clip["text"].split()[:3]
+            thumb_text = " ".join(words) if words else "WATCH THIS"
+
+            generate_viral_thumbnail(
+                video_path=clip["path"],
+                output_path=str(thumbnail_path),
+                text=thumb_text
+            )
+            clip["thumbnail"] = str(thumbnail_path)
+    except Exception as e:
+        logger.warning(f"Thumbnail generation skipped: {e}")
+
+    # Create Production Bundle (Zip Asset Archive)
+    bundle_path = output_dir / "viraclip_production_bundle.zip"
+    try:
+        with zipfile.ZipFile(bundle_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for clip in clips_info:
+                # Add clip mp4
+                zipf.write(clip["path"], f"clips/{clip['filename']}")
+                # Add thumbnail png
+                if "thumbnail" in clip:
+                    zipf.write(clip["thumbnail"], f"thumbnails/{Path(clip['thumbnail']).name}")
+        logger.info(f"Production Bundle Ready: {bundle_path.name}")
+    except Exception as e:
+        logger.error(f"Failed to create production bundle: {e}")
+
+    return clips_info
+
+
+def create_clips_with_transitions(
+    video_path: Path,
+    segments: List[Dict[str, Any]],
+    output_dir: Path,
+    font_family: str = "THEBOLDFONT",
+    font_size: int = 24,
+    font_color: str = "#FFFFFF",
+    caption_template: str = "default",
+    output_format: str = "vertical",
+    add_subtitles: bool = True,
+    task_id: str = "unknown",
+) -> List[Dict[str, Any]]:
+    """Create standalone video clips without inter-clip transitions.
+
+    Kept as a backward-compatible wrapper for older call sites.
+    Inter-clip transitions are disabled for standalone ViraClip exports.
+    """
+    logger.info(
+        f"Creating {len(segments)} standalone clips subtitles={add_subtitles} template '{caption_template}'"
+    )
+    logger.info(
+        "Inter-clip transitions are disabled for standalone ViraClip exports"
+    )
+    return create_clips_from_segments(
+        video_path,
+        segments,
+        output_dir,
+        font_family,
+        font_size,
+        font_color,
+        caption_template,
+        output_format,
+        add_subtitles,
+        task_id,
+    )
