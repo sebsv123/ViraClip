@@ -68,6 +68,11 @@ from .video_processing import (
     BRollSuggestion,
     search_broll_videos,
     get_best_broll_video,
+    # NEW: Professional B-Roll overlay system (Phase 2)
+    BRollDecision,
+    BRollOverlayEngine,
+    BRollDecisionEngine,
+    insert_broll_into_clip,
     
     # Utils
     format_ms_to_timestamp,
@@ -126,6 +131,11 @@ __all__ = [
     "BRollSuggestion",
     "search_broll_videos",
     "get_best_broll_video",
+    # NEW: Professional B-Roll overlay system (Phase 2)
+    "BRollDecision",
+    "BRollOverlayEngine",
+    "BRollDecisionEngine",
+    "insert_broll_into_clip",
     
     # Utils
     "format_ms_to_timestamp",

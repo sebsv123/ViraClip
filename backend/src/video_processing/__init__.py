@@ -94,6 +94,14 @@ from .broll import (
     get_best_broll_video,
 )
 
+# NEW: Professional B-Roll overlay system (Phase 2)
+from .broll_overlay import (
+    BRollDecision,
+    BRollOverlayEngine,
+    BRollDecisionEngine,
+    insert_broll_into_clip,
+)
+
 # Transition functions (migrated from video_utils)
 from .optical_flow_transitions import (
     get_available_transitions,
@@ -183,6 +191,11 @@ __all__ = [
     "BRollSuggestion",
     "search_broll_videos",
     "get_best_broll_video",
+    # NEW: Professional B-Roll overlay system (Phase 2)
+    "BRollDecision",
+    "BRollOverlayEngine",
+    "BRollDecisionEngine",
+    "insert_broll_into_clip",
     # Utils
     "format_ms_to_timestamp",
     "parse_timestamp_to_seconds",
