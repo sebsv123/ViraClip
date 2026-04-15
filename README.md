@@ -1,18 +1,14 @@
-# ViraClip
+# ViraClip 🎬
 
-**AI-Powered Video Clipping for Content Creators**
-
-<p align="center">
-  <a href="https://www.viraclip.com">
-    <img src="assets/banner.png" alt="ViraClip Banner" width="100%" />
-  </a>
-</p>
+**AI-Powered Video Clipping Platform for Content Creators**
 
 Transform long-form content into viral short clips with AI. ViraClip is an open-source video clipping platform that helps creators repurpose their content for TikTok, Instagram Reels, and YouTube Shorts.
 
-> 💡 **Inspired by SupoClip** - ViraClip builds upon the foundation of SupoClip, adding enterprise-grade validation, advanced analytics, and production-ready features.
-
-> 🚀 **Hosted Version**: Sign up for the waitlist at [viraclip.com](https://www.viraclip.com)
+> � **Status**: MVP Complete (90%) - Ready for Beta Testing
+>
+> 💡 **Latest**: Full-stack implementation with Next.js 15 + FastAPI + CUDA optimization
+>
+> 🎯 **Branch**: `version-basica` - Production-ready MVP with zero paid APIs
 
 ## Why ViraClip?
 
@@ -42,26 +38,54 @@ ViraClip was born from this need - a powerful, open-source alternative that puts
 
 ✅ **Unlimited Processing** - Process as many videos as your hardware can handle
 
-## Quick Start
-
-**📚 New to ViraClip?** See [DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md) for complete setup guide.
+## ⚡ Quick Start (5 minutes)
 
 ### Prerequisites
 
 - **Docker Desktop** - [Download here](https://www.docker.com/products/docker-desktop/)
 - **Git** - [Download here](https://git-scm.com/downloads)
-- **Optional:** Node.js 20+ and Bun for local frontend development
+- **Node.js 20+** - [Download here](https://nodejs.org/)
 
-**No API keys required** - ViraClip works 100% offline with local models!
-
-### 1. Clone and Configure
+### Setup in 3 Commands
 
 ```bash
+# 1. Clone repository (branch: version-basica)
 git clone https://github.com/sebsv123/ViraClip.git
 cd ViraClip
+git checkout version-basica
+
+# 2. Start database services
+docker-compose up -d postgres redis
+
+# 3. Setup frontend
+cd frontend
+npm install
+npx prisma generate
+npx prisma db push
+npm run dev
 ```
 
-Create a `.env` file in the root directory:
+**Frontend**: http://localhost:3000  
+**Backend API**: http://localhost:8000/docs
+
+### First User Setup
+
+1. Sign up at http://localhost:3000 with email/password (Google OAuth optional)
+2. You'll see waitlist pending page
+3. Approve yourself in database:
+```bash
+docker exec -it viraclip-postgres psql -U viraclip -d viraclip
+UPDATE users SET beta_access = true WHERE email = 'your-email@example.com';
+\q
+```
+4. Refresh browser → Full dashboard access! 🎉
+
+📚 **Detailed Guides**: 
+- Frontend: `frontend/QUICKSTART_MVP.md`
+- Complete setup: `IMPLEMENTACION_COMPLETA.md`
+- Environment vars: `frontend/ENV_SETUP.md`
+
+## ⚙️ Configuration (Optional)
 
 ```env
 # Required: Video transcription

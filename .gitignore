@@ -25,7 +25,9 @@ venv/
 
 # Node
 node_modules/
-package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # IDE
 .vscode/
@@ -82,6 +84,9 @@ htmlcov/
 .coverage
 .pytest_cache/
 test-results/
+backend/test_report_*.json
+backend/test_run_*.log
+backend/test_output.txt
 
 # Lockfiles (regenerate on install)
 frontend/bun.lockb
