@@ -41,12 +41,33 @@ export const auth = betterAuth({
         type: "boolean",
         input: false,
       },
+      waitlist_status: {
+        type: "string",
+        defaultValue: "pending",
+        input: false,
+      },
+      beta_access: {
+        type: "boolean",
+        defaultValue: false,
+        input: false,
+      },
+      clips_this_month: {
+        type: "number",
+        defaultValue: 0,
+        input: false,
+      },
     },
   },
   trustedOrigins,
   emailAndPassword: {
     enabled: true,
     disableSignUp,
+  },
+  socialProviders: {
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID as string,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+    },
   },
   plugins: [
     nextCookies(), // Enable Next.js cookie handling
