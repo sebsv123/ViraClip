@@ -29,7 +29,7 @@ class Config:
         self.pexels_api_key = os.getenv("PEXELS_API_KEY")
         self.apify_api_token = self._get_optional_env("APIFY_API_TOKEN")
         self.youtube_metadata_provider = self._normalize_youtube_metadata_provider(
-            os.getenv("YOUTUBE_METADATA_PROVIDER", "yt_dlp")
+            os.getenv("YOUTUBE_METADATA_PROVIDER", "youtube_data_api")
         )
         self.apify_youtube_default_quality = self._normalize_apify_quality(
             os.getenv("APIFY_YOUTUBE_DEFAULT_QUALITY", "1080")
@@ -159,7 +159,7 @@ class Config:
         
         if not has_llm:
             logger.warning(
-                "⚠️  No LLM API key found! Pipeline will use fallback text-based analysis. "
+                "[WARN] No LLM API key found! Pipeline will use fallback text-based analysis. "
                 "Set GROQ_API_KEY (recommended), OPENAI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY "
                 "for best quality."
             )
@@ -167,14 +167,14 @@ class Config:
         # Check Whisper device configuration
         whisper_device = os.getenv("WHISPER_DEVICE", "cpu")
         if whisper_device == "cuda":
-            logger.info("🎮 Whisper configured for CUDA/GPU. Ensure CUDA is properly installed.")
+            logger.info("[GPU] Whisper configured for CUDA/GPU.")
         
         # Check if critical directories exist (Docker handles this, but warn in standalone mode)
         if not os.path.exists(self.temp_dir):
-            logger.warning(f"⚠️  Temp directory not found: {self.temp_dir}. Will be created on first use.")
+            logger.warning(f"[WARN] Temp directory not found: {self.temp_dir}. Will be created on first use.")
         
         # Log configured LLM
-        logger.info(f"🤖 LLM configured: {self.llm}")
+        logger.info(f"[LLM] configured: {self.llm}")
 
     @staticmethod
     def _get_optional_env(name: str):

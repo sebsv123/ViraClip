@@ -525,6 +525,26 @@ Transcript:
 {transcript}"""
 
 
+def _truncate_transcript(transcript: str, max_chars: int = 3000) -> str:
+    """Truncate transcript keeping timestamps evenly distributed across the video."""
+    if len(transcript) <= max_chars:
+        return transcript
+    lines = transcript.splitlines()
+    if not lines:
+        return transcript[:max_chars]
+    # Keep first 40%, middle 20%, last 40% — preserves start/end hooks
+    keep = max_chars
+    head_end = int(keep * 0.40)
+    tail_start = int(keep * 0.60)
+    head = transcript[:head_end]
+    tail = transcript[-( keep - tail_start):]
+    mid_start = len(transcript) // 2 - keep // 10
+    mid_end = mid_start + keep // 5
+    mid = transcript[mid_start:mid_end]
+    truncated = head + "\n[...transcript truncated...]\n" + mid + "\n[...transcript truncated...]\n" + tail
+    return truncated
+
+
 def _ts_to_secs(ts: str) -> float:
     """Convert MM:SS timestamp string to seconds."""
     try:
@@ -701,16 +721,82 @@ async def get_most_relevant_parts_by_transcript(
         f"duration={video_duration:.1f}s {'[SHORT VIDEO]' if is_short else ''}"
     )
 
+    # Fallback model chain: if primary hits rate limit or is decommissioned, try these
+    # Only models with large context (>64k) to avoid 413 Payload Too Large
+    _FALLBACK_MODELS = [
+        "groq:llama-3.1-8b-instant",
+        "groq:llama-3.3-70b-versatile",
+        "groq:llama-3.1-70b-versatile",
+    ]
+
+    async def _run_with_retry(agent_instance, prompt_text: str, max_retries: int = 2):
+        """Run agent with retry on transient 429, immediate fallback on daily TPD limit."""
+        last_exc = None
+
+        def _is_daily_limit(err: Exception) -> bool:
+            s = str(err).lower()
+            return "tpd" in s or "per day" in s or "tokens per day" in s
+
+        def _is_decommissioned(err: Exception) -> bool:
+            s = str(err).lower()
+            return (
+                "decommission" in s or "deprecated" in s or "no longer" in s
+                or ("status_code: 400" in s)
+                or ("status_code: 413" in s or "payload too large" in s or "request too large" in s)
+            )
+
+        def _is_rate_limit(err: Exception) -> bool:
+            s = str(err).lower()
+            return "429" in s or "rate limit" in s or "too many" in s
+
+        for attempt in range(max_retries):
+            try:
+                return await agent_instance.run(prompt_text)
+            except Exception as _e:
+                if _is_daily_limit(_e):
+                    logger.warning(f"[LLM] Daily token limit hit on {config.llm}, trying fallbacks")
+                    last_exc = _e
+                    break
+                elif _is_decommissioned(_e):
+                    logger.warning(f"[LLM] Model {config.llm} decommissioned or invalid, trying fallbacks")
+                    last_exc = _e
+                    break
+                elif _is_rate_limit(_e):
+                    wait = 2 ** attempt  # 1s, 2s
+                    logger.warning(f"[LLM] 429 rate limit (attempt {attempt+1}/{max_retries}), waiting {wait}s...")
+                    await asyncio.sleep(wait)
+                    last_exc = _e
+                else:
+                    raise
+        # Primary exhausted — try fallback models
+        for fb_model in _FALLBACK_MODELS:
+            if fb_model == config.llm:
+                continue
+            try:
+                logger.info(f"[LLM] Trying fallback model: {fb_model}")
+                from pydantic_ai import Agent as _Agent
+                fb_agent = _Agent(
+                    model=fb_model,
+                    output_type=TranscriptAnalysis,
+                    system_prompt=transcript_analysis_system_prompt,
+                )
+                return await fb_agent.run(prompt_text)
+            except Exception as _fb_e:
+                logger.warning(f"[LLM] Fallback {fb_model} failed: {_fb_e}")
+        raise last_exc
+
     try:
         logger.info(f"[LLM CALL] Initializing agent with model: {config.llm}")
         agent = get_transcript_agent()
         
         prompt = build_transcript_analysis_prompt(
-            transcript=transcript, include_broll=include_broll, video_duration=video_duration
+            transcript=_truncate_transcript(transcript),
+            include_broll=include_broll,
+            video_duration=video_duration,
         )
         logger.info(f"[LLM CALL] Prompt built ({len(prompt)} chars), calling LLM...")
         
-        result = await agent.run(prompt)
+        result = await _run_with_retry(agent, prompt)
         
         # FIX: Validate LLM response is not None
         if result is None:

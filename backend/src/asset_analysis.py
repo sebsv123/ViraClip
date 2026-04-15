@@ -14,6 +14,14 @@ from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 class DescriptionResult(BaseModel):
     description: str
 
@@ -51,7 +59,7 @@ def extract_frames_from_clip(
         t = round(i * step, 3)
         frame_path = output_dir / f"{clip_id}-frame-{i+1:03}.jpg"
         cmd = [
-            "ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", str(video_path),
+            _get_ffmpeg_exe(), "-y", "-ss", f"{t:.3f}", "-i", str(video_path),
             "-frames:v", "1", "-q:v", "2", str(frame_path)
         ]
         try:

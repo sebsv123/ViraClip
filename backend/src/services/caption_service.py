@@ -23,6 +23,14 @@ import asyncio
 import logging
 import re
 import tempfile
+
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -362,7 +370,7 @@ async def burn_captions(
         vf = f"subtitles='{safe_ass}'{font_clause}"
 
         proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(video_path),
             "-vf", vf,
             "-c:v", "libx264", "-preset", "fast", "-crf", "20",

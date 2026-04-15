@@ -102,6 +102,14 @@ class StructuredLogger:
         self._log(logging.CRITICAL, message, **kwargs)
 
 
+def _get_utf8_stdout():
+    """Return a UTF-8 wrapped stdout, replacing unmappable chars instead of crashing."""
+    import sys as _sys, io as _io
+    if hasattr(_sys.stdout, 'buffer'):
+        return _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    return _sys.stdout
+
+
 def configure_logging() -> None:
     logs_dir = Path("logs")
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -116,17 +124,17 @@ def configure_logging() -> None:
     formatter = JsonLogFormatter()
     trace_filter = TraceIdFilter()
 
-    stream_handler = logging.StreamHandler()
+    stream_handler = logging.StreamHandler(_get_utf8_stdout())
     stream_handler.setLevel(log_level)
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(trace_filter)
 
-    app_file_handler = logging.FileHandler(logs_dir / "backend.log")
+    app_file_handler = logging.FileHandler(logs_dir / "backend.log", encoding='utf-8')
     app_file_handler.setLevel(log_level)
     app_file_handler.setFormatter(formatter)
     app_file_handler.addFilter(trace_filter)
 
-    error_file_handler = logging.FileHandler(logs_dir / "backend-error.log")
+    error_file_handler = logging.FileHandler(logs_dir / "backend-error.log", encoding='utf-8')
     error_file_handler.setLevel(logging.ERROR)
     error_file_handler.setFormatter(formatter)
     error_file_handler.addFilter(trace_filter)

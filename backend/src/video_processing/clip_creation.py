@@ -13,6 +13,15 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _get_ffmpeg_exe() -> str:
+    """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
 _PLATFORM_VF: dict = {
     "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
     "reels":    "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
@@ -225,7 +234,7 @@ def create_optimized_clip(
             if not add_subtitles and keep_original and not camera_plan:
                 result = subprocess.run(
                     [
-                        "ffmpeg", "-y", "-ss", str(start_time),
+                        _get_ffmpeg_exe(), "-y", "-ss", str(start_time),
                         "-i", str(video_path), "-t", str(duration),
                         "-c", "copy", "-movflags", "+faststart",
                         str(output_path),
@@ -243,7 +252,7 @@ def create_optimized_clip(
             logger.info(f"🔧 FFmpeg pre-extraction: {duration:.1f}s segment from {video_path.name}")
             _vf = _PLATFORM_VF.get(target_platform, _PLATFORM_VF["tiktok"])
             _ffmpeg_base = [
-                "ffmpeg", "-y",
+                _get_ffmpeg_exe(), "-y",
                 "-ss", str(start_time),
                 "-i", str(video_path),
                 "-t", str(duration),
@@ -368,7 +377,9 @@ def create_optimized_clip(
             # 6. Composite Stack
             final_stack = [processed_clip]
 
-            from ..video_utils import get_template, get_scaled_font_size, find_font_path
+            from ..caption_templates import get_template
+            from .utils import get_scaled_font_size
+            from ..font_registry import find_font_path
             _tmpl = get_template(caption_template)
             _fs = get_scaled_font_size(_tmpl.get("font_size", font_size), target_width)
             _font_path = find_font_path(font_family)
@@ -445,15 +456,18 @@ def create_optimized_clip(
                     logger.debug(f"Fade effects skipped: {_fade_e}")
 
             # 8. Write final clip
-            from ..video_utils import VideoProcessor
-            processor = VideoProcessor(font_family, font_size, font_color)
-
             if gpu_encoding_settings:
                 encoding_settings = gpu_encoding_settings
-                logger.info(f"✨ Using GPU encoding: {encoding_settings.get('codec')}")
+                logger.info(f"Using GPU encoding: {encoding_settings.get('codec')}")
             else:
-                encoding_settings = processor.get_optimal_encoding_settings("high")
-                logger.info("Using CPU encoding (libx264)")
+                from ..gpu_utils import get_ffmpeg_video_codec_args as _get_enc
+                _enc = _get_enc("high")
+                encoding_settings = {
+                    "codec": _enc["codec"],
+                    "preset": _enc.get("preset", "ultrafast"),
+                    "ffmpeg_params": _enc.get("extra_args", []),
+                }
+                logger.info(f"Using encoding: {encoding_settings['codec']}")
 
             _fps_used = clip.fps or 30
 
@@ -461,7 +475,8 @@ def create_optimized_clip(
 
             final_clip.write_videofile(
                 str(output_path),
-                temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.m4a"),
+                temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.aac"),
+                audio_codec="aac",
                 remove_temp=True, logger=None, fps=_fps_used, **encoding_settings
             )
 

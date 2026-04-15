@@ -13,6 +13,17 @@ import os
 import tempfile
 
 from ..utils.async_helpers import run_in_thread
+
+
+def _get_ffmpeg_exe() -> str:
+    """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 from ..youtube_utils import (
     async_download_youtube_video,
     async_get_youtube_video_info,
@@ -34,7 +45,7 @@ from ..video_processing.virality_tuner import get_tuner
 from .cache_manager import get_cache_manager, cache_transcript_smart, get_cached_transcript_smart
 from .metrics_service import get_metrics_collector, timed_stage
 from .error_handler import with_retry, execute_with_recovery, get_circuit_breaker
-from .concurrency_optimizer import parallel_map, run_with_timeout
+from .concurrency_optimizer import parallel_map, run_with_timeout, ParallelBatchProcessor
 from .llm_service import LLMService
 from .broll_service import BrollService
 from .elite_ai_service import EliteAIService
@@ -80,20 +91,19 @@ class VideoService:
 
     @staticmethod
     def _get_file_duration(path: Path) -> Optional[float]:
-        """Return video duration in seconds via ffprobe, or None on failure."""
+        """Return video duration in seconds via ffmpeg, or None on failure."""
+        import re as _re
         try:
             result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "csv=p=0",
-                    str(path),
-                ],
-                capture_output=True, text=True, check=True,
+                [_get_ffmpeg_exe(), "-v", "error", "-i", str(path)],
+                capture_output=True, text=True,
             )
-            return float(result.stdout.strip())
+            m = _re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", result.stderr)
+            if m:
+                return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+            return None
         except Exception as e:
-            logger.error(f"[VIDEO_DURATION] Failed to get duration for {path}: {e}", exc_info=True)
+            logger.warning(f"[VIDEO_DURATION] Failed to get duration for {path}: {e}")
             return None
 
     @staticmethod
@@ -297,7 +307,7 @@ class VideoService:
         )
 
         cmd = [
-            "ffmpeg", "-y", "-i", video_path,
+            _get_ffmpeg_exe(), "-y", "-i", video_path,
             "-vf", f"ass={ass_path}:fontsdir=/app/fonts",
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "copy",
@@ -374,7 +384,7 @@ class VideoService:
         import asyncio
         
         cmd = [
-            "ffmpeg", "-y", "-i", video_path,
+            _get_ffmpeg_exe(), "-y", "-i", video_path,
             "-vf", "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
             "-c:a", "aac", "-b:a", "192k",
@@ -755,7 +765,7 @@ class VideoService:
                 audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
                 audio_temp.close()
                 audio_ss = 0.0 if use_extracted_segment else start_seconds
-                cmd = ["ffmpeg", "-y", "-ss", str(audio_ss), "-i", str(video_path),
+                cmd = [_get_ffmpeg_exe(), "-y", "-ss", str(audio_ss), "-i", str(video_path),
                        "-t", str(duration), "-vn", "-acodec", "pcm_s16le",
                        "-ar", "16000", "-ac", "1", audio_temp.name]
                 subprocess.run(cmd, capture_output=True, timeout=60)
@@ -874,7 +884,7 @@ class VideoService:
                     _audio_for_groq = output_dir / f"audio_gw_{clip_index}.wav"
                     _audio_ss_gw = 0.0 if use_extracted_segment else start_seconds
                     _cmd_gw = [
-                        "ffmpeg", "-y",
+                        _get_ffmpeg_exe(), "-y",
                         "-ss", str(_audio_ss_gw), "-i", str(video_path),
                         "-t", str(min(duration, 60.0)),
                         "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -918,7 +928,7 @@ class VideoService:
                     audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
                     audio_ss2 = 0.0 if use_extracted_segment else start_seconds
                     cmd_extract = [
-                        "ffmpeg", "-y",
+                        _get_ffmpeg_exe(), "-y",
                         "-ss", str(audio_ss2), "-i", str(video_path),
                         "-t", str(duration),
                         "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -1247,7 +1257,7 @@ class VideoService:
                             _avg_cy = int(sum(pt[2] for pt in _trajectory) / len(_trajectory))
                             import subprocess as _sp2
                             _ef_cmd = [
-                                "ffmpeg", "-y", "-i", str(output_path),
+                                _get_ffmpeg_exe(), "-y", "-i", str(output_path),
                                 "-vf", f"crop=in_w:in_h:{max(0,_avg_cx-540)}:{max(0,_avg_cy-960)},scale=1080:1920",
                                 "-c:v", "libx264", "-preset", "fast", "-c:a", "copy",
                                 str(polished_path),
@@ -2603,6 +2613,37 @@ class VideoService:
                 top_virality = segments_json[0].get("virality_score", 0)
                 logger.info(f"[PIPELINE RETURN] Top segment virality: {top_virality}")
 
+            # Step 5: RENDER CLIPS TO DISK
+            clips_info = []
+            if len(segments_json) > 0 and video_path:
+                if should_cancel and await should_cancel():
+                    raise Exception("Task cancelled")
+
+                if progress_callback:
+                    await progress_callback(80, "Rendering clips to disk...", "processing")
+
+                logger.info(f"[CLIP RENDERING] Starting rendering of {len(segments_json[:num_clips])} clips...")
+                try:
+                    clips_info = await VideoService.create_video_clips_parallel(
+                        video_path=video_path,
+                        segments=segments_json[:num_clips],  # Render top N clips
+                        task_id=task_id or "full_test",
+                        font_family=font_family,
+                        font_size=font_size,
+                        font_color=font_color,
+                        caption_template=caption_template,
+                        output_format=output_format,
+                        add_subtitles=add_subtitles,
+                    )
+                    logger.info(f"[CLIP RENDERING] ✅ Successfully rendered {len([c for c in clips_info if c])} clips")
+                except Exception as render_error:
+                    logger.error(f"[CLIP RENDERING] ❌ Failed to render clips: {render_error}", exc_info=True)
+                    # Don't fail the entire pipeline if rendering fails
+                    clips_info = []
+
+                if progress_callback:
+                    await progress_callback(90, "Finalizing...", "processing")
+
             # Record pipeline success metrics
             get_metrics_collector().finish_pipeline(task_id or "unknown", success=True)
             
@@ -2614,7 +2655,8 @@ class VideoService:
                 "segments": segments_json,
                 "segments_to_render": segments_json,
                 "video_path": str(video_path),
-                "clips": [],
+                "clips": clips_info,
+                "clips_info": clips_info,
                 "summary": relevant_parts.summary if relevant_parts else None,
                 "key_topics": relevant_parts.key_topics if relevant_parts else None,
                 "transcript": transcript,

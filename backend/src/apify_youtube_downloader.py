@@ -22,7 +22,8 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-APIFY_YOUTUBE_DOWNLOADER_ACTOR = "epctex/youtube-video-downloader"
+APIFY_YOUTUBE_DOWNLOADER_ACTOR = "bernardo/youtube-downloader"
+APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "epctex/youtube-video-downloader"
 ALLOWED_APIFY_QUALITIES = {"360", "480", "720", "1080"}
 
 
@@ -144,29 +145,46 @@ def download_video_via_apify(
         resolved_quality,
     )
 
-    try:
-        client = ApifyClient(resolved_token)
-        run = client.actor(APIFY_YOUTUBE_DOWNLOADER_ACTOR).call(
-            run_input={
-                "startUrls": [url],
-                "quality": resolved_quality,
-                "proxy": {"useApifyProxy": True},
-            }
-        )
-        dataset_id = run.get("defaultDatasetId")
-        if not dataset_id:
-            raise ApifyDownloadError("Apify run did not return a dataset ID")
+    clean_url = f"https://www.youtube.com/watch?v={video_id}"
+    actors_to_try = [
+        (APIFY_YOUTUBE_DOWNLOADER_ACTOR, {
+            "startUrls": [{"url": clean_url}],
+            "quality": resolved_quality,
+            "proxy": {"useApifyProxy": True},
+        }),
+        (APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK, {
+            "startUrls": [url],
+            "quality": resolved_quality,
+            "proxy": {"useApifyProxy": True},
+        }),
+    ]
 
-        item = next(client.dataset(dataset_id).iterate_items(), None)
-        if not item:
-            raise ApifyDownloadError("Apify run returned no dataset items")
+    last_exc: Optional[Exception] = None
+    for actor_id, run_input in actors_to_try:
+        try:
+            logger.info("Trying Apify actor: %s", actor_id)
+            client = ApifyClient(resolved_token)
+            run = client.actor(actor_id).call(run_input=run_input)
+            dataset_id = run.get("defaultDatasetId")
+            if not dataset_id:
+                raise ApifyDownloadError("Apify run did not return a dataset ID")
 
-        download_url = _extract_download_url(item)
-        if not download_url:
-            raise ApifyDownloadError("Apify result did not contain a download URL")
+            item = next(client.dataset(dataset_id).iterate_items(), None)
+            if not item:
+                raise ApifyDownloadError("Apify run returned no dataset items")
 
-        return _download_file(download_url, temp_dir / video_id)
-    except ApifyDownloadError:
-        raise
-    except Exception as exc:
-        raise ApifyDownloadError(f"Apify download failed: {exc}") from exc
+            download_url = _extract_download_url(item)
+            if not download_url:
+                raise ApifyDownloadError("Apify result did not contain a download URL")
+
+            return _download_file(download_url, temp_dir / video_id)
+        except ApifyDownloadError as exc:
+            last_exc = exc
+            logger.warning("Actor %s failed: %s — trying next", actor_id, exc)
+            continue
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("Actor %s unexpected error: %s — trying next", actor_id, exc)
+            continue
+
+    raise ApifyDownloadError(f"All Apify actors failed. Last error: {last_exc}") from last_exc

@@ -11,6 +11,14 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
 class VideoPolishService:
     """Service for advanced video processing — MediaPipe-powered face tracking."""
 
@@ -267,7 +275,7 @@ class VideoPolishService:
             temp_v = output_path.with_suffix(".noaudio.mp4")
             os.rename(str(output_path), str(temp_v))
             ffmpeg_cmd = [
-                "ffmpeg", "-y", "-hide_banner",
+                _get_ffmpeg_exe(), "-y", "-hide_banner",
                 "-i", str(temp_v),
                 "-i", str(input_path),
                 "-map", "0:v:0",
@@ -528,7 +536,7 @@ class VideoPolishService:
 
             # Merge original audio back
             ffmpeg_cmd = [
-                "ffmpeg", "-y",
+                _get_ffmpeg_exe(), "-y",
                 "-i", str(tmp_video),
                 "-i", str(input_path),
                 "-c:v", "copy", "-c:a", "aac",
@@ -565,39 +573,42 @@ class VideoPolishService:
         """
         logger.info(f"🎬 Applying Pattern Interrupts to {input_path.name}")
         try:
-            # Get clip duration via ffprobe
+            # Get clip duration via ffmpeg -i (imageio_ffmpeg doesn't bundle ffprobe)
+            import re
             probe_result = subprocess.run(
-                ["ffprobe", "-v", "quiet", "-print_format", "json",
-                 "-show_streams", "-select_streams", "v:0", str(input_path)],
+                [_get_ffmpeg_exe(), "-i", str(input_path)],
                 capture_output=True, text=True, timeout=30,
             )
-            if probe_result.returncode != 0:
-                raise RuntimeError(f"ffprobe failed: {probe_result.stderr}")
-
-            import json as _json
-            probe_data = _json.loads(probe_result.stdout)
-            video_stream = probe_data.get("streams", [{}])[0]
-            duration_str = video_stream.get("duration", "0")
-            try:
-                duration = float(duration_str)
-            except (ValueError, TypeError):
-                duration = 0.0
-
+            stderr = probe_result.stderr
+            
+            # Parse duration: "Duration: 00:01:23.45"
+            duration = 0.0
+            dur_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
+            if dur_match:
+                hours = int(dur_match.group(1))
+                minutes = int(dur_match.group(2))
+                seconds = float(dur_match.group(3))
+                duration = hours * 3600 + minutes * 60 + seconds
+            
             if duration < 2.0:
                 logger.warning(f"Clip too short for pattern interrupts ({duration:.1f}s) — skipping")
                 import shutil
                 shutil.copy(input_path, output_path)
                 return True
 
-            width = int(video_stream.get("width", 1080))
-            height = int(video_stream.get("height", 1920))
-            fps_raw = video_stream.get("r_frame_rate", "30/1")
-            try:
-                num, den = fps_raw.split("/")
-                fps = float(num) / float(den)
-            except Exception as e:
-                logger.warning(f"[POLISH] Failed to parse FPS '{fps_raw}': {e} — defaulting to 30.0")
-                fps = 30.0
+            # Parse dimensions: "1920x1080" or "1080x1920"
+            dim_match = re.search(r'(\d{3,4})x(\d{3,4})', stderr)
+            if dim_match:
+                width = int(dim_match.group(1))
+                height = int(dim_match.group(2))
+            else:
+                width, height = 1080, 1920
+            
+            # Parse FPS: "30 fps" or "29.97 fps"
+            fps = 30.0
+            fps_match = re.search(r'(\d+\.?\d*)\s*fps', stderr)
+            if fps_match:
+                fps = float(fps_match.group(1))
 
             total_frames = int(duration * fps)
 

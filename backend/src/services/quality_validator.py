@@ -12,6 +12,14 @@ from enum import Enum
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 class QualityLevel(Enum):
     """Quality levels for clips."""
     EXCELLENT = "excellent"  # 90-100
@@ -200,7 +208,7 @@ class ClipQualityValidator:
             
             result = subprocess.run(
                 [
-                    "ffprobe", "-v", "error",
+                    _get_ffmpeg_exe(), "-v", "error",
                     "-select_streams", "v:0",
                     "-show_entries", "stream=height,width",
                     "-of", "json",
@@ -262,7 +270,7 @@ class ClipQualityValidator:
             
             result = subprocess.run(
                 [
-                    "ffprobe", "-v", "error",
+                    _get_ffmpeg_exe(), "-v", "error",
                     "-select_streams", "v:0",
                     "-show_entries", "stream=display_aspect_ratio",
                     "-of", "json",
@@ -334,7 +342,7 @@ class ClipQualityValidator:
             # Get audio levels using ffmpeg
             result = subprocess.run(
                 [
-                    "ffmpeg", "-i", str(clip_path),
+                    _get_ffmpeg_exe(), "-i", str(clip_path),
                     "-af", "volumedetect",
                     "-f", "null", "-"
                 ],
@@ -436,11 +444,12 @@ class ClipQualityValidator:
             # Verify it's a valid video file
             import subprocess
             result = subprocess.run(
-                ["ffprobe", "-v", "error", str(clip_path)],
+                [_get_ffmpeg_exe(), "-v", "error", "-i", str(clip_path), "-f", "null", "-"],
                 capture_output=True
             )
-            
-            if result.returncode != 0:
+            stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+            has_error = any(e in stderr for e in ("Invalid data", "moov atom not found", "no such file", "Error"))
+            if has_error:
                 return QualityCheck(
                     name="file_integrity",
                     passed=False,

@@ -16,15 +16,16 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.FileHandler(f'test_run_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    ]
-)
+# Configure logging — force UTF-8 on all handlers so emoji characters
+# don't crash on Windows cp1252 console.
+import io as _io
+_utf8_stdout = _io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+_log_fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+_handlers = [
+    logging.StreamHandler(_utf8_stdout),
+    logging.FileHandler(f'test_run_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log', encoding='utf-8'),
+]
+logging.basicConfig(level=logging.INFO, format=_log_fmt, handlers=_handlers)
 logger = logging.getLogger(__name__)
 
 # Test videos
@@ -108,7 +109,7 @@ class ViraClipTester:
             # Test 2: Video info retrieval
             logger.info("[TEST] Testing video info retrieval...")
             try:
-                from src.video_processing.youtube_handler import async_get_youtube_video_info
+                from src.youtube_utils import async_get_youtube_video_info
                 video_info = await async_get_youtube_video_info(url, task_id=video_id)
                 if video_info:
                     logger.info(f"   Title: {video_info.get('title', 'N/A')}")
@@ -150,6 +151,7 @@ class ViraClipTester:
                 return result
             
             # Test 4: Transcription
+            transcript = None
             logger.info("[TEST] Testing transcription...")
             try:
                 transcript = await VideoService.generate_transcript(
@@ -173,6 +175,8 @@ class ViraClipTester:
             # Test 5: AI Analysis
             logger.info("[TEST] Testing AI content analysis...")
             try:
+                if not transcript:
+                    raise ValueError("No transcript available for AI analysis")
                 analysis = await VideoService.analyze_transcript(
                     transcript,
                     video_duration=video_info.get('duration', 0) if 'video_info' in result else 0
@@ -203,20 +207,50 @@ class ViraClipTester:
                     
                     segments = pipeline_result.get('segments', [])
                     metrics = pipeline_result.get('_metrics', {})
+                    video_path = Path(pipeline_result.get('video_path', ''))
                     
                     logger.info(f"   PIPELINE COMPLETED!")
                     logger.info(f"   Clips identified: {len(segments)}")
                     logger.info(f"   Processing time: {metrics.get('total_duration_seconds', 'N/A')}s")
+
+                    # Step 7: Render actual video clips (the missing step)
+                    rendered_clips = []
+                    if segments and video_path.exists():
+                        logger.info(f"[TEST] Rendering {min(3, len(segments))} clips to disk...")
+                        clips_dir = Path("temp") / "clips"
+                        clips_dir.mkdir(parents=True, exist_ok=True)
+                        render_segments = segments[:3]
+                        try:
+                            clips_info = await VideoService.create_video_clips_parallel(
+                                video_path=video_path,
+                                segments=render_segments,
+                                task_id=video_id,
+                                add_subtitles=True,
+                                caption_template="viral",
+                                output_format="vertical",
+                            )
+                            rendered_clips = [c for c in clips_info if c]
+                            for i, ci in enumerate(rendered_clips):
+                                cp = Path(ci.get("path", ""))
+                                size_mb = cp.stat().st_size / 1024 / 1024 if cp.exists() else 0
+                                logger.info(
+                                    f"   CLIP {i+1} rendered: {cp.name} "
+                                    f"({size_mb:.1f}MB) virality={ci.get('virality_score',0)}"
+                                )
+                            logger.info(f"   Rendered {len(rendered_clips)}/{len(render_segments)} clips OK")
+                        except Exception as render_e:
+                            logger.error(f"   Clip render failed: {render_e}", exc_info=True)
                     
-                    # Log top clips
+                    # Log top segment info
                     for i, clip in enumerate(segments[:3]):
-                        logger.info(f"\n   CLIP {i+1}:")
+                        logger.info(f"\n   SEGMENT {i+1}:")
                         logger.info(f"      Virality Score: {clip.get('virality_score', 0):.1f}/100")
                         logger.info(f"      Duration: {clip.get('duration', 0):.1f}s")
                         logger.info(f"      Hook Type: {clip.get('hook_type', 'N/A')}")
                     
                     result["stages"]["pipeline"] = "SUCCESS"
-                    result["clips_generated"] = len(segments)
+                    result["clips_generated"] = len(rendered_clips) if rendered_clips else len(segments)
+                    result["clips_rendered"] = len(rendered_clips)
                     result["pipeline_metrics"] = metrics
                     result["top_clips"] = segments[:5]
                     result["status"] = "success"
