@@ -13,6 +13,14 @@ from typing import List, Optional
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 class OverlayStyle(str, Enum):
     FULL_SCREEN_BUBBLE = "full_screen_bubble"
     SPLIT_SCREEN = "split_screen"
@@ -88,7 +96,7 @@ class OverlayRenderer:
             filter_complex = ";".join(filter_parts)
             
             cmd = [
-                "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
                 *inputs,
                 "-filter_complex", filter_complex,
                 "-c:v", "libx264", "-preset", "medium", "-crf", "23",

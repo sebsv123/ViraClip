@@ -15,6 +15,14 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 class AudioType(Enum):
     """Types of audio content."""
     SPEECH = "speech"
@@ -133,7 +141,7 @@ class AudioAnalysisService:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
+                    _get_ffmpeg_exe(), "-y",
                     "-i", str(video_path),
                     "-vn",  # No video
                     "-acodec", "pcm_s16le",
@@ -159,7 +167,7 @@ class AudioAnalysisService:
             # Use ffmpeg silencedetect for silence detection
             result = subprocess.run(
                 [
-                    "ffmpeg",
+                    _get_ffmpeg_exe(),
                     "-i", str(audio_path),
                     "-af", "silencedetect=noise=-50dB:d=0.5",
                     "-f", "null",
@@ -364,7 +372,7 @@ class AudioAnalysisService:
             # Apply loudness normalization and light compression
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
+                    _get_ffmpeg_exe(), "-y",
                     "-i", str(audio_path),
                     "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
                     str(output_path)

@@ -9,6 +9,40 @@ import logging
 import os
 import hashlib
 
+# Register NVIDIA CUDA DLL paths so ctranslate2/faster-whisper can find
+# cublas64_12.dll on Windows when installed via pip (nvidia-cublas-cu12 etc.)
+def _register_cuda_dll_paths() -> None:
+    import site, ctypes
+    dll_dirs = []
+    for sp in (site.getsitepackages() or []) + [site.getusersitepackages()]:
+        nv_base = os.path.join(sp, "nvidia")
+        if not os.path.isdir(nv_base):
+            continue
+        for pkg_dir in os.listdir(nv_base):
+            bin_dir = os.path.join(nv_base, pkg_dir, "bin")
+            if os.path.isdir(bin_dir):
+                dll_dirs.append(bin_dir)
+                # Add to PATH for all DLL search mechanisms
+                os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
+                if hasattr(os, "add_dll_directory"):
+                    try:
+                        os.add_dll_directory(bin_dir)
+                    except Exception:
+                        pass
+
+    # Explicitly preload CUDA libs so Windows caches them before ctranslate2 lazy-loads
+    _cuda_dlls = ["cublas64_12.dll", "cublasLt64_12.dll", "cudnn_ops64_9.dll", "cudnn64_9.dll"]
+    for dll_dir in dll_dirs:
+        for dll_name in _cuda_dlls:
+            dll_path = os.path.join(dll_dir, dll_name)
+            if os.path.isfile(dll_path):
+                try:
+                    ctypes.CDLL(dll_path)
+                except Exception:
+                    pass
+
+_register_cuda_dll_paths()
+
 from ..config import Config
 
 logger = logging.getLogger(__name__)
@@ -179,17 +213,20 @@ def get_whisper_model():
     device_setting = os.environ.get("WHISPER_DEVICE", "auto")
     compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
 
-    if device_setting == "auto":
+    def _cuda_available_via_ct2() -> bool:
+        """Check CUDA via ctranslate2 (works even when torch is CPU-only build)."""
         try:
-            import torch
+            import ctranslate2
+            types = ctranslate2.get_supported_compute_types("cuda")
+            return len(types) > 0
+        except Exception:
+            return False
 
-            if torch.cuda.is_available():
-                device = "cuda"
-            else:
-                device = "cpu"
-                compute_type = "int8"
-        except Exception as e:
-            logger.warning(f"[TRANSCRIPTION] CUDA detection failed, falling back to CPU: {e}")
+    if device_setting == "auto":
+        if _cuda_available_via_ct2():
+            device = "cuda"
+            compute_type = "float16"
+        else:
             device = "cpu"
             compute_type = "int8"
     else:
@@ -197,15 +234,12 @@ def get_whisper_model():
         if device == "cpu":
             compute_type = "int8"
         elif device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    logger.warning("[TRANSCRIPTION] WHISPER_DEVICE=cuda but no CUDA in container — falling back to CPU")
-                    device = "cpu"
-                    compute_type = "int8"
-            except Exception:
+            if not _cuda_available_via_ct2():
+                logger.warning("[TRANSCRIPTION] CUDA not available via ctranslate2 — falling back to CPU")
                 device = "cpu"
                 compute_type = "int8"
+            else:
+                compute_type = "float16"
 
     current_config = (model_size, device, compute_type)
     if _whisper_model is not None and _whisper_model_config == current_config:
@@ -214,19 +248,25 @@ def get_whisper_model():
     from faster_whisper import WhisperModel
 
     model_path = model_size
+    _models_root = os.environ.get("WHISPER_MODELS_DIR") or (
+        "/app/models" if os.path.isdir("/app/models") else None
+    )
     try:
         _whisper_model = WhisperModel(
             model_path,
             device=device,
             compute_type=compute_type,
-            download_root="/app/models",
+            **( {"download_root": _models_root} if _models_root else {} ),
         )
     except Exception as e:
         if device != "cpu":
             logger.warning(f"[TRANSCRIPTION] WhisperModel failed on {device} ({e}) — retrying on CPU")
             device = "cpu"
             compute_type = "int8"
-            _whisper_model = WhisperModel(model_path, device="cpu", compute_type="int8", download_root="/app/models")
+            _whisper_model = WhisperModel(
+                model_path, device="cpu", compute_type="int8",
+                **( {"download_root": _models_root} if _models_root else {} ),
+            )
     _whisper_model_config = current_config
     return _whisper_model
 
@@ -248,7 +288,7 @@ async def get_video_transcript(
     """
     video_hash = None
     
-    # Check Redis cache first
+    # Check Redis cache first, then local file cache
     if use_cache:
         video_hash = _get_video_hash(video_path)
         if video_hash:
@@ -257,6 +297,14 @@ async def get_video_transcript(
                 text = cached_data.get("text", "")
                 logger.info(f"[TRANSCRIPTION] Redis cache HIT - skipping Whisper for {video_path.name}")
                 return text, cached_data
+
+        # Redis miss/unavailable — fall back to local file cache
+        file_cached = load_cached_transcript_data(video_path)
+        if file_cached:
+            text = file_cached.get("text", "")
+            if text:
+                logger.info(f"[TRANSCRIPTION] File cache HIT - skipping Whisper for {video_path.name}")
+                return text, file_cached
     
     logger.info(f"[TRANSCRIPTION] Cache MISS - transcribing with faster-whisper: {video_path}")
     

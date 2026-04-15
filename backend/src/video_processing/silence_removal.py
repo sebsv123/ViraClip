@@ -13,6 +13,15 @@ import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 logger = logging.getLogger(__name__)
 
 SILENCE_THRESHOLD: float = 0.4   # seconds — gaps longer than this are removed
@@ -114,7 +123,7 @@ async def remove_silences(
     select_expr  = "+".join(select_parts)
 
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        _get_ffmpeg_exe(), "-y", "-i", video_path,
         "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
         "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",
@@ -226,7 +235,7 @@ async def speed_ramp_silences(
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg", "-y", "-i", video_path,
+        _get_ffmpeg_exe(), "-y", "-i", video_path,
         "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "22",

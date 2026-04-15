@@ -10,6 +10,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 def analyze_clip_rhythm(video_path: Path) -> dict:
     """
     Detecta ritmo visual de un clip: número de escenas, duración media, ritmo.
@@ -134,7 +142,7 @@ def extract_representative_frames(
 
         # ffmpeg: extraer N frames distribuidos uniformemente
         cmd = [
-            "ffmpeg", "-y",
+            _get_ffmpeg_exe(), "-y",
             "-i", str(video_path),
             "-vf", f"select='not(mod(n,{max(1, int(30 / n_frames))}))',scale=640:-1",
             "-vframes", str(n_frames),

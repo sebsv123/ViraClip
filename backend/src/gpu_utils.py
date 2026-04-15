@@ -14,12 +14,34 @@ logger = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def cuda_available() -> bool:
-    """True if PyTorch detects a CUDA-capable GPU."""
+    """True if a CUDA-capable GPU is available.
+    
+    Uses ctranslate2 as primary check (works even when torch is CPU-only build),
+    then falls back to nvidia-smi subprocess detection.
+    torch.cuda.is_available() is NOT used — it returns False when torch is
+    installed as a CPU-only wheel, which is unrelated to actual GPU presence.
+    """
+    # Primary: ctranslate2 (used by faster-whisper) — reliable on Windows
     try:
-        import torch
-        return torch.cuda.is_available()
+        import ctranslate2
+        types = ctranslate2.get_supported_compute_types("cuda")
+        if len(types) > 1:  # more than just float32 means real CUDA support
+            logger.info("[GPU] CUDA available via ctranslate2")
+            return True
     except Exception:
-        return False
+        pass
+    # Fallback: nvidia-smi
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            logger.info("[GPU] CUDA available via nvidia-smi: %s", r.stdout.strip())
+            return True
+    except Exception:
+        pass
+    return False
 
 
 @lru_cache(maxsize=1)
@@ -39,9 +61,12 @@ def nvenc_available() -> bool:
 def gpu_name() -> str:
     """Return GPU name string, or 'CPU' if none detected."""
     try:
-        import torch
-        if torch.cuda.is_available():
-            return torch.cuda.get_device_name(0)
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().split("\n")[0].strip()
     except Exception:
         pass
     return "CPU"

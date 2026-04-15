@@ -17,6 +17,14 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 @dataclass
 class DenoiseResult:
     output_path: str
@@ -31,7 +39,7 @@ class DenoiseResult:
 async def _measure_lufs(audio_path: str) -> Optional[float]:
     """Measure integrated loudness (LUFS) via FFmpeg loudnorm."""
     cmd = [
-        "ffmpeg", "-v", "quiet",
+        _get_ffmpeg_exe(), "-v", "quiet",
         "-i", audio_path,
         "-af", "loudnorm=print_format=json",
         "-f", "null", "-",
@@ -112,7 +120,7 @@ async def denoise_audio(
 
     # Detect if input has video stream
     probe_cmd = [
-        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        _get_ffmpeg_exe(), "-v", "error", "-select_streams", "v:0",
         "-show_entries", "stream=codec_type",
         "-of", "default=noprint_wrappers=1:nokey=1",
         input_path,
@@ -125,7 +133,7 @@ async def denoise_audio(
 
     if has_video:
         cmd = [
-            "ffmpeg", "-y", "-i", input_path,
+            _get_ffmpeg_exe(), "-y", "-i", input_path,
             "-af", filter_str,
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "128k",
@@ -133,7 +141,7 @@ async def denoise_audio(
         ]
     else:
         cmd = [
-            "ffmpeg", "-y", "-i", input_path,
+            _get_ffmpeg_exe(), "-y", "-i", input_path,
             "-af", filter_str,
             "-c:a", "aac", "-b:a", "128k",
             output_path,

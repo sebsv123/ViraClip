@@ -21,6 +21,8 @@ from .transcription import (
     load_cached_transcript_data,
     snap_to_word_boundary,
     format_transcript_for_analysis,
+    get_redis_transcript_cache,
+    set_redis_transcript_cache,
 )
 
 from .face_detection import (

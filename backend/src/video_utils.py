@@ -26,7 +26,6 @@ from .video_processing import (
     create_optimized_clip,
     create_clips_from_segments,
     create_clips_with_transitions,
-    VideoProcessor,
     
     # Transcription
     get_video_transcript,
@@ -99,7 +98,6 @@ __all__ = [
     "create_optimized_clip",
     "create_clips_from_segments",
     "create_clips_with_transitions",
-    "VideoProcessor",
     
     # Transcription
     "get_video_transcript",

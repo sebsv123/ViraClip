@@ -10,6 +10,14 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
 # Confidence-based color mapping
 # Counter-intuitive: LOW confidence = interesting/rare words = highlight
 CONFIDENCE_COLOR_MAP = {
@@ -290,7 +298,7 @@ class ConfidenceSubtitleGenerator:
 
         try:
             extract_cmd = [
-                'ffmpeg', '-y', '-i', segment_video_path,
+                _get_ffmpeg_exe(), '-y', '-i', segment_video_path,
                 '-vn',                    # Sin video
                 '-acodec', 'pcm_s16le',   # WAV sin compresion
                 '-ar', '16000',           # 16kHz (optimo Whisper)

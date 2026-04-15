@@ -8,10 +8,25 @@ This is the new main entry point with:
 - Thread pool for blocking operations
 """
 
+import sys as _sys
+import io as _io
+
+# Force UTF-8 on stdout/stderr so emoji in log messages never crash on Windows cp1252
+if hasattr(_sys.stdout, 'buffer'):
+    _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+if hasattr(_sys.stderr, 'buffer'):
+    _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
 import time
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(_sys.stdout)],
+)
 
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware

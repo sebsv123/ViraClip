@@ -28,6 +28,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 # ── tuneable constants (override via env vars) ────────────────────────────────
 SATURATION      = float(os.environ.get("EP_SATURATION",      "1.25"))
 CONTRAST        = float(os.environ.get("EP_CONTRAST",        "1.10"))
@@ -72,27 +81,31 @@ EP_PROGRESS_STYLE     = os.environ.get("EP_PROGRESS_STYLE",     "solid")  # soli
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _probe_video(path: Path) -> Tuple[int, int, float, float]:
-    """Return (width, height, fps, duration) via ffprobe."""
-    import json
+    """Return (width, height, fps, duration) via ffmpeg -i."""
+    # Use ffmpeg -i instead of ffprobe (imageio_ffmpeg doesn't bundle ffprobe)
     out = subprocess.run(
         [
-            "ffprobe", "-v", "quiet", "-print_format", "json",
-            "-show_streams", "-show_format", str(path),
+            _get_ffmpeg_exe(), "-i", str(path),
         ],
         capture_output=True, timeout=15,
     )
-    data = json.loads(out.stdout)
-    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
-    w = int(video.get("width",  1080))
-    h = int(video.get("height", 1920))
-    # fps: "30/1" or "30000/1001"
-    fps_raw = video.get("r_frame_rate", "30/1")
-    try:
-        num, den = fps_raw.split("/")
-        fps = float(num) / float(den)
-    except Exception:
-        fps = 30.0
-    dur = float(data.get("format", {}).get("duration", 0) or 0)
+    # Parse from stderr instead of JSON
+    import re
+    stderr = out.stderr.decode('utf-8', errors='replace') if out.stderr else ''
+    # Default values
+    w, h, fps, dur = 1080, 1920, 30.0, 0.0
+    # Parse dimensions
+    dim_match = re.search(r'(\d{3,4})x(\d{3,4})', stderr)
+    if dim_match:
+        w, h = int(dim_match.group(1)), int(dim_match.group(2))
+    # Parse FPS
+    fps_match = re.search(r'(\d+\.?\d*)\s*fps', stderr)
+    if fps_match:
+        fps = float(fps_match.group(1))
+    # Parse duration
+    dur_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
+    if dur_match:
+        dur = int(dur_match.group(1)) * 3600 + int(dur_match.group(2)) * 60 + float(dur_match.group(3))
     return w, h, fps, dur
 
 
@@ -753,7 +766,7 @@ class EditingPipeline:
             if enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"):
                 vcodec = [enc, "-preset", gpu_settings.get("preset", "p4")]
 
-        cmd = ["ffmpeg", "-y", "-i", str(video_path),
+        cmd = [_get_ffmpeg_exe(), "-y", "-i", str(video_path),
                "-filter_complex", fc, "-map", v_label]
         if a_label:
             cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
@@ -817,15 +830,15 @@ class EditingPipeline:
     @staticmethod
     async def _check_has_audio(path: Path) -> bool:
         try:
+            # Use ffmpeg -i instead of ffprobe
             proc = await asyncio.create_subprocess_exec(
-                "ffprobe", "-v", "quiet", "-select_streams", "a:0",
-                "-show_entries", "stream=codec_type",
-                "-of", "csv=p=0", str(path),
+                _get_ffmpeg_exe(), "-i", str(path),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            return b"audio" in stdout
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+            # Check if stderr contains audio stream info
+            return b"Audio:" in stderr or b"audio" in stderr.lower()
         except Exception:
             return True
 

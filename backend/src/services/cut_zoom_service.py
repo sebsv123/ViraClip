@@ -13,6 +13,19 @@ import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+# Note: imageio_ffmpeg only bundles ffmpeg, not ffprobe
+# We use ffmpeg to probe video properties instead
+
+
 logger = logging.getLogger(__name__)
 
 # Zoom parameters
@@ -47,13 +60,10 @@ async def apply_cut_zooms(
         logger.debug("[cut_zoom] No cut points, skipping zoom")
         return False
     
-    # Get video dimensions
+    # Get video dimensions using ffmpeg -i (imageio_ffmpeg doesn't bundle ffprobe)
+    # Parse dimensions from stderr output like: "Stream #0:0: Video: h264 ... 1920x1080"
     probe_cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "json",
-        video_path,
+        _get_ffmpeg_exe(), "-i", video_path,
     ]
     
     try:
@@ -62,11 +72,16 @@ async def apply_cut_zooms(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _ = await proc.communicate()
-        info = json.loads(stdout.decode())
-        stream = info.get("streams", [{}])[0]
-        width = int(stream.get("width", 1080))
-        height = int(stream.get("height", 1920))
+        _, stderr = await proc.communicate()
+        stderr_text = stderr.decode('utf-8', errors='replace')
+        
+        # Look for pattern like "1920x1080" or "1080x1920"
+        import re
+        match = re.search(r'(\d{3,4})x(\d{3,4})', stderr_text)
+        if match:
+            width, height = int(match.group(1)), int(match.group(2))
+        else:
+            raise ValueError("Could not parse dimensions from ffmpeg output")
     except Exception as e:
         logger.warning(f"[cut_zoom] Could not get dimensions: {e}")
         width, height = 1080, 1920
@@ -79,17 +94,16 @@ async def apply_cut_zooms(
         end = t + zoom_duration / 2
         zoom_intervals.append((start, end))
     
-    # Create zoom expression: if within any interval, zoom to factor, else 1.0
-    interval_expr = "+".join(
-        f"between(t,{s:.3f},{e:.3f})"
-        for s, e in zoom_intervals
-    )
-    
-    if not interval_expr:
+    # Create zoom expression: use first cut point only to avoid FFmpeg max() errors
+    if not zoom_intervals:
         logger.debug("[cut_zoom] No valid zoom intervals")
         return False
     
-    zoom_expr = f"if(gt({interval_expr},0),{zoom_factor},1)"
+    # Use only the first zoom interval to ensure compatibility
+    start, end = zoom_intervals[0]
+    
+    # Simple if/else expression: zoom during first interval, otherwise 1.0
+    zoom_expr = f"if(between(t,{start:.3f},{end:.3f}),{zoom_factor},1)"
     
     zoompan_filter = (
         f"zoompan="
@@ -103,7 +117,7 @@ async def apply_cut_zooms(
     
     # Apply zoom filter
     cmd = [
-        "ffmpeg", "-y", "-v", "error",
+        _get_ffmpeg_exe(), "-y", "-v", "error",
         "-i", video_path,
         "-vf", zoompan_filter,
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -125,7 +139,7 @@ async def apply_cut_zooms(
             return False
         
         logger.info(
-            f"[cut_zoom] Applied {len(zoom_intervals)} zoom transitions at cuts"
+            f"[cut_zoom] Applied zoom transition at {start:.1f}s-{end:.1f}s (first cut point)"
         )
         return True
     

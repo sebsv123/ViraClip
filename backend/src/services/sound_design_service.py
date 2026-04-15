@@ -11,6 +11,14 @@ import os
 
 logger = logging.getLogger(__name__)
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
 # Mapeo: tipo de momento viral → sound effect
 VIRAL_SOUND_MAP = {
     "curiosity_gap": "tension_riser.mp3",      # Pitch ascendente 1.5s
@@ -170,22 +178,24 @@ class SoundDesignService:
     ) -> str:
         """Fallback: loudnorm + fade in/out when no sound assets are available."""
         try:
+            # Use ffmpeg -i instead of ffprobe
+            import re
             proc = await asyncio.create_subprocess_exec(
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=duration",
-                "-of", "csv=p=0", video_path,
+                _get_ffmpeg_exe(), "-i", video_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, _ = await proc.communicate()
-            try:
-                vid_dur = float(stdout.decode().strip().split("\n")[0])
-            except Exception:
-                vid_dur = 60.0
+            _, stderr = await proc.communicate()
+            stderr_text = stderr.decode('utf-8', errors='replace')
+            # Parse duration
+            vid_dur = 60.0
+            dur_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr_text)
+            if dur_match:
+                vid_dur = int(dur_match.group(1)) * 3600 + int(dur_match.group(2)) * 60 + float(dur_match.group(3))
             fade_out_start = max(0.0, vid_dur - 0.5)
             af = f"loudnorm,afade=t=in:st=0:d=0.5,afade=t=out:st={fade_out_start:.2f}:d=0.5"
             norm_proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", video_path,
+                _get_ffmpeg_exe(), "-y", "-i", video_path,
                 "-af", af,
                 "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k",
@@ -267,7 +277,7 @@ class SoundDesignService:
             filter_complex += f";{mix_parts}amix=inputs={num_sounds+1}:normalize=0[aout]"
             
             cmd = [
-                "ffmpeg", "-y",
+                _get_ffmpeg_exe(), "-y",
                 *inputs,
                 "-filter_complex", filter_complex,
                 "-map", "0:v",

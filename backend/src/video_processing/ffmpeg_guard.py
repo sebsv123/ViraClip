@@ -6,31 +6,42 @@ Pattern: validate at the boundary, never trust the caller has done it.
 
 import logging
 import subprocess
-import json
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 
-def get_duration(source_path: str) -> float:
-    """Return file duration in seconds via ffprobe. Returns 0.0 on failure."""
+def _get_ffmpeg_exe() -> str:
     try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def get_duration(source_path: str) -> float:
+    """Return file duration in seconds via ffmpeg -i. Returns 0.0 on failure."""
+    try:
+        import re
         result = subprocess.run(
             [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "json",
-                source_path,
+                _get_ffmpeg_exe(), "-i", source_path,
             ],
             capture_output=True,
             text=True,
             timeout=15,
         )
-        if result.returncode != 0:
-            logger.warning(f"[FFMPEG_GUARD] ffprobe failed on {source_path}: {result.stderr[:200]}")
+        # Parse duration from stderr: "Duration: 00:01:23.45"
+        stderr = result.stderr
+        match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
+        if match:
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            seconds = float(match.group(3))
+            return hours * 3600 + minutes * 60 + seconds
+        else:
+            logger.warning(f"[FFMPEG_GUARD] Could not parse duration from ffmpeg output for {source_path}")
             return 0.0
-        data = json.loads(result.stdout)
-        return float(data.get("format", {}).get("duration", 0.0))
     except Exception as e:
         logger.warning(f"[FFMPEG_GUARD] get_duration error for {source_path}: {e}")
         return 0.0

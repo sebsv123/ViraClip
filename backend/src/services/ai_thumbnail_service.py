@@ -12,6 +12,12 @@ import subprocess
 
 logger = logging.getLogger(__name__)
 
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
 
 class ThumbnailStyle(Enum):
     """Thumbnail style presets."""
@@ -265,7 +271,7 @@ class AIThumbnailService:
         try:
             subprocess.run(
                 [
-                    "ffmpeg", "-y",
+                    _get_ffmpeg_exe(), "-y",
                     "-ss", str(timestamp),
                     "-i", str(video_path),
                     "-vframes", "1",

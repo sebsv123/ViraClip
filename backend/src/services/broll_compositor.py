@@ -32,6 +32,15 @@ import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
+
+def _get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
 logger = logging.getLogger(__name__)
 
 # Importar motor de efectos inteligentes
@@ -56,7 +65,7 @@ def probe_dimensions(video_path: Path | str) -> Tuple[int, int, float]:
     """
     try:
         cmd = [
-            "ffprobe", "-v", "quiet",
+            _get_ffmpeg_exe(), "-v", "quiet",
             "-print_format", "json",
             "-show_streams",
             str(video_path),
@@ -84,7 +93,7 @@ def probe_duration(video_path: Path | str) -> float:
     """Return duration in seconds. Falls back to 30.0."""
     try:
         cmd = [
-            "ffprobe", "-v", "error",
+            _get_ffmpeg_exe(), "-v", "error",
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(video_path),
@@ -164,7 +173,7 @@ def normalize_broll(
 
     if is_image:
         cmd = [
-            "ffmpeg", "-y",
+            _get_ffmpeg_exe(), "-y",
             "-loop", "1", "-i", str(broll_path),
             "-t", str(duration),
             "-vf", vf,
@@ -176,7 +185,7 @@ def normalize_broll(
         ]
     else:
         cmd = [
-            "ffmpeg", "-y",
+            _get_ffmpeg_exe(), "-y",
             "-i", str(broll_path),
             "-t", str(duration),
             "-vf", vf,
@@ -249,7 +258,7 @@ def compose_overlay(
     )
 
     cmd = [
-        "ffmpeg", "-y",
+        _get_ffmpeg_exe(), "-y",
         "-i", str(main_path),
         "-i", str(norm_path),
         "-filter_complex", filter_complex,
@@ -340,7 +349,7 @@ async def compose_overlay_multi(
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg", "-y",
+        _get_ffmpeg_exe(), "-y",
         *inputs,
         "-filter_complex", filter_complex,
         "-map", f"[{prev}]",
