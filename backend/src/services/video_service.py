@@ -52,7 +52,13 @@ from .elite_ai_service import EliteAIService
 from .vfx_service import VFXService
 from .social_distribution_service import SocialDistributionService
 from .phi3_virality_service import Phi3ViralityService, get_phi3_service
-from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+# Guarded import for ConfidenceSubtitleGenerator
+try:
+    from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+    _confidence_subtitle_available = True
+except (ImportError, Exception):
+    _confidence_subtitle_available = False
+    ConfidenceSubtitleGenerator = None  # type: ignore
 from .semantic_broll_service import SemanticBrollService
 from .sound_design_service import SoundDesignService, add_viral_sound_effects
 from .hook_visual_service import HookVisualService
@@ -921,7 +927,7 @@ class VideoService:
                     logger.warning(f"  Groq Whisper failed: {_gw_e}")
 
             # ── Priority 2: faster-whisper local (last resort) ──────────────
-            if not words_with_confidence:
+            if not words_with_confidence and _confidence_subtitle_available:
                 try:
                     _whisper_device = os.environ.get("WHISPER_DEVICE", "cpu")
                     subtitle_gen = ConfidenceSubtitleGenerator(model_size="tiny", device=_whisper_device)
