@@ -374,6 +374,7 @@ def check_viral_gate_from_transcript(
 def check_viral_gate(
     segments: List[Dict[str, Any]],
     threshold: Optional[float] = None,
+    task_id: str = "",
 ) -> Dict[str, Any]:
     """
     Gate 1: Viral viability check using FAISS semantic similarity.
@@ -495,6 +496,23 @@ def check_viral_gate(
                 f"  #{sc['segment_index']} score={sc['composite_score']:.3f} "
                 f"({sc['best_match_type']}) \"{sc['text'][:60]}...\""
             )
+
+        # ── Persist to RAG memory (fire-and-forget) ──────────────────────
+        try:
+            from .rag_memory import store_successful_clip
+            for seg, sc in viable[:3]:  # store top 3 segments max
+                store_successful_clip(
+                    task_id=task_id or str(id(segments)),  # temp id until coordinator passes it
+                    mood=seg.get("mood", "inspirational"),
+                    hook_text=seg.get("hook_text") or sc.get("text", "")[:200],
+                    transcript_excerpt=sc.get("text", ""),
+                    edit_decisions=seg.get("edit_decisions", {}),
+                    audio_decisions=seg.get("audio_decisions", {}),
+                    quality_score=sc.get("composite_score", 0) * 10,  # normalize to 0-10
+                )
+        except Exception as _rag_err:
+            logger.debug("[ViralGate] RAG storage skipped: %s", _rag_err)
+
         return {
             "passed": True,
             "viable_segments": viable_segments,

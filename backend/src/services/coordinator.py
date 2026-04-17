@@ -373,6 +373,23 @@ class VideoCoordinator:
                         seg["creative_warnings"] = creative.get("warnings", [])
                         if creative.get("warnings"):
                             logger.warning("[Phase 2.7] Segment warnings: %s", creative["warnings"])
+
+                        # Store successful clips to RAG memory
+                        q_score = creative.get("quality", {}).get("overall_score", 0)
+                        if q_score >= 6.5:
+                            try:
+                                from .rag_memory import store_successful_clip
+                                store_successful_clip(
+                                    task_id=self.task_id,
+                                    mood=seg.get("mood", "inspirational"),
+                                    hook_text=creative.get("hook", {}).get("hook_text", ""),
+                                    transcript_excerpt=seg.get("text", "")[:400],
+                                    edit_decisions=creative.get("edit", {}),
+                                    audio_decisions=creative.get("audio", {}),
+                                    quality_score=q_score,
+                                )
+                            except Exception as _rag_store_err:
+                                logger.debug("[Phase 2.7] RAG store skipped: %s", _rag_store_err)
                     except Exception as _ce:
                         logger.warning("[Phase 2.7] Creative pipeline skipped for segment: %s", _ce)
                     enriched_segments.append(seg)
