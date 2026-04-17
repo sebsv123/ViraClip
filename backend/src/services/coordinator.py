@@ -986,6 +986,29 @@ class VideoCoordinator:
                     logger.debug("Transition selection skipped for clip %d: %s", index, _tr_e)
                     clip["transition_enabled"] = False
 
+                # ── Audio ducking (bajar música cuando hay voz) ───────────────────────
+                if self.config.get("audio_ducking", True) and _words_for_editor:
+                    try:
+                        from .audio_ducking_service import get_audio_ducking_service as _get_duck_svc
+                        _duck_in = _Path(clip["path"])
+                        _duck_out = _duck_in.with_name(f"duck_{_duck_in.name}")
+                        _duck_svc = _get_duck_svc()
+                        _duck_ok = await _duck_svc.apply_ducking(
+                            input_path=_duck_in,
+                            output_path=_duck_out,
+                            words=_words_for_editor,
+                        )
+                        if _duck_ok and _duck_out.exists() and _duck_out.stat().st_size > 0:
+                            _duck_in.unlink(missing_ok=True)
+                            _duck_out.rename(_duck_in)
+                            clip["path"] = str(_duck_in)
+                            clip["audio_ducking_applied"] = True
+                            logger.info("  [Ducking] Word-aware audio ducking applied")
+                        else:
+                            _duck_out.unlink(missing_ok=True)
+                    except Exception as _dk_e:
+                        logger.debug("Audio ducking skipped for clip %d: %s", index, _dk_e)
+
                 # ── CTA overlay (last 2 s) ─────────────────────────────────────
                 # "Follow for more 🔥" / "Comment below 👇" injected as drawtext
                 # on the final clip, respecting the platform safe zone.

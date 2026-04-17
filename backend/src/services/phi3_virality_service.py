@@ -16,6 +16,9 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
+# Module-level flag to cache Ollama availability (avoid retries on every clip)
+_ollama_available: Optional[bool] = None
+
 # Import viral trend service (Phase 4.3)
 try:
     from services.viral_trend_service import get_trend_service
@@ -166,6 +169,13 @@ class Phi3ViralityService:
             )
         
         # Default: monolithic prompt mode
+        
+        # Check cached Ollama availability to avoid retries on every clip
+        global _ollama_available
+        if _ollama_available is False:
+            # Skip Ollama attempt, use fallback immediately
+            return self._fallback_score(segment_text, duration)
+        
         # Prepare audio context if available
         tempo = audio_features.get("tempo_bpm", 0) if audio_features else 0
         energy_peaks = len(audio_features.get("energy_peaks_timestamps", [])) if audio_features else 0
@@ -217,9 +227,13 @@ class Phi3ViralityService:
                     edit_suggestions=score_data.get("edit_suggestions", []),
                     hashtag_themes=score_data.get("hashtag_themes", [])
                 )
+                # Mark Ollama as available for subsequent clips
+                _ollama_available = True
                 
         except Exception as e:
             logger.error(f"Phi-3-mini scoring failed: {e}")
+            # Mark Ollama as unavailable to skip retries on subsequent clips
+            _ollama_available = False
             # Fallback to heuristic scoring
             return self._fallback_score(segment_text, duration)
     

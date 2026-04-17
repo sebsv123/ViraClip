@@ -473,6 +473,8 @@ def create_optimized_clip(
 
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Remove audio_codec from encoding_settings to avoid duplicate with explicit arg
+            encoding_settings.pop("audio_codec", None)
             final_clip.write_videofile(
                 str(output_path),
                 temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.aac"),
