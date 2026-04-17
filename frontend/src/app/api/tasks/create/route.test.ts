@@ -47,7 +47,7 @@ describe("/api/tasks/create", () => {
       user: { id: "user-1" },
     } as never);
     vi.mocked(buildBackendAuthHeaders).mockReturnValue({
-      "x-supoclip-user-id": "user-1",
+      "x-viraclip-user-id": "user-1",
     });
     vi.mocked(fetch).mockResolvedValue(
       new Response(JSON.stringify({ task_id: "task-1" }), {
@@ -75,7 +75,7 @@ describe("/api/tasks/create", () => {
         body: JSON.stringify(payload),
         headers: expect.objectContaining({
           "Content-Type": "application/json",
-          "x-supoclip-user-id": "user-1",
+          "x-viraclip-user-id": "user-1",
         }),
       }),
     );

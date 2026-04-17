@@ -39,7 +39,7 @@ export function SignIn() {
 
     // Redirect after successful sign in
     setTimeout(() => {
-      router.push("/");
+      router.push("/dashboard");
       router.refresh();
     }, 500);
   };

@@ -39,7 +39,7 @@ export function SignUp() {
 
     // Automatically sign in after successful sign up
     setTimeout(() => {
-      window.location.href = "/";
+      window.location.href = "/waitlist-pending";
     }, 1000);
   };
 

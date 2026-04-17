@@ -6,11 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sse_starlette.sse import EventSourceResponse
+import asyncio
 import json
 import logging
 from typing import Dict, Any
 import inspect
 import re
+import time
+from pathlib import Path
+import shutil
 
 from ...database import get_db
 from ...database import AsyncSessionLocal
@@ -21,7 +25,10 @@ from ...workers.job_queue import JobQueue
 from ...workers.progress import ProgressTracker
 from ...config import get_config
 from ...font_registry import is_font_accessible
-import redis.asyncio as redis
+from ...utils.async_helpers import run_in_thread
+from ...repositories.clip_repository import ClipRepository
+from ...api.middleware.rate_limit import task_rate_limit_dependency
+import redis.asyncio as aioredis
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
 
 logger = logging.getLogger(__name__)
@@ -49,7 +56,7 @@ def _normalize_font_family(value: Any, default: str = "TikTokSans-Regular") -> s
 
 
 def _get_user_id_from_headers(request: Request) -> str:
-    """Get user ID. Monetization on: signed auth (same as create_task/billing_summary). Off: user_id or x-supoclip-user-id."""
+    """Get user ID. Monetization on: signed auth (same as create_task/billing_summary). Off: user_id or x-viraclip-user-id."""
     config = get_config()
     if config.monetization_enabled:
         return get_signed_user_id(request, config)
@@ -95,7 +102,7 @@ async def list_tasks(
         raise HTTPException(status_code=500, detail=f"Error retrieving tasks: {str(e)}")
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(task_rate_limit_dependency)])
 async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     """
     Create a new task and enqueue it for processing.
@@ -122,6 +129,51 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     caption_template = data.get("caption_template", "default")
     include_broll = data.get("include_broll", False)
     processing_mode = data.get("processing_mode", config.default_processing_mode)
+    
+    # Viral editing features
+    jump_cut = bool(data.get("jump_cut", False))
+    jump_cut_min_silence = float(data.get("jump_cut_min_silence", 0.3))
+    zoom_on_cuts = bool(data.get("zoom_on_cuts", True))
+    cut_zoom_factor = float(data.get("cut_zoom_factor", 1.08))
+    denoise_audio = bool(data.get("denoise_audio", False))
+    
+    # NEW: Contextual overlays
+    contextual_overlays = bool(data.get("contextual_overlays", True))
+    overlay_frequency = data.get("overlay_frequency", "adaptive")
+    if overlay_frequency not in {"low", "medium", "high", "very_high", "adaptive"}:
+        overlay_frequency = "adaptive"
+    
+    # NEW: Audio ducking
+    audio_ducking = bool(data.get("audio_ducking", True))
+    
+    # NEW: Speed control
+    playback_speed = float(data.get("playback_speed", 1.0))
+    if not (0.5 <= playback_speed <= 2.0):
+        playback_speed = 1.0
+    dramatic_slowmo = bool(data.get("dramatic_slowmo", False))
+    speed_ramp_enabled = bool(data.get("speed_ramp_enabled", True))
+    
+    # NEW: Scene detection
+    use_scene_detection = bool(data.get("use_scene_detection", True))
+    
+    # NEW: Force fresh - skip cache for testing improvements
+    force_fresh = bool(data.get("force_fresh", False))
+    
+    # NEW: Viral template (overrides individual settings if provided)
+    viral_template = data.get("viral_template")
+    if viral_template:
+        from ...services.viral_templates import get_viral_template_service
+        template_params = get_viral_template_service().get_template_config(viral_template)
+        if template_params:
+            # Apply template overrides
+            jump_cut = template_params.get("jump_cut", jump_cut)
+            jump_cut_min_silence = template_params.get("jump_cut_min_silence", jump_cut_min_silence)
+            zoom_on_cuts = template_params.get("zoom_on_cuts", zoom_on_cuts)
+            cut_zoom_factor = template_params.get("zoom_factor", cut_zoom_factor)
+            denoise_audio = template_params.get("denoise_audio", denoise_audio)
+            contextual_overlays = template_params.get("overlay_enabled", contextual_overlays)
+            overlay_frequency = template_params.get("overlay_frequency", overlay_frequency)
+            audio_ducking = template_params.get("audio_ducking", audio_ducking)
     if processing_mode not in {"fast", "balanced", "quality"}:
         processing_mode = config.default_processing_mode
     output_format = data.get("output_format", "vertical")
@@ -130,6 +182,15 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     add_subtitles = data.get("add_subtitles", True)
     if not isinstance(add_subtitles, bool):
         add_subtitles = True
+    target_language = data.get("target_language", "eng")
+    auto_center_face = data.get("auto_center_face", False)
+    eye_contact_correction = data.get("eye_contact_correction", False)
+    split_screen = data.get("split_screen", False)
+    target_platform = data.get("target_platform", "all")
+    if target_platform not in {"tiktok", "reels", "shorts", "all"}:
+        target_platform = "all"
+    generate_ab_variants = bool(data.get("generate_ab_variants", False))  # P3.5
+    num_clips = max(3, min(10, int(data.get("num_clips", 6))))
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -150,6 +211,11 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             caption_template=caption_template,
             include_broll=include_broll,
             processing_mode=processing_mode,
+            target_language=target_language,
+            auto_center_face=auto_center_face,
+            eye_contact_correction=eye_contact_correction,
+            split_screen=split_screen,
+            force_fresh=force_fresh,
         )
 
         # Get source type for worker
@@ -157,7 +223,11 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             raw_source["url"]
         )
 
-        # Enqueue job for worker
+        # Enqueue job for worker.
+        # Note: generate_ab_variants and target_platform are NOT stored in the task
+        # record — they are passed directly as job arguments so the worker can act on
+        # them at render time.  task_service.process_task() uses generate_ab_variants
+        # to optionally render a B-variant clip for each segment (P3.5).
         queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
         job_id = await queue_adapter.enqueue_processing_job(
             "process_video_task",
@@ -173,10 +243,31 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             processing_mode,
             output_format,
             add_subtitles,
+            target_language,
+            auto_center_face,
+            eye_contact_correction,
+            include_broll,
+            split_screen,
+            target_platform,
+            generate_ab_variants=generate_ab_variants,  # P3.5
+            num_clips=num_clips,
+            jump_cut=jump_cut,  # Viral editing
+            jump_cut_min_silence=jump_cut_min_silence,
+            zoom_on_cuts=zoom_on_cuts,
+            cut_zoom_factor=cut_zoom_factor,
+            denoise_audio=denoise_audio,
+            contextual_overlays=contextual_overlays,  # NEW
+            overlay_frequency=overlay_frequency,
+            audio_ducking=audio_ducking,
+            playback_speed=playback_speed,
+            dramatic_slowmo=dramatic_slowmo,
+            speed_ramp_enabled=speed_ramp_enabled,
+            use_scene_detection=use_scene_detection,
+            force_fresh=force_fresh,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
         try:
@@ -187,11 +278,12 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                     "source_type": source_type,
                     "output_format": output_format,
                     "add_subtitles": add_subtitles,
+                    "force_fresh": force_fresh,
                 }),
                 ex=60 * 60 * 24 * 7,
             )
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         logger.info(f"Task {task_id} created and job {job_id} enqueued")
 
@@ -215,6 +307,187 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error(f"Error creating task: {e}")
         raise HTTPException(status_code=500, detail=f"Error creating task: {str(e)}")
+
+
+@router.post("/batch-start")
+async def batch_start(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    P3.4: Batch processing — submit multiple YouTube URLs / uploaded file paths
+    in one request.  Each source is queued as a separate task.  Returns a
+    batch_id (UUID) and the list of created task_ids for status polling.
+
+    Body:
+    {
+        "sources": ["https://youtube.com/...", "https://youtube.com/..."],
+        // All other fields are identical to POST /tasks/ and apply to every task
+        "caption_template": "default",
+        "target_platform": "tiktok",
+        ...
+    }
+
+    Returns:
+    {
+        "batch_id": "uuid",
+        "task_ids": [...],
+        "queued": N,
+        "skipped": M  // sources that failed validation
+    }
+    """
+    import uuid as _uuid
+    from ...repositories.task_repository import TaskRepository
+
+    config = get_config()
+    if config.monetization_enabled:
+        user_id = get_signed_user_id(request, config)
+    else:
+        user_id = request.headers.get("user_id") or request.headers.get(USER_ID_HEADER)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User authentication required")
+
+    data = await request.json()
+    sources = data.get("sources", [])
+    if not sources or not isinstance(sources, list):
+        raise HTTPException(status_code=400, detail="'sources' must be a non-empty list of URLs/paths")
+    if len(sources) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 sources per batch")
+
+    # Shared settings for all tasks in the batch
+    font_options = data.get("font_options", {})
+    shared_settings = {
+        "font_family": _normalize_font_family(font_options.get("font_family", "TikTokSans-Regular")),
+        "font_size": _normalize_font_size(font_options.get("font_size", 24)),
+        "font_color": _normalize_font_color(font_options.get("font_color", "#FFFFFF")),
+        "caption_template": data.get("caption_template", "default"),
+        "include_broll": data.get("include_broll", False),
+        "processing_mode": data.get("processing_mode", config.default_processing_mode),
+        "output_format": data.get("output_format", "vertical"),
+        "add_subtitles": data.get("add_subtitles", True),
+        "target_language": data.get("target_language", "eng"),
+        "auto_center_face": data.get("auto_center_face", False),
+        "eye_contact_correction": data.get("eye_contact_correction", False),
+        "split_screen": data.get("split_screen", False),
+        "target_platform": data.get("target_platform", "all"),
+    }
+
+    batch_id = str(_uuid.uuid4())
+    task_ids = []
+    skipped = 0
+
+    job_queue = JobQueue()
+    task_service = TaskService(db)
+
+    billing_service = BillingService(db)
+
+    for source_url in sources:
+        source_url = str(source_url).strip()
+        if not source_url:
+            skipped += 1
+            continue
+        try:
+            # Enforce billing limits per task — same as single-task endpoint
+            await billing_service.assert_can_create_task(user_id)
+
+            task_id = await task_service.create_task(
+                user_id=user_id,
+                source=source_url,
+                batch_id=batch_id,
+                **shared_settings,
+            )
+
+            # Determine source type for worker arguments
+            source_type = task_service.video_service.determine_source_type(source_url)
+
+            # Use enqueue_processing_job (enqueue_task does not exist on JobQueue)
+            await job_queue.enqueue_processing_job(
+                "process_video_task",
+                shared_settings["processing_mode"],
+                task_id,
+                source_url,
+                source_type,
+                user_id,
+                shared_settings["font_family"],
+                shared_settings["font_size"],
+                shared_settings["font_color"],
+                shared_settings["caption_template"],
+                shared_settings["processing_mode"],
+                shared_settings["output_format"],
+                shared_settings["add_subtitles"],
+                shared_settings["target_language"],
+                shared_settings["auto_center_face"],
+                shared_settings["eye_contact_correction"],
+                shared_settings["include_broll"],
+                shared_settings["split_screen"],
+                shared_settings["target_platform"],
+            )
+            task_ids.append(task_id)
+            logger.info(f"Batch {batch_id}: queued task {task_id} for {source_url[:60]}")
+        except BillingLimitExceeded as e:
+            logger.warning(f"Batch {batch_id}: billing limit reached after {len(task_ids)} tasks — {e}")
+            skipped += len(sources) - len(task_ids) - skipped  # count all remaining as skipped
+            break
+        except Exception as e:
+            logger.warning(f"Batch {batch_id}: skipped '{source_url[:60]}' — {e}")
+            skipped += 1
+
+    if not task_ids:
+        raise HTTPException(status_code=400, detail="All provided sources failed validation")
+
+    return {
+        "batch_id": batch_id,
+        "task_ids": task_ids,
+        "queued": len(task_ids),
+        "skipped": skipped,
+    }
+
+
+@router.get("/batch/{batch_id}/status")
+async def batch_status(batch_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    P3.4: Return the status of all tasks belonging to a batch.
+    """
+    from sqlalchemy import text as sa_text
+    config = get_config()
+    if config.monetization_enabled:
+        user_id = get_signed_user_id(request, config)
+    else:
+        user_id = request.headers.get("user_id") or request.headers.get(USER_ID_HEADER)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="User authentication required")
+
+    try:
+        result = await db.execute(
+            sa_text(
+                "SELECT id, status, progress, progress_message, clips_count, created_at, updated_at "
+                "FROM tasks WHERE batch_id = :batch_id AND user_id = :user_id ORDER BY created_at ASC"
+            ),
+            {"batch_id": batch_id, "user_id": user_id},
+        )
+        rows = result.fetchall()
+        tasks = [
+            {
+                "task_id": row.id,
+                "status": row.status,
+                "progress": row.progress or 0,
+                "progress_message": row.progress_message,
+                "clips_count": row.clips_count or 0,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ]
+        total = len(tasks)
+        completed = sum(1 for t in tasks if t["status"] == "completed")
+        failed = sum(1 for t in tasks if t["status"] in ("error", "cancelled"))
+        return {
+            "batch_id": batch_id,
+            "total": total,
+            "completed": completed,
+            "failed": failed,
+            "processing": total - completed - failed,
+            "tasks": tasks,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching batch status: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/billing/summary")
@@ -331,7 +604,7 @@ async def get_task_progress_sse(task_id: str, request: Request):
 
         # Connect to Redis for real-time updates
         runtime_config = get_config()
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=runtime_config.redis_host,
             port=runtime_config.redis_port,
             password=runtime_config.redis_password,
@@ -343,6 +616,12 @@ async def get_task_progress_sse(task_id: str, request: Request):
             async for progress_data in ProgressTracker.subscribe_to_progress(
                 redis_client, task_id
             ):
+                # Abort early if client already closed the connection (avoids keeping
+                # the Redis pub/sub channel open after the browser tab is closed).
+                if await request.is_disconnected():
+                    logger.info(f"SSE client disconnected for task {task_id}, closing stream")
+                    break
+
                 event_type = progress_data.get("event_type", "progress")
                 yield {"event": event_type, "data": json.dumps(progress_data)}
 
@@ -355,7 +634,7 @@ async def get_task_progress_sse(task_id: str, request: Request):
                     break
 
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
     return EventSourceResponse(event_generator())
 
@@ -528,6 +807,140 @@ async def merge_clips(
         raise HTTPException(status_code=500, detail=f"Error merging clips: {str(e)}")
 
 
+@router.post("/{task_id}/compile")
+async def compile_clips_into_reel(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Compile all clips for a task into a single highlights reel with transitions.
+    Returns the path to the compiled video file.
+    """
+    try:
+        from ..video_processing import get_available_transitions, apply_transition_effect
+        from moviepy import VideoFileClip, concatenate_videoclips
+        import random
+
+        user_id = _get_user_id_from_headers(request)
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+
+        clip_repo = ClipRepository()
+
+        # Get all clips sorted by order
+        clips = await clip_repo.get_clips_by_task(db, task_id)
+        if not clips:
+            raise HTTPException(status_code=404, detail="No clips found for this task")
+
+        # Filter to only existing video files
+        valid_clips = [c for c in clips if c.get("file_path") and Path(c["file_path"]).exists()]
+        if len(valid_clips) < 1:
+            raise HTTPException(status_code=404, detail="No renderable clip files found")
+
+        if len(valid_clips) == 1:
+            # Single clip — return it directly as "compilation"
+            clip = valid_clips[0]
+            return {
+                "compiled_path": clip["file_path"],
+                "compiled_url": f"/clips/{clip['filename']}",
+                "clip_count": 1,
+                "message": "Single clip returned as compilation",
+            }
+
+        # Get available transitions
+        transition_files = get_available_transitions()
+
+        # Output path for compilation
+        config = get_config()
+        clips_dir = Path(config.temp_dir) / "clips"
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        compilation_filename = f"reel_{task_id[:8]}_{int(time.time())}.mp4"
+        compilation_path = clips_dir / compilation_filename
+
+        # Compile: apply transitions between each consecutive pair
+        # Start with first clip, then apply transition to merge each next clip
+        current_path = Path(valid_clips[0]["file_path"])
+
+        for i, clip_info in enumerate(valid_clips[1:], 1):
+            next_path = Path(clip_info["file_path"])
+            temp_output = clips_dir / f"reel_tmp_{task_id[:8]}_{i}.mp4"
+
+            # Pick a random transition if available, otherwise just concatenate
+            success = False
+            if transition_files:
+                transition_path = Path(random.choice(transition_files))
+                success = await run_in_thread(
+                    apply_transition_effect,
+                    current_path, next_path, transition_path, temp_output
+                )
+
+            if success and temp_output.exists():
+                # Clean up previous temp file if not the original first clip
+                if i > 1 and current_path.name.startswith("reel_tmp_"):
+                    try:
+                        current_path.unlink()
+                    except Exception:
+                        pass
+                current_path = temp_output
+            else:
+                # Fallback: concatenate without transition
+                try:
+                    clip_a = None
+                    clip_b = None
+                    merged = None
+                    try:
+                        clip_a = VideoFileClip(str(current_path))
+                        clip_b = VideoFileClip(str(next_path))
+                        merged = concatenate_videoclips([clip_a, clip_b], method="compose")
+                        merged.write_videofile(
+                            str(temp_output),
+                            codec="libx264",
+                            audio_codec="aac",
+                            preset="veryfast",
+                            logger=None,
+                        )
+                        if i > 1 and current_path.name.startswith("reel_tmp_"):
+                            try:
+                                current_path.unlink()
+                            except Exception:
+                                pass
+                        current_path = temp_output
+                    finally:
+                        for clip in [clip_a, clip_b, merged]:
+                            if clip is not None:
+                                try:
+                                    clip.close()
+                                except Exception:
+                                    pass
+                except Exception as concat_e:
+                    logger.error(f"Concat failed at clip {i}: {concat_e}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to concatenate clips at position {i}: {str(concat_e)}"
+                    )
+
+        # Move final result to compilation path
+        if current_path != compilation_path:
+            shutil.move(str(current_path), str(compilation_path))
+
+        if not compilation_path.exists():
+            raise HTTPException(status_code=500, detail="Compilation failed — output file not created")
+
+        return {
+            "compiled_path": str(compilation_path),
+            "compiled_url": f"/clips/{compilation_filename}",
+            "clip_count": len(valid_clips),
+            "message": f"Compiled {len(valid_clips)} clips into highlights reel",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error compiling clips: {e}")
+        raise HTTPException(status_code=500, detail=f"Error compiling clips: {str(e)}")
+
+
 @router.patch("/{task_id}/clips/{clip_id}/captions")
 async def update_clip_captions(
     task_id: str, clip_id: str, request: Request, db: AsyncSession = Depends(get_db)
@@ -562,6 +975,116 @@ async def update_clip_captions(
         raise HTTPException(
             status_code=500, detail=f"Error updating captions: {str(e)}"
         )
+
+
+@router.post("/{task_id}/clips/{clip_id}/refine")
+async def refine_clip_with_ai(
+    task_id: str, clip_id: str, request: Request, db: AsyncSession = Depends(get_db)
+):
+    """
+    P3.1: AI Chat — natural-language clip refinement.
+
+    Body: { "instruction": "Cut the first 2 seconds" }
+
+    The LLM parses the instruction into one of the supported edit actions
+    (trim, split, caption_update, template_change, hook_title) and executes it
+    using the existing TaskService methods.  Returns the updated clip or a list
+    of clips if a split was performed.
+    """
+    try:
+        payload = await request.json()
+        instruction = str(payload.get("instruction", "")).strip()
+        if not instruction:
+            raise HTTPException(status_code=400, detail="instruction is required")
+
+        task_service = TaskService(db)
+        await _require_task_owner(request, task_service, db, task_id)
+
+        # Fetch current clip for context
+        clip = await ClipRepository.get_clip_by_id(db, clip_id)
+        if not clip:
+            raise HTTPException(status_code=404, detail="Clip not found")
+
+        clip_duration = float(clip.get("duration", 0))
+        current_text = str(clip.get("text", ""))
+
+        # Parse instruction with LLM
+        from ...ai import parse_clip_edit_instruction
+        action = await parse_clip_edit_instruction(
+            instruction, clip_duration=clip_duration, current_text=current_text
+        )
+
+        logger.info(
+            f"AI refine clip {clip_id}: instruction='{instruction}' "
+            f"action={action.action} reasoning={action.reasoning}"
+        )
+
+        if action.action == "trim":
+            start_off = action.trim_start or 0.0
+            end_off = action.trim_end or 0.0
+            if start_off <= 0 and end_off <= 0:
+                return {
+                    "action": "noop",
+                    "message": "Could not determine trim amount from instruction",
+                    "reasoning": action.reasoning,
+                }
+            updated = await task_service.trim_clip(task_id, clip_id, start_off, end_off)
+            return {"action": "trim", "clip": updated, "reasoning": action.reasoning}
+
+        elif action.action == "split":
+            split_at = action.split_at
+            if not split_at or split_at <= 0 or split_at >= clip_duration:
+                return {
+                    "action": "noop",
+                    "message": f"Split timestamp {split_at}s is out of clip range (0–{clip_duration:.1f}s)",
+                    "reasoning": action.reasoning,
+                }
+            result = await task_service.split_clip(task_id, clip_id, split_at)
+            return {"action": "split", "clips": result, "reasoning": action.reasoning}
+
+        elif action.action == "caption_update":
+            if not action.new_caption:
+                return {"action": "noop", "message": "No new caption provided", "reasoning": action.reasoning}
+            updated = await task_service.update_clip_captions(
+                task_id, clip_id, action.new_caption, "bottom", []
+            )
+            return {"action": "caption_update", "clip": updated, "reasoning": action.reasoning}
+
+        elif action.action == "template_change":
+            # template_change is a settings-level action — we store it on the task
+            # and return guidance; full re-render would require re-processing the clip
+            return {
+                "action": "template_change",
+                "new_template": action.new_template,
+                "reasoning": action.reasoning,
+                "message": (
+                    f"To apply template '{action.new_template}', use the Caption Template "
+                    "selector in the settings panel and click 'Apply to All Clips'."
+                ),
+            }
+
+        elif action.action == "hook_title":
+            if not action.new_hook_title:
+                return {"action": "noop", "message": "No hook title provided", "reasoning": action.reasoning}
+            # Store hook title as a caption update with the hook prepended
+            combined = f"{action.new_hook_title} | {current_text}" if current_text else action.new_hook_title
+            updated = await task_service.update_clip_captions(
+                task_id, clip_id, combined, "bottom", [action.new_hook_title]
+            )
+            return {"action": "hook_title", "clip": updated, "hook_title": action.new_hook_title, "reasoning": action.reasoning}
+
+        else:  # noop
+            return {
+                "action": "noop",
+                "message": "No edit performed — instruction was not actionable",
+                "reasoning": action.reasoning,
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in AI clip refinement: {e}")
+        raise HTTPException(status_code=500, detail=f"AI refinement error: {str(e)}")
 
 
 @router.post("/{task_id}/clips/{clip_id}/regenerate")
@@ -647,6 +1170,7 @@ async def export_clip(
 ):
     """Export clip with a social platform preset."""
     try:
+        config = get_config()
         preset_name = preset.lower().strip()
         if preset_name not in EXPORT_PRESETS:
             raise HTTPException(
@@ -685,19 +1209,20 @@ async def cancel_task(
 ):
     """Cancel an active queued or processing task."""
     try:
+        config = get_config()
         task_service = TaskService(db)
         task = await _require_task_owner(request, task_service, db, task_id)
 
         if task.get("status") in ["completed", "error", "cancelled"]:
             return {"message": f"Task already in terminal state: {task.get('status')}"}
 
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
         try:
             await redis_client.setex(f"task_cancel:{task_id}", 3600, "1")
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         await task_service.task_repo.update_task_status(
             db,
@@ -732,6 +1257,7 @@ async def resume_task(
 ):
     """Resume a cancelled or errored task by enqueueing a new worker job."""
     try:
+        config = get_config()
         task_service = TaskService(db)
         task = await _require_task_owner(request, task_service, db, task_id)
 
@@ -746,7 +1272,7 @@ async def resume_task(
         output_format = "vertical"
         add_subtitles = True
 
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
         try:
@@ -764,18 +1290,18 @@ async def resume_task(
                 if isinstance(asub, bool):
                     add_subtitles = asub
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         if not source_url or not source_type:
             raise HTTPException(status_code=400, detail="Task source URL is missing")
 
-        redis_client = redis.Redis(
+        redis_client = aioredis.Redis(
             host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
         )
         try:
             await redis_client.delete(f"task_cancel:{task_id}")
         finally:
-            await redis_client.close()
+            await redis_client.aclose()
 
         await task_service.task_repo.update_task_status(
             db,
@@ -814,7 +1340,8 @@ async def resume_task(
 @router.get("/dead-letter/list")
 async def list_dead_letter_tasks():
     """List tasks that exhausted retries and landed in dead-letter store."""
-    redis_client = redis.Redis(
+    config = get_config()
+    redis_client = aioredis.Redis(
         host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
     )
     try:
@@ -832,4 +1359,45 @@ async def list_dead_letter_tasks():
 
         return {"total": len(items), "tasks": items}
     finally:
-        await redis_client.close()
+        await redis_client.aclose()
+
+
+@router.get("/{task_id}/progress")
+async def stream_task_progress(task_id: str, request: Request):
+    """
+    SSE endpoint for real-time task progress updates.
+    
+    Client usage:
+        const evtSource = new EventSource(`/tasks/${taskId}/progress`);
+        evtSource.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            console.log(data.progress, data.message);
+        };
+    """
+    config = get_config()
+    redis_client = aioredis.from_url(
+        f"redis://{config.redis_host}:{config.redis_port}",
+        password=config.redis_password,
+        decode_responses=True,
+    )
+
+    async def event_generator():
+        try:
+            # Send initial state from Redis cache
+            tracker = ProgressTracker(redis_client, task_id)
+            initial = await tracker.get()
+            if initial:
+                yield {"data": json.dumps(initial)}
+
+            # Subscribe to real-time updates
+            async for update in ProgressTracker.subscribe_to_progress(redis_client, task_id):
+                yield {"data": json.dumps(update)}
+                # Stop streaming when task completes or errors
+                if update.get("status") in {"completed", "error"}:
+                    break
+        except asyncio.CancelledError:
+            logger.debug(f"SSE stream cancelled for task {task_id}")
+        finally:
+            await redis_client.aclose()
+
+    return EventSourceResponse(event_generator())
