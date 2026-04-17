@@ -83,5 +83,9 @@ llama-index-agent-openai>=0.3.0
 # === LangGraph State Machine Pipeline (Phase 3) ===
 langgraph>=0.1.0
 
+# === RAG Memory (ChromaDB + fastembed) ===
+chromadb>=0.4.0
+fastembed>=0.2.0
+
 # === Optional: B-roll detection (B.4) — lazy-imported, install separately if BROLL_ENABLED=true ===
 # ultralytics>=8.0.0
