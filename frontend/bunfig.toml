@@ -1,0 +1,18 @@
+[install]
+# Use Bun's fast install with lockfile (bun.lockb)
+# Run: bun install  (instead of npm install)
+# Run: bun run dev  (instead of npm run dev)
+# Run: bun run build
+
+[install.cache]
+dir = "~/.bun/install/cache"
+disable = false
+
+[run]
+# Bun is a Node.js-compatible runtime; Next.js works without changes.
+# For full Bun runtime (instead of Node.js): bun --bun run dev
+bun = false
+
+[test]
+# bun test is Bun's built-in Jest-compatible test runner.
+# ViraClip uses Vitest; keep using: bun run test

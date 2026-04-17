@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
@@ -51,6 +51,21 @@ import {
   Settings2,
   Type,
   Clapperboard,
+  Sparkles,
+  Bot,
+  Send,
+  BrainCircuit,
+  Target,
+  MousePointer2,
+  Wand2,
+  Film,
+  Volume2,
+  CheckCircle2,
+  XCircle,
+  Layers,
+  Loader2,
+  Shuffle,
+  Music,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
@@ -77,6 +92,58 @@ interface Clip {
   value_score: number;
   shareability_score: number;
   hook_type: string | null;
+  intensity?: number;
+  vfx_trigger?: string;
+  bgm_style?: string;
+  // P3: Social copy
+  social_title?: string | null;
+  social_description?: string | null;
+  suggested_hashtags?: string[];
+  // P4: Thumbnail
+  thumbnail_url?: string | null;
+  thumbnail_filename?: string | null;
+  // B-3: Face detection
+  face_detected?: boolean | null;
+  // P2.4: Hook preview score
+  hook_preview_score?: number;
+  // P3.5: A/B variant
+  variant?: string | null;
+  variant_group?: string | null;
+  // V3 Phase 4: Social Intelligence
+  strategic_advice?: string | null;
+  conversion_tips?: string | null;
+  // B.6: User rating
+  user_rating?: number | null;
+  // Phase 9: Creative Engine
+  creative_enhanced?: boolean;
+  hook_reorder_applied?: boolean;
+  hook_already_optimized?: boolean;
+  hook_text?: string;
+  zoom_punch_applied?: boolean;
+  color_grade_applied?: boolean;
+  sfx_injected?: number;
+  loudnorm_applied?: boolean;
+  preset_used?: string;
+  broll_overlays?: number;
+  qa_passed?: boolean;
+  qa_issues?: string[];
+  pacing_score?: number | null;
+  emotion_score?: number | null;
+  improvements?: string[];
+  // Smart Auto-Editor
+  smart_edit_decisions?: number;
+  smart_edit_summary?: string;
+  smart_edit_time_saved?: number;
+  text_pops_applied?: number;
+  // Phase 10: Viral Polish & A/B
+  cta_overlay_applied?: boolean;
+  emoji_overlays_applied?: boolean;
+  variants?: Array<{
+    path: string;
+    variant: string;  // "caption" | "bgm"
+    label: string;
+    type: string;
+  }>;
 }
 
 interface TaskDetails {
@@ -96,6 +163,15 @@ interface TaskDetails {
   font_color?: string;
   caption_template?: string;
   include_broll?: boolean;
+  analysis?: {
+    summary?: string;
+    key_topics?: string[];
+    most_relevant_segments?: Array<{
+      theme?: string;
+      virality_score?: number;
+      reasoning?: string;
+    }>;
+  };
 }
 
 interface FontOption {
@@ -127,6 +203,13 @@ export default function TaskPage() {
   const [captionPosition, setCaptionPosition] = useState("bottom");
   const [highlightWords, setHighlightWords] = useState("");
   const [exportPreset, setExportPreset] = useState("tiktok");
+  const [activeTopicFilter, setActiveTopicFilter] = useState<string | null>(null);
+  const [clipRatings, setClipRatings] = useState<Record<string, number>>({});
+  // P3.1: AI refine state
+  const [refiningClipId, setRefiningClipId] = useState<string | null>(null);
+  const [refineInstruction, setRefineInstruction] = useState("");
+  const [isRefining, setIsRefining] = useState(false);
+  const [refineResult, setRefineResult] = useState<{ action: string; reasoning: string } | null>(null);
 
   const [projectFontFamily, setProjectFontFamily] = useState("TikTokSans-Regular");
   const [projectFontSize, setProjectFontSize] = useState("24");
@@ -140,8 +223,86 @@ export default function TaskPage() {
     Array<{ id: string; name: string; description: string; animation: string }>
   >([]);
   const hasTriggeredAutoRefresh = useRef(false);
+  const notifiedRef = useRef(false);
+
+  // Music picker state
+  const [musicTracks, setMusicTracks] = useState<Array<{id: string; label: string}>>([]);
+  const [musicPickerClipId, setMusicPickerClipId] = useState<string | null>(null);
+  const [selectedTrack, setSelectedTrack] = useState<string>("");
+  const [isApplyingMusic, setIsApplyingMusic] = useState(false);
+  const [musicAppliedClipId, setMusicAppliedClipId] = useState<string | null>(null);
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Load available music tracks once
+  useEffect(() => {
+    fetch(`${apiUrl}/clips/music/tracks`)
+      .then(r => r.json())
+      .then(d => { if (d.tracks) setMusicTracks(d.tracks); })
+      .catch(() => {});
+  }, [apiUrl]);
+
+  const handleApplyMusic = async (clipId: string) => {
+    if (!selectedTrack) return;
+    setIsApplyingMusic(true);
+    try {
+      const res = await fetch(`${apiUrl}/clips/${clipId}/apply-music`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ track: selectedTrack }),
+      });
+      if (res.ok) {
+        setMusicAppliedClipId(clipId);
+        setMusicPickerClipId(null);
+        setTimeout(() => setMusicAppliedClipId(null), 3000);
+      }
+    } finally {
+      setIsApplyingMusic(false);
+    }
+  };
+
+  const getStatusBadge = (status: string) => {
+    const map: Record<string, { label: string; className: string }> = {
+      completed: { label: "Completed", className: "bg-green-500/15 text-green-400 border-green-500/30" },
+      processing: { label: "Processing", className: "bg-blue-500/15 text-blue-400 border-blue-500/30" },
+      queued: { label: "Queued", className: "bg-amber-500/15 text-amber-400 border-amber-500/30" },
+      failed: { label: "Failed", className: "bg-red-500/15 text-red-400 border-red-500/30" },
+      error: { label: "Error", className: "bg-red-500/15 text-red-400 border-red-500/30" },
+    };
+    const s = map[status] ?? { label: status, className: "bg-white/5 text-gray-300 border-white/10" };
+    return (
+      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${s.className}`}>{s.label}</span>
+    );
+  };
+
+  const fireCompletionNotification = useCallback((clipCount: number) => {
+    if (notifiedRef.current) return;
+    notifiedRef.current = true;
+    if (typeof window === "undefined") return;
+    if ("Notification" in window && Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("ViraClip — clips ready!", {
+        body: `${clipCount} clip${clipCount !== 1 ? "s" : ""} generated successfully.`,
+        icon: "/favicon.ico",
+      });
+    }
+    document.title = `✅ Done — ViraClip`;
+  }, []);
+
+  const rateClip = async (clipId: string, rating: number) => {
+    setClipRatings((prev) => ({ ...prev, [clipId]: rating }));
+    try {
+      await fetch(`${apiUrl}/clips/${clipId}/rating`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating }),
+      });
+    } catch {
+      setClipRatings((prev) => ({ ...prev, [clipId]: prev[clipId] }));
+    }
+  };
   const taskApiUrl = "/api/tasks";
 
   const buildSupportError = useCallback(async (response: Response, fallbackMessage: string) => {
@@ -273,6 +434,17 @@ export default function TaskPage() {
     void loadTemplates();
   }, [apiUrl]);
 
+  // document.title progress indicator
+  useEffect(() => {
+    const status = task?.status;
+    if (!status || status === "completed" || status === "failed") return;
+    const pct = progress > 0 ? ` ${progress}%` : "";
+    document.title = `⏳${pct} Processing — ViraClip`;
+    return () => {
+      document.title = "ViraClip";
+    };
+  }, [task?.status, progress]);
+
   // SSE effect - real-time progress updates
   useEffect(() => {
     const taskStatus = task?.status;
@@ -292,7 +464,10 @@ export default function TaskPage() {
       setProgressMessage(data.message || "");
 
       if (data.status === "completed") {
-        void fetchTaskStatus().then(() => triggerAutoRefresh());
+        void fetchTaskStatus().then((ok) => {
+          if (ok) fireCompletionNotification(clips.length);
+          triggerAutoRefresh();
+        });
       }
     });
 
@@ -307,7 +482,10 @@ export default function TaskPage() {
         setTask((currentTask) => (currentTask ? { ...currentTask, status: data.status } : currentTask));
 
         if (data.status === "completed") {
-          void fetchTaskStatus().then(() => triggerAutoRefresh());
+          void fetchTaskStatus().then((ok) => {
+            if (ok) fireCompletionNotification(clips.length);
+            triggerAutoRefresh();
+          });
         }
       }
     });
@@ -333,6 +511,7 @@ export default function TaskPage() {
 
       // Refresh task and clips
       await fetchTaskStatus();
+      fireCompletionNotification(clips.length);
       triggerAutoRefresh();
     });
 
@@ -350,7 +529,7 @@ export default function TaskPage() {
       console.log("🔌 Disconnecting SSE");
       eventSource.close();
     };
-  }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh]); // Re-run when task status changes
+  }, [params.id, task?.status, fetchTaskStatus, taskApiUrl, triggerAutoRefresh, fireCompletionNotification, clips.length]); // Re-run when task status changes
 
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -388,6 +567,20 @@ export default function TaskPage() {
       none: "No Hook",
     };
     return labels[hookType || "none"] || hookType || "None";
+  };
+
+  const getIntensityColor = (intensity: number) => {
+    if (intensity >= 0.8) return "text-red-600 bg-red-50 border-red-200";
+    if (intensity >= 0.5) return "text-orange-600 bg-orange-50 border-orange-200";
+    return "text-blue-600 bg-blue-50 border-blue-200";
+  };
+
+  // P2.4: Hook preview score color — gradient from low (gray) to high (orange-red)
+  const getHookPreviewColor = (score: number) => {
+    if (score >= 75) return "bg-orange-500 text-white";
+    if (score >= 55) return "bg-amber-400 text-white";
+    if (score >= 35) return "bg-yellow-400 text-gray-800";
+    return "bg-gray-200 text-gray-400";
   };
 
   const handleEditTitle = async () => {
@@ -573,6 +766,36 @@ export default function TaskPage() {
     }
   };
 
+  // P3.1: AI refine a clip with a natural language instruction
+  const handleRefineClip = async (clipId: string) => {
+    if (!refineInstruction.trim() || !task?.id) return;
+    setIsRefining(true);
+    setRefineResult(null);
+    try {
+      const res = await fetch(`${taskApiUrl}/${task.id}/clips/${clipId}/refine`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instruction: refineInstruction }),
+      });
+      if (!res.ok) {
+        const msg = await buildSupportError(res, "AI refine failed");
+        setRefineResult({ action: "error", reasoning: msg });
+        return;
+      }
+      const json = await res.json();
+      setRefineResult({ action: json.action ?? "done", reasoning: json.reasoning ?? "" });
+      setRefineInstruction("");
+      // Refresh clips if the action mutated something
+      if (json.action && json.action !== "noop" && json.action !== "error") {
+        await fetchTaskStatus();
+      }
+    } catch (err) {
+      setRefineResult({ action: "error", reasoning: String(err) });
+    } finally {
+      setIsRefining(false);
+    }
+  };
+
   const handleExportClip = async (clipId: string, fallbackFilename: string) => {
     if (!session?.user?.id || !task?.id) return;
 
@@ -598,195 +821,141 @@ export default function TaskPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-white p-4">
-        <div className="max-w-6xl mx-auto">
-          <div className="mb-6">
-            <Skeleton className="h-8 w-48 mb-2" />
-            <Skeleton className="h-4 w-96" />
+      <div className="min-h-screen bg-[#0a0a0f] text-white flex">
+        <aside className="w-64 bg-[#0a0a0f] border-r border-white/5 min-h-screen flex flex-col">
+          <div className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="relative w-10 h-10">
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
+                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
+                  <Zap className="w-5 h-5 text-cyan-400" />
+                </div>
+              </div>
+              <span className="text-xl font-bold">
+                Vira<span className="text-cyan-400">Clip</span>
+              </span>
+            </div>
           </div>
-          <div className="grid gap-6">
-            {[1, 2, 3].map((i) => (
-              <Card key={i}>
-                <CardContent className="p-6">
-                  <Skeleton className="h-48 w-full mb-4" />
-                  <Skeleton className="h-4 w-full mb-2" />
-                  <Skeleton className="h-4 w-3/4" />
-                </CardContent>
-              </Card>
-            ))}
+        </aside>
+        <main className="flex-1 flex items-center justify-center">
+          <div className="flex items-center gap-3">
+            <Loader2 className="w-8 h-8 text-cyan-400 animate-spin" />
+            <span className="text-gray-400">Loading task details...</span>
           </div>
-        </div>
+        </main>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className="min-h-screen bg-white p-4">
-        <div className="max-w-6xl mx-auto">
-          <Alert>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-          <Link href="/" className="mt-4 inline-block">
-            <Button variant="outline">
-              <ArrowLeft className="w-4 h-4" />
-              Back to Home
-            </Button>
-          </Link>
-        </div>
+      <div className="min-h-screen bg-[#0a0a0f] text-white flex">
+        <aside className="w-64 bg-[#0a0a0f] border-r border-white/5 min-h-screen flex flex-col">
+          <div className="p-6">
+            <div className="flex items-center gap-3">
+              <div className="relative w-10 h-10">
+                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
+                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
+                  <Zap className="w-5 h-5 text-cyan-400" />
+                </div>
+              </div>
+              <span className="text-xl font-bold">
+                Vira<span className="text-cyan-400">Clip</span>
+              </span>
+            </div>
+          </div>
+        </aside>
+        <main className="flex-1 flex items-center justify-center p-8">
+          <div className="text-center">
+            <AlertCircle className="w-16 h-16 text-red-400 mx-auto mb-4" />
+            <p className="text-gray-400 mb-4">{error}</p>
+            <Link href="/list" className="text-cyan-400 hover:underline">
+              Back to My Clips
+            </Link>
+          </div>
+        </main>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-[#0a0a0f] text-white flex">
       {/* Header */}
-      <div className="border-b bg-white">
-        <div className="max-w-6xl mx-auto px-4 py-6">
-          <div className="flex items-center gap-4 mb-4">
-            <Link href="/">
-              <Button variant="ghost" size="sm">
-                <ArrowLeft className="w-4 h-4" />
-                Back
-              </Button>
-            </Link>
-          </div>
-
+      <header className="sticky top-0 z-40 bg-[#0a0a0f]/80 backdrop-blur-xl border-b border-white/5 px-8 py-4">
+        <div className="flex items-center gap-4">
+          <Link href="/list">
+            <button className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors">
+              <ArrowLeft className="w-5 h-5" />
+            </button>
+          </Link>
           {task && (
-            <div>
-              <div className="flex items-center gap-3 mb-2">
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-3">
                 {isEditing ? (
-                  <div className="flex items-center gap-2 flex-1">
-                    <Input
+                  <>
+                    <input
+                      type="text"
                       value={editedTitle}
                       onChange={(e) => setEditedTitle(e.target.value)}
-                      className="text-2xl font-bold h-auto py-1"
+                      className="flex-1 px-4 py-2 bg-white/5 border border-white/10 rounded-xl text-white focus:border-cyan-500/50 focus:outline-none"
                       autoFocus
                     />
-                    <Button size="sm" onClick={handleEditTitle} disabled={!editedTitle.trim()}>
-                      <Check className="w-4 h-4" />
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
+                    <button
+                      onClick={handleEditTitle}
+                      disabled={!editedTitle.trim()}
+                      className="p-2 rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 disabled:opacity-50"
+                    >
+                      <Check className="w-5 h-5" />
+                    </button>
+                    <button
                       onClick={() => {
                         setIsEditing(false);
                         setEditedTitle(task.source_title);
                       }}
+                      className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white"
                     >
-                      <X className="w-4 h-4" />
-                    </Button>
-                  </div>
+                      <X className="w-5 h-5" />
+                    </button>
+                  </>
                 ) : (
                   <>
-                    <h1 className={`text-2xl font-bold text-black ${task.status === "processing" || task.status === "queued" ? "shimmer" : ""}`}>{task.source_title}</h1>
+                    <h1 className="text-xl font-bold text-white truncate">
+                      {task.source_title}
+                    </h1>
                     <div className="flex items-center gap-1">
-                      <Button
-                        size="sm"
-                        variant="ghost"
+                      <button
                         onClick={() => {
                           setIsEditing(true);
                           setEditedTitle(task.source_title);
                         }}
+                        className="p-2 rounded-lg hover:bg-white/10 text-gray-400 hover:text-white transition-colors"
                       >
                         <Edit2 className="w-4 h-4" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        className="text-red-600 hover:text-red-700 hover:bg-red-50"
+                      </button>
+                      <button
                         onClick={() => setShowDeleteDialog(true)}
+                        className="p-2 rounded-lg hover:bg-red-500/10 text-red-400 hover:text-red-300 transition-colors"
                       >
                         <Trash2 className="w-4 h-4" />
-                      </Button>
+                      </button>
                     </div>
                   </>
                 )}
               </div>
-              <div className="flex items-center gap-4 text-sm text-gray-600">
-                <Badge variant="outline" className="capitalize">
+              <div className="flex items-center gap-3 text-sm text-gray-500 mt-1">
+                <span className="px-2 py-0.5 rounded-full bg-white/5 border border-white/10 capitalize">
                   {task.source_type}
-                </Badge>
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <span className="flex items-center gap-1 cursor-default">
-                        <Clock className="w-4 h-4" />
-                        {new Date(task.created_at).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}
-                      </span>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      {new Date(task.created_at).toLocaleString(undefined, {
-                        year: "numeric",
-                        month: "long",
-                        day: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit",
-                        second: "2-digit",
-                        timeZoneName: "short",
-                      })}
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-                {task.status === "completed" ? (
-                  <span>
-                    {clips.length} {clips.length === 1 ? "clip" : "clips"} generated
-                  </span>
-                ) : task.status === "processing" ? (
-                  <div className="relative group">
-                    <Badge className="bg-blue-100 text-blue-800 cursor-default shimmer">Processing</Badge>
-                    <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md opacity-0 scale-95 transition-all group-hover:opacity-100 group-hover:scale-100 pointer-events-none">
-                      🔍&nbsp;&nbsp;We&apos;re currently processing your video. Check back in a couple minutes.
-                    </div>
-                  </div>
-                ) : task.status === "queued" ? (
-                  <Badge className="bg-yellow-100 text-yellow-800">Queued</Badge>
-                ) : (
-                  <Badge variant="outline" className="capitalize">
-                    {task.status}
-                  </Badge>
-                )}
-                {task.status === "completed" && clips.length > 0 && (
-                  <Link href={`/tasks/${task.id}/edit`}>
-                    <Button size="sm" variant="outline">
-                      <Clapperboard className="w-4 h-4" />
-                      Open Editor
-                    </Button>
-                  </Link>
-                )}
-                {(task.status === "queued" || task.status === "processing") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      await fetch(`${taskApiUrl}/${task.id}/cancel`, {
-                        method: "POST",
-                      });
-                      await fetchTaskStatus();
-                    }}
-                  >
-                    Cancel
-                  </Button>
-                )}
-                {(task.status === "cancelled" || task.status === "error") && (
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={async () => {
-                      await fetch(`${taskApiUrl}/${task.id}/resume`, {
-                        method: "POST",
-                      });
-                      await fetchTaskStatus();
-                    }}
-                  >
-                    Resume
-                  </Button>
-                )}
+                </span>
+                <span>{new Date(task.created_at).toLocaleDateString()}</span>
+                <span>•</span>
+                <span>{clips.length} clips</span>
+                <span>•</span>
+                {getStatusBadge(task.status)}
               </div>
             </div>
           )}
         </div>
-      </div>
+      </header>
 
       {/* Main Content */}
       <div className="max-w-6xl mx-auto px-4 py-8">
@@ -823,65 +992,154 @@ export default function TaskPage() {
               )}
             </div>
 
+            {/* Content Analysis Section */}
+            {task?.analysis && (
+              <div className="mb-8 rounded-lg border border-zinc-700 bg-zinc-900/50 p-6">
+                <h3 className="text-sm font-semibold text-zinc-400 uppercase tracking-wide mb-4">
+                  Content Analysis
+                </h3>
+                {task.analysis.summary && (
+                  <div className="mb-4">
+                    <p className="text-sm text-zinc-300 leading-relaxed">{task.analysis.summary}</p>
+                  </div>
+                )}
+                {task.analysis.key_topics && task.analysis.key_topics.length > 0 && (
+                  <div>
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <span className="text-xs text-zinc-500 mr-1 self-center">Capítulos:</span>
+                      {/* "All" pill */}
+                      <span
+                        onClick={() => setActiveTopicFilter(null)}
+                        className={`px-3 py-1 rounded-full text-xs font-medium border cursor-pointer transition-colors select-none
+                          ${activeTopicFilter === null
+                            ? "bg-blue-600 text-white border-blue-500"
+                            : "bg-zinc-800 text-zinc-400 border-zinc-700 hover:bg-zinc-700"
+                          }`}
+                      >
+                        Todos ({clips.length})
+                      </span>
+                      {task.analysis.key_topics.map((topic: string) => {
+                        const matchCount = clips.filter((c) =>
+                          c.text?.toLowerCase().includes(topic.toLowerCase().split(" ")[0])
+                        ).length;
+                        return (
+                          <span
+                            key={topic}
+                            onClick={() => setActiveTopicFilter(activeTopicFilter === topic ? null : topic)}
+                            className={`px-3 py-1 rounded-full text-xs font-medium border cursor-pointer transition-colors select-none
+                              ${activeTopicFilter === topic
+                                ? "bg-blue-600 text-white border-blue-500"
+                                : "bg-blue-900/40 text-blue-300 border-blue-700/50 hover:bg-blue-900/60"
+                              }`}
+                          >
+                            {topic} {matchCount > 0 && `(${matchCount})`}
+                          </span>
+                        );
+                      })}
+                    </div>
+                    {activeTopicFilter && (
+                      <p className="text-xs text-zinc-500 mt-2">
+                        Mostrando clips relacionados con <span className="text-blue-400">"{activeTopicFilter}"</span>
+                        {" · "}
+                        <button onClick={() => setActiveTopicFilter(null)} className="underline hover:text-zinc-300">
+                          Ver todos
+                        </button>
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Live clips grid — shows clips as they render */}
             {clips.length > 0 && (
               <div className="grid gap-6">
                 <p className="text-sm text-neutral-500 text-center">
-                  {clips.length} clip{clips.length !== 1 ? "s" : ""} ready
+                  {activeTopicFilter
+                    ? `${clips.filter((c) =>
+                        c.text?.toLowerCase().includes(activeTopicFilter.toLowerCase().split(" ")[0])
+                      ).length} clip(s) en "${activeTopicFilter}"`
+                    : `${clips.length} clip${clips.length !== 1 ? "s" : ""} ready`}
                 </p>
-                {clips.map((clip) => (
-                  <Card key={clip.id} className="overflow-hidden">
-                    <CardContent className="p-0">
-                      <div className="flex flex-col lg:flex-row">
-                        <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                          <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
-                        </div>
-                        <div className="p-6 flex-1">
-                          <div className="flex items-start justify-between mb-4">
-                            <div>
-                              <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                              <div className="flex items-center gap-2 text-sm text-gray-600">
-                                <span>{clip.start_time} - {clip.end_time}</span>
-                                <span>•</span>
-                                <span>{formatDuration(clip.duration)}</span>
+                {clips
+                  .filter((clip) => {
+                    if (!activeTopicFilter) return true;
+                    const keyword = activeTopicFilter.toLowerCase().split(" ")[0];
+                    return clip.text?.toLowerCase().includes(keyword);
+                  })
+                  .map((clip) => (
+                    <Card key={clip.id} className="overflow-hidden">
+                      <CardContent className="p-0">
+                        <div className="flex flex-col lg:flex-row">
+                          <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
+                            <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                          </div>
+                          <div className="p-6 flex-1">
+                            <div className="flex items-start justify-between mb-4">
+                              <div>
+                                <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
+                                <div className="flex items-center gap-2 text-sm text-gray-400">
+                                  <span>{clip.start_time} - {clip.end_time}</span>
+                                  <span>•</span>
+                                  <span>{formatDuration(clip.duration)}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                {clip.virality_score > 0 && (
+                                  <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
+                                    <Zap className="w-3 h-3 mr-1" />
+                                    {clip.virality_score}
+                                  </Badge>
+                                )}
+                                <Badge className={getScoreColor(clip.relevance_score)}>
+                                  <Star className="w-3 h-3 mr-1" />
+                                  {(clip.relevance_score * 100).toFixed(0)}%
+                                </Badge>
                               </div>
                             </div>
-                            <div className="flex items-center gap-2">
-                              {clip.virality_score > 0 && (
-                                <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
-                                  <Zap className="w-3 h-3 mr-1" />
-                                  {clip.virality_score}
-                                </Badge>
-                              )}
-                              <Badge className={getScoreColor(clip.relevance_score)}>
-                                <Star className="w-3 h-3 mr-1" />
-                                {(clip.relevance_score * 100).toFixed(0)}%
-                              </Badge>
+                            {clip.text && (
+                              <div className="mb-4">
+                                <h4 className="font-medium text-black mb-2">Transcript</h4>
+                                <p className="text-sm text-gray-300 bg-white/3 p-3 rounded">{clip.text}</p>
+                              </div>
+                            )}
+                            {clip.reasoning && (
+                              <div className="mb-4">
+                                <h4 className="font-medium text-black mb-2">AI Analysis</h4>
+                                <p className="text-sm text-gray-400">{clip.reasoning}</p>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-3 flex-wrap">
+                              <div className="flex items-center gap-1" title="Rate this clip">
+                                {[1, 2, 3, 4, 5].map((star) => (
+                                  <button
+                                    key={star}
+                                    onClick={() => rateClip(clip.id, star)}
+                                    className="p-0.5 transition-transform hover:scale-110 focus:outline-none"
+                                    aria-label={`Rate ${star} star${star !== 1 ? "s" : ""}`}
+                                  >
+                                    <Star
+                                      className={`w-5 h-5 ${
+                                        star <= (clipRatings[clip.id] ?? clip.user_rating ?? 0)
+                                          ? "fill-yellow-400 text-yellow-400"
+                                          : "text-gray-300"
+                                      }`}
+                                    />
+                                  </button>
+                                ))}
+                              </div>
+                              <Button size="sm" variant="outline" asChild>
+                                <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
+                                  <Download className="w-4 h-4" />
+                                  Download
+                                </a>
+                              </Button>
                             </div>
                           </div>
-                          {clip.text && (
-                            <div className="mb-4">
-                              <h4 className="font-medium text-black mb-2">Transcript</h4>
-                              <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
-                            </div>
-                          )}
-                          {clip.reasoning && (
-                            <div className="mb-4">
-                              <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                              <p className="text-sm text-gray-600">{clip.reasoning}</p>
-                            </div>
-                          )}
-                          <Button size="sm" variant="outline" asChild>
-                            <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
-                              <Download className="w-4 h-4" />
-                              Download
-                            </a>
-                          </Button>
                         </div>
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
+                      </CardContent>
+                    </Card>
+                  ))}
               </div>
             )}
           </div>
@@ -900,7 +1158,7 @@ export default function TaskPage() {
                 <AlertCircle className="w-12 h-12 mx-auto mb-2" />
                 <h2 className="text-xl font-semibold">Processing Failed</h2>
               </div>
-              <p className="text-gray-600 mb-4">There was an error processing your video. Please try again.</p>
+              <p className="text-gray-400 mb-4">There was an error processing your video. Please try again.</p>
               <Link href="/">
                 <Button>
                   <ArrowLeft className="w-4 h-4" />
@@ -918,7 +1176,7 @@ export default function TaskPage() {
                     <AlertCircle className="w-12 h-12 mx-auto mb-2" />
                     <h2 className="text-xl font-semibold">No Clips Generated</h2>
                   </div>
-                  <p className="text-gray-600 mb-4">
+                  <p className="text-gray-400 mb-4">
                     The task completed but no clips were generated. The video may not have had suitable content for
                     clipping.
                   </p>
@@ -935,7 +1193,7 @@ export default function TaskPage() {
                     <Clock className="w-8 h-8 text-blue-500 animate-pulse" />
                   </div>
                   <h2 className="text-xl font-semibold text-black mb-2">Still Generating...</h2>
-                  <p className="text-gray-600">
+                  <p className="text-gray-400">
                     Your clips are being generated. This page will refresh automatically when they&apos;re ready.
                   </p>
                 </>
@@ -1041,9 +1299,16 @@ export default function TaskPage() {
                         {availableTemplates.length === 0 && <SelectItem value="default">Default</SelectItem>}
                       </SelectContent>
                     </Select>
+                    {/* P2.6: hint about auto platform selection */}
+                    {projectCaptionTemplate === "default" && (
+                      <p className="text-[10px] text-gray-400 leading-tight">
+                        ✨ Auto-selects per platform: TikTok → Viral Pro / Hormozi, Reels → TikTok / Subtitles, Shorts →
+                        Subtitles
+                      </p>
+                    )}
                   </div>
 
-                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <label className="flex items-center gap-2 text-sm text-gray-300">
                     <input
                       type="checkbox"
                       checked={projectIncludeBroll}
@@ -1070,19 +1335,22 @@ export default function TaskPage() {
             </Sheet>
 
             {clips.map((clip) => (
-              <Card key={clip.id} className="overflow-hidden">
+              <Card key={clip.id} className="overflow-hidden glass-card hover:shadow-xl transition-shadow duration-300">
                 <CardContent className="p-0">
                   <div className="flex flex-col lg:flex-row">
                     {/* Video Player */}
                     <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                      <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                      <DynamicVideoPlayer
+                        src={`${apiUrl}${clip.video_url}`}
+                        poster={clip.thumbnail_url ? `${apiUrl}${clip.thumbnail_url}` : "/placeholder-video.jpg"}
+                      />
                     </div>
 
                     {/* Clip Details */}
                     <div className="p-6 flex-1">
                       <div className="flex items-start justify-between mb-4">
-                        <div>
-                          <label className="flex items-center gap-2 text-xs text-gray-600 mb-2">
+                        <div className="flex-1">
+                          <label className="flex items-center gap-2 text-xs text-gray-400 mb-2">
                             <input
                               type="checkbox"
                               checked={selectedClipIds.includes(clip.id)}
@@ -1091,7 +1359,7 @@ export default function TaskPage() {
                             Select for merge
                           </label>
                           <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                          <div className="flex items-center gap-2 text-sm text-gray-600">
+                          <div className="flex items-center gap-2 text-sm text-gray-400">
                             <span>
                               {clip.start_time} - {clip.end_time}
                             </span>
@@ -1099,26 +1367,59 @@ export default function TaskPage() {
                             <span>{formatDuration(clip.duration)}</span>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                          {/* Virality Score Badge */}
-                          {clip.virality_score > 0 && (
-                            <Badge className={`${getViralityBgColor(clip.virality_score)} text-white`}>
-                              <Zap className="w-3 h-3 mr-1" />
-                              {clip.virality_score}
+                        <div className="flex flex-col items-end gap-2">
+                          <div className="flex items-center gap-2">
+                            {clip.virality_score > 0 && (
+                              <Badge className={`${getViralityBgColor(clip.virality_score)} text-white shadow-lg`}>
+                                <Zap className="w-3 h-3 mr-1" />
+                                {clip.virality_score}
+                              </Badge>
+                            )}
+                            {/* V3 Intensity Badge */}
+                            {clip.intensity !== undefined && (
+                              <Badge variant="outline" className={`${getIntensityColor(clip.intensity)} glass-badge shadow-sm`}>
+                                <TrendingUp className="w-3 h-3 mr-1" />
+                                {(clip.intensity * 10).toFixed(1)} Intensity
+                              </Badge>
+                            )}
+                            <Badge className={getScoreColor(clip.relevance_score)}>
+                              <Star className="w-3 h-3 mr-1" />
+                              {(clip.relevance_score * 100).toFixed(0)}%
+                            </Badge>
+                            {/* P2.4: Hook preview score badge */}
+                            {clip.hook_preview_score !== undefined && clip.hook_preview_score > 0 && (
+                              <Badge
+                                variant="outline"
+                                className={`${getHookPreviewColor(clip.hook_preview_score)} border-0 shadow-sm`}
+                                title="Hook Preview Score — how likely the opening seconds are to stop scrolling"
+                              >
+                                🎣 {clip.hook_preview_score}
+                              </Badge>
+                            )}
+                            {/* P3.5: A/B variant badge */}
+                            {clip.variant && (
+                              <Badge
+                                variant="outline"
+                                className="bg-blue-50 text-blue-700 border-blue-200 shadow-sm font-semibold"
+                                title={`A/B variant ${clip.variant} — different caption template for split testing`}
+                              >
+                                A/B {clip.variant}
+                              </Badge>
+                            )}
+                          </div>
+                          {clip.bgm_style && (
+                            <Badge variant="secondary" className="text-[10px] h-5 bg-purple-50 text-purple-700 border-purple-100">
+                              🎵 {clip.bgm_style}
                             </Badge>
                           )}
-                          <Badge className={getScoreColor(clip.relevance_score)}>
-                            <Star className="w-3 h-3 mr-1" />
-                            {(clip.relevance_score * 100).toFixed(0)}%
-                          </Badge>
                         </div>
                       </div>
 
                       {/* Virality Score Breakdown */}
                       {clip.virality_score > 0 && (
-                        <div className="mb-4 p-3 bg-gray-50 rounded-lg">
+                        <div className="mb-4 p-3 bg-white/3 rounded-lg">
                           <div className="flex items-center justify-between mb-3">
-                            <h4 className="font-medium text-black text-sm flex items-center gap-2">
+                            <h4 className="font-medium text-black text-sm flex items-center gap-1">
                               <Zap className="w-4 h-4" />
                               Virality Score
                             </h4>
@@ -1131,7 +1432,7 @@ export default function TaskPage() {
                             {/* Hook Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <MessageSquare className="w-3 h-3" />
                                   Hook
                                 </span>
@@ -1143,7 +1444,7 @@ export default function TaskPage() {
                             {/* Engagement Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <TrendingUp className="w-3 h-3" />
                                   Engagement
                                 </span>
@@ -1155,7 +1456,7 @@ export default function TaskPage() {
                             {/* Value Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <Star className="w-3 h-3" />
                                   Value
                                 </span>
@@ -1167,7 +1468,7 @@ export default function TaskPage() {
                             {/* Shareability Score */}
                             <div className="space-y-1">
                               <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-600">
+                                <span className="flex items-center gap-1 text-gray-400">
                                   <Share2 className="w-3 h-3" />
                                   Shareability
                                 </span>
@@ -1190,16 +1491,298 @@ export default function TaskPage() {
                       {clip.text && (
                         <div className="mb-4">
                           <h4 className="font-medium text-black mb-2">Transcript</h4>
-                          <p className="text-sm text-gray-700 bg-gray-50 p-3 rounded">{clip.text}</p>
+                          <p className="text-sm text-gray-300 bg-white/3 p-3 rounded">{clip.text}</p>
+                        </div>
+                      )}
+
+                      {/* Phase 9: Creative Engine Panel */}
+                      {clip.creative_enhanced && (
+                        <div className="mb-4 p-4 bg-gradient-to-br from-cyan-950/60 to-purple-950/60 border border-cyan-800/40 rounded-lg">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Wand2 className="w-4 h-4 text-cyan-400" />
+                              <h4 className="font-bold text-sm text-cyan-300 uppercase tracking-wider">Creative Engine</h4>
+                            </div>
+                            {clip.preset_used && (
+                              <span className="text-xs bg-cyan-900/60 text-cyan-300 border border-cyan-700/40 rounded-full px-2 py-0.5 font-mono">
+                                {clip.preset_used}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* Effect flags */}
+                          <div className="grid grid-cols-2 gap-2 mb-3">
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.hook_reorder_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Film className="w-3 h-3" />
+                              Hook Flash {clip.hook_reorder_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.zoom_punch_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Layers className="w-3 h-3" />
+                              Zoom Punch {clip.zoom_punch_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.loudnorm_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Volume2 className="w-3 h-3" />
+                              EBU R128 {clip.loudnorm_applied ? "✓" : "—"}
+                            </div>
+                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
+                              clip.color_grade_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
+                            }`}>
+                              <Sparkles className="w-3 h-3" />
+                              Color Grade {clip.color_grade_applied ? "✓" : "—"}
+                            </div>
+                          </div>
+
+                          {/* Pacing + Emotion sub-scores */}
+                          {(clip.pacing_score != null || clip.emotion_score != null) && (
+                            <div className="grid grid-cols-2 gap-2 mb-3">
+                              {clip.pacing_score != null && (
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3" />Pacing</span>
+                                    <span className="text-cyan-300 font-medium">{Math.round(clip.pacing_score)}</span>
+                                  </div>
+                                  <Progress value={clip.pacing_score} className="h-1" />
+                                </div>
+                              )}
+                              {clip.emotion_score != null && (
+                                <div className="space-y-1">
+                                  <div className="flex items-center justify-between text-xs">
+                                    <span className="text-gray-400 flex items-center gap-1"><Zap className="w-3 h-3" />Emotion</span>
+                                    <span className="text-purple-300 font-medium">{Math.round(clip.emotion_score)}</span>
+                                  </div>
+                                  <Progress value={clip.emotion_score} className="h-1" />
+                                </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* B-roll + SFX counts */}
+                          <div className="flex flex-wrap gap-3 mb-3 text-xs">
+                            {clip.broll_overlays !== undefined && clip.broll_overlays > 0 && (
+                              <span className="text-purple-300">🎬 {clip.broll_overlays} B-roll{clip.broll_overlays !== 1 ? "s" : ""}</span>
+                            )}
+                            {clip.sfx_injected !== undefined && clip.sfx_injected > 0 && (
+                              <span className="text-cyan-300">🔊 {clip.sfx_injected} SFX</span>
+                            )}
+                            {clip.smart_edit_decisions !== undefined && clip.smart_edit_decisions > 0 && (
+                              <span className="text-amber-300">✂️ {clip.smart_edit_decisions} edit{clip.smart_edit_decisions !== 1 ? "s" : ""}{clip.smart_edit_time_saved ? ` · ${clip.smart_edit_time_saved.toFixed(1)}s saved` : ""}</span>
+                            )}
+                            {clip.text_pops_applied !== undefined && clip.text_pops_applied > 0 && (
+                              <span className="text-pink-300">💥 {clip.text_pops_applied} keyword pop{clip.text_pops_applied !== 1 ? "s" : ""}</span>
+                            )}
+                          </div>
+
+                          {clip.hook_text && (
+                            <div className="text-xs text-cyan-200 italic mb-2">Hook: &ldquo;{clip.hook_text}&rdquo;</div>
+                          )}
+
+                          {/* Improvement suggestions */}
+                          {clip.improvements && clip.improvements.length > 0 && (
+                            <div className="mb-3">
+                              <p className="text-xs text-amber-400 font-medium mb-1">💡 Suggestions</p>
+                              <ul className="space-y-0.5">
+                                {clip.improvements.slice(0, 3).map((imp, i) => (
+                                  <li key={i} className="text-xs text-amber-200/80">• {imp}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+
+                          <div className={`flex items-center gap-1.5 text-xs font-medium ${
+                            clip.qa_passed ? "text-emerald-400" : "text-amber-400"
+                          }`}>
+                            {clip.qa_passed
+                              ? <><CheckCircle2 className="w-3.5 h-3.5" /> QA Passed</>
+                              : <><XCircle className="w-3.5 h-3.5" /> QA Issues: {(clip.qa_issues || []).join(", ")}</>
+                            }
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Phase 10: Viral Polish panel */}
+                      {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (
+                        <div className="mb-4 p-4 bg-gradient-to-br from-rose-950/50 to-orange-950/50 border border-rose-800/40 rounded-lg">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Sparkles className="w-4 h-4 text-rose-400" />
+                            <h4 className="font-bold text-sm text-rose-300 uppercase tracking-wider">Viral Polish</h4>
+                          </div>
+
+                          {/* Applied effects badges */}
+                          <div className="flex flex-wrap gap-2 mb-3">
+                            {clip.cta_overlay_applied && (
+                              <span className="flex items-center gap-1 text-xs bg-orange-900/50 text-orange-300 border border-orange-700/40 rounded-full px-2 py-0.5">
+                                <Target className="w-3 h-3" /> CTA Overlay
+                              </span>
+                            )}
+                            {clip.emoji_overlays_applied && (
+                              <span className="flex items-center gap-1 text-xs bg-pink-900/50 text-pink-300 border border-pink-700/40 rounded-full px-2 py-0.5">
+                                😀 Emoji Cues
+                              </span>
+                            )}
+                          </div>
+
+                          {/* A/B Variants */}
+                          {clip.variants && clip.variants.length > 0 && (
+                            <div>
+                              <p className="text-xs text-rose-400 font-medium mb-2 flex items-center gap-1">
+                                <Shuffle className="w-3 h-3" /> A/B Variants ({clip.variants.length})
+                              </p>
+                              <div className="space-y-1.5">
+                                {clip.variants.map((v, vi) => (
+                                  <div key={vi} className="flex items-center justify-between bg-black/30 rounded px-2 py-1.5">
+                                    <div className="flex items-center gap-2">
+                                      {v.type === "caption_style" ? (
+                                        <Subtitles className="w-3 h-3 text-cyan-400 flex-shrink-0" />
+                                      ) : (
+                                        <Music className="w-3 h-3 text-purple-400 flex-shrink-0" />
+                                      )}
+                                      <span className="text-xs text-gray-300 truncate max-w-[160px]" title={v.label}>{v.label}</span>
+                                    </div>
+                                    <a
+                                      href={`${apiUrl}/clips/${clip.video_url.split("/")[2]}/${v.path.split("/").pop()}`}
+                                      download
+                                      className="text-xs text-rose-400 hover:text-rose-300 font-medium ml-2 flex-shrink-0"
+                                    >
+                                      <Download className="w-3 h-3" />
+                                    </a>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {/* ViraClip V3: Viral Intelligence & Tactical Tips */}
+                      {(clip.strategic_advice || clip.conversion_tips) && (
+                        <div className="mb-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg backdrop-blur-sm">
+                          <div className="flex items-center gap-2 mb-3 text-blue-800">
+                            <BrainCircuit className="w-5 h-5 text-blue-600" />
+                            <h4 className="font-bold text-sm tracking-tight uppercase">Viral Intelligence</h4>
+                          </div>
+                          <div className="space-y-3">
+                            {clip.strategic_advice && (
+                              <div className="flex gap-3">
+                                <div className="mt-1 p-1 bg-blue-100 rounded-md">
+                                  <Target className="w-3.5 h-3.5 text-blue-700" />
+                                </div>
+                                <div>
+                                  <span className="text-[10px] font-bold text-blue-400 uppercase leading-none block mb-1">Psychological Hook</span>
+                                  <p className="text-sm text-blue-900 leading-relaxed font-medium">
+                                    {clip.strategic_advice}
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                            {clip.conversion_tips && (
+                              <div className="flex gap-3 pt-2 border-t border-blue-100/50">
+                                <div className="mt-1 p-1 bg-green-100 rounded-md">
+                                  <MousePointer2 className="w-3.5 h-3.5 text-green-700" />
+                                </div>
+                                <div>
+                                  <span className="text-[10px] font-bold text-green-500 uppercase leading-none block mb-1">Conversion Tactic</span>
+                                  <p className="text-sm text-gray-300 leading-relaxed italic">
+                                    {clip.conversion_tips}
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                         </div>
                       )}
 
                       {clip.reasoning && (
                         <div className="mb-4">
                           <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                          <p className="text-sm text-gray-600">{clip.reasoning}</p>
+                          <p className="text-sm text-gray-400">{clip.reasoning}</p>
                         </div>
                       )}
+
+                      {/* P3: Social Copy Panel */}
+                      {(clip.social_title || clip.social_description || (clip.suggested_hashtags && clip.suggested_hashtags.length > 0)) && (
+                        <div className="mb-4 p-3 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-100 rounded-lg">
+                          <h4 className="font-medium text-purple-800 mb-2 text-sm flex items-center gap-1">
+                            📱 Social Media Copy
+                          </h4>
+                          {clip.social_title && (
+                            <div className="mb-2">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">TITLE</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText(clip.social_title!)}
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
+                                  title="Copy title"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <p className="text-sm font-semibold text-gray-800 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_title}</p>
+                            </div>
+                          )}
+                          {clip.social_description && (
+                            <div className="mb-2">
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">DESCRIPTION</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText(clip.social_description!)}
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
+                                  title="Copy description"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <p className="text-sm text-gray-300 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_description}</p>
+                            </div>
+                          )}
+                          {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-xs text-gray-500 font-medium">HASHTAGS</span>
+                                <button
+                                  onClick={() => navigator.clipboard.writeText((clip.suggested_hashtags || []).join(' '))}
+                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
+                                  title="Copy hashtags"
+                                >
+                                  Copy
+                                </button>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {clip.suggested_hashtags.map((tag, idx) => (
+                                  <span key={idx} className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 cursor-pointer hover:bg-purple-200"
+                                    onClick={() => navigator.clipboard.writeText(tag)}>
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex items-center gap-1 mb-3" title="Rate this clip">
+                        {[1, 2, 3, 4, 5].map((star) => (
+                          <button
+                            key={star}
+                            onClick={() => rateClip(clip.id, star)}
+                            className="p-0.5 transition-transform hover:scale-110 focus:outline-none"
+                            aria-label={`Rate ${star} star${star !== 1 ? 's' : ''}`}
+                          >
+                            <Star
+                              className={`w-5 h-5 ${
+                                star <= (clipRatings[clip.id] ?? clip.user_rating ?? 0)
+                                  ? "fill-yellow-400 text-yellow-400"
+                                  : "text-gray-300"
+                              }`}
+                            />
+                          </button>
+                        ))}
+                      </div>
 
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" asChild>
@@ -1242,10 +1825,43 @@ export default function TaskPage() {
                           <Scissors className="w-4 h-4" />
                           Edit
                         </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className={musicAppliedClipId === clip.id ? "border-green-500 text-green-400" : ""}
+                          onClick={() => setMusicPickerClipId(musicPickerClipId === clip.id ? null : clip.id)}
+                        >
+                          <Music className="w-4 h-4" />
+                          {musicAppliedClipId === clip.id ? "Applied!" : "Music"}
+                        </Button>
                       </div>
 
+                      {musicPickerClipId === clip.id && (
+                        <div className="mt-3 p-3 border border-purple-500/30 rounded-lg bg-purple-500/5 flex flex-wrap gap-2 items-center">
+                          <Select value={selectedTrack} onValueChange={setSelectedTrack}>
+                            <SelectTrigger className="h-8 w-48">
+                              <SelectValue placeholder="Choose a track…" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {musicTracks.map(t => (
+                                <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            size="sm"
+                            disabled={!selectedTrack || isApplyingMusic}
+                            onClick={() => handleApplyMusic(clip.id)}
+                          >
+                            {isApplyingMusic ? <Loader2 className="w-4 h-4 animate-spin" /> : <Music className="w-4 h-4" />}
+                            {isApplyingMusic ? "Applying…" : "Apply"}
+                          </Button>
+                          <span className="text-xs text-gray-500">Music is mixed with ducking — voice stays clear</span>
+                        </div>
+                      )}
+
                       {editingClipId === clip.id && (
-                        <div className="mt-4 p-3 border rounded-lg space-y-3 bg-gray-50">
+                        <div className="mt-4 p-3 border rounded-lg space-y-3 bg-white/3">
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
                             <Input
                               value={startOffset}
@@ -1305,6 +1921,61 @@ export default function TaskPage() {
                           </Button>
                         </div>
                       )}
+
+                      {/* P3.1: AI Refine panel */}
+                      <div className="mt-3 border border-purple-500/20 rounded-lg bg-purple-500/5">
+                        <button
+                          className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-300 hover:bg-purple-500/10 rounded-lg transition-colors"
+                          onClick={() => {
+                            setRefiningClipId(refiningClipId === clip.id ? null : clip.id);
+                            setRefineResult(null);
+                          }}
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          AI Refine
+                          <span className="ml-auto text-xs text-purple-400">
+                            {refiningClipId === clip.id ? "▲" : "▼"}
+                          </span>
+                        </button>
+                        {refiningClipId === clip.id && (
+                          <div className="px-3 pb-3 space-y-2">
+                            <p className="text-xs text-purple-400">
+                              Describe what you want to change: <em>"trim 3 seconds from the start"</em>, <em>"make the hook more energetic"</em>, <em>"use the subtitles template"</em>…
+                            </p>
+                            <div className="flex gap-2">
+                              <Input
+                                value={refineInstruction}
+                                onChange={(e) => setRefineInstruction(e.target.value)}
+                                onKeyDown={(e) => e.key === "Enter" && !isRefining && handleRefineClip(clip.id)}
+                                placeholder="e.g. Remove the first 2 seconds"
+                                className="text-sm"
+                              />
+                              <Button
+                                size="sm"
+                                onClick={() => handleRefineClip(clip.id)}
+                                disabled={isRefining || !refineInstruction.trim()}
+                                className="bg-purple-600 hover:bg-purple-700 text-white shrink-0"
+                              >
+                                {isRefining ? (
+                                  <RefreshCw className="w-4 h-4 animate-spin" />
+                                ) : (
+                                  <Send className="w-4 h-4" />
+                                )}
+                              </Button>
+                            </div>
+                            {refineResult && (
+                              <div className={`text-xs rounded p-2 ${refineResult.action === "error" ? "bg-red-500/10 text-red-400 border border-red-500/30" : "bg-green-500/10 text-green-400 border border-green-500/30"}`}>
+                                <span className="font-semibold capitalize">
+                                  {refineResult.action === "noop" ? "No changes needed" : refineResult.action === "error" ? "Error" : `✓ ${refineResult.action.replace("_", " ")}`}
+                                </span>
+                                {refineResult.reasoning && (
+                                  <span className="ml-1 text-current/80">— {refineResult.reasoning}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </CardContent>
@@ -1325,29 +1996,8 @@ export default function TaskPage() {
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={isDeleting}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteTask} disabled={isDeleting} className="bg-red-600 hover:bg-red-700">
-              {isDeleting ? "Deleting..." : "Delete"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
-
-      {/* Delete Clip Confirmation Dialog */}
-      <AlertDialog open={!!deletingClipId} onOpenChange={(open) => !open && setDeletingClipId(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Delete Clip</AlertDialogTitle>
-            <AlertDialogDescription>
-              Are you sure you want to delete this clip? This action cannot be undone.
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() => deletingClipId && handleDeleteClip(deletingClipId)}
-              className="bg-red-600 hover:bg-red-700"
-            >
+            <AlertDialogAction onClick={handleDeleteTask} className="bg-red-600 hover:bg-red-700">
               Delete
             </AlertDialogAction>
           </AlertDialogFooter>

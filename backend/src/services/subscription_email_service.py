@@ -27,38 +27,38 @@ class SubscriptionEmailService:
     def _build_subscribed_email(self, user: User) -> EmailContent:
         first_name = self._first_name_for(user)
         return EmailContent(
-            subject="Thanks for subscribing to SupoClip",
+            subject="Thanks for subscribing to ViraClip",
             html=(
                 f"<p>Hi {first_name},</p>"
-                "<p>Thanks for subscribing to SupoClip.</p>"
+                "<p>Thanks for subscribing to ViraClip.</p>"
                 "<p>Your Pro plan is now active, and you can jump back in anytime to create more clips.</p>"
                 "<p>We’re excited to have you with us.</p>"
-                "<p>Team SupoClip</p>"
+                "<p>Team ViraClip</p>"
             ),
             text=(
                 f"Hi {first_name},\n\n"
-                "Thanks for subscribing to SupoClip.\n\n"
+                "Thanks for subscribing to ViraClip.\n\n"
                 "Your Pro plan is now active, and you can jump back in anytime to create more clips.\n\n"
                 "We’re excited to have you with us.\n\n"
-                "Team SupoClip"
+                "Team ViraClip"
             ),
         )
 
     def _build_unsubscribed_email(self, user: User) -> EmailContent:
         first_name = self._first_name_for(user)
         return EmailContent(
-            subject="Sorry to see you go from SupoClip",
+            subject="Sorry to see you go from ViraClip",
             html=(
                 f"<p>Hi {first_name},</p>"
-                "<p>Sorry to see you go, and thanks for trying SupoClip.</p>"
-                "<p>Your subscription has been canceled. If you ever want to come back, we’d love to have you.</p>"
-                "<p>Team SupoClip</p>"
+                "<p>Sorry to see you go, and thanks for trying ViraClip.</p>"
+                "<p>Your subscription has been canceled. If you ever want to come back, we'd love to have you.</p>"
+                "<p>Team ViraClip</p>"
             ),
             text=(
                 f"Hi {first_name},\n\n"
-                "Sorry to see you go, and thanks for trying SupoClip.\n\n"
-                "Your subscription has been canceled. If you ever want to come back, we’d love to have you.\n\n"
-                "Team SupoClip"
+                "Sorry to see you go, and thanks for trying ViraClip.\n\n"
+                "Your subscription has been canceled. If you ever want to come back, we'd love to have you.\n\n"
+                "Team ViraClip"
             ),
         )
 

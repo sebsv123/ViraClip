@@ -1,11 +1,38 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.config import Config
 from src.services import task_service as task_service_module
 from src.services.task_service import TaskService
+
+
+@contextmanager
+def _process_task_patches(tmp_video: str = "/tmp"):
+    """Patch all process_task dependencies added after the unit tests were written.
+
+    - Path.exists → True (video file existence check)
+    - subprocess.run → fake ffprobe JSON (duration probe)
+    - extract_segments_fast → returns [None] (no pre-extraction in unit tests)
+    - detect_gpu → ('none', {})
+    """
+    import json as _json
+    ffprobe_result = MagicMock()
+    ffprobe_result.stdout = _json.dumps({"format": {"duration": "60"}}).encode()
+    async def _fake_extract(video_path, segments, output_dir, task_id):
+        return [None] * len(segments)
+
+    with patch("src.services.task_service.extract_segments_fast",
+               new=_fake_extract), \
+         patch("src.services.task_service.detect_gpu",
+               return_value=("none", {})), \
+         patch("subprocess.run", return_value=ffprobe_result), \
+         patch.object(Path, "exists", return_value=True), \
+         patch.object(Path, "mkdir"):
+        yield
 
 
 @pytest.mark.asyncio
@@ -58,14 +85,16 @@ def build_task_service() -> TaskService:
     config = Config()
     config.app_base_url = "http://localhost:3000"
     config.resend_api_key = "re_test"
-    config.resend_from_email = "SupoClip <noreply@example.com>"
+    config.resend_from_email = "ViraClip <noreply@example.com>"
     service = TaskService(db=AsyncMock(), config=config)
     service.cache_repo.get_cache = AsyncMock(return_value=None)
     service.cache_repo.upsert_cache = AsyncMock()
+    service.cache_repo.delete_cache = AsyncMock()
     service.task_repo.update_task_runtime_metadata = AsyncMock()
     service.task_repo.update_task_status = AsyncMock()
     service.task_repo.update_task_clips = AsyncMock()
     service.clip_repo.create_clip = AsyncMock(return_value="clip-1")
+    service.clip_repo.delete_clips_by_task = AsyncMock()
     service.video_service.create_single_clip = AsyncMock(return_value=build_clip_result())
     service.video_service.apply_single_transition = AsyncMock(
         side_effect=lambda _prev_clip_path, clip_info, _index, _clips_output_dir: clip_info
@@ -73,7 +102,8 @@ def build_task_service() -> TaskService:
     service.video_service.process_video_complete = AsyncMock(
         return_value={
             "clips": [build_clip_result()],
-            "segments_to_render": [{"start": 0, "end": 10}],
+            # segments_to_render must use start_time/end_time keys (task_service format)
+            "segments_to_render": [{"start_time": "00:00", "end_time": "00:50"}],
             "video_path": "/tmp/source.mp4",
             "segments": [],
             "summary": None,
@@ -118,11 +148,12 @@ async def test_process_task_sends_completion_email_when_enabled(monkeypatch):
         FakeTaskCompletionEmailService,
     )
 
-    result = await service.process_task(
-        task_id="task-1",
-        url="https://www.youtube.com/watch?v=demo",
-        source_type="youtube",
-    )
+    with _process_task_patches():
+        result = await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
 
     assert result["clips_count"] == 1
     send_task_completed_email.assert_awaited_once()
@@ -164,11 +195,12 @@ async def test_process_task_skips_completion_email_when_disabled(monkeypatch):
         FakeTaskCompletionEmailService,
     )
 
-    await service.process_task(
-        task_id="task-1",
-        url="https://www.youtube.com/watch?v=demo",
-        source_type="youtube",
-    )
+    with _process_task_patches():
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
 
     send_task_completed_email.assert_not_awaited()
     service.task_repo.mark_completion_notification_sent.assert_not_awaited()
@@ -221,11 +253,12 @@ async def test_process_task_keeps_generated_clips_standalone():
         }
     )
 
-    result = await service.process_task(
-        task_id="task-1",
-        url="https://www.youtube.com/watch?v=demo",
-        source_type="youtube",
-    )
+    with _process_task_patches():
+        result = await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
 
     assert result["clips_count"] == 2
     service.video_service.apply_single_transition.assert_not_awaited()
@@ -269,11 +302,12 @@ async def test_process_task_ignores_completion_email_failures(monkeypatch):
         FakeTaskCompletionEmailService,
     )
 
-    result = await service.process_task(
-        task_id="task-1",
-        url="https://www.youtube.com/watch?v=demo",
-        source_type="youtube",
-    )
+    with _process_task_patches():
+        result = await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
 
     assert result["clips_count"] == 1
     send_task_completed_email.assert_awaited_once()
@@ -317,11 +351,12 @@ async def test_process_task_skips_completion_email_when_already_sent(monkeypatch
         FakeTaskCompletionEmailService,
     )
 
-    await service.process_task(
-        task_id="task-1",
-        url="https://www.youtube.com/watch?v=demo",
-        source_type="youtube",
-    )
+    with _process_task_patches():
+        await service.process_task(
+            task_id="task-1",
+            url="https://www.youtube.com/watch?v=demo",
+            source_type="youtube",
+        )
 
     send_task_completed_email.assert_not_awaited()
     service.task_repo.mark_completion_notification_sent.assert_not_awaited()

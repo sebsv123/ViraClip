@@ -17,7 +17,7 @@ class SourceRepository:
 
     @staticmethod
     async def create_source(
-        db: AsyncSession, source_type: str, title: str, url: Optional[str] = None
+        db: AsyncSession, source_type: str, title: str, url: Optional[str] = None, url_secondary: Optional[str] = None
     ) -> str:
         """Create a new source record and return its ID."""
         source_id = str(uuid4())
@@ -25,8 +25,8 @@ class SourceRepository:
             result = await db.execute(
                 text(
                     """
-                    INSERT INTO sources (id, type, title, url, created_at, updated_at)
-                    VALUES (:source_id, :source_type, :title, :url, NOW(), NOW())
+                    INSERT INTO sources (id, type, title, url, url_secondary, created_at, updated_at)
+                    VALUES (:source_id, :source_type, :title, :url, :url_secondary, NOW(), NOW())
                     RETURNING id
                     """
                 ),
@@ -35,6 +35,7 @@ class SourceRepository:
                     "source_type": source_type,
                     "title": title,
                     "url": url,
+                    "url_secondary": url_secondary,
                 },
             )
             source_id = result.scalar()
@@ -80,6 +81,7 @@ class SourceRepository:
             "type": row.type,
             "title": row.title,
             "url": getattr(row, "url", None),
+            "url_secondary": getattr(row, "url_secondary", None),
             "created_at": row.created_at,
         }
 

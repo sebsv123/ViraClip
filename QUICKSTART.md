@@ -51,7 +51,7 @@ LLM=openai:gpt-4
 # RESEND_FROM_EMAIL="SupoClip <onboarding@your-domain.com>"
 ```
 
-### 2. Start SupoClip
+### 2. Start ViraClip
 
 ```bash
 ./start.sh

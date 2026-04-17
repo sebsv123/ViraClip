@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 echo "============================================"
-echo "  SupoClip - AI Video Clipping Tool"
+echo "  ViraClip - AI Video Clipping Tool"
 echo "============================================"
 echo ""
 
@@ -73,7 +73,7 @@ else
     DOCKER_COMPOSE="docker-compose"
 fi
 
-echo -e "${GREEN}Starting SupoClip...${NC}"
+echo -e "${GREEN}Starting ViraClip...${NC}"
 echo ""
 
 # Build and start containers

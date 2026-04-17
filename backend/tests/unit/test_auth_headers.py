@@ -38,9 +38,9 @@ def test_get_signed_user_id_rejects_expired_signature():
     config.auth_signature_ttl_seconds = 1
     request = _build_request(
         {
-            "x-supoclip-user-id": "user-1",
-            "x-supoclip-ts": str(int(time.time()) - 10),
-            "x-supoclip-signature": "invalid",
+            "x-viraclip-user-id": "user-1",
+            "x-viraclip-ts": str(int(time.time()) - 10),
+            "x-viraclip-signature": "invalid",
         }
     )
 

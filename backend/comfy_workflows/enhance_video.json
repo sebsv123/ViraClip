@@ -1,0 +1,77 @@
+{
+  "1": {
+    "class_type": "VHS_LoadVideo",
+    "inputs": {
+      "video": "__INPUT_VIDEO__",
+      "force_rate": 0,
+      "force_size": "Disabled",
+      "custom_width": 1080,
+      "custom_height": 1920,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "meta_batch": [
+        "99",
+        0
+      ]
+    }
+  },
+  "2": {
+    "class_type": "UpscaleModelLoader",
+    "inputs": {
+      "model_name": "RealESRGAN_x2plus.pth"
+    }
+  },
+  "3": {
+    "class_type": "ImageUpscaleWithModel",
+    "inputs": {
+      "upscale_model": [
+        "2",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ]
+    }
+  },
+  "4": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "3",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 1080,
+      "height": 1920,
+      "crop": "center"
+    }
+  },
+  "5": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "4",
+        0
+      ],
+      "frame_rate": 30,
+      "loop_count": 0,
+      "filename_prefix": "enhanced_",
+      "format": "video/h264-mp4",
+      "pingpong": false,
+      "save_output": true,
+      "audio": [
+        "1",
+        2
+      ]
+    }
+  },
+  "99": {
+    "class_type": "VHS_BatchManager",
+    "inputs": {
+      "batch_size": 16,
+      "frames_per_batch": 16
+    }
+  }
+}

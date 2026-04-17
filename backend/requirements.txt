@@ -1,0 +1,91 @@
+# ViraClip Backend Dependencies
+# Install with: pip install -r requirements.txt
+
+# === Core API ===
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+sqlalchemy[asyncio]==2.0.25
+asyncpg==0.29.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+alembic==1.13.1
+
+# === Async / Workers ===
+arq==0.25.0
+redis==5.0.1
+httpx==0.26.0
+
+# === Video Processing ===
+yt-dlp>=2024.1.1
+opencv-python-headless==4.9.0.80
+moviepy>=2.0.0
+Pillow==10.2.0
+pydub==0.25.1
+
+# === AI/ML (PyTorch se instala APARTE con CUDA en Dockerfile) ===
+sentence-transformers==2.3.1
+transformers==4.37.0
+faster-whisper==0.10.0
+mediapipe==0.10.9
+sentencepiece==0.1.99
+faiss-cpu==1.7.4
+
+# === Audio ===
+librosa==0.10.1
+scipy==1.12.0
+soundfile==0.12.1
+
+# === System ===
+psutil==5.9.8
+numpy>=1.24.0
+
+# === Auth / Utils ===
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+scenedetect[opencv]>=0.6.5
+
+# === Free TTS ===
+edge-tts>=6.1.9
+
+# === Free Audio (Music + SFX) ===
+freesound-python>=1.1.0
+
+# === AI Services ===
+openai>=1.0.0
+anthropic>=0.7.0
+google-generativeai>=0.3.0
+
+# === Phase 3: LLM Optimization (for future fine-tuning) ===
+# Uncomment when ready for Phase 3 implementation
+# dspy-ai==2.5.2
+# datasets>=2.0
+# transformers==4.40.2
+# peft==0.11.1
+# trl==0.8.6
+ollama>=0.1.0
+assemblyai>=0.26.0
+
+# === Utilities ===
+requests>=2.31.0
+python-dotenv>=1.0.0
+python-dateutil>=2.8.2
+tenacity>=8.2.0
+
+# === Monitoring ===
+prometheus-client>=0.18.0
+
+# === LlamaIndex Multi-Agent Pipeline (Phase 2) ===
+llama-index-core>=0.10.0
+llama-index-llms-groq>=0.1.0
+llama-index-agent-openai>=0.3.0
+
+# === LangGraph State Machine Pipeline (Phase 3) ===
+langgraph>=0.1.0
+
+# === RAG Memory (ChromaDB + fastembed) ===
+chromadb>=0.4.0
+fastembed>=0.2.0
+
+# === Optional: B-roll detection (B.4) — lazy-imported, install separately if BROLL_ENABLED=true ===
+# ultralytics>=8.0.0

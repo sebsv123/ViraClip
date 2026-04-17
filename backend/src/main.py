@@ -1,5 +1,17 @@
+import sys as _sys
+import io as _io
+
+# Force UTF-8 on stdout/stderr so emoji in log messages never crash on Windows cp1252
+if hasattr(_sys.stdout, 'buffer'):
+    _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+if hasattr(_sys.stderr, 'buffer'):
+    _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+
 from .youtube_utils import *
-from .video_utils import *
+from .video_processing import (
+    apply_transition_effect,
+    get_available_transitions,
+)
 from .ai import *
 from .config import Config
 from .caption_templates import get_template_info, get_template_names
@@ -11,11 +23,14 @@ import json
 import asyncio
 from typing import Dict, Any
 
-# Configure logging
+# Configure logging — UTF-8 handlers
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(), logging.FileHandler("logs/backend.log")],
+    handlers=[
+        logging.StreamHandler(_sys.stdout),
+        logging.FileHandler("logs/backend.log", encoding="utf-8"),
+    ],
 )
 
 logger = logging.getLogger(__name__)
@@ -32,7 +47,10 @@ from .auth_headers import get_signed_user_id, USER_ID_HEADER
 from .api.routes.tasks import router as tasks_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
+#from .api.routes.social import router as social_router
+from .api.routes.clips import router as clips_router
 from .services.video_service import VideoService, UPLOAD_URL_PREFIX
+from .services.llm_service import LLMService
 
 config = Config()
 
@@ -40,15 +58,49 @@ config = Config()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # Initialize database
         await init_db()
+        
+        # Initialize Redis for caching and rate limiting
+        from .scaling.redis_manager import get_redis_client
+        from .middleware.rate_limiter import init_rate_limiter
+        from .caching import init_cache
+        
+        redis_client = await get_redis_client()
+        if redis_client:
+            await init_rate_limiter(redis_client)
+            await init_cache(redis_client)
+            logger.info("✅ Rate limiting and caching initialized")
+        else:
+            logger.warning("⚠️ Redis unavailable - rate limiting and caching disabled")
+        
+        # LUTService: auto-download film LUTs if not present
+        try:
+            from .services.lut_service import get_lut_service as _get_lut
+            _lut_svc = _get_lut()
+            _lut_info = _lut_svc.get_info()
+            if _lut_info["cube_files_present"] == 0:
+                logger.info("[LUT] No .cube files found — downloading Film-Luts (background)...")
+                import asyncio as _aio
+                _aio.create_task(_lut_svc.download_luts())
+            else:
+                logger.info(f"[LUT] {_lut_info['cube_files_present']} LUT presets ready")
+        except Exception as _lut_e:
+            logger.debug(f"[LUT] Auto-download skipped: {_lut_e}")
+
         yield
     finally:
         await close_db()
+        
+        # Close Redis connections
+        from .scaling.redis_manager import get_redis_manager
+        manager = await get_redis_manager()
+        await manager.close()
 
 
 app = FastAPI(
-    title="SupoClip API",
-    description="Python-based backend for SupoClip",
+    title="ViraClip API",
+    description="Python-based backend for ViraClip",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -61,9 +113,9 @@ app.add_middleware(
     allow_headers=[
         "Content-Type",
         "Authorization",
-        "x-supoclip-user-id",
-        "x-supoclip-ts",
-        "x-supoclip-signature",
+        "x-viraclip-user-id",
+        "x-viraclip-ts",
+        "x-viraclip-signature",
         "user_id",
     ],
 )
@@ -72,6 +124,69 @@ app.add_middleware(
 app.include_router(tasks_router)
 app.include_router(feedback_router)
 app.include_router(billing_router)
+#app.include_router(social_router)
+app.include_router(clips_router)
+
+# Include admin routers
+from .api.routes.admin import router as admin_router
+from .api.routes.ai_metrics import router as ai_metrics_router
+from .api.routes.health import router as health_router
+app.include_router(admin_router)
+app.include_router(ai_metrics_router)
+app.include_router(health_router)
+
+# Autopilot — end-to-end automation pipeline
+try:
+    from .api.routes.autopilot import router as autopilot_router
+    app.include_router(autopilot_router)
+except Exception as _ap_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Autopilot router skipped: {_ap_e}")
+
+# Workflow Automation — visual workflow builder
+try:
+    from .api.routes.workflows import router as workflows_router
+    app.include_router(workflows_router)
+except Exception as _wf_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Workflows router skipped: {_wf_e}")
+
+# LUT Service — cinematic color grading management
+try:
+    from fastapi import APIRouter as _AR2
+    _lut_router = _AR2(prefix="/luts", tags=["luts"])
+
+    @_lut_router.get("/")
+    def list_luts():
+        from .services.lut_service import get_lut_service
+        return get_lut_service().get_info()
+
+    @_lut_router.post("/download")
+    async def download_luts():
+        from .services.lut_service import get_lut_service
+        result = await get_lut_service().download_luts()
+        return result
+
+    app.include_router(_lut_router)
+except Exception as _lut_re:
+    import logging as _log; _log.getLogger(__name__).warning(f"LUT router skipped: {_lut_re}")
+
+# Competitor Analysis — benchmarking endpoint
+try:
+    from fastapi import APIRouter as _AR
+    _comp_router = _AR(prefix="/competitor", tags=["competitor"])
+
+    @_comp_router.get("/analysis")
+    def get_competitor_analysis():
+        from .services.competitor_analysis import get_competitive_analysis
+        return get_competitive_analysis()
+
+    @_comp_router.get("/report")
+    def get_competitor_report():
+        from .services.competitor_analysis import generate_competitor_report
+        return {"report": generate_competitor_report()}
+
+    app.include_router(_comp_router)
+except Exception as _ca_e:
+    import logging as _log; _log.getLogger(__name__).warning(f"Competitor router skipped: {_ca_e}")
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"
@@ -96,7 +211,7 @@ def _resolve_uploaded_video_path(url: str) -> Path:
 @app.get("/")
 def read_root():
     return {
-        "message": "This is the SupoClip FastAPI-based API. Visit /docs for the API documentation."
+        "message": "This is the ViraClip FastAPI-based API. Visit /docs for the API documentation."
     }
 
 
@@ -319,6 +434,8 @@ async def start_task(request: Request):
                             value_score=clip_info.get("value_score", 0),
                             shareability_score=clip_info.get("shareability_score", 0),
                             hook_type=clip_info.get("hook_type"),
+                            strategic_advice=clip_info.get("strategic_advice"),
+                            conversion_tips=clip_info.get("conversion_tips"),
                         )
                         db.add(clip_record)
                         await db.flush()
@@ -487,7 +604,7 @@ async def process_video_task(
         async with AsyncSessionLocal() as db:
             source_result = await db.execute(
                 text(
-                    "SELECT * FROM sources WHERE id IN (SELECT source_id FROM tasks WHERE id = :task_id)"
+                    "SELECT s.* FROM sources s JOIN tasks t ON t.source_id = s.id WHERE t.id = :task_id"
                 ),
                 {"task_id": task_id},
             )
@@ -593,6 +710,8 @@ async def process_video_task(
                         value_score=clip_info.get("value_score", 0),
                         shareability_score=clip_info.get("shareability_score", 0),
                         hook_type=clip_info.get("hook_type"),
+                        strategic_advice=clip_info.get("strategic_advice"),
+                        conversion_tips=clip_info.get("conversion_tips"),
                     )
                     db.add(clip_record)
                     await db.flush()
@@ -612,9 +731,8 @@ async def process_video_task(
         logger.info(f"🎉 Task {task_id} completed successfully!")
 
     except Exception as e:
-        logger.error(f"❌ Error processing task {task_id}: {str(e)}")
+        logger.error(f"❌ Error processing task {task_id}: {str(e)}", exc_info=True)
         await update_task_status(task_id, "error")
-        logger.error(f"📊 Task {task_id} marked as error: {str(e)}")
 
 
 @app.get("/tasks/{task_id}/clips")
@@ -635,7 +753,7 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
         SELECT id, filename, file_path, start_time, end_time, duration,
                text, relevance_score, reasoning, clip_order, created_at,
                virality_score, hook_score, engagement_score, value_score,
-               shareability_score, hook_type
+               shareability_score, hook_type, strategic_advice, conversion_tips
         FROM generated_clips
         WHERE task_id = :task_id
         ORDER BY clip_order ASC
@@ -667,6 +785,8 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
                 "value_score": clip.value_score or 0,
                 "shareability_score": clip.shareability_score or 0,
                 "hook_type": clip.hook_type,
+                "strategic_advice": clip.strategic_advice,
+                "conversion_tips": clip.conversion_tips,
             }
             clips_data.append(clip_data)
 
@@ -783,7 +903,7 @@ async def get_font_file(font_name: str):
 async def get_available_transitions():
     """Get list of available transition effects"""
     try:
-        from .video_utils import get_available_transitions
+        from .video_processing import get_available_transitions
 
         transitions = get_available_transitions()
 
@@ -828,7 +948,7 @@ async def get_caption_templates():
 async def search_broll(query: str, count: int = 5, orientation: str = "portrait"):
     """Search for B-roll videos from Pexels"""
     try:
-        from .broll import search_broll_videos, get_video_download_url
+        from .video_processing.broll import search_broll_videos, get_video_download_url
 
         if not config.pexels_api_key:
             raise HTTPException(
@@ -920,3 +1040,54 @@ async def upload_video(request: Request):
     except Exception as e:
         logger.error(f"❌ Error uploading video: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error uploading video: {str(e)}")
+
+# ====================== VIRA CLIP BATCH UPLOAD ENDPOINT ======================
+from fastapi import UploadFile, File, HTTPException
+from typing import List
+import shutil
+import uuid
+from pathlib import Path
+
+UPLOAD_DIR = Path(config.temp_dir) / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+@app.post("/api/upload-batch")
+async def upload_batch(files: List[UploadFile] = File(...)):
+    """Subida masiva de videos - ViraClip"""
+    if len(files) == 0:
+        raise HTTPException(status_code=400, detail="No se enviaron archivos")
+    
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Máximo 20 videos por batch")
+
+    uploaded_files = []
+    
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("video/"):
+            raise HTTPException(
+                status_code=400, 
+                detail=f"El archivo {file.filename} no es un video válido"
+            )
+        
+        # Nombre único para evitar sobrescrituras
+        file_extension = Path(file.filename).suffix.lower()
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        
+        file_path = UPLOAD_DIR / unique_filename
+        
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        
+        uploaded_files.append({
+            "filename": unique_filename,
+            "original_name": file.filename,
+            "size": file.size,
+            "path": str(file_path),
+            "url": f"/uploads/{unique_filename}",
+        })
+    
+    return {
+        "uploaded": len(uploaded_files),
+        "files": uploaded_files,
+        "message": f"Se subieron {len(uploaded_files)} video(s) correctamente"
+    }
