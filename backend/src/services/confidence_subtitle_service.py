@@ -291,6 +291,8 @@ class ConfidenceSubtitleGenerator:
         if language and len(language) == 3:
             language = _ISO3_TO_ISO1.get(language.lower(), None)
 
+        tmp_audio_path = None  # Initialize before try to avoid UnboundLocalError in finally
+
         # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
         tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp_audio_path = tmp_audio.name
@@ -371,7 +373,8 @@ class ConfidenceSubtitleGenerator:
             logger.error(f"[RE-ALIGN] Error: {e}")
             return original_words or []
         finally:
-            Path(tmp_audio_path).unlink(missing_ok=True)
+            if tmp_audio_path:
+                Path(tmp_audio_path).unlink(missing_ok=True)
 
 
 def _transfer_emphasis_flags(realigned: List[Dict], original: List[Dict]):

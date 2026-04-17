@@ -2,12 +2,26 @@
 Narrative Cut Engine - Intelligent cut point detection
 Detects natural break points for seamless editing
 """
-import numpy as np
+import logging
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
-import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton for SentenceTransformer (CPU-only to preserve VRAM for Whisper)
+_SENTENCE_MODEL = None
+_SENTENCE_UTIL = None
+
+def get_sentence_model():
+    global _SENTENCE_MODEL, _SENTENCE_UTIL
+    if _SENTENCE_MODEL is None:
+        from sentence_transformers import SentenceTransformer, util
+        _SENTENCE_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        _SENTENCE_MODEL = _SENTENCE_MODEL.to("cpu")  # free VRAM for Whisper
+        _SENTENCE_UTIL = util
+        logger.info("[SentenceTransformer] Loaded once on CPU (VRAM reserved for Whisper)")
+    return _SENTENCE_MODEL, _SENTENCE_UTIL
 
 # Hesitation markers that indicate natural cut points
 HESITATION_MARKERS = [
@@ -50,14 +64,11 @@ class NarrativeCutEngine:
         self.sentence_transformers = None
     
     def _load_embeddings(self):
-        """Lazy load sentence-transformers for topic detection"""
+        """Lazy load sentence-transformers for topic detection via singleton"""
         if self.sentence_transformers is None:
             try:
-                from sentence_transformers import SentenceTransformer, util
-                self.sentence_transformers = {
-                    'model': SentenceTransformer('all-MiniLM-L6-v2'),
-                    'util': util
-                }
+                model, util = get_sentence_model()
+                self.sentence_transformers = {'model': model, 'util': util}
             except ImportError:
                 logger.warning("sentence-transformers not available, topic detection disabled")
     
