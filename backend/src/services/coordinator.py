@@ -236,6 +236,59 @@ class VideoCoordinator:
             
             await emit_progress(self.task_id, "analysis", 40, "Analysis completed")
             
+            # PHASE 1.5: Gate 1 — Viral viability filter (FAISS)
+            await emit_progress(self.task_id, "viral_gate", 42, "Running viral viability gate...")
+            try:
+                from .viral_gate import check_viral_gate_from_transcript
+                from ..exceptions import PipelineCancelledError
+                
+                gate_result = check_viral_gate_from_transcript(transcript)
+                
+                if gate_result.get("passed"):
+                    viable_count = len([
+                        s for s in gate_result.get("scores", [])
+                        if s.get("composite_score", 0) >= 0.60
+                    ])
+                    best = max(
+                        (s.get("composite_score", 0) for s in gate_result.get("scores", [])),
+                        default=0,
+                    )
+                    logger.info(
+                        f"[Gate 1] ✅ Passed — {viable_count} viable segments "
+                        f"(best={best:.4f})"
+                    )
+                    await emit_progress(
+                        self.task_id, "viral_gate", 48,
+                        f"Gate 1 passed: {viable_count} viable segments (best={best:.3f}) [{gate_result.get('quality_tier', 'unknown')}]"
+                    )
+                else:
+                    reason = gate_result.get("reason", "Unknown")
+                    best_score = gate_result.get("best_score", 0.0)
+                    recommendation = gate_result.get("recommendation", "")
+                    logger.warning(
+                        f"[Gate 1] ❌ Failed — best={best_score:.4f}. {reason}"
+                    )
+                    await emit_progress(
+                        self.task_id, "viral_gate", 48,
+                        f"Gate 1 failed: {reason}"
+                    )
+                    raise PipelineCancelledError(
+                        reason=reason,
+                        gate="viral_gate",
+                        best_score=best_score,
+                        recommendation=recommendation,
+                    )
+            except ImportError as gate_import_err:
+                logger.warning(
+                    f"[Gate 1] Skipped (import error): {gate_import_err}"
+                )
+            except PipelineCancelledError:
+                raise  # Re-raise — must not be swallowed
+            except Exception as gate_err:
+                logger.warning(
+                    f"[Gate 1] Skipped (error): {gate_err}. Letting pipeline continue."
+                )
+            
             # PHASE 2: Scoring with combined context
             await emit_progress(self.task_id, "scoring", 50, "Scoring viral segments...")
             
