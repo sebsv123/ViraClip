@@ -3,7 +3,7 @@ Worker tasks - background jobs processed by arq workers.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 
 from ..observability import configure_logging, set_trace_id
@@ -26,6 +26,29 @@ async def process_video_task(
     processing_mode: str = "fast",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    target_language: str = "eng",
+    auto_center_face: bool = False,
+    eye_contact_correction: bool = False,
+    include_broll: bool = False,
+    split_screen: bool = False,
+    target_platform: str = "all",
+    url_secondary: Optional[str] = None,
+    generate_ab_variants: bool = False,   # P3.5
+    num_clips: int = 6,
+    # Viral editing features
+    jump_cut: bool = True,
+    jump_cut_min_silence: float = 0.3,
+    zoom_on_cuts: bool = True,
+    cut_zoom_factor: float = 1.08,
+    denoise_audio: bool = False,
+    contextual_overlays: bool = True,
+    overlay_frequency: str = "adaptive",
+    audio_ducking: bool = True,
+    playback_speed: float = 1.0,
+    dramatic_slowmo: bool = False,
+    speed_ramp_enabled: bool = True,
+    use_scene_detection: bool = True,
+    force_fresh: bool = False,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -85,6 +108,28 @@ async def process_video_task(
                 processing_mode=processing_mode,
                 output_format=output_format,
                 add_subtitles=add_subtitles,
+                target_language=target_language,
+                auto_center_face=auto_center_face,
+                eye_contact_correction=eye_contact_correction,
+                include_broll=include_broll,
+                split_screen=split_screen,
+                target_platform=target_platform,
+                url_secondary=url_secondary,
+                generate_ab_variants=generate_ab_variants,
+                num_clips=num_clips,
+                jump_cut=jump_cut,
+                jump_cut_min_silence=jump_cut_min_silence,
+                zoom_on_cuts=zoom_on_cuts,
+                cut_zoom_factor=cut_zoom_factor,
+                denoise_audio=denoise_audio,
+                contextual_overlays=contextual_overlays,
+                overlay_frequency=overlay_frequency,
+                audio_ducking=audio_ducking,
+                playback_speed=playback_speed,
+                dramatic_slowmo=dramatic_slowmo,
+                speed_ramp_enabled=speed_ramp_enabled,
+                use_scene_detection=use_scene_detection,
+                force_fresh=force_fresh,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,
@@ -94,25 +139,204 @@ async def process_video_task(
             return result
 
         except Exception as e:
-            logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            from ..workers.retry_policy import (
+                should_retry_task,
+                get_max_attempts_for_error,
+                format_error_for_storage
+            )
+            from ..exceptions import ViraClipException
+            
+            # Get current attempt
+            job_try = int(ctx.get("job_try", 1))
+            max_tries = get_max_attempts_for_error(e)
+            
+            # Format error for storage
+            error_details = format_error_for_storage(e, task_id, stage="worker")
+            
+            # Log error with context
+            if isinstance(e, ViraClipException):
+                logger.error(
+                    f"Task {task_id} failed [{e.error_code.value}]: {e.message}",
+                    extra={"error_context": e.context, "retryable": e.retryable}
+                )
+            else:
+                logger.error(f"Task {task_id} failed: {e}", exc_info=True)
+            
+            # Update task with error details
+            from ..repositories.task_repository import TaskRepository
+            task_repo = TaskRepository()
             try:
-                job_try = int(ctx.get("job_try", 1))
-                max_tries = int(getattr(WorkerSettings, "max_tries", 3))
-                if job_try >= max_tries:
+                await task_repo.update_task_error(
+                    db,
+                    task_id,
+                    error_code=error_details["error_code"],
+                    error_message=error_details["error_message"]
+                )
+                await db.commit()
+            except Exception as db_err:
+                logger.warning(f"Failed to update task error in DB: {db_err}")
+            
+            # Determine if we should retry
+            should_retry, delay = should_retry_task(e, job_try, max_tries)
+            
+            if not should_retry or job_try >= max_tries:
+                # Task failed permanently
+                try:
                     payload = {
                         "task_id": task_id,
-                        "error": str(e),
+                        "error_code": error_details["error_code"],
+                        "error": error_details["error_message"],
                         "tries": job_try,
+                        "context": error_details.get("context", {}),
                     }
                     await ctx["redis"].set(
                         f"dead_letter:{task_id}", json.dumps(payload)
                     )
                     await ctx["redis"].sadd("tasks:dead_letter", task_id)
-                    await progress.error("Task failed permanently after retries")
-            except Exception:
-                logger.exception("Failed to persist dead-letter payload")
-            # Error will be caught by arq and task status will be updated
+                    
+                    error_msg = f"Task failed permanently: {error_details['error_message']}"
+                    await progress.error(error_msg)
+                    
+                    logger.error(
+                        f"Task {task_id} moved to dead letter queue after {job_try} attempts"
+                    )
+                except Exception:
+                    logger.exception("Failed to persist dead-letter payload")
+            else:
+                # Task will be retried
+                logger.info(
+                    f"Task {task_id} will be retried (attempt {job_try + 1}/{max_tries})"
+                    + (f" after {delay}s delay" if delay else "")
+                )
+            
+            # Re-raise so arq handles retry
             raise
+
+async def analyze_ab_test(
+    ctx: Dict[str, Any],
+    user_id: str,
+    test_id: str,
+) -> Dict[str, Any]:
+    """
+    ARQ background job: analyze A/B test results and determine winner.
+    Enqueued automatically after test_duration_hours expires.
+    """
+    set_trace_id(f"abtest-{test_id}")
+    logger.info(f"[ABTest] Analyzing test {test_id} for user {user_id}")
+    try:
+        from ..services.ab_testing_service import ABTestingService
+        svc = ABTestingService()
+        winner = await svc.analyze_test(user_id=user_id, test_id=test_id)
+        logger.info(f"[ABTest] Test {test_id} winner: {winner.variant_id if winner else 'inconclusive'}")
+        return {"status": "analyzed", "test_id": test_id, "winner": winner.variant_id if winner else None}
+    except Exception as e:
+        logger.error(f"[ABTest] analyze failed for {test_id}: {e}")
+        raise
+
+
+async def process_scheduled_job(
+    ctx: Dict[str, Any],
+    job_id: str,
+    user_id: str,
+) -> Dict[str, Any]:
+    """
+    ARQ worker function: execute a scheduled automation job.
+    Delegates to AutoSchedulerService.process_scheduled_job().
+    """
+    set_trace_id(f"schedule-{job_id}")
+    logger.info(f"[Scheduler] Running job {job_id} for user {user_id}")
+    try:
+        from ..services.auto_scheduler import AutoSchedulerService
+        svc = AutoSchedulerService()
+        await svc.process_scheduled_job(job_id=job_id, user_id=user_id)
+        return {"status": "completed", "job_id": job_id}
+    except Exception as e:
+        logger.error(f"[Scheduler] Job {job_id} failed: {e}")
+        raise
+
+
+async def worker_startup(ctx: Dict[str, Any]) -> None:
+    """
+    Run cleanup on worker startup to remove old files.
+    """
+    import asyncio
+    from pathlib import Path
+    from ..config import get_config
+    from ..utils.resource_manager import cleanup_temp_files, detect_hardware_capabilities
+    from ..utils.cleanup import cleanup_old_clips, cleanup_old_downloads
+
+    logger.info("Worker starting up...")
+
+    # ── Whisper model warm-up ────────────────────────────────────────────────
+    # Pre-load the Whisper model so the first real task doesn't stall waiting
+    # for weights to download or for CTranslate2 to compile the graph.
+    async def _warm_whisper():
+        try:
+            from ..config import get_config as _cfg
+            _c = _cfg()
+            from faster_whisper import WhisperModel
+            _model_size = getattr(_c, "whisper_model_size", "small") or "small"
+            _device = getattr(_c, "whisper_device", "cpu") or "cpu"
+            _compute = getattr(_c, "whisper_compute_type", "int8") or "int8"
+            logger.info(
+                "🔄 Whisper warm-up: loading model=%s device=%s compute=%s ...",
+                _model_size, _device, _compute,
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: WhisperModel(_model_size, device=_device, compute_type=_compute),
+            )
+            logger.info("✅ Whisper model loaded and ready")
+        except Exception as _we:
+            logger.warning("Whisper warm-up skipped: %s", _we)
+
+    asyncio.create_task(_warm_whisper())
+
+    # Detect hardware and log capabilities
+    hw_caps = detect_hardware_capabilities()
+
+    cfg = get_config()
+    clips_dir = Path(cfg.temp_dir) / "uploads" / "clips"
+    downloads_dir = Path(cfg.temp_dir) / "uploads"
+    
+    # Aggressive temp cleanup to free disk space
+    temp_base = Path(cfg.temp_dir)
+    cleanup_temp_files(temp_base / "segments", max_age_hours=12)
+    cleanup_temp_files(temp_base / "uploads", max_age_hours=24)
+
+    # B-7 fix: collect filenames referenced by active/queued tasks so we never
+    # delete their output files even if they exceed the retention window.
+    protected_filenames: set = set()
+    try:
+        import asyncpg
+        db_url = cfg.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(db_url)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT gc.filename
+                FROM generated_clips gc
+                JOIN tasks t ON gc.task_id = t.id
+                WHERE t.status IN ('queued', 'processing')
+                """
+            )
+            protected_filenames = {row["filename"] for row in rows}
+            if protected_filenames:
+                logger.info(f"[startup cleanup] protecting {len(protected_filenames)} file(s) from active tasks")
+        finally:
+            await conn.close()
+    except Exception as _dbe:
+        logger.warning(f"[startup cleanup] could not fetch active task files ({_dbe}) — proceeding without protection")
+
+    # Keep clips for 48 h, downloaded source videos for 24 h
+    clips_deleted, clips_freed = cleanup_old_clips(clips_dir, retention_hours=48, protected_filenames=protected_filenames)
+    dl_deleted, dl_freed = cleanup_old_downloads(downloads_dir, retention_hours=24)
+    logger.info(
+        f"[startup cleanup] clips={clips_deleted} files freed, "
+        f"downloads={dl_deleted} files freed "
+        f"({(clips_freed + dl_freed) // (1024 * 1024):.1f}MB total)"
+    )
+
 
 # Worker configuration for arq
 class WorkerSettings:
@@ -124,8 +348,9 @@ class WorkerSettings:
     config = Config()
 
     # Functions to run
-    functions = [process_video_task]
-    queue_name = "supoclip_tasks"
+    functions = [process_video_task, analyze_ab_test, process_scheduled_job]
+    # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
+    queue_name = "viraclip_cpu_tasks"
 
     # Redis settings from environment
     redis_settings = RedisSettings(
@@ -137,5 +362,35 @@ class WorkerSettings:
     job_timeout = 3600  # 1 hour timeout for video processing
 
     # Worker pool settings
-    max_jobs = 4  # Process up to 4 jobs simultaneously
-    cron_jobs = []
+    # 1 job per worker process keeps max concurrent renders at 3 workers × 1 job × semaphore(2) = 6
+    # Previously max_jobs=2 allowed 3×2×2=12 simultaneous renders on a single machine, saturating CPU/GPU
+    max_jobs = 1
+
+    # Startup/shutdown hooks
+    on_startup = worker_startup
+    
+    # Periodic tasks (Phase 5.3: Model retraining — Sundays at 2 AM)
+    @staticmethod
+    def _build_cron_jobs():
+        from arq import cron
+        from ..services.feedback_loop_service import periodic_model_retraining
+        return [cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0)]
+
+    cron_jobs = _build_cron_jobs.__func__(None) if False else []  # activated below
+
+
+# Activate cron jobs after class definition to avoid forward-reference issues
+try:
+    from arq import cron
+    from .feedback_cron import periodic_model_retraining  # re-exported shim
+    from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
+    WorkerSettings.cron_jobs = [
+        # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
+        cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0),
+        # Phase 7.5: daily trending data fetch (03:00 UTC every day)
+        cron(fetch_trending_data, hour=3, minute=0),
+        # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)
+        cron(retrain_scorer_monthly, hour=4, minute=0, day=1),
+    ]
+except Exception:  # pragma: no cover
+    pass  # cron stays empty if import fails (test environments)

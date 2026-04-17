@@ -1,0 +1,66 @@
+{
+  "description": "Sample transcripts for AI validation testing",
+  "transcripts": {
+    "tech_tutorial_high_viral": {
+      "title": "ChatGPT Secret Trick",
+      "expected_score_range": [7, 10],
+      "content": "[00:00 - 00:12] I'm about to show you a ChatGPT trick that will blow your mind.\n[00:12 - 00:28] This changed everything for me, and most people have no idea this exists.\n[00:28 - 00:48] You can literally 10x your productivity with this one simple prompt.\n[00:48 - 01:10] Here's exactly what you do. First, open ChatGPT and type this.\n[01:10 - 01:32] The results are insane. Look at what it generates in seconds.\n[01:32 - 01:55] This would take hours manually, but with this trick, it's instant.\n[01:55 - 02:18] I use this every single day now. It's become essential to my workflow."
+    },
+    
+    "storytelling_high_viral": {
+      "title": "My Life Changed Forever",
+      "expected_score_range": [8, 10],
+      "content": "[00:00 - 00:15] Three years ago, I was living in my car with $47 to my name.\n[00:15 - 00:35] Today, I'm going to tell you exactly how I went from that to making $50k per month.\n[00:35 - 00:58] The turning point came when I discovered this one thing that nobody talks about.\n[00:58 - 01:22] I spent my last $40 on a course that taught me this skill. Best decision ever.\n[01:22 - 01:48] Within 3 months, I made my first $10k. Here's how I did it step by step.\n[01:48 - 02:15] The secret is not working harder. It's working smarter. Let me explain.\n[02:15 - 02:40] If you're struggling right now, this is for you. Pay close attention."
+    },
+    
+    "educational_medium_viral": {
+      "title": "Python Tutorial",
+      "expected_score_range": [5, 7],
+      "content": "[00:00 - 00:18] Today we're going to learn about Python list comprehensions.\n[00:18 - 00:40] They're a concise way to create lists based on existing lists.\n[00:40 - 01:05] The syntax might look confusing at first, but it's actually quite simple.\n[01:05 - 01:30] Here's a basic example using a for loop inside square brackets.\n[01:30 - 01:55] You can also add conditions to filter the results. Let me show you.\n[01:55 - 02:20] This is more efficient than traditional for loops in many cases.\n[02:20 - 02:45] Practice these examples and you'll master them quickly."
+    },
+    
+    "vlog_medium_viral": {
+      "title": "Morning Routine",
+      "expected_score_range": [4, 6],
+      "content": "[00:00 - 00:15] Good morning everyone! Today I'm taking you through my morning routine.\n[00:15 - 00:35] First thing I do is make my bed. It sets the tone for the day.\n[00:35 - 00:58] Then I head to the kitchen and make my protein smoothie.\n[00:58 - 01:22] I usually throw in some spinach, banana, protein powder, and almond milk.\n[01:22 - 01:48] While that's blending, I check my emails and plan out my day.\n[01:48 - 02:15] After breakfast, I do a quick 20-minute workout to get energized.\n[02:15 - 02:40] That's pretty much it! Simple but effective routine."
+    },
+    
+    "podcast_low_viral": {
+      "title": "Random Chat",
+      "expected_score_range": [2, 5],
+      "content": "[00:00 - 00:25] So yeah, um, we're just kind of hanging out and chatting today.\n[00:25 - 00:50] I don't really have a specific topic planned, just whatever comes up.\n[00:50 - 01:18] How's the weather been for you? It's been pretty nice here lately.\n[01:18 - 01:45] Oh, did you see that movie that came out last week? I haven't watched it yet.\n[01:45 - 02:12] I should probably go see it at some point. Maybe this weekend.\n[02:12 - 02:40] Anyway, yeah, just thought I'd record this and see what happens.\n[02:40 - 03:05] Not sure if this is interesting to anyone, but here we are."
+    },
+    
+    "technical_lecture_low_viral": {
+      "title": "Database Normalization",
+      "expected_score_range": [3, 5],
+      "content": "[00:00 - 00:30] Today's lecture covers database normalization theory in detail.\n[00:30 - 01:00] We'll start with first normal form, which eliminates repeating groups.\n[01:00 - 01:35] Second normal form requires that all non-key attributes depend on the entire primary key.\n[01:35 - 02:10] Third normal form removes transitive dependencies between non-key attributes.\n[02:10 - 02:45] There are also higher normal forms like BCNF and fourth normal form.\n[02:45 - 03:20] These concepts are fundamental to database design and data integrity.\n[03:20 - 03:55] Make sure to review the textbook chapter and complete the homework assignment."
+    },
+    
+    "no_speech_detected": {
+      "title": "Music Video",
+      "expected_score_range": [1, 3],
+      "content": "[00:00 - 00:30] [INSTRUMENTAL MUSIC]\n[00:30 - 01:00] [BACKGROUND AMBIENCE]\n[01:00 - 01:30] [SOUND EFFECTS]\n[01:30 - 02:00] [CONTINUED MUSIC]"
+    },
+    
+    "multilingual_unclear": {
+      "title": "Mixed Languages",
+      "expected_score_range": [2, 5],
+      "content": "[00:00 - 00:20] Hello, aujourd'hui je vais parler de... um, como se dice?\n[00:20 - 00:45] Sorry, I'm mixing languages. Let me start over in English.\n[00:45 - 01:10] Actually, mejor en español. No, wait, in English is better.\n[01:10 - 01:35] This is confusing. Ich weiß nicht mehr was ich sagen wollte.\n[01:35 - 02:00] Let's just skip to the next topic. Moving on to..."
+    }
+  },
+  
+  "validation_criteria": {
+    "score_range": "Scores must be between 1-10",
+    "score_variance": "Multiple segments should have some variance (not all identical)",
+    "segment_duration": "Clips should be 10-60 seconds ideally (5-120s acceptable)",
+    "hook_quality": "Hook titles should be descriptive and engaging",
+    "no_overlap": "Segments should not overlap in time"
+  },
+  
+  "expected_anomalies": {
+    "no_speech_detected": "Should generate very few or no segments",
+    "multilingual_unclear": "May have lower scores due to unclear content",
+    "technical_lecture": "Lower scores expected for dry educational content"
+  }
+}

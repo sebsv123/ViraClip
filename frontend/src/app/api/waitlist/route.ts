@@ -24,11 +24,11 @@ export async function POST(request: NextRequest) {
     const resend = new Resend(resendApiKey);
 
     const { error } = await resend.emails.send({
-      from: "SupoClip <noreply@shiori.ai>",
+      from: "ViraClip <noreply@shiori.ai>",
       to: [normalizedEmail],
-      subject: "Welcome to the SupoClip waitlist",
+      subject: "Welcome to the ViraClip waitlist",
       html: `
-        <p>Thanks for joining the SupoClip waitlist.</p>
+        <p>Thanks for joining the ViraClip waitlist.</p>
         <p>We will email you when early access is available.</p>
       `,
     });

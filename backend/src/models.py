@@ -10,6 +10,7 @@ from sqlalchemy import (
     Boolean,
     Float,
     Integer,
+    SmallInteger,
     Text,
     text as sql_text,
 )
@@ -79,6 +80,28 @@ class User(Base):
         DateTime(timezone=True), nullable=True
     )
 
+    # Phase A: Platform OAuth credentials (encrypted JSON)
+    youtube_credentials: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON: access_token, refresh_token, expires_at
+    tiktok_credentials: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+    instagram_credentials: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )
+
+    # Notification preferences
+    slack_webhook_url: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    discord_webhook_url: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )
+    email_notifications: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'true'")
+    )
+
     # Relationships
     tasks: Mapped[List["Task"]] = relationship(
         "Task", back_populates="user", cascade="all, delete-orphan"
@@ -138,6 +161,31 @@ class Task(Base):
     stage_timings_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     completion_notification_sent_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    
+    # Phase 10 / 11 Feature flags (per-task opt-in)
+    enable_timeline: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    enable_vision_ai: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    enable_timeline_render: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+
+    # Phase 8 & 9 Flags
+    target_language: Mapped[str] = mapped_column(
+        String(10), nullable=False, server_default=sql_text("'eng'")
+    )
+    auto_center_face: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'true'")
+    )
+    eye_contact_correction: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    split_screen: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -231,6 +279,124 @@ class GeneratedClip(Base):
         Integer, nullable=True, server_default=sql_text("'0'")
     )
     hook_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    strategic_advice: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    conversion_tips: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    user_rating: Mapped[Optional[int]] = mapped_column(
+        SmallInteger, nullable=True
+    )
+
+    # Phase 4.2: Viral metadata (hashtags, SEO title, description)
+    clip_metadata: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON with title, description, hashtags
+
+    # Phase 4.4: Auto-generated thumbnail
+    thumbnail_path: Mapped[Optional[str]] = mapped_column(
+        String(500), nullable=True
+    )  # Path to auto-selected thumbnail image
+
+    # Phase A: Platform publishing tracking
+    youtube_video_id: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    tiktok_video_id: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+    instagram_media_id: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+
+    # Phase C: Real analytics metrics
+    youtube_views: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    youtube_likes: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    youtube_comments: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    youtube_watch_time: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+    youtube_ctr: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+    youtube_engagement_rate: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+
+    tiktok_views: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    tiktok_likes: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    tiktok_comments: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    tiktok_shares: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    tiktok_completion_rate: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+    tiktok_engagement_rate: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+
+    instagram_impressions: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_reach: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_engagement: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_likes: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_comments: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_shares: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_saves: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, server_default=sql_text("'0'")
+    )
+    instagram_engagement_rate: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+
+    metrics_last_updated: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # Phase 9: Creative Engine metadata (JSON blob — all creative pipeline outputs)
+    creative_meta_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON: viral_score, hook_score, preset_used, timeline_built, zoom_punch_applied, etc.
+
+    # Phase D: A/B testing
+    ab_test_id: Mapped[Optional[str]] = mapped_column(
+        String(36), nullable=True
+    )
+    ab_variant: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True
+    )
+
+    # Phase 10: Viral polish flags + A/B variant paths
+    cta_overlay_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    emoji_overlays_applied: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=sql_text("'false'")
+    )
+    variants_json: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True
+    )  # JSON list of {path, variant, label, type} dicts from variant_generator
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

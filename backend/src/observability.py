@@ -43,11 +43,71 @@ class JsonLogFormatter(logging.Formatter):
             "message": record.getMessage(),
             "trace_id": getattr(record, "trace_id", "-"),
         }
+        
+        # Add structured context fields if present
+        for field in ["task_id", "user_id", "stage", "clip_index", "error_code"]:
+            if hasattr(record, field):
+                payload[field] = getattr(record, field)
+        
+        # Add custom extra fields
+        if hasattr(record, "extra_context"):
+            payload["context"] = record.extra_context
 
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, ensure_ascii=True)
+
+
+class StructuredLogger:
+    """
+    Helper for structured logging with task context.
+    
+    Usage:
+        logger = StructuredLogger("my_module", task_id="abc123")
+        logger.info("Processing started", stage="download")
+        logger.error("Download failed", error_code="E1001", extra={"url": url})
+    """
+    
+    def __init__(self, name: str, **default_context):
+        self.logger = logging.getLogger(name)
+        self.default_context = default_context
+    
+    def _log(self, level: int, message: str, **kwargs):
+        """Internal log with structured context."""
+        # Merge default context with call-specific context
+        context = {**self.default_context, **kwargs}
+        
+        # Create log record with extra fields
+        extra = {}
+        for key, value in context.items():
+            if key not in ["exc_info", "stack_info", "stacklevel", "extra"]:
+                extra[key] = value
+        
+        self.logger.log(level, message, extra=extra)
+    
+    def debug(self, message: str, **kwargs):
+        self._log(logging.DEBUG, message, **kwargs)
+    
+    def info(self, message: str, **kwargs):
+        self._log(logging.INFO, message, **kwargs)
+    
+    def warning(self, message: str, **kwargs):
+        self._log(logging.WARNING, message, **kwargs)
+    
+    def error(self, message: str, **kwargs):
+        self._log(logging.ERROR, message, **kwargs)
+    
+    def critical(self, message: str, **kwargs):
+        self._log(logging.CRITICAL, message, **kwargs)
+
+
+def _get_utf8_stdout():
+    """Return a UTF-8 wrapped stdout, replacing unmappable chars instead of crashing."""
+    import sys as _sys, io as _io
+    if hasattr(_sys.stdout, 'buffer'):
+        return _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+    return _sys.stdout
 
 
 def configure_logging() -> None:
@@ -64,17 +124,17 @@ def configure_logging() -> None:
     formatter = JsonLogFormatter()
     trace_filter = TraceIdFilter()
 
-    stream_handler = logging.StreamHandler()
+    stream_handler = logging.StreamHandler(_get_utf8_stdout())
     stream_handler.setLevel(log_level)
     stream_handler.setFormatter(formatter)
     stream_handler.addFilter(trace_filter)
 
-    app_file_handler = logging.FileHandler(logs_dir / "backend.log")
+    app_file_handler = logging.FileHandler(logs_dir / "backend.log", encoding='utf-8')
     app_file_handler.setLevel(log_level)
     app_file_handler.setFormatter(formatter)
     app_file_handler.addFilter(trace_filter)
 
-    error_file_handler = logging.FileHandler(logs_dir / "backend-error.log")
+    error_file_handler = logging.FileHandler(logs_dir / "backend-error.log", encoding='utf-8')
     error_file_handler.setLevel(logging.ERROR)
     error_file_handler.setFormatter(formatter)
     error_file_handler.addFilter(trace_filter)

@@ -29,7 +29,7 @@ async def test_list_tasks_only_returns_owned_tasks(client, db_session):
 
     response = await client.get(
         "/tasks/",
-        headers={"x-supoclip-user-id": owner["id"]},
+        headers={"x-viraclip-user-id": owner["id"]},
     )
 
     assert response.status_code == 200
@@ -44,7 +44,7 @@ async def test_create_task_enqueues_a_job(client, db_session):
 
     response = await client.post(
         "/tasks/",
-        headers={"x-supoclip-user-id": "user-1"},
+        headers={"x-viraclip-user-id": "user-1"},
         json={
             "source": {"url": "https://www.youtube.com/watch?v=demo"},
             "font_options": {"font_color": "#abcdef", "font_size": 18},

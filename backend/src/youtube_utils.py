@@ -6,6 +6,7 @@ Optimized for Apify-first downloads with direct yt-dlp fallback.
 import asyncio
 from datetime import datetime
 import logging
+import os
 import re
 import subprocess
 import time
@@ -20,6 +21,23 @@ from .apify_youtube_downloader import ApifyDownloadError, download_video_via_api
 from .config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+def _get_browser_cookies_config():
+    """Return cookiesfrombrowser tuple for yt-dlp, trying browsers in order.
+    Returns None if a cookies file is configured via YOUTUBE_COOKIES_FILE env var.
+    """
+    if os.environ.get("YOUTUBE_COOKIES_FILE"):
+        return None
+    for browser in ("firefox", "chrome", "edge", "chromium"):
+        try:
+            import yt_dlp.cookies as _yt_cookies
+            _yt_cookies.load_cookies_from_browser(browser, None, None, None)
+            return (browser,)
+        except Exception:
+            continue
+    return None
+
 
 YOUTUBE_METADATA_PROVIDER_YTDLP = "yt_dlp"
 YOUTUBE_METADATA_PROVIDER_DATA_API = "youtube_data_api"
@@ -42,31 +60,57 @@ class YouTubeDownloader:
 
         opts = {
             "outtmpl": str(output_path),
-            # Use best available video/audio to avoid quality caps from container constraints.
-            "format": "bestvideo*+bestaudio/best",
-            "format_sort": ["res", "fps"],
+            # Prefer h264/mp4 over VP9/webm to guarantee mp4 output.
+            # 4K on YouTube is VP9-only; 1080p (h=1920 portrait) has h264/mp4.
+            # Priority: best mp4/h264 + m4a → best mp4 + any audio → any → best.
+            "format": "bestvideo[ext=mp4][vcodec!=vp9]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
+            "format_sort": ["ext:mp4", "vcodec:h264", "res:1920", "fps"],
             "merge_output_format": "mp4",
             "writesubtitles": False,
             "writeautomaticsub": False,
             "noplaylist": True,
             "overwrites": True,
+            # Speed: parallel fragment downloads (inspired by yt-dlp concurrent downloader)
+            "concurrent_fragment_downloads": 4,
             # Optimized for speed and reliability
             "socket_timeout": 30,
-            "retries": 5,  # Increased retries
+            "retries": 5,
             "fragment_retries": 5,
             "http_chunk_size": 10485760,  # 10MB chunks
             # Quiet operation - only errors/warnings
             "quiet": True,
-            "no_warnings": False,  # Show warnings but not info
+            "no_warnings": False,
             "ignoreerrors": False,
-            # Enhanced headers to avoid 403 errors
-            "http_headers": {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate",
-                "Connection": "keep-alive",
+            # Use the web client extractor (better 403 bypass than mweb)
+            "extractor_args": {
+                "youtube": {
+                    "player_client": ["ios", "android", "web", "tv_embedded"],
+                    "skip": ["translated_subs"],
+                }
             },
+            # Enhanced headers to avoid 403 errors - rotate user agents
+            "http_headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Upgrade-Insecure-Requests": "1",
+                "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+{};",
+            },
+            # Enable bypass for age-restricted and blocked content
+            # Prefer a pre-exported cookies file; fall back to browser cookies
+            "cookiesfrombrowser": _get_browser_cookies_config(),
+            "cookiefile": os.environ.get("YOUTUBE_COOKIES_FILE") or None,
+            # Node.js runtime + EJS challenge solver (required since 2025)
+            # Equivalent to: yt-dlp --js-runtimes node --remote-components ejs:github
+            "js_runtimes": "node",
+            "ejs_path": None,  # auto-download from GitHub
+            "legacyserverconnect": True,
             # Metadata extraction
             "extract_flat": False,
             "writeinfojson": False,
@@ -77,6 +121,11 @@ class YouTubeDownloader:
         }
 
         return opts
+
+
+def _build_ejs_postprocessor_args() -> list:
+    """Return extra command line args list for yt-dlp subprocess calls."""
+    return ["--js-runtimes", "node", "--remote-components", "ejs:github"]
 
 
 def _build_info_options() -> Dict[str, Any]:
@@ -93,6 +142,12 @@ def _build_info_options() -> Dict[str, Any]:
             "Connection": "keep-alive",
         },
         "nocheckcertificate": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["ios", "android", "web", "tv_embedded"],
+                "skip": ["translated_subs"],
+            }
+        },
     }
     return ydl_opts
 
@@ -498,8 +553,48 @@ def _download_youtube_video_with_ytdlp(
 
             ydl_opts = downloader.get_optimal_download_options(video_id)
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([url])
+            # Use subprocess CLI to support --js-runtimes node --remote-components ejs:github
+            # (Python API does not expose these options, but they are required since 2025)
+            output_template = str(downloader.temp_dir / f"{video_id}.%(ext)s")
+
+            # Locate ffmpeg for yt-dlp merge step (not in system PATH; use imageio_ffmpeg).
+            # Pass full binary path since the executable is named ffmpeg-win-x86_64-vX.Y.exe.
+            _ffmpeg_location = None
+            try:
+                import imageio_ffmpeg as _iio_ff
+                _ffmpeg_location = _iio_ff.get_ffmpeg_exe()
+            except Exception:
+                pass
+
+            cmd = [
+                "yt-dlp",
+                "--js-runtimes", "node",
+                "--remote-components", "ejs:github",
+                "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
+                "-S", "ext:mp4,vcodec:h264,res:1920,fps",
+                "--merge-output-format", "mp4",
+                "--no-playlist",
+                "--force-overwrites",
+                "--concurrent-fragments", "4",
+                "--socket-timeout", "30",
+                "--retries", "5",
+                "--fragment-retries", "5",
+                "--quiet",
+                "--no-warnings",
+                "--no-check-certificate",
+                "-o", output_template,
+                url,
+            ]
+            if _ffmpeg_location:
+                cmd.extend(["--ffmpeg-location", _ffmpeg_location])
+            _cookies_file = os.environ.get("YOUTUBE_COOKIES_FILE")
+            if _cookies_file:
+                cmd.extend(["--cookies", _cookies_file])
+
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                stderr = proc.stderr.strip()
+                raise yt_dlp.utils.DownloadError(stderr or "yt-dlp subprocess failed")
 
             logger.info(f"Searching for downloaded file: {video_id}.*")
             downloaded_files = [

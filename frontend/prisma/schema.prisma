@@ -36,6 +36,12 @@ model User {
   default_font_color  String?   @default("#FFFFFF") @db.VarChar(7)
   notify_on_completion Boolean  @default(true)
 
+  // Waitlist and beta access - AUTO-APPROVED for testing
+  waitlist_status      String    @default("approved") @db.VarChar(20) // pending|approved|rejected
+  beta_access          Boolean   @default(true)
+  clips_this_month     Int       @default(0)
+  last_reset_date      DateTime  @default(now()) @db.Timestamptz
+
   // Monetization and billing
   plan                 String    @default("free") @db.VarChar(20)
   subscription_status  String    @default("inactive") @db.VarChar(20)
@@ -81,12 +87,42 @@ model Task {
   @@map("tasks")
 }
 
+model Clip {
+  id              String    @id @default(uuid())
+  task_id         String
+  user_id         String
+  
+  // File metadata
+  filename        String    @db.VarChar(500)
+  duration        Float     // in seconds
+  file_size       Int?      // in bytes
+  
+  // Viral metrics
+  viral_score     Int?      // 0-100
+  
+  // User feedback
+  rating          Int?      // 1-5 stars
+  thumbs          String?   @db.VarChar(20) // thumbs_up|thumbs_down|neutral
+  feedback_text   String?   @db.VarChar(500)
+  
+  // Timestamps
+  created_at      DateTime  @default(now()) @db.Timestamptz
+  updated_at      DateTime  @updatedAt @db.Timestamptz
+  
+  @@index([task_id])
+  @@index([user_id])
+  @@index([created_at])
+  @@map("clips")
+}
+
 model Source {
-  id         String   @id @default(uuid())
-  type       String   @db.VarChar(20)
-  title      String   @db.VarChar(500)
-  created_at DateTime @default(now()) @db.Timestamptz
-  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
+  id              String   @id @default(uuid())
+  type            String   @db.VarChar(20)
+  title           String   @db.VarChar(500)
+  url             String?  @db.VarChar(1000)
+  url_secondary   String?  @db.VarChar(1000)
+  created_at      DateTime @default(now()) @db.Timestamptz
+  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz
 
   // Relationships
   tasks      Task[]

@@ -29,6 +29,26 @@ Thumbs.db
 uploads/
 logs/
 *.log
+temp/
+exports/
+output/
+clips/
+
+# Modelos ML — pueden ser GB
+models/
+*.pt
+*.bin
+*.safetensors
+*.onnx
+
+# Archivos de video/audio generados — CRÍTICO para build rápido
+*.mp4
+*.mp3
+*.wav
+*.webm
+*.avi
+*.mkv
+*.flac
 
 # Git
 .git/
@@ -37,3 +57,7 @@ logs/
 # Documentation
 README.md
 *.md
+
+# Tests
+tests/
+*.test.py

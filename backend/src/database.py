@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import (
 load_dotenv()
 
 DEFAULT_DATABASE_URL = os.getenv(
-    "DATABASE_URL", "postgresql+asyncpg://localhost:5432/supoclip"
+    "DATABASE_URL", "postgresql+asyncpg://localhost:5432/viraclip"
 )
 
 _database_url_override: str | None = None
@@ -92,6 +92,41 @@ async def get_db():
             await session.close()
 
 
+def _split_sql_statements(sql: str) -> list:
+    """Split SQL into individual statements on ';', but skip ';' inside $$...$$
+    dollar-quoted blocks (used by PostgreSQL trigger/function bodies)."""
+    statements: list = []
+    current: list = []
+    in_dollar = False
+    i = 0
+    while i < len(sql):
+        ch = sql[i]
+        if not in_dollar and sql[i:i+2] == '$$':
+            in_dollar = True
+            current.append('$$')
+            i += 2
+            continue
+        if in_dollar and sql[i:i+2] == '$$':
+            in_dollar = False
+            current.append('$$')
+            i += 2
+            continue
+        if not in_dollar and ch == ';':
+            stmt = ''.join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    # Trailing statement without semicolon
+    stmt = ''.join(current).strip()
+    if stmt:
+        statements.append(stmt)
+    return statements
+
+
 # Initialize database
 async def init_db():
     async with get_engine().begin() as conn:
@@ -122,11 +157,11 @@ async def init_db():
                     continue
 
                 sql = migration_file.read_text()
-                # asyncpg doesn't support multiple statements in one execute(),
-                # so split on semicolons and run each statement individually
-                for statement in sql.split(";"):
-                    statement = statement.strip()
-                    if statement:
+                # asyncpg doesn't support multiple statements in one execute().
+                # Split on semicolons but respect dollar-quoted strings ($$...$$)
+                # used in PostgreSQL trigger/function bodies.
+                for statement in _split_sql_statements(sql):
+                    if statement.strip():
                         await conn.execute(text(statement))
                 await conn.execute(
                     text("INSERT INTO schema_migrations (version) VALUES (:version)"),
