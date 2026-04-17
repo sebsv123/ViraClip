@@ -12,14 +12,19 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# Lazy import for sentence-transformers
-def _import_sentence_transformers():
-    try:
+# Module-level singleton for SentenceTransformer (CPU-only to preserve VRAM for Whisper)
+_SENTENCE_MODEL = None
+_SENTENCE_UTIL = None
+
+def get_sentence_model():
+    global _SENTENCE_MODEL, _SENTENCE_UTIL
+    if _SENTENCE_MODEL is None:
         from sentence_transformers import SentenceTransformer, util
-        return SentenceTransformer, util
-    except ImportError:
-        logger.error("sentence-transformers not installed. Run: pip install sentence-transformers")
-        raise
+        _SENTENCE_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+        _SENTENCE_MODEL = _SENTENCE_MODEL.to("cpu")  # free VRAM for Whisper
+        _SENTENCE_UTIL = util
+        logger.info("[SentenceTransformer] Loaded once on CPU (VRAM reserved for Whisper)")
+    return _SENTENCE_MODEL, _SENTENCE_UTIL
 
 
 @dataclass
@@ -72,12 +77,10 @@ class SemanticBrollService:
         logger.info(f"Semantic B-roll Service initialized (model: {embedding_model})")
     
     def _load_embedding_model(self):
-        """Lazy load sentence-transformers model (~80MB)"""
+        """Lazy load sentence-transformers model (~80MB) via singleton"""
         if self.embedding_model is None:
-            SentenceTransformer, util = _import_sentence_transformers()
-            logger.info(f"Loading embedding model: {self.embedding_model_name}")
-            self.embedding_model = SentenceTransformer(self.embedding_model_name)
-            self.sentence_transformers = util
+            self.embedding_model, self.sentence_transformers = get_sentence_model()
+            logger.info(f"Using singleton embedding model: {self.embedding_model_name}")
     
     async def search_videos(
         self, 
