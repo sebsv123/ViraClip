@@ -229,6 +229,30 @@ class VideoCoordinator:
             
             logger.info(f"🎬 Starting coordinator for task {self.task_id}")
             
+            # PHASE 0.5: Gate 0 — Pre-flight checks (before expensive Whisper call)
+            await emit_progress(self.task_id, "preflight", 5, "Running pre-flight checks...")
+            try:
+                from .preflight_gate import check_preflight
+                from ..exceptions import PipelineCancelledError
+                
+                preflight = check_preflight(self.video_path)
+                if not preflight["passed"]:
+                    await emit_progress(self.task_id, "preflight", 5, f"Pre-flight failed: {preflight['reason']}")
+                    raise PipelineCancelledError(
+                        reason=preflight["reason"],
+                        gate="preflight_gate",
+                        best_score=0.0,
+                        recommendation=preflight.get("recommendation", ""),
+                    )
+                await emit_progress(self.task_id, "preflight", 8, f"Pre-flight passed ✅ ({preflight['summary']})")
+                logger.info(f"[Gate 0] ✅ {preflight['summary']}")
+            except ImportError:
+                logger.warning("[Gate 0] Skipped (preflight_gate not found)")
+            except PipelineCancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[Gate 0] Skipped (error): {e}")
+            
             # PHASE 1: Parallel transcription + vision analysis
             await emit_progress(self.task_id, "analysis", 10, "Starting analysis...")
             
