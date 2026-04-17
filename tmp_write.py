@@ -1,5 +1,10 @@
 """
 SubagentPipeline: two complementary systems.
+
+1. enrich_segments_with_subagents() — Sequential LLM enrichment of scored segments.
+   Called from coordinator.py between Phase 2.5 and Phase 3.
+
+2. SubagentPipeline (class) — Object-oriented pipeline for Phase 2 features.
 """
 import json
 import logging
@@ -10,11 +15,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-async def enrich_segments_with_subagents(segments, transcript, language, groq_api_key, num_clips=3):
+async def enrich_segments_with_subagents(
+    segments: List[Dict[str, Any]],
+    transcript: str,
+    language: str,
+    groq_api_key: str,
+    num_clips: int = 3,
+) -> List[Dict[str, Any]]:
     if not segments:
         return []
     _GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-    _headers = {"Authorization": "Bearer " + groq_api_key, "Content-Type": "application/json"}
+    _headers = {"Authorization": f"Bearer {groq_api_key}", "Content-Type": "application/json"}
 
     logger.info("[Subagent] Paso 1/3: Hook Detector para %d segments", len(segments))
     try:
@@ -95,12 +106,14 @@ async def enrich_segments_with_subagents(segments, transcript, language, groq_ap
 
 
 class SubagentPipeline:
+    """Object-oriented pipeline for Phase 2 creative agents."""
+
     def __init__(self, llm_service=None):
         self.llm_service = llm_service
 
-    async def run(self, clip_context):
+    async def run(self, clip_context: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("[SubagentPipeline] Starting pipeline")
-        results = {}
+        results: Dict[str, Any] = {}
         mood = clip_context.get("mood", "inspirational")
         hook_strength = clip_context.get("hook_strength", 5)
         transcript = clip_context.get("transcript", "")
@@ -157,4 +170,3 @@ class SubagentPipeline:
 
         results["pipeline_status"] = "completed"
         return results
-
