@@ -360,6 +360,33 @@ class VideoCoordinator:
             
             self.clips_generated = successful
             
+            # PHASE 3.5: Gate 2 — Post-render quality check
+            await emit_progress(self.task_id, "gate2", 80, "Running post-render quality gate...")
+            try:
+                from .clip_quality_gate import check_clips_quality
+                from ..exceptions import PipelineCancelledError
+
+                gate2_result = check_clips_quality(successful, segments)
+                if not gate2_result["passed"]:
+                    await emit_progress(self.task_id, "gate2", 80, f"Gate 2 failed: {gate2_result['reason']}")
+                    raise PipelineCancelledError(
+                        reason=gate2_result["reason"],
+                        gate="clip_quality_gate",
+                        best_score=gate2_result.get("best_score", 0.0),
+                        recommendation=gate2_result.get("recommendation", ""),
+                    )
+                await emit_progress(
+                    self.task_id, "gate2", 85,
+                    f"Gate 2 passed ✅ {gate2_result['summary']}"
+                )
+                logger.info(f"[Gate 2] ✅ {gate2_result['summary']}")
+            except ImportError:
+                logger.warning("[Gate 2] Skipped (clip_quality_gate not found)")
+            except PipelineCancelledError:
+                raise
+            except Exception as e:
+                logger.warning(f"[Gate 2] Skipped (error): {e}")
+            
             # PHASE 4: Completion
             await emit_completion(self.task_id, len(successful))
             
@@ -620,6 +647,32 @@ class VideoCoordinator:
 
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
                 _words_for_editor = list(clip.get("words") or [])
+
+                # ── Beat sync (cortes al ritmo de la música) ──────────────────────────
+                if self.config.get("beat_sync", False):
+                    try:
+                        from .beat_sync_service import get_beat_sync_service as _get_beat
+                        _bs_in = _Path(clip["path"])
+                        _bs_out = _bs_in.with_name(f"bs_{_bs_in.name}")
+                        _beat_svc = _get_beat()
+                        _bs_result = await _beat_svc.sync_to_beat(
+                            video_path=_bs_in,
+                            output_path=_bs_out,
+                            words=_words_for_editor,
+                        )
+                        if isinstance(_bs_result, dict) and _bs_result.get("success") \
+                                and _bs_out.exists() and _bs_out.stat().st_size > 0:
+                            _bs_in.unlink(missing_ok=True)
+                            _bs_out.rename(_bs_in)
+                            clip["path"] = str(_bs_in)
+                            clip["beat_sync_applied"] = True
+                            clip["beat_sync_cuts"] = _bs_result.get("cuts_applied", 0)
+                            logger.info("  [BeatSync] %d cuts", _bs_result.get("cuts_applied", 0))
+                        else:
+                            _bs_out.unlink(missing_ok=True)
+                    except Exception as _bs_e:
+                        logger.debug("Beat sync skipped clip %d: %s", index, _bs_e)
+
                 creative_meta: dict = {}
                 try:
                     from .creative_pipeline import get_creative_pipeline
@@ -644,6 +697,87 @@ class VideoCoordinator:
                     logger.error(f"[Coordinator] Creative pipeline FAILED for clip {index}: {type(_ce).__name__}: {_ce}", exc_info=True)
                     clip.pop("words", None)
                     clip.pop("audio_features", None)
+
+                # ── Captions animadas ASS (palabra por palabra) ──────────────────────
+                if self.config.get("add_subtitles", True) and _words_for_editor:
+                    try:
+                        from .caption_service import get_caption_service as _get_cap
+                        _cap_svc = _get_cap()
+                        _cap_in = _Path(clip["path"])
+                        _cap_out = _cap_in.with_name(f"cap_{_cap_in.name}")
+                        _platform = self.config.get("target_platform", "tiktok")
+                        _cap_style = _cap_svc.style_for_template(
+                            self.config.get("caption_template", "tiktok_viral"), _platform
+                        )
+                        _cap_ok = await _cap_svc.burn(
+                            video_path=_cap_in,
+                            output_path=_cap_out,
+                            words=_words_for_editor,
+                            style=_cap_style,
+                            platform=_platform,
+                        )
+                        if _cap_ok and _cap_out.exists() and _cap_out.stat().st_size > 0:
+                            _cap_in.unlink(missing_ok=True)
+                            _cap_out.rename(_cap_in)
+                            clip["path"] = str(_cap_in)
+                            clip["caption_style_used"] = _cap_style
+                            clip["captions_applied"] = True
+                            logger.info("  [Captions] ASS %s OK", _cap_style)
+                        else:
+                            _cap_out.unlink(missing_ok=True)
+                    except Exception as _cap_e:
+                        logger.debug("Caption service skipped clip %d: %s", index, _cap_e)
+
+                # ── Hook visual overlay (texto primeros 3s) ───────────────────────────
+                if self.config.get("add_hook_visual", True):
+                    try:
+                        from .hook_visual_service import add_hook_overlay_to_clip as _add_hook
+                        _hook_in = _Path(clip["path"])
+                        _hook_out = _hook_in.with_name(f"hk_{_hook_in.name}")
+                        _hook_text = (
+                            creative_meta.get("hook_text")
+                            or vs_segment.get("hook_text")
+                            or vs_segment.get("title")
+                            or vs_segment.get("text", "")[:60]
+                        )
+                        _hook_ok = await _add_hook(
+                            input_path=_hook_in,
+                            output_path=_hook_out,
+                            hook_text=_hook_text,
+                            platform=self.config.get("target_platform", "tiktok"),
+                        )
+                        if _hook_ok and _hook_out.exists() and _hook_out.stat().st_size > 0:
+                            _hook_in.unlink(missing_ok=True)
+                            _hook_out.rename(_hook_in)
+                            clip["path"] = str(_hook_in)
+                            clip["hook_visual_applied"] = True
+                            logger.info("  [HookVisual] OK: %.30s...", _hook_text)
+                        else:
+                            _hook_out.unlink(missing_ok=True)
+                    except Exception as _hk_e:
+                        logger.debug("Hook visual skipped clip %d: %s", index, _hk_e)
+
+                # ── LUT color grading (solo si creative_pipeline no aplicó ya grade) ─
+                if self.config.get("lut_id") and not creative_meta.get("color_grade_applied"):
+                    try:
+                        from .lut_service import get_lut_service as _get_lut
+                        _lut_in = _Path(clip["path"])
+                        _lut_out = _lut_in.with_name(f"lut_{_lut_in.name}")
+                        _lut_ok = await _get_lut().apply_lut(
+                            input_path=_lut_in,
+                            output_path=_lut_out,
+                            lut_id=self.config["lut_id"],
+                        )
+                        if _lut_ok and _lut_out.exists() and _lut_out.stat().st_size > 0:
+                            _lut_in.unlink(missing_ok=True)
+                            _lut_out.rename(_lut_in)
+                            clip["path"] = str(_lut_in)
+                            clip["lut_applied"] = self.config["lut_id"]
+                            logger.info("  [LUT] %s applied", self.config["lut_id"])
+                        else:
+                            _lut_out.unlink(missing_ok=True)
+                    except Exception as _lut_e:
+                        logger.debug("LUT skipped clip %d: %s", index, _lut_e)
 
                 # Smart Auto-Editor — viral keyword analysis + TEXT_POP overlay application
                 try:
@@ -1043,7 +1177,8 @@ class VideoCoordinator:
                     # Strip all known prefixes from the name so it's human-readable
                     _PREFIXES = ("sub_", "broll_", "ep_", "jc_", "centered_",
                                  "music_fb_", "music_", "duck_", "tp_", "emo_",
-                                 "cta_", "brand_", "dn_", "gaze_", "efx_")
+                                 "cta_", "brand_", "dn_", "gaze_", "efx_",
+                                 "cap_", "hk_", "lut_", "bs_")
                     _clean = _final_path.name
                     for _p in _PREFIXES:
                         _clean = _clean.replace(_p, "")

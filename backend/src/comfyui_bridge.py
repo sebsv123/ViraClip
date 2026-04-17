@@ -13,6 +13,7 @@ Key public API:
 import os
 import json
 import copy
+import shutil
 import logging
 import asyncio
 from pathlib import Path
@@ -33,6 +34,13 @@ COMFYUI_TIMEOUT  = float(os.environ.get("COMFYUI_TIMEOUT", "600"))
 # Workflow JSON directory — mounted at /app/comfy_workflows inside worker containers
 _LOCAL_WORKFLOWS = Path(__file__).parent.parent / "comfy_workflows"
 WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR", str(_LOCAL_WORKFLOWS)))
+
+# Host-side directory that is bind-mounted to /comfyui/input/ inside the container.
+# Used to place video files where VHS_LoadVideo can find them.
+COMFYUI_INPUT_HOST_DIR = Path(os.environ.get(
+    "COMFYUI_INPUT_HOST_DIR",
+    str(Path.home() / "proyectos" / "ViraClip" / "uploads"),
+))
 
 
 @dataclass
@@ -114,8 +122,9 @@ class ComfyUIBridge:
             result = await resp.json()
             return result.get("name", local_path.name)
 
-    async def download_output(self, filename: str, dest: Path, subfolder: str = "output") -> bool:
-        """Download an output file from ComfyUI and save to *dest*."""
+    async def download_output(self, filename: str, dest: Path, subfolder: str = "") -> bool:
+        """Download an output file from ComfyUI and save to *dest*.
+        subfolder must match the real subfolder within /comfyui/output/ (usually empty)."""
         url = f"{self.base_url}/view?filename={filename}&subfolder={subfolder}&type=output"
         try:
             session = await self._get_session()
@@ -144,7 +153,15 @@ class ComfyUIBridge:
             logger.debug("[ComfyUI] enhance_video skipped — ComfyUI not available")
             return None
         try:
-            remote_name = await self.upload_file(video_path)
+            # Copiar el clip a la carpeta bind-mounted en /comfyui/input/
+            # (más fiable que /upload/image para archivos de video)
+            COMFYUI_INPUT_HOST_DIR.mkdir(parents=True, exist_ok=True)
+            video_path = Path(video_path).resolve()
+            dest_in_container = COMFYUI_INPUT_HOST_DIR / video_path.name
+            if dest_in_container.resolve() != video_path:
+                shutil.copy2(video_path, dest_in_container)
+            remote_name = video_path.name
+            logger.info(f"[ComfyUI] enhance_video input ready: {remote_name} (in {COMFYUI_INPUT_HOST_DIR})")
             result = await self.execute_workflow(
                 "enhance_video",
                 {"__INPUT_VIDEO__": remote_name},
@@ -154,12 +171,13 @@ class ComfyUIBridge:
                 logger.warning(f"[ComfyUI] enhance_video workflow error: {result.error_message}")
                 return None
 
-            out_file = self._first_video_output(result.outputs)
-            if not out_file:
+            found = self._first_video_output(result.outputs)
+            if not found:
                 logger.warning("[ComfyUI] enhance_video: no video in outputs")
                 return None
+            out_file, out_sub = found
 
-            ok = await self.download_output(out_file, output_path)
+            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
             if ok and output_path.exists() and output_path.stat().st_size > 10_000:
                 logger.info(f"[ComfyUI] ✓ Video enhanced → {output_path.name}")
                 return output_path
@@ -200,11 +218,12 @@ class ComfyUIBridge:
                 logger.warning(f"[ComfyUI] generate_broll workflow error: {result.error_message}")
                 return None
 
-            out_file = self._first_video_output(result.outputs)
-            if not out_file:
+            found = self._first_video_output(result.outputs)
+            if not found:
                 return None
+            out_file, out_sub = found
 
-            ok = await self.download_output(out_file, output_path)
+            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
             if ok and output_path.exists() and output_path.stat().st_size > 5_000:
                 logger.info(f"[ComfyUI] ✓ B-Roll generated ({prompt[:40]}) → {output_path.name}")
                 return output_path
@@ -313,8 +332,8 @@ class ComfyUIBridge:
                 logger.debug(f"[ComfyUI] poll error: {exc}")
             await asyncio.sleep(2.0)
 
-    def _first_video_output(self, outputs: Dict[str, Any]) -> Optional[str]:
-        """Find the first .mp4 filename in ComfyUI output dict."""
+    def _first_video_output(self, outputs: Dict[str, Any]) -> Optional[tuple]:
+        """Find the first .mp4 in ComfyUI output dict. Returns (filename, subfolder) or None."""
         for node_outputs in outputs.values():
             if not isinstance(node_outputs, dict):
                 continue
@@ -322,9 +341,13 @@ class ComfyUIBridge:
                 if not isinstance(file_list, list):
                     continue
                 for item in file_list:
-                    fname = item.get("filename", "") if isinstance(item, dict) else str(item)
+                    if isinstance(item, dict):
+                        fname = item.get("filename", "")
+                        sub = item.get("subfolder", "")
+                    else:
+                        fname, sub = str(item), ""
                     if fname.endswith(".mp4") or fname.endswith(".webm"):
-                        return fname
+                        return (fname, sub)
         return None
 
     async def get_system_stats(self) -> Dict[str, Any]:

@@ -132,3 +132,120 @@ Transcripción:
 Identifica todos los hooks virales en esta transcripción.
 Devuelve JSON con la lista de hooks encontrados.
 """.strip()
+
+
+# ── SUBAGENTE 4: Hook Rewriter ─────────────────────────────────────────────
+HOOK_REWRITER_SYSTEM_PROMPT = """
+Eres un experto en reescribir los primeros 3 segundos de clips virales.
+
+Tu objetivo: transformar cualquier inicio en un hook irresistible que 
+haga imposible hacer scroll.
+
+REGLAS:
+- Máximo 12 palabras
+- Debe funcionar SIN contexto previo (el espectador no vio nada antes)
+- Usar uno de estos patrones:
+  * Pregunta retórica: "¿Sabías que X hace Y sin que lo notes?"
+  * Dato bomba: "El 94% de la gente hace esto mal..."
+  * Afirmación polémica: "Todo lo que te dijeron sobre X es mentira"
+  * Promesa de valor: "En 30 segundos vas a entender por qué X"
+- Devolver 3 variantes ordenadas por potencia estimada
+- Idioma: el mismo que el texto de entrada
+
+OUTPUT JSON:
+{
+  "hooks": [
+    {"text": "hook aquí", "pattern": "tipo_de_patron", "score": 0-10},
+    {"text": "hook aquí", "pattern": "tipo_de_patron", "score": 0-10},
+    {"text": "hook aquí", "pattern": "tipo_de_patron", "score": 0-10}
+  ],
+  "best": "el mejor hook aquí"
+}
+""".strip()
+
+def build_hook_rewriter_prompt(segment_text: str, language: str) -> str:
+    return f"""
+Idioma: {language}
+Texto del segmento:
+{segment_text}
+
+Reescribe el inicio de este segmento como un hook viral.
+""".strip()
+
+
+# ── SUBAGENTE 5: B-roll Director ───────────────────────────────────────────
+BROLL_DIRECTOR_SYSTEM_PROMPT = """
+Eres un director de fotografía especializado en contenido viral de formato corto.
+
+Tu trabajo: describir visualmente qué imágenes o vídeos mostrar como B-roll 
+para cada momento del clip, maximizando el impacto visual.
+
+REGLAS:
+- Cada descripción debe ser específica y cinematográfica
+- Sin texto, logos ni caras reconocibles
+- Optimizado para generación con IA (Flux/SDXL)
+- Estilo: hiperreal, iluminación dramática, 4K
+- Duración sugerida por B-roll: 2-4 segundos
+- Máximo 5 B-rolls por clip
+
+OUTPUT JSON:
+{
+  "brolls": [
+    {
+      "timestamp": "MM:SS",
+      "duration": 3,
+      "prompt": "descripción visual detallada para Flux",
+      "mood": "dramatic|energetic|calm|mysterious"
+    }
+  ]
+}
+""".strip()
+
+def build_broll_director_prompt(segment_text: str, timestamps: str, language: str) -> str:
+    return f"""
+Idioma: {language}
+Timestamps del clip: {timestamps}
+Texto del clip:
+{segment_text}
+
+Genera los B-rolls visuales para este clip.
+""".strip()
+
+
+# ── SUBAGENTE 6: Quality Judge ─────────────────────────────────────────────
+QUALITY_JUDGE_SYSTEM_PROMPT = """
+Eres un juez de calidad para contenido viral de formato corto.
+Evalúas clips terminados y das feedback accionable.
+
+DIMENSIONES DE EVALUACIÓN (0-10 cada una):
+- hook_quality: ¿Los primeros 3 segundos enganchan sin contexto?
+- pacing: ¿El ritmo mantiene atención sin momentos muertos?
+- clarity: ¿El mensaje principal es claro y memorable?
+- cta_strength: ¿Termina con algo que invite a interactuar?
+- platform_fit: ¿Funciona para TikTok/Reels/Shorts?
+
+OUTPUT JSON:
+{
+  "scores": {
+    "hook_quality": 0-10,
+    "pacing": 0-10,
+    "clarity": 0-10,
+    "cta_strength": 0-10,
+    "platform_fit": 0-10
+  },
+  "overall": promedio_float,
+  "verdict": "approved|needs_improvement|rejected",
+  "top_issue": "el problema más crítico en una frase",
+  "quick_fix": "acción concreta para mejorar"
+}
+""".strip()
+
+def build_quality_judge_prompt(clip_transcript: str, hook_used: str, language: str) -> str:
+    return f"""
+Idioma: {language}
+Hook utilizado: {hook_used}
+Transcripción del clip:
+{clip_transcript}
+
+Evalúa la calidad de este clip para redes sociales.
+""".strip()

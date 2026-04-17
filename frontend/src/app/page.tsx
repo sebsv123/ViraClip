@@ -1,6 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { useSession } from "@/lib/auth-client";
 import { 
   Zap, 
   Sparkles, 
@@ -95,6 +97,16 @@ function StatCard({ value, label }: { value: string, label: string }) {
 }
 
 export default function LandingPage() {
+  const router = useRouter();
+  const { data: session, isPending } = useSession();
+  
+  // Redirect to dashboard if user is logged in
+  useEffect(() => {
+    if (!isPending && session) {
+      router.push("/dashboard");
+    }
+  }, [session, isPending, router]);
+  
   const features = [
     { icon: Scissors, title: "AI Clip Detection", description: "Advanced machine learning finds the most viral moments in your videos automatically", color: "cyan" },
     { icon: Subtitles, title: "Smart Subtitles", description: "Animated, emoji-enhanced captions with perfect timing and viral styling", color: "pink" },
@@ -110,6 +122,18 @@ export default function LandingPage() {
     { value: "100%", label: "Self-Hosted" },
     { value: "0", label: "Watermarks" },
   ];
+
+  // Show loading while checking session
+  if (isPending) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <div className="w-12 h-12 border-4 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin" />
+          <p className="text-gray-400">Loading...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white overflow-x-hidden font-sans">

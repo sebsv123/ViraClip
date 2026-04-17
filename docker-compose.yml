@@ -891,7 +891,6 @@ services:
       start_period: 60s
 
   comfyui:
-    profiles: ["gpu"]
     build:
       context: ./comfyui
       dockerfile: Dockerfile
@@ -899,25 +898,31 @@ services:
     ports:
       - "8188:8188"
     volumes:
-      - comfyui_models:/home/comfy/models
-      - comfyui_output:/home/comfy/output
-      - comfyui_input:/home/comfy/input
-      - ./backend/comfy_workflows:/home/comfy/user/default/workflows
-      - ./backend/src/comfy_nodes:/home/comfy/custom_nodes/viraclip_nodes
+      - ./comfyui/custom_nodes:/comfyui/custom_nodes
+      - ./workflows:/comfyui/workflows
+      - ./transitions:/comfyui/transitions
+      - ~/proyectos/ViraClip/uploads:/comfyui/input
+      - ~/proyectos/ViraClip/outputs:/comfyui/output
+      - ~/proyectos/ViraClip/models:/comfyui/models:ro
+      - comfyui_models:/comfyui/models:rw
     environment:
-      - CLI_ARGS=--preview-method latent2rgb --lowvram
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
+      - CUDA_MODULE_LOADING=LAZY
+      - OMP_NUM_THREADS=8
       - VRACLIP_API_URL=http://backend:8000
     deploy:
       resources:
+        limits:
+          cpus: '6.0'
+          memory: 10G
         reservations:
           devices:
             - driver: nvidia
-              count: all
+              count: 1
               capabilities: [gpu]
     restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8188/system_stats || exit 1"]
       interval: 30s
@@ -1017,6 +1022,8 @@ services:
 
 volumes:
   uploads:
+    driver: local
+  viraclip_clips:
     driver: local
   whisper_models:
     driver: local

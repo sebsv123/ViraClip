@@ -28,6 +28,7 @@ transformers==4.37.0
 faster-whisper==0.10.0
 mediapipe==0.10.9
 sentencepiece==0.1.99
+faiss-cpu==1.7.4
 
 # === Audio ===
 librosa==0.10.1
