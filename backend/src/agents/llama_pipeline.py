@@ -164,6 +164,51 @@ def build_quality_tool():
     return FunctionTool.from_defaults(fn=validate_quality, name="validate_quality", description="Validate pipeline output quality and approve or reject the clip")
 
 
+def build_memory_tool():
+    """Wraps RAG memory query as a FunctionTool for EditDecisionAgent."""
+    def query_clip_memory_tool(
+        transcript_excerpt: str,
+        mood: str = "inspirational",
+    ) -> dict:
+        """
+        Query historical successful clip decisions from RAG memory.
+        Returns edit and audio decisions that worked for similar content.
+        Use this BEFORE deciding edit style to leverage past successful patterns.
+        """
+        try:
+            from ..services.rag_memory import query_clip_memory
+            results = query_clip_memory(
+                query_text=transcript_excerpt,
+                mood=mood,
+                n_results=3,
+            )
+            if not results:
+                return {
+                    "memory_available": False,
+                    "message": "No historical data yet — using defaults",
+                    "past_decisions": [],
+                }
+            return {
+                "memory_available": True,
+                "past_decisions": results[:3],
+                "top_edit_style": results[0].get("edit_decisions", {}).get("speed_ramp_style"),
+                "top_lut": results[0].get("edit_decisions", {}).get("lut"),
+                "top_bgm_mood": results[0].get("audio_decisions", {}).get("bgm_mood"),
+                "top_quality_score": results[0].get("quality_score"),
+            }
+        except Exception as e:
+            logger.warning("[MemoryTool] Query failed: %s", e)
+            return {"memory_available": False, "error": str(e), "past_decisions": []}
+
+    if not LLAMA_AVAILABLE:
+        return query_clip_memory_tool
+    return FunctionTool.from_defaults(
+        fn=query_clip_memory_tool,
+        name="query_clip_memory",
+        description="Query historical successful ViraClip decisions for similar content. Returns edit and audio patterns that worked before.",
+    )
+
+
 # ── AgentWorkflow builder ─────────────────────────────────────────────────────
 
 def build_llama_pipeline(groq_api_key: str) -> Optional[Any]:
@@ -196,9 +241,9 @@ def build_llama_pipeline(groq_api_key: str) -> Optional[Any]:
     )
 
     edit_agent = FunctionAgent(
-        tools=[build_edit_tool()],
+        tools=[build_edit_tool(), build_memory_tool()],
         llm=llm,
-        system_prompt="Eres EditDecisionAgent. Decides el speed ramp style, SFX mood y LUT basándote en el mood del clip. Llama a apply_edit_decisions.",
+        system_prompt="Eres EditDecisionAgent. Decides el speed ramp style, SFX mood y LUT basándote en el mood del clip. Primero consulta query_clip_memory para ver qué funcionó antes, luego llama a apply_edit_decisions.",
         callback_manager=callback_manager,
         name="EditDecisionAgent",
     )
