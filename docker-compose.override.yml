@@ -1,0 +1,173 @@
+# Docker Compose Override for RTX 5070 Laptop
+# Hardware: Intel Core Ultra 7 255H + RTX 5070 8GB + 32GB RAM
+# This file extends docker-compose.yml with optimized resource limits
+
+services:
+  # PostgreSQL - Standard config (sufficient for local dev)
+  postgres:
+    ports:
+      - "5432:5432"
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+  # Redis - Lightweight cache
+  redis:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # Backend API - FastAPI
+  backend:
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 4G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+    environment:
+      - RENDER_CONCURRENCY=2
+
+  # Worker 1 - Primary GPU worker (RTX 5070)
+  worker:
+    deploy:
+      resources:
+        limits:
+          cpus: '8.0'
+          memory: 12G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - RENDER_CONCURRENCY=6
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
+      - SAM2_ENABLED=true
+      - T2V_ENABLED=true
+
+  # Worker 2 - CPU fallback (no GPU)
+  worker-2:
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 8G
+        reservations:
+          cpus: '3.0'
+          memory: 4G
+    environment:
+      - RENDER_CONCURRENCY=3
+      - CUDA_VISIBLE_DEVICES=""
+      - WHISPER_DEVICE=cpu
+      - SAM2_ENABLED=false
+      - T2V_ENABLED=false
+
+  # Worker 3 - Lightweight CPU tasks
+  worker-3:
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 6G
+        reservations:
+          cpus: '2.0'
+          memory: 3G
+    environment:
+      - RENDER_CONCURRENCY=2
+      - CUDA_VISIBLE_DEVICES=""
+      - WHISPER_DEVICE=cpu
+      - SAM2_ENABLED=false
+      - T2V_ENABLED=false
+
+  # Frontend - Next.js
+  frontend:
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+  # Nginx - Reverse proxy
+  nginx:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  # Ollama - Local LLM (optional, uses CPU)
+  ollama:
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8G
+        reservations:
+          cpus: '2.0'
+          memory: 4G
+
+  # GPU Worker - Specialized for heavy AI tasks
+  gpu_worker:
+    profiles:
+      - gpu
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 10G
+        reservations:
+          cpus: '4.0'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - RENDER_CONCURRENCY=4
+      - CUDA_VISIBLE_DEVICES=0
+      - NVIDIA_VISIBLE_DEVICES=all
+
+  # ComfyUI - Generative AI (GPU only)
+  # Los args de arranque viven en comfyui/entrypoint.sh (--lowvram por defecto).
+  # Para overridear sin reconstruir: COMFYUI_EXTRA_ARGS="--normalvram" docker-compose up
+  comfyui:
+    profiles:
+      - gpu
+    environment:
+      - COMFYUI_EXTRA_ARGS=${COMFYUI_EXTRA_ARGS:---lowvram --use-split-cross-attention --disable-smart-memory}
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 14G  # subido: T5 offloadeado vive en RAM (~5GB)
+        reservations:
+          cpus: '2.0'
+          memory: 8G
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

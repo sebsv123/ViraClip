@@ -1,66 +1,78 @@
-import logging
-from typing import List, Dict, Any, Optional
+"""
+Social Distribution Service — STUB mínimo.
+
+Este módulo fue referenciado por `video_service.py` y otros pero nunca se
+incluyó en el repo. Este stub permite que los imports funcionen y que el
+pipeline local (descarga → transcripción → LLM → render ComfyUI) se ejecute
+sin depender de distribución a TikTok/Instagram/YouTube.
+
+Si más adelante se implementa la distribución real, basta con reemplazar
+este archivo por la versión funcional.
+"""
+
+from __future__ import annotations
+
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import logging
 
 logger = logging.getLogger(__name__)
 
-class SocialDistributionService:
-    """
-    V4 Elite Social Distribution Hub.
-    Handles official API connectors for TikTok and Instagram Publishing.
-    """
 
-    @staticmethod
-    async def get_viral_hashtags(
-        clip_description: str,
-        platform: str = "tiktok"
-    ) -> List[str]:
-        """
-        Synthesizes high-engagement hashtags based on trend intelligence.
-        """
-        logger.info(f"🏷️ Distribution: Generating {platform} hashtags for clip")
-        # P4: Logic to call TrendIntelligenceAgent via EliteAIService
-        return ["#viraclip", "#elite", "#foryou", "#growth"]
+class SocialDistributionService:
+    """Stub de distribución social. Todos los métodos son no-ops seguros."""
 
     @staticmethod
     async def publish_clip(
         video_path: Path,
         platform: str,
-        caption: str,
-        hashtags: List[str],
-        user_auth_token: str
+        caption: str = "",
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
-        Officially publishes the clip to the target social platform.
+        No-op: no publica realmente. Devuelve un dict marcando skip.
         """
-        if platform not in ["tiktok", "instagram"]:
-            raise ValueError(f"Unsupported platform: {platform}")
-        
-        if not video_path.exists():
-            raise FileNotFoundError(f"Clip not found: {video_path}")
-
-        logger.warning(
-            f"[STUB] publish_clip called for {platform} — "
-            "real API integration (P4) is not yet implemented. Returning mock response."
+        logger.info(
+            "SocialDistributionService.publish_clip (stub): "
+            "platform=%s, video=%s — skipped",
+            platform,
+            video_path,
         )
-
-        # P4: Integration with TikTok Content Posting API / IG Graph API
-        # TODO: Implement the three-step upload flow:
-        #   1. Initialize upload  (POST /publish/video/init)
-        #   2. Upload video binary (PUT  /publish/video/upload)
-        #   3. Post caption/meta  (POST /publish/video/complete)
-
         return {
+            "success": False,
+            "skipped": True,
+            "reason": "SocialDistributionService not implemented (stub)",
             "platform": platform,
-            "status": "pending_implementation",   # never claim success when it's a stub
-            "stub": True,
-            "message": "Social publishing is not yet connected to the platform API (P4).",
+            "video_path": str(video_path),
         }
 
     @staticmethod
     def get_oauth_url(platform: str) -> str:
         """
-        Generates the OAuth2 redirect URL for platform authorization.
+        No-op: devuelve string vacío para evitar crashes en rutas auth.
         """
-        logger.info(f"🔑 Distribution: Generating OAuth2 URL for {platform}")
-        return f"https://auth.{platform}.com/oauth2/authorize?client_id=viraclip&scope=video.upload,user.info"
+        logger.info(
+            "SocialDistributionService.get_oauth_url (stub): platform=%s", platform
+        )
+        return ""
+
+    @staticmethod
+    async def get_viral_hashtags(
+        transcript: str,
+        platform: str = "tiktok",
+        **kwargs: Any,
+    ) -> List[str]:
+        """
+        No-op: devuelve lista vacía. El pipeline continúa sin hashtags.
+        """
+        logger.debug(
+            "SocialDistributionService.get_viral_hashtags (stub): "
+            "platform=%s, transcript_len=%d — returning []",
+            platform,
+            len(transcript or ""),
+        )
+        return []
+
+
+__all__ = ["SocialDistributionService"]

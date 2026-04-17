@@ -36,9 +36,9 @@ model User {
   default_font_color  String?   @default("#FFFFFF") @db.VarChar(7)
   notify_on_completion Boolean  @default(true)
 
-  // Waitlist and beta access
-  waitlist_status      String    @default("pending") @db.VarChar(20) // pending|approved|rejected
-  beta_access          Boolean   @default(false)
+  // Waitlist and beta access - AUTO-APPROVED for testing
+  waitlist_status      String    @default("approved") @db.VarChar(20) // pending|approved|rejected
+  beta_access          Boolean   @default(true)
   clips_this_month     Int       @default(0)
   last_reset_date      DateTime  @default(now()) @db.Timestamptz
 

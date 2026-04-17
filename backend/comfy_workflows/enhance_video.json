@@ -10,7 +10,10 @@
       "frame_load_cap": 0,
       "skip_first_frames": 0,
       "select_every_nth": 1,
-      "meta_batch": ["99", 0]
+      "meta_batch": [
+        "99",
+        0
+      ]
     }
   },
   "2": {
@@ -22,14 +25,23 @@
   "3": {
     "class_type": "ImageUpscaleWithModel",
     "inputs": {
-      "upscale_model": ["2", 0],
-      "image": ["1", 0]
+      "upscale_model": [
+        "2",
+        0
+      ],
+      "image": [
+        "1",
+        0
+      ]
     }
   },
   "4": {
     "class_type": "ImageScale",
     "inputs": {
-      "image": ["3", 0],
+      "image": [
+        "3",
+        0
+      ],
       "upscale_method": "lanczos",
       "width": 1080,
       "height": 1920,
@@ -39,20 +51,27 @@
   "5": {
     "class_type": "VHS_VideoCombine",
     "inputs": {
-      "images": ["4", 0],
+      "images": [
+        "4",
+        0
+      ],
       "frame_rate": 30,
       "loop_count": 0,
       "filename_prefix": "enhanced_",
       "format": "video/h264-mp4",
       "pingpong": false,
       "save_output": true,
-      "audio": ["1", 2]
+      "audio": [
+        "1",
+        2
+      ]
     }
   },
   "99": {
     "class_type": "VHS_BatchManager",
     "inputs": {
-      "batch_size": 16
+      "batch_size": 16,
+      "frames_per_batch": 16
     }
   }
 }

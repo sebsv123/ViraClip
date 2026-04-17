@@ -55,6 +55,9 @@ class ErrorCode(str, Enum):
     INVALID_CONFIGURATION = "E7001"
     MISSING_API_KEY = "E7002"
     
+    # Pipeline gate errors (8xxx)
+    PIPELINE_CANCELLED = "E8001"
+    
     # Unknown
     UNKNOWN_ERROR = "E9999"
 
@@ -332,4 +335,29 @@ class MissingAPIKeyError(ConfigurationException):
             error_code=ErrorCode.MISSING_API_KEY,
             retryable=False,
             context={"service": service, "env_var": env_var}
+        )
+
+
+# ── Pipeline Gate Exceptions ────────────────────────────────────────────────
+
+class PipelineCancelledError(ViraClipException):
+    """Pipeline cancelled by a quality gate (e.g. viral gate threshold not met)."""
+    
+    def __init__(
+        self,
+        reason: str,
+        gate: str = "unknown",
+        best_score: Optional[float] = None,
+        recommendation: Optional[str] = None,
+    ):
+        super().__init__(
+            message=f"Pipeline cancelled by {gate}: {reason}",
+            error_code=ErrorCode.PIPELINE_CANCELLED,
+            retryable=False,
+            context={
+                "gate": gate,
+                "reason": reason,
+                "best_score": best_score,
+                "recommendation": recommendation,
+            },
         )
