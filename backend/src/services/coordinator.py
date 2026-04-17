@@ -344,6 +344,45 @@ class VideoCoordinator:
                 except Exception as scene_err:
                     logger.warning(f"Scene detection skipped: {scene_err}")
             
+            # PHASE 2.7: LangGraph creative pipeline — enrich segments with agent decisions
+            await emit_progress(self.task_id, "creative_pipeline", 63, "Running creative pipeline...")
+            try:
+                from .langgraph_pipeline import run_langgraph_pipeline
+                from ..config import get_config
+                _cfg = get_config()
+
+                enriched_segments = []
+                for seg in segments:
+                    try:
+                        creative = await run_langgraph_pipeline(
+                            transcript=seg.get("text", ""),
+                            mood=seg.get("mood", "inspirational"),
+                            language=self.config.get("language", "es"),
+                            duration=float(seg.get("end", 60)) - float(seg.get("start", 0)),
+                            hook_strength=float(seg.get("score", 5)),
+                            groq_api_key=_cfg.groq_api_key,
+                            task_id=self.task_id,
+                        )
+                        # Merge creative decisions into segment
+                        seg["hook_text"] = creative.get("hook", {}).get("hook_text") or seg.get("hook_text", "")
+                        seg["hook_variants"] = creative.get("hook", {}).get("hook_variants", [])
+                        seg["edit_decisions"] = creative.get("edit", {})
+                        seg["audio_decisions"] = creative.get("audio", {})
+                        seg["caption_decisions"] = creative.get("captions", {})
+                        seg["quality_score"] = creative.get("quality", {}).get("overall_score", 0)
+                        seg["creative_warnings"] = creative.get("warnings", [])
+                        if creative.get("warnings"):
+                            logger.warning("[Phase 2.7] Segment warnings: %s", creative["warnings"])
+                    except Exception as _ce:
+                        logger.warning("[Phase 2.7] Creative pipeline skipped for segment: %s", _ce)
+                    enriched_segments.append(seg)
+
+                segments = enriched_segments
+                await emit_progress(self.task_id, "creative_pipeline", 64, f"Creative pipeline done ({len(segments)} segments enriched)")
+                logger.info("[Phase 2.7] Creative pipeline complete for %d segments", len(segments))
+            except Exception as _lg_err:
+                logger.warning("[Phase 2.7] LangGraph pipeline skipped: %s", _lg_err)
+
             # PHASE 3: Parallel clip rendering
             await emit_progress(self.task_id, "render", 65, "Rendering clips...")
             
