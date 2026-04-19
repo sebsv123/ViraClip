@@ -367,8 +367,88 @@ DEFAULT_FLAGS = {
         "strategy": RolloutStrategy.CANARY,
         "enabled": True,
         "description": "Advanced analytics and reporting"
-    }
+    },
+    # ── Viral Boost flags ────────────────────────────────────────────────
+    "hook_visual": {
+        "strategy": RolloutStrategy.ALL_USERS,
+        "enabled": True,
+        "description": "HookVisualService text overlay on first seconds"
+    },
+    "cinematic_intro": {
+        "strategy": RolloutStrategy.ALL_USERS,
+        "enabled": True,
+        "description": "FFmpeg cinematic intro (letterbox + flash + zoom)"
+    },
+    "broll_use_images": {
+        "strategy": RolloutStrategy.ALL_USERS,
+        "enabled": True,
+        "description": "Pexels image + Ken Burns as B-roll fallback"
+    },
+    "ltxv_broll": {
+        "strategy": RolloutStrategy.ALL_USERS,
+        "enabled": False,
+        "description": "LTX-Video T2V B-roll generation via ComfyUI"
+    },
+    "ltxv_intro": {
+        "strategy": RolloutStrategy.ALL_USERS,
+        "enabled": False,
+        "description": "LTX-Video I2V intro hook animation"
+    },
 }
+
+
+@dataclass
+class ViralBoostConfig:
+    """
+    Resolved Viral Boost feature configuration.
+    Reads env vars as defaults, can be overridden per-preset or per-user
+    via the FeatureFlagManager.
+    """
+    hook_visual: bool = True
+    cinematic_intro: bool = True
+    broll_use_images: bool = True
+    broll_max_overlays: int = 8
+    broll_slot_timeout: float = 30.0
+    broll_min_spacing: float = 3.0
+    ltxv_enabled: bool = False
+    ltxv_broll_max_per_clip: int = 2
+    ltxv_clip_timeout: float = 180.0
+
+    @classmethod
+    def from_env(cls, user_id: Optional[str] = None) -> "ViralBoostConfig":
+        """Build config from environment + feature flags."""
+        import os
+        _bool = lambda k, d: os.environ.get(k, d).lower() not in ("false", "0", "no")
+
+        cfg = cls(
+            hook_visual=_bool("HOOK_VISUAL_ENABLED", "true"),
+            cinematic_intro=_bool("CINEMATIC_INTRO_ENABLED", "true"),
+            broll_use_images=_bool("BROLL_USE_IMAGES", "true"),
+            broll_max_overlays=int(os.environ.get("BROLL_MAX_OVERLAYS", "8")),
+            broll_slot_timeout=float(os.environ.get("BROLL_SLOT_TIMEOUT_SEC", "30")),
+            broll_min_spacing=float(os.environ.get("BROLL_MIN_SPACING_SEC", "3.0")),
+            ltxv_enabled=_bool("LTXV_ENABLED", "false"),
+            ltxv_broll_max_per_clip=int(os.environ.get("LTXV_BROLL_MAX_PER_CLIP", "2")),
+            ltxv_clip_timeout=float(os.environ.get("LTXV_CLIP_TIMEOUT_SEC", "180")),
+        )
+
+        # Override from flag manager if user-specific flags exist
+        try:
+            fm = get_feature_flag_manager()
+            if not fm.is_enabled("hook_visual", user_id):
+                cfg.hook_visual = False
+            if not fm.is_enabled("cinematic_intro", user_id):
+                cfg.cinematic_intro = False
+            if not fm.is_enabled("broll_use_images", user_id):
+                cfg.broll_use_images = False
+            if fm.is_enabled("ltxv_broll", user_id):
+                cfg.ltxv_enabled = True
+            if fm.is_enabled("ltxv_intro", user_id):
+                cfg.ltxv_enabled = True
+        except Exception:
+            pass  # Fall back to env-only
+
+        return cfg
 
 
 def initialize_default_flags() -> None:
