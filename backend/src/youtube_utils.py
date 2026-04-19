@@ -566,8 +566,12 @@ def _download_youtube_video_with_ytdlp(
             except Exception:
                 pass
 
+            # Use full path to yt-dlp in container (not in PATH)
+            _ytdlp_path = "/app/.venv/bin/yt-dlp"
+            if not Path(_ytdlp_path).exists():
+                _ytdlp_path = "yt-dlp"  # fallback to PATH
             cmd = [
-                "yt-dlp",
+                _ytdlp_path,
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",

@@ -55,7 +55,7 @@ class ClipRepository:
             result = await db.execute(
                 sa_text("""
                     INSERT INTO generated_clips
-                    (task_id, filename, file_path, start_time, end_time, duration,
+                    (id, task_id, filename, file_path, start_time, end_time, duration,
                      text, relevance_score, reasoning, clip_order,
                      virality_score, hook_score, engagement_score, value_score, shareability_score, hook_type,
                      translated_text,
@@ -66,7 +66,7 @@ class ClipRepository:
                      cta_overlay_applied, emoji_overlays_applied, variants_json,
                      created_at)
                     VALUES
-                    (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
+                    (:id, :task_id, :filename, :file_path, :start_time, :end_time, :duration,
                      :text, :relevance_score, :reasoning, :clip_order,
                      :virality_score, :hook_score, :engagement_score, :value_score, :shareability_score, :hook_type,
                      :translated_text,
@@ -79,6 +79,7 @@ class ClipRepository:
                     RETURNING id
                 """),
                 {
+                    "id": str(__import__('uuid').uuid4()),
                     "task_id": task_id,
                     "filename": filename,
                     "file_path": file_path,
@@ -113,14 +114,15 @@ class ClipRepository:
             result = await db.execute(
                 sa_text("""
                     INSERT INTO generated_clips
-                    (task_id, filename, file_path, start_time, end_time, duration,
+                    (id, task_id, filename, file_path, start_time, end_time, duration,
                      text, relevance_score, reasoning, clip_order, created_at)
                     VALUES
-                    (:task_id, :filename, :file_path, :start_time, :end_time, :duration,
+                    (:id, :task_id, :filename, :file_path, :start_time, :end_time, :duration,
                      :text, :relevance_score, :reasoning, :clip_order, NOW())
                     RETURNING id
                 """),
                 {
+                    "id": str(__import__('uuid').uuid4()),
                     "task_id": task_id,
                     "filename": filename,
                     "file_path": file_path,
