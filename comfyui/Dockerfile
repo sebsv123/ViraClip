@@ -8,7 +8,7 @@ ENV CUDA_MODULE_LOADING=LAZY
 ENV OMP_NUM_THREADS=8
 
 RUN apt-get update && apt-get install -y \
-    python3 python3-pip git wget ffmpeg \
+    python3 python3-pip git wget curl ffmpeg \
     libgl1-mesa-glx libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 

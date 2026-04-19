@@ -10,7 +10,9 @@ Pipeline:
            → audio mastering (loudnorm + SFX) → QA + render manifest
 """
 
+import asyncio
 import logging
+import os
 import traceback
 from pathlib import Path
 
@@ -18,6 +20,45 @@ logger = logging.getLogger(__name__)
 
 # Runtime diagnostics flag - set to True to see detailed error traces
 DIAGNOSTIC_MODE = True
+
+async def _apply_cinematic_intro(clip_path: Path, output_path: Path) -> bool:
+    """
+    Apply a cinematic intro effect to the first ~0.5s of the clip:
+      1. Letterbox bars slide in from top/bottom (0.0–0.3s)
+      2. Slight white flash (0.1s at t=0)
+      3. Zoom-in from 115% → 100% over the first 0.4s
+
+    Implemented as a single FFmpeg pass with drawbox + eq filters.
+    Returns True on success, False on failure.
+    """
+    try:
+        vf = (
+            # Letterbox bars: black drawbox top and bottom, fade out by t=0.35
+            "drawbox=x=0:y=0:w=iw:h=ih*0.06:color=black@'if(lt(t,0.35),1-t/0.35,0)':t=fill,"
+            "drawbox=x=0:y=ih*0.94:w=iw:h=ih*0.06:color=black@'if(lt(t,0.35),1-t/0.35,0)':t=fill,"
+            # White flash at t=0, fades by t=0.12
+            "drawbox=x=0:y=0:w=iw:h=ih:color=white@'if(lt(t,0.12),0.55*(1-t/0.12),0)':t=fill,"
+            # Zoom from 115% → 100% over 0.4s using scale+crop
+            "scale='if(lt(t,0.4),iw*(1.15-0.15*t/0.4),iw)':'if(lt(t,0.4),ih*(1.15-0.15*t/0.4),ih)',"
+            "crop=iw/if(lt(t,0.4),(1.15-0.15*t/0.4),1):ih/if(lt(t,0.4),(1.15-0.15*t/0.4),1):'"
+            "(iw-iw/if(lt(t,0.4),(1.15-0.15*t/0.4),1))/2':"
+            "'(ih-ih/if(lt(t,0.4),(1.15-0.15*t/0.4),1))/2'"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-hide_banner", "-loglevel", "quiet", "-y",
+            "-i", str(clip_path),
+            "-vf", vf,
+            "-c:a", "copy",
+            str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=120.0)
+        return output_path.exists() and output_path.stat().st_size > 0
+    except Exception as exc:
+        logger.debug("_apply_cinematic_intro failed: %s", exc)
+        return False
+
 
 def _log_step_error(step_name: str, exc: Exception, critical: bool = False):
     """Log detailed error information for pipeline step failures."""
@@ -228,44 +269,118 @@ class CreativePipeline:
         except Exception as exc:
             logger.debug("  [Creative] Hook reorder failed: %s", exc)
 
-        # ── 5. B-roll overlay ─────────────────────────────────────────────────
-        logger.info("  [Creative] Step 5/8: B-roll overlay...")
+        # ── 4.8. Hook visual overlay (text animation on first 2s) ────────────
+        if os.environ.get("HOOK_VISUAL_ENABLED", "true").lower() == "true":
+            logger.info("  [Creative] Step 4.8: Hook visual overlay...")
+            try:
+                from .hook_visual_service import HookVisualService
+                _hook_svc = HookVisualService()
+                _hook_segment = {
+                    "text": transcript or "",
+                    "hook_type": meta.get("hook_text") and "curiosity_gap" or "insight_reveal",
+                }
+                _hook_overlay = _hook_svc.generate_hook_from_segment(_hook_segment, duration=2.0)
+                if _hook_overlay.text:
+                    _hooked = clip_path.with_name(f"hv_{clip_path.name}")
+                    _hv_result = await _hook_svc.add_hook_to_video(
+                        str(clip_path), str(_hooked), _hook_overlay
+                    )
+                    if _hv_result == str(_hooked) and _hooked.exists() and _hooked.stat().st_size > 0:
+                        clip_path.unlink(missing_ok=True)
+                        _hooked.rename(clip_path)
+                        logger.info("  [Creative] ✓ Step 4.8: Hook visual overlay applied: '%s'", _hook_overlay.text[:40])
+                    else:
+                        _hooked.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.debug("  [Creative] Step 4.8 (Hook visual) skipped: %s", exc)
+
+        # ── 4.9. Cinematic intro (FFmpeg letterbox+flash+zoom, fallback if no LTXV) ─
+        _ltxv_intro_active = meta.get("ltxv_intro_applied", False)
+        if (not _ltxv_intro_active
+                and os.environ.get("CINEMATIC_INTRO_ENABLED", "true").lower() == "true"):
+            logger.info("  [Creative] Step 4.9: Cinematic intro (FFmpeg)...")
+            try:
+                _intro_out = clip_path.with_name(f"intro_{clip_path.name}")
+                _intro_ok = await _apply_cinematic_intro(clip_path, _intro_out)
+                if _intro_ok and _intro_out.exists() and _intro_out.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    _intro_out.rename(clip_path)
+                    logger.info("  [Creative] ✓ Step 4.9: Cinematic intro applied")
+                else:
+                    _intro_out.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.debug("  [Creative] Step 4.9 (Cinematic intro) skipped: %s", exc)
+
+        # ── 5. B-roll overlay (density-planned) ────────────────────────────
+        logger.info("  [Creative] Step 5/8: B-roll overlay (density-planned)...")
         broll_count = 0
         try:
-            logger.debug("  [Creative] Importing contextual_broll & video_effects...")
             from .contextual_broll import get_contextual_broll
             from .video_effects import overlay_broll_clips
-            logger.debug("  [Creative] B-roll imports OK")
-            broll_pairs = await get_contextual_broll().get_for_timeline(
-                timeline, max_assets=3
-            )
+            from .multimodal_detector import TimelineEvent
 
-            # Fallback: if timeline had no hook/impact keyword hits, use LLM to extract
-            # visual keywords from the actual transcript ("what the speaker says")
+            clip_dur = max(1.0, end - start)
+            _broll_ctx = get_contextual_broll()
+            broll_pairs: list = []
+
+            # ── 5a. Run density planner to get prioritised slots ─────────
+            try:
+                from .broll_density_planner import plan_broll_density
+                _energy = float((audio_features or {}).get("energy", 0.5) or 0.5)
+                density_plan = plan_broll_density(
+                    timeline_events=timeline,
+                    clip_duration=clip_dur,
+                    transcript=transcript,
+                    audio_energy=_energy,
+                    preset_name=preset.name if preset else "",
+                )
+                logger.info(
+                    "  [Creative] Density plan: %d slots, coverage=%.0f%%, ltxv=%d",
+                    len(density_plan.slots),
+                    density_plan.planned_coverage * 100,
+                    density_plan.ltxv_slots,
+                )
+                # Resolve each slot via the cascade
+                for slot in density_plan.slots:
+                    asset = await _broll_ctx.get_for_keyword(
+                        slot.keyword, duration=slot.duration, mood=slot.visual_mode,
+                    )
+                    if asset:
+                        evt = TimelineEvent(
+                            t=slot.t, type="keyword", strength=0.7,
+                            duration=slot.duration,
+                            payload={"word": slot.keyword, "category": "planner"},
+                        )
+                        broll_pairs.append((evt, asset))
+            except ImportError:
+                logger.debug("  [Creative] BrollDensityPlanner not available, falling back to timeline")
+            except Exception as _plan_exc:
+                logger.debug("  [Creative] Planner failed: %s, falling back", _plan_exc)
+
+            # ── 5b. Fallback: timeline-based if planner yielded nothing ──
+            if not broll_pairs:
+                broll_pairs = await _broll_ctx.get_for_timeline(timeline, max_assets=8)
+
+            # ── 5c. LLM keyword fallback if still empty ──────────────────
             if not broll_pairs and transcript:
                 try:
                     from .broll_service import BrollService
-                    from .multimodal_detector import TimelineEvent
                     llm_kws = await BrollService().extract_keywords(transcript)
-                    clip_dur = max(1.0, end - start)
-                    llm_pairs = []
-                    for i, kw in enumerate(llm_kws[:2]):
-                        asset = await get_contextual_broll().get_for_keyword(kw, duration=3.0)
+                    for i, kw in enumerate(llm_kws[:3]):
+                        asset = await _broll_ctx.get_for_keyword(kw, duration=3.0)
                         if asset:
-                            t_ins = max(2.0, min(4.0 + i * 7.0, clip_dur - 4.0))
+                            t_ins = max(2.0, min(4.0 + i * 6.0, clip_dur - 4.0))
                             evt = TimelineEvent(
                                 t=t_ins, type="keyword", strength=0.7,
                                 duration=3.0, payload={"word": kw, "category": "broll_llm"},
                             )
-                            llm_pairs.append((evt, asset))
-                    if llm_pairs:
-                        broll_pairs = llm_pairs
-                        logger.info(
-                            "  [Creative] B-roll LLM fallback: keywords=%s", llm_kws
-                        )
+                            broll_pairs.append((evt, asset))
+                    if broll_pairs:
+                        logger.info("  [Creative] B-roll LLM fallback: %d assets", len(broll_pairs))
                 except Exception as _fb:
                     logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
 
+            # ── 5d. Apply overlays ───────────────────────────────────────
             if broll_pairs:
                 brolled = clip_path.with_name(f"broll_{clip_path.name}")
                 result = await overlay_broll_clips(clip_path, broll_pairs, brolled)

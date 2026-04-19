@@ -2,9 +2,13 @@
 Video Effects — Phase 9.10/9.11 Creative Engine
 
 FFmpeg-based visual effects applied in a single post-render pass:
-  - Zoom punch-in at audio peak timestamps (zoompan)
+  - Zoom punch-in at audio peak timestamps (scale+crop, NOT zoompan)
   - Color grade / vignette from template preset (extra_vf_filters)
   - B-roll full-screen overlay at keyword event timestamps
+
+NOTE: zoompan with d=1 was replaced by scale+crop to avoid the known FFmpeg bug
+where d=1 forces frame-by-frame re-encoding, making the entire clip 10x slower.
+The scale+crop approach evaluates between(t,...) inline and processes in one pass.
 """
 
 import asyncio
@@ -23,10 +27,11 @@ def _is_image_path(path: str) -> bool:
     return _Path(path).suffix.lower() in _IMAGE_EXTS
 
 
-_PUNCH_ZOOM    = 1.04   # 4% zoom for punch
-_PUNCH_DUR_S   = 0.25   # duration of each punch in seconds
-_MAX_PUNCHES   = 1      # cap to keep filtergraph readable
-_BROLL_MAX     = 3      # max B-roll overlays per clip
+_PUNCH_ZOOM    = 1.08   # 8% zoom for punch (was 1.04)
+_PUNCH_DUR_S   = 0.18   # duration of each punch in seconds (was 0.25)
+_MAX_PUNCHES   = 3      # cap (was 1)
+_BROLL_MAX     = 8      # max B-roll overlays per clip (was 3)
+_PUNCH_SAT     = 1.35   # saturation boost during punch
 
 
 # ── Zoom punch + color grade ──────────────────────────────────────────────────
@@ -50,7 +55,7 @@ async def apply_preset_effects(
     if getattr(preset, "zoom_punch_enabled", False) and peak_events:
         strong_peaks = [e for e in peak_events if e.type == "audio_peak" and e.strength >= 0.65]
         if strong_peaks:
-            zoom_vf = _build_zoompan(strong_peaks[:_MAX_PUNCHES], preset)
+            zoom_vf = _build_zoom_punch(strong_peaks[:_MAX_PUNCHES], preset)
             vf_parts.append(zoom_vf)
 
     # Color grade / vignette filters
@@ -82,30 +87,48 @@ async def apply_preset_effects(
         return None
 
 
-def _build_zoompan(peaks: list, preset) -> str:
+def _build_zoom_punch(peaks: list, preset) -> str:
     """
-    Build an FFmpeg zoompan filter expression that briefly zooms to
-    _PUNCH_ZOOM at each peak timestamp and returns to 1.0 in between.
-    """
-    w, h = getattr(preset, "resolution", (1080, 1920))
-    fps   = getattr(preset, "fps", 30)
-    peaks = peaks[:_MAX_PUNCHES]  # cap regardless of caller
+    Build FFmpeg scale+crop filters for zoom punch at audio peak timestamps.
 
-    # between(t, start, end) returns 1 inside the interval, 0 outside
-    interval_parts = "+".join(
+    Replaces the old zoompan d=1 approach which caused a known FFmpeg bug:
+    zoompan with d=1 forces per-frame re-encoding, making the whole clip 10x
+    slower. This scale+crop method evaluates between(t,...) inline and runs
+    in a single streaming pass with no frame buffering.
+
+    Strategy: scale up by _PUNCH_ZOOM during punch interval → crop back to
+    original resolution centered. Also applies a saturation boost during punch.
+    """
+    w, h   = getattr(preset, "resolution", (1080, 1920))
+    peaks  = peaks[:_MAX_PUNCHES]
+
+    z      = _PUNCH_ZOOM
+    sw     = round(w * z)   # scaled width
+    sh     = round(h * z)   # scaled height
+    cx     = (sw - w) // 2  # crop x offset
+    cy     = (sh - h) // 2  # crop y offset
+
+    # Build one between() expression per punch interval
+    in_punch = "+".join(
         f"between(t,{round(e.t, 3)},{round(e.t + _PUNCH_DUR_S, 3)})"
         for e in peaks
     )
-    zoom_expr = f"if(gt({interval_parts},0),{_PUNCH_ZOOM},1)"
+    in_punch_expr = f"gt({in_punch},0)"   # 1 during any punch, 0 otherwise
+
+    # scale: full size when punching, original size otherwise (then crop is a no-op)
+    scale_w = f"if({in_punch_expr},{sw},{w})"
+    scale_h = f"if({in_punch_expr},{sh},{h})"
+    # crop x/y: offset during punch, 0 otherwise
+    crop_x  = f"if({in_punch_expr},{cx},0)"
+    crop_y  = f"if({in_punch_expr},{cy},0)"
+
+    # saturation boost during punch via eq filter
+    sat_expr = f"if({in_punch_expr},{_PUNCH_SAT},1)"
 
     return (
-        f"zoompan="
-        f"zoom='{zoom_expr}':"
-        f"x='iw/2-(iw/zoom/2)':"
-        f"y='ih/2-(ih/zoom/2)':"
-        f"d=1:"
-        f"s={w}x{h}:"
-        f"fps={fps}"
+        f"scale='{scale_w}':'{scale_h}',"
+        f"crop={w}:{h}:'{crop_x}':'{crop_y}',"
+        f"eq=saturation='{sat_expr}'"
     )
 
 

@@ -96,20 +96,44 @@ class ContextualBroll:
     ) -> "BrollAsset | None":
         """Return a B-roll asset for keyword, or None if nothing found.
 
-        Lookup order:
+        Lookup order (cascade with 30s total timeout):
           1. Local asset bank (instant, offline, category-aware)
-          2. Multi-source: Pexels + Pixabay + Coverr in parallel
-          3. Replicate T2V (only when T2V_ENABLED=true)
+          2. Multi-source video: Pexels + Pixabay + Coverr in parallel
+          3. Pexels/Unsplash IMAGE → Ken Burns animation (FFmpeg, cheap)
+          4. Replicate T2V or LTXV local (only when enabled)
         """
+        _timeout = float(os.environ.get("BROLL_SLOT_TIMEOUT_SEC", "30"))
+        try:
+            return await asyncio.wait_for(
+                self._cascade_lookup(keyword, duration, mood),
+                timeout=_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("B-roll lookup timed out (%.0fs) for '%s'", _timeout, keyword)
+            return None
+
+    async def _cascade_lookup(
+        self, keyword: str, duration: float, mood: str
+    ) -> "BrollAsset | None":
+        """Internal cascade — called inside the per-slot timeout."""
+        # 1. Local asset bank
         local = self._find_local(keyword)
         if local:
             return BrollAsset(str(local), "local", keyword, duration)
 
+        # 2. Multi-source video (Pexels + Pixabay + Coverr)
         if self._pexels_key or self._pixabay_key or self._coverr_key:
             path = await self._fetch_multi_source(keyword, duration)
             if path:
                 return BrollAsset(path, "multi", keyword, duration)
 
+        # 3. Image fallback → Ken Burns (Pexels image search, very cheap)
+        if self._pexels_key:
+            img_path = await self._fetch_pexels_image(keyword)
+            if img_path:
+                return BrollAsset(img_path, "image", keyword, duration)
+
+        # 4. T2V / LTXV generation (expensive, last resort)
         if self._t2v_enabled and self._replicate_token:
             path = await self._generate_t2v(keyword, duration, mood=mood)
             if path:
@@ -127,10 +151,12 @@ class ContextualBroll:
 
         Returns [(event, BrollAsset), ...] for events where an asset was found.
         """
+        # Include hook, impact, energy keywords AND silence gaps ≥2s for B-roll
         candidates = [
             e for e in timeline_events
-            if e.type == "keyword"
-            and e.payload.get("category") in ("hook", "impact")
+            if (e.type == "keyword"
+                and e.payload.get("category") in ("hook", "impact", "energy", "broll_llm"))
+            or (e.type == "silence" and e.duration >= 2.0)
         ][:max_assets]
 
         results = await asyncio.gather(
@@ -196,6 +222,48 @@ class ContextualBroll:
             return str(result) if result else None
         except Exception as exc:
             logger.debug("Multi-source B-roll failed for '%s': %s", keyword, exc)
+            return None
+
+    async def _fetch_pexels_image(self, keyword: str) -> "str | None":
+        """
+        Search Pexels for a portrait IMAGE (not video) and download it.
+        The broll_compositor.normalize_broll() will detect the image extension
+        and apply Ken Burns animation with silent audio automatically.
+        Returns local image path or None.
+        """
+        if not self._pexels_key:
+            return None
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    "https://api.pexels.com/v1/search",
+                    params={"query": keyword, "per_page": 5, "orientation": "portrait"},
+                    headers={"Authorization": self._pexels_key},
+                )
+                if resp.status_code != 200:
+                    return None
+                photos = resp.json().get("photos", [])
+                if not photos:
+                    return None
+                # Pick the first photo, use the "large" size (portrait, ~1280px)
+                import random
+                photo = random.choice(photos[:3])
+                img_url = photo.get("src", {}).get("large2x") or photo.get("src", {}).get("large")
+                if not img_url:
+                    return None
+                # Download
+                img_resp = await client.get(img_url)
+                if img_resp.status_code != 200:
+                    return None
+                ext = ".jpg"
+                img_path = self._bank / f"pexels_{keyword[:20].replace(' ', '_')}{ext}"
+                img_path.parent.mkdir(parents=True, exist_ok=True)
+                img_path.write_bytes(img_resp.content)
+                logger.debug("Pexels image downloaded for '%s': %s", keyword, img_path)
+                return str(img_path)
+        except Exception as exc:
+            logger.debug("Pexels image fetch failed for '%s': %s", keyword, exc)
             return None
 
     async def _generate_t2v(

@@ -4,7 +4,31 @@
 
 echo "[ViraClip] Iniciando entrypoint..."
 
-# Instalar dependencias de custom_nodes si existen
+# ── Clone ComfyUI-LTXVideo if not present ────────────────────────────────────
+LTXV_DIR="/comfyui/custom_nodes/ComfyUI-LTXVideo"
+if [ ! -d "$LTXV_DIR" ]; then
+    echo "[ViraClip] Cloning ComfyUI-LTXVideo..."
+    git clone https://github.com/Lightricks/ComfyUI-LTXVideo "$LTXV_DIR" 2>&1 | tail -5
+fi
+
+# ── Download LTX-Video model if not present ──────────────────────────────────
+LTXV_MODEL="/comfyui/models/checkpoints/ltxv-2b-0.9.8-distilled-fp8.safetensors"
+if [ ! -f "$LTXV_MODEL" ]; then
+    echo "[ViraClip] Downloading LTX-Video 0.9.8-distilled FP8 (~3.8 GB)..."
+    pip3 install --no-cache-dir huggingface_hub 2>/dev/null
+    python3 -c "
+from huggingface_hub import hf_hub_download
+hf_hub_download(
+    repo_id='Lightricks/LTX-Video',
+    filename='ltxv-2b-0.9.8-distilled-fp8.safetensors',
+    local_dir='/comfyui/models/checkpoints/',
+    local_dir_use_symlinks=False
+)
+print('[ViraClip] LTX-Video model downloaded OK')
+" 2>&1 || echo "[ViraClip] WARNING: LTX-Video model download failed (will retry on next start)"
+fi
+
+# ── Install requirements for all custom_nodes ────────────────────────────────
 if [ -d "/comfyui/custom_nodes" ]; then
     echo "[ViraClip] Instalando dependencias de custom_nodes..."
     

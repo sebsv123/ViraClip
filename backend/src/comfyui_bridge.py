@@ -30,6 +30,11 @@ COMFYUI_HOST     = os.environ.get("COMFYUI_HOST", "comfyui")
 COMFYUI_PORT     = int(os.environ.get("COMFYUI_PORT", "8188"))
 COMFYUI_API_URL  = os.environ.get("COMFYUI_API_URL", f"http://{COMFYUI_HOST}:{COMFYUI_PORT}")
 COMFYUI_TIMEOUT  = float(os.environ.get("COMFYUI_TIMEOUT", "600"))
+LTXV_ENABLED     = os.environ.get("LTXV_ENABLED", "false").lower() not in ("false", "0", "no")
+
+# Global VRAM semaphore — serialises ALL GPU-intensive ComfyUI/LTX-Video calls
+# so that parallel clip workers never OOM the 8 GB RTX 5070.
+_VRAM_SEM = asyncio.Semaphore(1)
 
 # Workflow JSON directory — mounted at /app/comfy_workflows inside worker containers
 _LOCAL_WORKFLOWS = Path(__file__).parent.parent / "comfy_workflows"
@@ -147,44 +152,46 @@ class ComfyUIBridge:
     ) -> Optional[Path]:
         """
         Run Real-ESRGAN x2 upscaling + face-aware sharpening on a clip.
+        Acquires VRAM semaphore to prevent OOM.
         Returns output_path on success, None if ComfyUI is unavailable.
         """
         if not await self.is_available():
             logger.debug("[ComfyUI] enhance_video skipped — ComfyUI not available")
             return None
-        try:
-            # Copiar el clip a la carpeta bind-mounted en /comfyui/input/
-            # (más fiable que /upload/image para archivos de video)
-            COMFYUI_INPUT_HOST_DIR.mkdir(parents=True, exist_ok=True)
-            video_path = Path(video_path).resolve()
-            dest_in_container = COMFYUI_INPUT_HOST_DIR / video_path.name
-            if dest_in_container.resolve() != video_path:
-                shutil.copy2(video_path, dest_in_container)
-            remote_name = video_path.name
-            logger.info(f"[ComfyUI] enhance_video input ready: {remote_name} (in {COMFYUI_INPUT_HOST_DIR})")
-            result = await self.execute_workflow(
-                "enhance_video",
-                {"__INPUT_VIDEO__": remote_name},
-                timeout=timeout,
-            )
-            if result.status != "completed":
-                logger.warning(f"[ComfyUI] enhance_video workflow error: {result.error_message}")
-                return None
+        async with _VRAM_SEM:
+            try:
+                # Copiar el clip a la carpeta bind-mounted en /comfyui/input/
+                # (más fiable que /upload/image para archivos de video)
+                COMFYUI_INPUT_HOST_DIR.mkdir(parents=True, exist_ok=True)
+                video_path = Path(video_path).resolve()
+                dest_in_container = COMFYUI_INPUT_HOST_DIR / video_path.name
+                if dest_in_container.resolve() != video_path:
+                    shutil.copy2(video_path, dest_in_container)
+                remote_name = video_path.name
+                logger.info(f"[ComfyUI] enhance_video input ready: {remote_name} (in {COMFYUI_INPUT_HOST_DIR})")
+                result = await self.execute_workflow(
+                    "enhance_video",
+                    {"__INPUT_VIDEO__": remote_name},
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    logger.warning(f"[ComfyUI] enhance_video workflow error: {result.error_message}")
+                    return None
 
-            found = self._first_video_output(result.outputs)
-            if not found:
-                logger.warning("[ComfyUI] enhance_video: no video in outputs")
-                return None
-            out_file, out_sub = found
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    logger.warning("[ComfyUI] enhance_video: no video in outputs")
+                    return None
+                out_file, out_sub = found
 
-            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
-            if ok and output_path.exists() and output_path.stat().st_size > 10_000:
-                logger.info(f"[ComfyUI] ✓ Video enhanced → {output_path.name}")
-                return output_path
-            return None
-        except Exception as exc:
-            logger.warning(f"[ComfyUI] enhance_video failed: {exc}")
-            return None
+                ok = await self.download_output(out_file, output_path, subfolder=out_sub)
+                if ok and output_path.exists() and output_path.stat().st_size > 10_000:
+                    logger.info(f"[ComfyUI] ✓ Video enhanced → {output_path.name}")
+                    return output_path
+                return None
+            except Exception as exc:
+                logger.warning(f"[ComfyUI] enhance_video failed: {exc}")
+                return None
 
     async def generate_broll(
         self,
@@ -200,37 +207,38 @@ class ComfyUIBridge:
         if not await self.is_available():
             logger.debug("[ComfyUI] generate_broll skipped — ComfyUI not available")
             return None
-        try:
-            n_frames = max(8, min(32, int(duration * 8)))  # ~8fps
-            full_prompt = (
-                f"{prompt}, cinematic, professional, high quality, "
-                f"sharp focus, vibrant colors, 4k, portrait orientation"
-            )
-            result = await self.execute_workflow(
-                "generate_broll",
-                {
-                    "__POSITIVE_PROMPT__": full_prompt,
-                    "__N_FRAMES__": n_frames,
-                },
-                timeout=timeout,
-            )
-            if result.status != "completed":
-                logger.warning(f"[ComfyUI] generate_broll workflow error: {result.error_message}")
-                return None
+        async with _VRAM_SEM:
+            try:
+                n_frames = max(8, min(32, int(duration * 8)))  # ~8fps
+                full_prompt = (
+                    f"{prompt}, cinematic, professional, high quality, "
+                    f"sharp focus, vibrant colors, 4k, portrait orientation"
+                )
+                result = await self.execute_workflow(
+                    "generate_broll",
+                    {
+                        "__POSITIVE_PROMPT__": full_prompt,
+                        "__N_FRAMES__": n_frames,
+                    },
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    logger.warning(f"[ComfyUI] generate_broll workflow error: {result.error_message}")
+                    return None
 
-            found = self._first_video_output(result.outputs)
-            if not found:
-                return None
-            out_file, out_sub = found
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    return None
+                out_file, out_sub = found
 
-            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
-            if ok and output_path.exists() and output_path.stat().st_size > 5_000:
-                logger.info(f"[ComfyUI] ✓ B-Roll generated ({prompt[:40]}) → {output_path.name}")
-                return output_path
-            return None
-        except Exception as exc:
-            logger.warning(f"[ComfyUI] generate_broll failed: {exc}")
-            return None
+                ok = await self.download_output(out_file, output_path, subfolder=out_sub)
+                if ok and output_path.exists() and output_path.stat().st_size > 5_000:
+                    logger.info(f"[ComfyUI] ✓ B-Roll generated ({prompt[:40]}) → {output_path.name}")
+                    return output_path
+                return None
+            except Exception as exc:
+                logger.warning(f"[ComfyUI] generate_broll failed: {exc}")
+                return None
 
     # ── Generic workflow execution ────────────────────────────────────────────
 
@@ -349,6 +357,92 @@ class ComfyUIBridge:
                     if fname.endswith(".mp4") or fname.endswith(".webm"):
                         return (fname, sub)
         return None
+
+    # ── LTX-Video specific methods (Ola C) ──────────────────────────────────
+
+    async def generate_ltxv_broll(
+        self, prompt: str, output_path: Path, duration: float = 3.0, timeout: float = 120.0,
+    ) -> Optional[Path]:
+        """Generate B-roll via LTX-Video 0.9.8-distilled. Acquires VRAM semaphore."""
+        if not LTXV_ENABLED or not await self.is_available():
+            return None
+        async with _VRAM_SEM:
+            try:
+                result = await self.execute_workflow(
+                    "ltxv_t2v_broll",
+                    {"__POSITIVE_PROMPT__": prompt, "__DURATION__": str(duration)},
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    return None
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    return None
+                ok = await self.download_output(found[0], output_path, subfolder=found[1])
+                if ok and output_path.exists() and output_path.stat().st_size > 5_000:
+                    logger.info("[ComfyUI] ✓ LTXV B-roll generated → %s", output_path.name)
+                    return output_path
+                return None
+            except Exception as exc:
+                logger.warning("[ComfyUI] generate_ltxv_broll failed: %s", exc)
+                return None
+
+    async def animate_image_ltxv(
+        self, image_path: Path, prompt: str, output_path: Path, timeout: float = 120.0,
+    ) -> Optional[Path]:
+        """Animate a static image via LTX-Video I2V. Acquires VRAM semaphore."""
+        if not LTXV_ENABLED or not await self.is_available():
+            return None
+        async with _VRAM_SEM:
+            try:
+                remote = await self.upload_file(image_path)
+                result = await self.execute_workflow(
+                    "ltxv_i2v_animate",
+                    {"__INPUT_IMAGE__": remote, "__POSITIVE_PROMPT__": prompt},
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    return None
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    return None
+                ok = await self.download_output(found[0], output_path, subfolder=found[1])
+                if ok and output_path.exists() and output_path.stat().st_size > 5_000:
+                    logger.info("[ComfyUI] ✓ LTXV I2V → %s", output_path.name)
+                    return output_path
+                return None
+            except Exception as exc:
+                logger.warning("[ComfyUI] animate_image_ltxv failed: %s", exc)
+                return None
+
+    async def generate_ltxv_intro(
+        self, first_frame_path: Path, theme: str, output_path: Path, timeout: float = 60.0,
+    ) -> Optional[Path]:
+        """Generate a 1.5s animated intro from the first frame of the clip.
+        Acquires VRAM semaphore. If successful, replaces cinematic FFmpeg intro."""
+        if not LTXV_ENABLED or not await self.is_available():
+            return None
+        async with _VRAM_SEM:
+            try:
+                remote = await self.upload_file(first_frame_path)
+                result = await self.execute_workflow(
+                    "ltxv_intro_hook",
+                    {"__INPUT_IMAGE__": remote, "__THEME__": theme},
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    return None
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    return None
+                ok = await self.download_output(found[0], output_path, subfolder=found[1])
+                if ok and output_path.exists() and output_path.stat().st_size > 5_000:
+                    logger.info("[ComfyUI] ✓ LTXV intro hook → %s", output_path.name)
+                    return output_path
+                return None
+            except Exception as exc:
+                logger.warning("[ComfyUI] generate_ltxv_intro failed: %s", exc)
+                return None
 
     async def get_system_stats(self) -> Dict[str, Any]:
         """Return GPU VRAM + queue info from ComfyUI /system_stats."""
