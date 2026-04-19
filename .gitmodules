@@ -1,0 +1,3 @@
+[submodule "comfyui/custom_nodes/ComfyUI-LTXVideo"]
+	path = comfyui/custom_nodes/ComfyUI-LTXVideo
+	url = https://github.com/Lightricks/ComfyUI-LTXVideo
