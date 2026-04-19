@@ -1,0 +1,105 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "ltxv-2b-0.9.8-distilled-fp8.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load LTX-Video Model" }
+  },
+  "2": {
+    "inputs": {
+      "image": "__INPUT_IMAGE__",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "First Frame of Clip" }
+  },
+  "3": {
+    "inputs": {
+      "text": "cinematic dramatic intro, smooth camera pull back revealing scene, __THEME__, professional film opening, dynamic motion, depth of field",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Intro Prompt" }
+  },
+  "4": {
+    "inputs": {
+      "text": "low quality, blurry, distorted, watermark, text overlay, ugly, deformed, static, frozen, no motion",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "5": {
+    "inputs": {
+      "width": 480,
+      "height": 848,
+      "length": 37,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": { "title": "Empty Latent (1.5s @ 24fps + 1)" }
+  },
+  "6": {
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "vae": ["1", 2],
+      "latent": ["5", 0],
+      "image": ["2", 0],
+      "image_noise_scale": 0.10
+    },
+    "class_type": "LTXVImgToVideoConditioning",
+    "_meta": { "title": "Image-to-Video Conditioning (low noise = faithful to first frame)" }
+  },
+  "7": {
+    "inputs": {
+      "steps": 6,
+      "max_shift": 2.05,
+      "base_shift": 0.95
+    },
+    "class_type": "LTXVScheduler",
+    "_meta": { "title": "LTXV Scheduler (fewer steps for short clip)" }
+  },
+  "8": {
+    "inputs": {
+      "seed": 0,
+      "steps": 6,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["6", 0],
+      "negative": ["6", 1],
+      "latent_image": ["6", 2],
+      "sigmas": ["7", 0]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "LTXV Sampler" }
+  },
+  "9": {
+    "inputs": {
+      "samples": ["8", 0],
+      "vae": ["1", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "10": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "ltxv_intro/hook",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 18,
+      "save_metadata": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": ["9", 0]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": { "title": "Save Intro Hook Video" }
+  }
+}
