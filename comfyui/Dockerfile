@@ -23,6 +23,9 @@ RUN pip3 install --no-cache-dir \
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git . \
     && pip3 install --no-cache-dir -r requirements.txt
 
+# Inicializar submodules (incluye ComfyUI-LTXVideo y otros custom nodes como submodules)
+RUN git submodule update --init --recursive
+
 # Instalar dependencias comunes de VideoHelperSuite (por si el volumen no está listo inmediatamente)
 RUN pip3 install --no-cache-dir \
     opencv-python-headless \

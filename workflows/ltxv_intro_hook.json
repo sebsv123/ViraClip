@@ -32,36 +32,20 @@
   },
   "5": {
     "inputs": {
-      "width": 480,
-      "height": 848,
-      "length": 37,
-      "batch_size": 1
-    },
-    "class_type": "EmptyLTXVLatentVideo",
-    "_meta": { "title": "Empty Latent (1.5s @ 24fps + 1)" }
-  },
-  "6": {
-    "inputs": {
       "positive": ["3", 0],
       "negative": ["4", 0],
       "vae": ["1", 2],
-      "latent": ["5", 0],
       "image": ["2", 0],
-      "image_noise_scale": 0.10
+      "width": 480,
+      "height": 848,
+      "length": 41,
+      "batch_size": 1,
+      "strength": 0.70
     },
-    "class_type": "LTXVImgToVideoConditioning",
-    "_meta": { "title": "Image-to-Video Conditioning (low noise = faithful to first frame)" }
+    "class_type": "LTXVImgToVideo",
+    "_meta": { "title": "Image-to-Video (low strength = faithful to first frame)" }
   },
-  "7": {
-    "inputs": {
-      "steps": 6,
-      "max_shift": 2.05,
-      "base_shift": 0.95
-    },
-    "class_type": "LTXVScheduler",
-    "_meta": { "title": "LTXV Scheduler (fewer steps for short clip)" }
-  },
-  "8": {
+  "6": {
     "inputs": {
       "seed": 0,
       "steps": 6,
@@ -70,23 +54,22 @@
       "scheduler": "normal",
       "denoise": 1.0,
       "model": ["1", 0],
-      "positive": ["6", 0],
-      "negative": ["6", 1],
-      "latent_image": ["6", 2],
-      "sigmas": ["7", 0]
+      "positive": ["5", 0],
+      "negative": ["5", 1],
+      "latent_image": ["5", 2]
     },
-    "class_type": "KSamplerAdvanced",
+    "class_type": "KSampler",
     "_meta": { "title": "LTXV Sampler" }
   },
-  "9": {
+  "7": {
     "inputs": {
-      "samples": ["8", 0],
+      "samples": ["6", 0],
       "vae": ["1", 2]
     },
     "class_type": "VAEDecode",
     "_meta": { "title": "VAE Decode" }
   },
-  "10": {
+  "8": {
     "inputs": {
       "frame_rate": 24,
       "loop_count": 0,
@@ -97,7 +80,7 @@
       "save_metadata": false,
       "pingpong": false,
       "save_output": true,
-      "images": ["9", 0]
+      "images": ["7", 0]
     },
     "class_type": "VHS_VideoCombine",
     "_meta": { "title": "Save Intro Hook Video" }

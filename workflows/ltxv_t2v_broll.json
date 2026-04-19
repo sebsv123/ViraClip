@@ -34,15 +34,6 @@
   },
   "5": {
     "inputs": {
-      "steps": 8,
-      "max_shift": 2.05,
-      "base_shift": 0.95
-    },
-    "class_type": "LTXVScheduler",
-    "_meta": { "title": "LTXV Scheduler (distilled = fewer steps)" }
-  },
-  "6": {
-    "inputs": {
       "seed": 0,
       "steps": 8,
       "cfg": 1.0,
@@ -52,21 +43,20 @@
       "model": ["1", 0],
       "positive": ["2", 0],
       "negative": ["3", 0],
-      "latent_image": ["4", 0],
-      "sigmas": ["5", 0]
+      "latent_image": ["4", 0]
     },
-    "class_type": "KSamplerAdvanced",
+    "class_type": "KSampler",
     "_meta": { "title": "LTXV Sampler" }
   },
-  "7": {
+  "6": {
     "inputs": {
-      "samples": ["6", 0],
+      "samples": ["5", 0],
       "vae": ["1", 2]
     },
     "class_type": "VAEDecode",
     "_meta": { "title": "VAE Decode" }
   },
-  "8": {
+  "7": {
     "inputs": {
       "frame_rate": 24,
       "loop_count": 0,
@@ -77,7 +67,7 @@
       "save_metadata": false,
       "pingpong": false,
       "save_output": true,
-      "images": ["7", 0]
+      "images": ["6", 0]
     },
     "class_type": "VHS_VideoCombine",
     "_meta": { "title": "Save B-Roll Video" }
