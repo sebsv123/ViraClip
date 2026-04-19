@@ -172,13 +172,18 @@ def normalize_broll(
         )
 
     if is_image:
+        # Include silent audio (-f lavfi -i anullsrc) so the B-roll video
+        # has a valid audio stream. Without this, compose_overlay_multi fails
+        # when mixing AV streams because the overlay input lacks audio.
         cmd = [
             _get_ffmpeg_exe(), "-y",
             "-loop", "1", "-i", str(broll_path),
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-t", str(duration),
             "-vf", vf,
-            "-an",
             *_gpu_codec("medium"),
+            "-c:a", "aac", "-ar", "44100",
+            "-shortest",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
