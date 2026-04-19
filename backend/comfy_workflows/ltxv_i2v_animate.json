@@ -1,0 +1,105 @@
+{
+  "1": {
+    "inputs": {
+      "ckpt_name": "ltxv-2b-0.9.8-distilled-fp8.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": { "title": "Load LTX-Video Model" }
+  },
+  "2": {
+    "inputs": {
+      "image": "__INPUT_IMAGE__",
+      "upload": "image"
+    },
+    "class_type": "LoadImage",
+    "_meta": { "title": "Load Input Image" }
+  },
+  "3": {
+    "inputs": {
+      "text": "__POSITIVE_PROMPT__",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Positive Prompt" }
+  },
+  "4": {
+    "inputs": {
+      "text": "low quality, blurry, distorted, watermark, text overlay, ugly, deformed, static, frozen",
+      "clip": ["1", 1]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": { "title": "Negative Prompt" }
+  },
+  "5": {
+    "inputs": {
+      "width": 480,
+      "height": 848,
+      "length": 73,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": { "title": "Empty Latent (3s @ 24fps + 1)" }
+  },
+  "6": {
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["4", 0],
+      "vae": ["1", 2],
+      "latent": ["5", 0],
+      "image": ["2", 0],
+      "image_noise_scale": 0.15
+    },
+    "class_type": "LTXVImgToVideoConditioning",
+    "_meta": { "title": "Image-to-Video Conditioning" }
+  },
+  "7": {
+    "inputs": {
+      "steps": 8,
+      "max_shift": 2.05,
+      "base_shift": 0.95
+    },
+    "class_type": "LTXVScheduler",
+    "_meta": { "title": "LTXV Scheduler" }
+  },
+  "8": {
+    "inputs": {
+      "seed": 0,
+      "steps": 8,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["1", 0],
+      "positive": ["6", 0],
+      "negative": ["6", 1],
+      "latent_image": ["6", 2],
+      "sigmas": ["7", 0]
+    },
+    "class_type": "KSamplerAdvanced",
+    "_meta": { "title": "LTXV Sampler" }
+  },
+  "9": {
+    "inputs": {
+      "samples": ["8", 0],
+      "vae": ["1", 2]
+    },
+    "class_type": "VAEDecode",
+    "_meta": { "title": "VAE Decode" }
+  },
+  "10": {
+    "inputs": {
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "ltxv_i2v/animated",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": false,
+      "pingpong": false,
+      "save_output": true,
+      "images": ["9", 0]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": { "title": "Save Animated Video" }
+  }
+}
