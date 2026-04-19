@@ -126,6 +126,13 @@ class CreativePipeline:
         end = _ts(segment.get("end_time") or segment.get("end"), start + 60.0)
         transcript = segment.get("transcript", "")
 
+        # ── Resolve Viral Boost feature config ────────────────────────────
+        try:
+            from .feature_flags import ViralBoostConfig
+            vb = ViralBoostConfig.from_env()
+        except Exception:
+            vb = None
+
         meta: dict = {
             "creative_enhanced": False,
             "timeline_events": 0,
@@ -143,6 +150,14 @@ class CreativePipeline:
             "loudnorm_applied": False,
             "qa_passed": None,
             "qa_issues": [],
+            # ── Viral Boost tracking ─────────────────────────────────────
+            "hook_visual_applied": False,
+            "cinematic_intro_applied": False,
+            "ltxv_intro_applied": False,
+            "broll_slots_planned": 0,
+            "broll_slots_filled": 0,
+            "ltxv_assets_generated": 0,
+            "broll_density_coverage": 0.0,
         }
 
         # ── 1. Multimodal event timeline ──────────────────────────────────────
@@ -270,7 +285,9 @@ class CreativePipeline:
             logger.debug("  [Creative] Hook reorder failed: %s", exc)
 
         # ── 4.8. Hook visual overlay (text animation on first 2s) ────────────
-        if os.environ.get("HOOK_VISUAL_ENABLED", "true").lower() == "true":
+        _hook_visual_on = (vb.hook_visual if vb else
+                           os.environ.get("HOOK_VISUAL_ENABLED", "true").lower() == "true")
+        if _hook_visual_on:
             logger.info("  [Creative] Step 4.8: Hook visual overlay...")
             try:
                 from .hook_visual_service import HookVisualService
@@ -288,6 +305,7 @@ class CreativePipeline:
                     if _hv_result == str(_hooked) and _hooked.exists() and _hooked.stat().st_size > 0:
                         clip_path.unlink(missing_ok=True)
                         _hooked.rename(clip_path)
+                        meta["hook_visual_applied"] = True
                         logger.info("  [Creative] ✓ Step 4.8: Hook visual overlay applied: '%s'", _hook_overlay.text[:40])
                     else:
                         _hooked.unlink(missing_ok=True)
@@ -295,9 +313,10 @@ class CreativePipeline:
                 logger.debug("  [Creative] Step 4.8 (Hook visual) skipped: %s", exc)
 
         # ── 4.9. Cinematic intro (FFmpeg letterbox+flash+zoom, fallback if no LTXV) ─
+        _cinematic_on = (vb.cinematic_intro if vb else
+                         os.environ.get("CINEMATIC_INTRO_ENABLED", "true").lower() == "true")
         _ltxv_intro_active = meta.get("ltxv_intro_applied", False)
-        if (not _ltxv_intro_active
-                and os.environ.get("CINEMATIC_INTRO_ENABLED", "true").lower() == "true"):
+        if not _ltxv_intro_active and _cinematic_on:
             logger.info("  [Creative] Step 4.9: Cinematic intro (FFmpeg)...")
             try:
                 _intro_out = clip_path.with_name(f"intro_{clip_path.name}")
@@ -305,6 +324,7 @@ class CreativePipeline:
                 if _intro_ok and _intro_out.exists() and _intro_out.stat().st_size > 0:
                     clip_path.unlink(missing_ok=True)
                     _intro_out.rename(clip_path)
+                    meta["cinematic_intro_applied"] = True
                     logger.info("  [Creative] ✓ Step 4.9: Cinematic intro applied")
                 else:
                     _intro_out.unlink(missing_ok=True)
@@ -334,18 +354,27 @@ class CreativePipeline:
                     audio_energy=_energy,
                     preset_name=preset.name if preset else "",
                 )
+                meta["broll_slots_planned"] = len(density_plan.slots)
+                meta["broll_density_coverage"] = round(density_plan.planned_coverage, 3)
                 logger.info(
                     "  [Creative] Density plan: %d slots, coverage=%.0f%%, ltxv=%d",
                     len(density_plan.slots),
                     density_plan.planned_coverage * 100,
                     density_plan.ltxv_slots,
                 )
+                # LTXV budget: cap per clip
+                _ltxv_budget = (vb.ltxv_broll_max_per_clip if vb else
+                                int(os.environ.get("LTXV_BROLL_MAX_PER_CLIP", "2")))
+                _ltxv_used = 0
                 # Resolve each slot via the cascade
                 for slot in density_plan.slots:
                     asset = await _broll_ctx.get_for_keyword(
                         slot.keyword, duration=slot.duration, mood=slot.visual_mode,
                     )
                     if asset:
+                        if getattr(asset, 'source', '') in ('t2v', 'ltxv'):
+                            _ltxv_used += 1
+                            meta["ltxv_assets_generated"] = _ltxv_used
                         evt = TimelineEvent(
                             t=slot.t, type="keyword", strength=0.7,
                             duration=slot.duration,
@@ -388,6 +417,7 @@ class CreativePipeline:
                     clip_path.unlink(missing_ok=True)
                     brolled.rename(clip_path)
                     broll_count = len(broll_pairs)
+                    meta["broll_slots_filled"] = broll_count
                     logger.info("  [Creative] ✓ Step 5/8: B-roll: %d overlays applied", broll_count)
                 else:
                     brolled.unlink(missing_ok=True)

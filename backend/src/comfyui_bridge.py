@@ -31,10 +31,59 @@ COMFYUI_PORT     = int(os.environ.get("COMFYUI_PORT", "8188"))
 COMFYUI_API_URL  = os.environ.get("COMFYUI_API_URL", f"http://{COMFYUI_HOST}:{COMFYUI_PORT}")
 COMFYUI_TIMEOUT  = float(os.environ.get("COMFYUI_TIMEOUT", "600"))
 LTXV_ENABLED     = os.environ.get("LTXV_ENABLED", "false").lower() not in ("false", "0", "no")
+LTXV_MAX_PER_CLIP = int(os.environ.get("LTXV_BROLL_MAX_PER_CLIP", "2"))
+LTXV_CLIP_TIMEOUT = float(os.environ.get("LTXV_CLIP_TIMEOUT_SEC", "180"))
 
 # Global VRAM semaphore — serialises ALL GPU-intensive ComfyUI/LTX-Video calls
 # so that parallel clip workers never OOM the 8 GB RTX 5070.
 _VRAM_SEM = asyncio.Semaphore(1)
+
+
+class ClipGPUBudget:
+    """Per-clip budget tracker for LTXV generation limits.
+
+    Usage::
+
+        budget = ClipGPUBudget()
+        if budget.can_generate():
+            result = await bridge.generate_ltxv_broll(...)
+            budget.record()
+    """
+
+    def __init__(
+        self,
+        max_generations: int = LTXV_MAX_PER_CLIP,
+        total_timeout: float = LTXV_CLIP_TIMEOUT,
+    ):
+        self.max_generations = max_generations
+        self.total_timeout = total_timeout
+        self._count = 0
+        self._start: float | None = None
+
+    def can_generate(self) -> bool:
+        """Return True if budget allows another generation."""
+        if self._count >= self.max_generations:
+            return False
+        if self._start is not None:
+            import time
+            if (time.monotonic() - self._start) >= self.total_timeout:
+                return False
+        return True
+
+    def record(self) -> None:
+        """Record a completed generation."""
+        import time
+        if self._start is None:
+            self._start = time.monotonic()
+        self._count += 1
+
+    @property
+    def used(self) -> int:
+        return self._count
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.max_generations - self._count)
 
 # Workflow JSON directory — mounted at /app/comfy_workflows inside worker containers
 _LOCAL_WORKFLOWS = Path(__file__).parent.parent / "comfy_workflows"
