@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Configuraciones B-roll via environment variables para fácil tuning
 _BROLL_DOWNLOAD_TIMEOUT = int(os.environ.get("BROLL_DOWNLOAD_TIMEOUT", "30"))   # seconds per file
 _MIN_SILENCE_SEC = float(os.environ.get("BROLL_MIN_SILENCE_SEC", "1.5"))       # minimum silence gap
-_BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "4.5"))               # seconds of B-roll - más largo para presencia
+_BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "2.5"))               # seconds of B-roll - capped 1.5-3s for TikTok/Reels
 _FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))             # fade-in / fade-out length - suave
 _CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))               # cache stale days
 _BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "8"))             # max overlays per clip (was 3)

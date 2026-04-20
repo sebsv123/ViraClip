@@ -15,6 +15,7 @@ Design:
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -33,6 +34,82 @@ _LTXV_THRESHOLD     = float(os.environ.get("LTXV_BROLL_PRIORITY_THRESHOLD", "0.7
 _COVERAGE_NARRATIVE  = 0.55   # 55% for narrative/emotional clips
 _COVERAGE_ACTION     = 0.25   # 25% for action/high-energy clips
 _COVERAGE_DEFAULT    = 0.40   # 40% default
+
+# ── Static fallback: Spanish/English trigger word → English visual search term ─
+_TRIGGER_TO_VISUAL = {
+    "peor": "mistake warning sign", "mejor": "success achievement",
+    "increíble": "amazing discovery", "increible": "amazing discovery",
+    "nunca": "person saying no", "secreto": "mystery reveal",
+    "sorprendente": "surprised reaction", "imposible": "impossible challenge",
+    "top": "ranking list podium", "número": "number statistics",
+    "numero": "number statistics", "primer": "first place winner",
+    "primero": "first place winner", "viral": "social media phone",
+    "wow": "amazed person", "dios": "shocked reaction",
+    "espera": "hand stop gesture", "mira": "person pointing looking",
+    "escucha": "person listening", "dinero": "money cash currency",
+    "gratis": "free gift present", "peligroso": "danger warning",
+    "nuevo": "new product launch", "importante": "important document",
+    "urgente": "urgent alarm clock", "millones": "millions dollars wealth",
+    "error": "mistake failure", "hack": "technology shortcut",
+    "truco": "clever trick", "clave": "key unlock",
+    "ahora": "clock time now", "exclusivo": "exclusive vip",
+    # English equivalents
+    "worst": "mistake warning sign", "best": "success trophy",
+    "incredible": "amazing discovery", "never": "person refusing",
+    "secret": "mystery reveal", "surprising": "surprised reaction",
+    "impossible": "impossible challenge", "number": "statistics chart",
+    "first": "first place winner", "wait": "hand stop gesture",
+    "look": "person pointing", "listen": "person listening carefully",
+    "amazing": "amazed reaction", "seriously": "serious conversation",
+    "finally": "celebration finish line", "actually": "fact reveal",
+}
+
+
+async def _translate_keyword_llm(word: str, transcript_ctx: str) -> str:
+    """Use Groq LLM to translate a trigger word + context into a visual search term."""
+    import httpx
+    groq_key = os.getenv("GROQ_API_KEY", "")
+    if not groq_key:
+        return _TRIGGER_TO_VISUAL.get(word.lower().strip(), word)
+
+    prompt = (
+        "You are a stock-video editor. Given a transcript excerpt and a trigger word, "
+        "return 2-4 SPECIFIC English search terms for stock video that visually "
+        "illustrate what the speaker means in context.\n"
+        "Rules: concrete nouns/actions only, no abstract concepts, no emotions.\n"
+        "Reply with ONLY a JSON array, e.g. [\"office meeting\", \"handshake deal\"]\n\n"
+        f"Transcript: ...{transcript_ctx[-200:]}...\n"
+        f"Trigger word: {word}\n"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 40,
+                    "temperature": 0.15,
+                },
+            )
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip()
+            terms = json.loads(content)
+            if isinstance(terms, list) and terms:
+                result = " ".join(str(t) for t in terms[:2])
+                logger.info("[BrollPlanner] LLM translated '%s' → '%s'", word, result)
+                return result
+    except Exception as exc:
+        logger.debug("[BrollPlanner] LLM translation failed for '%s': %s", word, exc)
+
+    return _TRIGGER_TO_VISUAL.get(word.lower().strip(), word)
+
+
+def _translate_keyword_sync(word: str) -> str:
+    """Synchronous fallback: static mapping only."""
+    return _TRIGGER_TO_VISUAL.get(word.lower().strip(), word)
+
 
 # ── Visual-mode classification dictionaries ──────────────────────────────────
 
@@ -85,7 +162,7 @@ class DensityPlan:
 
 # ── Public API ───────────────────────────────────────────────────────────────
 
-def plan_broll_density(
+async def plan_broll_density(
     timeline_events: list,
     clip_duration: float,
     transcript: str = "",
@@ -137,10 +214,12 @@ def plan_broll_density(
                 prio = "low"
                 hint = "image_kenburns"
 
+            # Use LLM translation with transcript context for better relevance
+            translated = await _translate_keyword_llm(word, transcript)
             raw_slots.append(BrollSlot(
                 t=ev.t,
-                duration=min(max(ev.duration + 1.0, 3.0), 6.0),
-                keyword=word,
+                duration=min(max(ev.duration, 1.5), 3.0),
+                keyword=translated,
                 priority=prio,
                 source_hint=hint,
                 visual_mode=vm,

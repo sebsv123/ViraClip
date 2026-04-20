@@ -408,6 +408,7 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
@@ -467,7 +468,7 @@ services:
       - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
+      - EP_CTA_ON=${EP_CTA_ON:-true}
       - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
       - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
       - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
@@ -961,7 +962,7 @@ services:
       - ./comfyui/custom_nodes:/comfyui/custom_nodes
       - ./workflows:/comfyui/workflows
       - ./transitions:/comfyui/transitions
-      - ~/proyectos/ViraClip/uploads:/comfyui/input
+      - uploads:/comfyui/input
       - ~/proyectos/ViraClip/outputs:/comfyui/output
       - ~/proyectos/ViraClip/models:/comfyui/models:ro
       - comfyui_models:/comfyui/models:rw

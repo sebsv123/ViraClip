@@ -320,7 +320,7 @@ class ConfidenceSubtitleGenerator:
                 word_timestamps=True,
                 vad_filter=True,
                 vad_parameters=dict(min_silence_duration_ms=300),
-                beam_size=5
+                beam_size=8
             )
 
             # Paso 3: Construir lista de palabras con offset de anticipacion

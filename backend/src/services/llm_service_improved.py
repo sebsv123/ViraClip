@@ -34,10 +34,10 @@ class HookType(str, Enum):
 
 class ViralityScores(BaseModel):
     """Strict validation for virality sub-scores."""
-    hook_score: int = Field(ge=0, le=25, description="Hook strength (0-25)")
-    engagement_score: int = Field(ge=0, le=25, description="Engagement potential (0-25)")
-    value_score: int = Field(ge=0, le=25, description="Educational/informational value (0-25)")
-    shareability_score: int = Field(ge=0, le=25, description="Share likelihood (0-25)")
+    hook_score: int = Field(default=10, ge=0, le=25, description="Hook strength (0-25)")
+    engagement_score: int = Field(default=10, ge=0, le=25, description="Engagement potential (0-25)")
+    value_score: int = Field(default=10, ge=0, le=25, description="Educational/informational value (0-25)")
+    shareability_score: int = Field(default=10, ge=0, le=25, description="Share likelihood (0-25)")
     virality_score: int = Field(ge=0, le=100, description="Total score (sum of 4 sub-scores)")
     
     @field_validator('virality_score')
@@ -60,11 +60,11 @@ class ViralityScores(BaseModel):
 class SegmentAnalysis(BaseModel):
     """Analysis for a single transcript segment."""
     segment_index: int = Field(ge=0)
-    hook_score: int = Field(ge=0, le=25)
-    engagement_score: int = Field(ge=0, le=25)
-    value_score: int = Field(ge=0, le=25)
-    shareability_score: int = Field(ge=0, le=25)
-    virality_score: int = Field(ge=0, le=100)
+    hook_score: int = Field(default=10, ge=0, le=25)
+    engagement_score: int = Field(default=10, ge=0, le=25)
+    value_score: int = Field(default=10, ge=0, le=25)
+    shareability_score: int = Field(default=10, ge=0, le=25)
+    virality_score: int = Field(default=40, ge=0, le=100)
     hook_type: HookType
     suggested_title: str = Field(default="")
     suggested_hashtags: List[str] = Field(default_factory=list)

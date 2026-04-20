@@ -73,6 +73,7 @@ from ..video_processing.silence_removal import (
     build_keep_intervals, MIN_SILENCE_SAVINGS,
 )
 from ..video_processing.audio import denoise_audio, apply_voice_enhancement
+from .broll_compositor import probe_duration
 from ..video_processing.editing_pipeline import EditingPipeline
 from ..video_processing.thumbnail_selector import select_best_thumbnail
 from .viral_metadata_service import generate_viral_metadata
@@ -1069,9 +1070,9 @@ class VideoService:
         )
         if _realign_enabled and words_with_confidence and os.path.exists(str(output_path)):
             try:
-                _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "small")
+                _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "medium")
                 _whisper_device = os.environ.get("WHISPER_DEVICE", "auto")
-                _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "0"))
+                _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "-80"))
 
                 from .confidence_subtitle_service import ConfidenceSubtitleGenerator
                 _realigner = ConfidenceSubtitleGenerator(
@@ -1085,10 +1086,24 @@ class VideoService:
                     anticipation_offset_ms=_anticipation_ms
                 )
                 if _realigned:
-                    logger.info(
-                        f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras"
-                    )
-                    words_with_confidence = _realigned
+                    _drift_ok = True
+                    if words_with_confidence and len(_realigned) >= 3:
+                        _common = min(len(words_with_confidence), len(_realigned))
+                        _deltas = [
+                            abs(float(_realigned[i].get("start", 0)) - float(words_with_confidence[i].get("start", 0)))
+                            for i in range(_common)
+                        ]
+                        _avg_drift = sum(_deltas) / len(_deltas) if _deltas else 0.0
+                        if _avg_drift > 0.5:
+                            logger.warning("[RE-ALIGN] Avg drift %.3fs > 0.5s — rejecting re-alignment", _avg_drift)
+                            _drift_ok = False
+                        else:
+                            logger.info("[RE-ALIGN] Avg drift %.3fs — within tolerance", _avg_drift)
+                    if _drift_ok:
+                        logger.info(
+                            f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras"
+                        )
+                        words_with_confidence = _realigned
                 else:
                     logger.warning("[CLIP] Re-alineacion retorno vacio, manteniendo originales")
             except Exception as e:
@@ -1176,7 +1191,10 @@ class VideoService:
                 _jc_keep, _jc_saved = build_keep_intervals(
                     words_with_confidence, duration, _silence_thresh
                 )
-                if _jc_saved >= MIN_SILENCE_SAVINGS and len(_jc_keep) >= 2:
+                _max_ratio = float(os.environ.get("SILENCE_MAX_COMPRESSION", "0.30"))
+                if (_jc_saved >= MIN_SILENCE_SAVINGS
+                        and len(_jc_keep) >= 2
+                        and (duration <= 0 or _jc_saved / duration <= _max_ratio)):
                     _jc_path = output_path.with_name(f"jc_{output_path.name}")
                     if SILENCE_MODE == "ramp":
                         _jc_ok = await speed_ramp_silences(
@@ -2022,6 +2040,22 @@ class VideoService:
         except Exception as _ch_e:
             logger.debug(f"  Clip health skipped: {_ch_e}")
         # ─────────────────────────────────────────────────────────────────
+
+        # Phase 5: Final duration guard — ensure clip isn't too short after processing
+        try:
+            _final_dur = probe_duration(output_path)
+            if _final_dur < 10.0:
+                logger.warning(
+                    "[CLIP-GUARD] Final clip duration %.1fs < 10s minimum — "
+                    "silence removal may have cut too aggressively", _final_dur
+                )
+            elif _final_dur > 90.0:
+                logger.warning(
+                    "[CLIP-GUARD] Final clip duration %.1fs > 90s maximum — "
+                    "consider platform limits", _final_dur
+                )
+        except Exception as _dur_e:
+            logger.debug(f"[CLIP-GUARD] Duration check skipped: {_dur_e}")
 
         return {
             "clip_id": clip_index + 1,

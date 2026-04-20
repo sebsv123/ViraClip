@@ -16,6 +16,7 @@ import copy
 import shutil
 import logging
 import asyncio
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
@@ -37,6 +38,17 @@ LTXV_CLIP_TIMEOUT = float(os.environ.get("LTXV_CLIP_TIMEOUT_SEC", "180"))
 # Global VRAM semaphore — serialises ALL GPU-intensive ComfyUI/LTX-Video calls
 # so that parallel clip workers never OOM the 8 GB RTX 5070.
 _VRAM_SEM = asyncio.Semaphore(1)
+
+# MED enhance semaphore — allows 2 parallel lightweight RealESRGAN enhance jobs
+# but defers to _VRAM_SEM when LTX is running (VRAM guard enforced in enhance_pexels).
+_ENHANCE_SEM = asyncio.Semaphore(2)
+
+_ENHANCE_MAX_INPUT_SEC = float(os.environ.get("ENHANCE_MAX_INPUT_SEC", "6.0"))
+
+# Flag: True while an LTXV generation is in progress (heavy VRAM consumer).
+# enhance_pexels checks this instead of _VRAM_SEM.locked() so that
+# concurrent enhance_video (also uses _VRAM_SEM) doesn't block B-roll enhance.
+_LTXV_ACTIVE = False
 
 
 class ClipGPUBudget:
@@ -89,11 +101,11 @@ class ClipGPUBudget:
 _LOCAL_WORKFLOWS = Path(__file__).parent.parent / "comfy_workflows"
 WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR", str(_LOCAL_WORKFLOWS)))
 
-# Host-side directory that is bind-mounted to /comfyui/input/ inside the container.
-# Used to place video files where VHS_LoadVideo can find them.
+# Container path shared with ComfyUI via 'uploads' volume.
+# Worker writes to /app/temp/uploads → ComfyUI reads from /comfyui/input (same volume)
 COMFYUI_INPUT_HOST_DIR = Path(os.environ.get(
     "COMFYUI_INPUT_HOST_DIR",
-    str(Path.home() / "proyectos" / "ViraClip" / "uploads"),
+    "/app/temp/uploads",  # Inside worker container, maps to 'uploads' volume
 ))
 
 
@@ -207,6 +219,23 @@ class ComfyUIBridge:
         if not await self.is_available():
             logger.debug("[ComfyUI] enhance_video skipped — ComfyUI not available")
             return None
+
+        # Duration guard: RealESRGAN frame-by-frame upscaling via VHS_BatchManager
+        # truncates long videos.  Only enhance short clips (≤8s).
+        _MAX_ENHANCE_SEC = float(os.environ.get("ENHANCE_VIDEO_MAX_SEC", "8.0"))
+        try:
+            _probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            _dur = float(_probe.stdout.strip())
+            if _dur > _MAX_ENHANCE_SEC:
+                logger.info("[ComfyUI] enhance_video skipped — %.1fs > %.0fs limit", _dur, _MAX_ENHANCE_SEC)
+                return None
+        except Exception:
+            pass
+
         async with _VRAM_SEM:
             try:
                 # Copiar el clip a la carpeta bind-mounted en /comfyui/input/
@@ -287,6 +316,75 @@ class ComfyUIBridge:
                 return None
             except Exception as exc:
                 logger.warning(f"[ComfyUI] generate_broll failed: {exc}")
+                return None
+
+    async def enhance_pexels(
+        self,
+        video_path: Path,
+        output_path: Path,
+        timeout: float = 45.0,
+    ) -> Optional[Path]:
+        """
+        Upscale a short Pexels video (≤6s) via RealESRGAN x4 + scale to 1080x1920.
+        Returns output_path on success, None on any failure (caller falls back to original).
+        """
+        if not COMFYUI_ENABLED:
+            return None
+        if not await self.is_available():
+            return None
+
+        # Duration guard: skip if clip is too long (frame-by-frame upscale is slow)
+        try:
+            import subprocess, json as _json
+            probe = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+                capture_output=True, text=True, timeout=5,
+            )
+            dur = float(probe.stdout.strip())
+            if dur > _ENHANCE_MAX_INPUT_SEC:
+                logger.debug("[ComfyUI] enhance_pexels skipped: %.1fs > %.0fs limit", dur, _ENHANCE_MAX_INPUT_SEC)
+                return None
+        except Exception:
+            pass
+
+        # VRAM guard: skip only if a heavy LTXV generation is active
+        if _LTXV_ACTIVE:
+            logger.debug("[ComfyUI] enhance_pexels skipped – LTXV generation active")
+            return None
+
+        async with _ENHANCE_SEM:
+            try:
+                COMFYUI_INPUT_HOST_DIR.mkdir(parents=True, exist_ok=True)
+                video_path = Path(video_path).resolve()
+                dest = COMFYUI_INPUT_HOST_DIR / video_path.name
+                if dest.resolve() != video_path:
+                    import shutil as _sh
+                    _sh.copy2(video_path, dest)
+                remote_name = video_path.name
+
+                result = await self.execute_workflow(
+                    "enhance_pexels",
+                    {"__INPUT_VIDEO__": remote_name},
+                    timeout=timeout,
+                )
+                if result.status != "completed":
+                    logger.debug("[ComfyUI] enhance_pexels workflow failed: %s", result.error_message)
+                    return None
+
+                found = self._first_video_output(result.outputs)
+                if not found:
+                    return None
+                ok = await self.download_output(found[0], output_path, subfolder=found[1])
+                if ok and output_path.exists() and output_path.stat().st_size > 5_000:
+                    logger.info("[ComfyUI] ✓ Pexels enhanced (RealESRGAN) → %s", output_path.name)
+                    return output_path
+                return None
+            except asyncio.TimeoutError:
+                logger.warning("[ComfyUI] enhance_pexels timed out after %.0fs", timeout)
+                return None
+            except Exception as exc:
+                logger.debug("[ComfyUI] enhance_pexels error: %s", exc)
                 return None
 
     # ── Generic workflow execution ────────────────────────────────────────────
@@ -413,9 +511,11 @@ class ComfyUIBridge:
         self, prompt: str, output_path: Path, duration: float = 3.0, timeout: float = 120.0,
     ) -> Optional[Path]:
         """Generate B-roll via LTX-Video 0.9.8-distilled. Acquires VRAM semaphore."""
+        global _LTXV_ACTIVE
         if not LTXV_ENABLED or not await self.is_available():
             return None
         async with _VRAM_SEM:
+            _LTXV_ACTIVE = True
             try:
                 result = await self.execute_workflow(
                     "ltxv_t2v_broll",
@@ -435,14 +535,18 @@ class ComfyUIBridge:
             except Exception as exc:
                 logger.warning("[ComfyUI] generate_ltxv_broll failed: %s", exc)
                 return None
+            finally:
+                _LTXV_ACTIVE = False
 
     async def animate_image_ltxv(
         self, image_path: Path, prompt: str, output_path: Path, timeout: float = 120.0,
     ) -> Optional[Path]:
         """Animate a static image via LTX-Video I2V. Acquires VRAM semaphore."""
+        global _LTXV_ACTIVE
         if not LTXV_ENABLED or not await self.is_available():
             return None
         async with _VRAM_SEM:
+            _LTXV_ACTIVE = True
             try:
                 remote = await self.upload_file(image_path)
                 result = await self.execute_workflow(
@@ -463,15 +567,19 @@ class ComfyUIBridge:
             except Exception as exc:
                 logger.warning("[ComfyUI] animate_image_ltxv failed: %s", exc)
                 return None
+            finally:
+                _LTXV_ACTIVE = False
 
     async def generate_ltxv_intro(
         self, first_frame_path: Path, theme: str, output_path: Path, timeout: float = 60.0,
     ) -> Optional[Path]:
         """Generate a 1.5s animated intro from the first frame of the clip.
         Acquires VRAM semaphore. If successful, replaces cinematic FFmpeg intro."""
+        global _LTXV_ACTIVE
         if not LTXV_ENABLED or not await self.is_available():
             return None
         async with _VRAM_SEM:
+            _LTXV_ACTIVE = True
             try:
                 remote = await self.upload_file(first_frame_path)
                 result = await self.execute_workflow(
@@ -492,6 +600,8 @@ class ComfyUIBridge:
             except Exception as exc:
                 logger.warning("[ComfyUI] generate_ltxv_intro failed: %s", exc)
                 return None
+            finally:
+                _LTXV_ACTIVE = False
 
     async def get_system_stats(self) -> Dict[str, Any]:
         """Return GPU VRAM + queue info from ComfyUI /system_stats."""

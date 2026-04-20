@@ -23,11 +23,30 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, "/app/src") if "/app/src" not in sys.path else None
+
+def _sw_fallback(quality="high"):
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22" if quality == "high" else "24"]
+
 try:
-    from gpu_utils import ffmpeg_codec_flags as _gpu_codec
-except ImportError:
-    def _gpu_codec(quality="high"):
-        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22" if quality == "high" else "24"]
+    from gpu_utils import ffmpeg_codec_flags as _raw_gpu_codec
+    # Validate NVENC flags — if they contain -rc (unsupported in some FFmpeg builds),
+    # fall back to software encoder for the entire broll_compositor module.
+    _test = _raw_gpu_codec("medium")
+    if "-rc" in _test:
+        # Quick probe: does FFmpeg actually accept -rc?
+        _probe = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1",
+             "-frames:v", "1", *_test, "-f", "null", "-"],
+            capture_output=True, timeout=5,
+        )
+        if _probe.returncode != 0:
+            _gpu_codec = _sw_fallback
+        else:
+            _gpu_codec = _raw_gpu_codec
+    else:
+        _gpu_codec = _raw_gpu_codec
+except (ImportError, Exception):
+    _gpu_codec = _sw_fallback
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
@@ -171,6 +190,9 @@ def normalize_broll(
             f"setsar=1"
         )
 
+    # Build codec flags (ensure they come after input/output mapping options)
+    _codec_flags = _gpu_codec("medium")
+    
     if is_image:
         # Include silent audio (-f lavfi -i anullsrc) so the B-roll video
         # has a valid audio stream. Without this, compose_overlay_multi fails
@@ -181,9 +203,9 @@ def normalize_broll(
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-t", str(duration),
             "-vf", vf,
-            *_gpu_codec("medium"),
-            "-c:a", "aac", "-ar", "44100",
             "-shortest",
+            *_codec_flags,
+            "-c:a", "aac", "-ar", "44100",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
@@ -195,7 +217,7 @@ def normalize_broll(
             "-t", str(duration),
             "-vf", vf,
             "-an",
-            *_gpu_codec("medium"),
+            *_codec_flags,
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
@@ -229,7 +251,7 @@ def compose_overlay(
     broll_path: Path | str,
     output_path: Path | str,
     timestamp: float,
-    duration: float = 4.5,
+    duration: float = 2.5,
     fade: float = 0.6,
 ) -> bool:
     """
