@@ -15,7 +15,7 @@ import asyncio
 import logging
 import tempfile
 from pathlib import Path
-from .broll_compositor import compose_overlay_multi
+from .broll_compositor import compose_overlay_multi, probe_duration
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +138,7 @@ async def overlay_broll_clips(
     clip_path: Path,
     broll_pairs: "list[tuple]",  # [(TimelineEvent, BrollAsset), ...]
     output_path: Path,
+    clip_duration: float = 0.0,
 ) -> "Path | None":
     """
     Overlay B-roll clips at their keyword event timestamps.
@@ -146,17 +147,56 @@ async def overlay_broll_clips(
     Delegates to broll_compositor.compose_overlay_multi for format-adaptive
     scaling, fade-in/out and AV-safe PTS handling.
 
+    Overlap protection: skips B-roll that overlaps hook (first 1.5s) or CTA (last 2s),
+    and ensures B-roll slots don't overlap each other.
+
     Returns output_path on success, None on error or if no pairs.
     """
     if not broll_pairs:
         return None
 
-    pairs = broll_pairs[:_BROLL_MAX]
+    # Probe clip duration if not provided
+    _dur = clip_duration or probe_duration(clip_path)
+    _hook_guard = 1.5   # don't overlay B-roll in first 1.5s (hook protection)
+    _cta_guard = 2.0    # don't overlay B-roll in last 2s (CTA protection)
+
+    # Sort by timestamp and filter overlapping/protected slots
+    sorted_pairs = sorted(broll_pairs, key=lambda x: x[0].t)
+    filtered_pairs = []
+    last_end = 0.0
+
+    for event, asset in sorted_pairs[:_BROLL_MAX]:
+        _start = event.t
+        _dur_slot = min(3.0, max(1.5, event.duration))
+        _end = _start + _dur_slot
+
+        # Skip if overlaps hook guard (first 1.5s)
+        if _start < _hook_guard:
+            logger.debug("[BrollOverlay] Skipping slot at %.2fs (overlaps hook guard)", _start)
+            continue
+
+        # Skip if overlaps CTA guard (last 2s)
+        if _start > (_dur - _cta_guard):
+            logger.debug("[BrollOverlay] Skipping slot at %.2fs (overlaps CTA guard)", _start)
+            continue
+
+        # Skip if overlaps previous B-roll (min 0.5s gap)
+        if _start < last_end + 0.5:
+            logger.debug("[BrollOverlay] Skipping slot at %.2fs (overlaps previous B-roll)", _start)
+            continue
+
+        filtered_pairs.append((event, asset))
+        last_end = _end
+
+    if not filtered_pairs:
+        logger.info("[BrollOverlay] No valid B-roll slots after overlap filtering")
+        return None
 
     # Build (timestamp, path, duration) tuples for the compositor
+    # Cap duration to 1.5-3.0s for TikTok/Reels standard (was 5-8s, too long)
     compositor_pairs = [
-        (round(event.t, 3), asset.path, round(max(3.5, event.duration + 2.0), 3))
-        for event, asset in pairs
+        (round(event.t, 3), asset.path, round(min(3.0, max(1.5, event.duration)), 3))
+        for event, asset in filtered_pairs
     ]
 
     ok = await compose_overlay_multi(

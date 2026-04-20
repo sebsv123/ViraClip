@@ -63,7 +63,7 @@ EP_HOOK_ZOOM_ON   = os.environ.get("EP_HOOK_ZOOM_ON",  "true").lower() != "false
 EP_BEAT_SYNC_ON   = os.environ.get("EP_BEAT_SYNC_ON",  "true").lower() != "false"
 EP_FADE_ON        = os.environ.get("EP_FADE_ON",       "true").lower() != "false"
 EP_FADE_DURATION  = float(os.environ.get("EP_FADE_DURATION",   "0.25"))
-EP_CTA_ON         = os.environ.get("EP_CTA_ON",        "false").lower() != "false"
+EP_CTA_ON         = os.environ.get("EP_CTA_ON",        "true").lower() != "false"
 EP_CTA_TEXT       = os.environ.get("EP_CTA_TEXT",      "Follow for more!")
 EP_CTA_DURATION   = float(os.environ.get("EP_CTA_DURATION",    "2.0"))
 EP_CTA_FONT_SIZE  = int(os.environ.get("EP_CTA_FONT_SIZE",     "54"))

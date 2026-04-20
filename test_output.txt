@@ -1,0 +1,32 @@
+============================================================
+STEP 1: Container status
+viraclip-worker | Up 8 minutes (healthy)
+viraclip-comfyui | Up 8 minutes (healthy)
+viraclip-backend | Up 2 hours (healthy)
+viraclip-postgres | Up 35 hours (healthy)
+viraclip-redis | Up 35 hours (healthy)
+
+STEP 2: ComfyUI logs (RealESRGAN + VideoUpscale)
+FETCH DATA from: https://raw.githubusercontent.com/ltdrdata/ComfyUI-Manager/main/custom-node-list.json [DONE]
+[DEPRECATION WARNING] Detected import of deprecated legacy API: /extensions/core/widgetInputs.js. This is likely caused by a custom node extension using outdated APIs. Please update your extensions or contact the extension author for an updated version.
+[DEPRECATION WARNING] Detected import of deprecated legacy API: /scripts/ui.js. This is likely caused by a custom node extension using outdated APIs. Please update your extensions or contact the extension author for an updated version.
+[DEPRECATION WARNING] Detected import of deprecated legacy API: /extensions/core/groupNode.js. This is likely caused by a custom node extension using outdated APIs. Please update your extensions or contact the extension author for an updated version.
+[DEPRECATION WARNING] Detected import of deprecated legacy API: /scripts/ui/components/buttonGroup.js. This is likely caused by a custom node extension using outdated APIs. Please update your extensions or contact the extension author for an updated version.
+[DEPRECATION WARNING] Detected import of deprecated legacy API: /scripts/ui/components/button.js. This is likely caused by a custom node extension using outdated APIs. Please update your extensions or contact the extension author for an updated version.
+
+STEP 3: ComfyUI /system_stats
+{"system": {"os": "linux", "ram_total": 33005867008, "ram_free": 18683576320, "comfyui_version": "0.19.3", "required_frontend_version": "1.42.11", "installed_templates_version": "0.9.57", "required_templates_version": "0.9.57", "python_version": "3.10.12 (main, Mar  3 2026, 11:56:32) [GCC 11.4.0]", "pytorch_version": "2.7.0+cu128", "embedded_python": false, "argv": ["main.py", "--listen", "0.0.0.0", "--port", "8188", "--lowvram", "--use-split-cross-attention", "--disable-smart-memory"]}, "devices": [{"name": "cuda:0 NVIDIA GeForce RTX 5070 Laptop GPU : cudaMallocAsync", "type": "cuda", "index": 0, "vram_total": 8082096128, "vram_free": 7798718464, "torch_vram_total": 0, "torch_vram_free": 0}]}
+
+STEP 4: Backend /health
+{"status":"healthy"}
+
+STEP 5: Create test task (Test A)
+{"task_id":"7cb24297-87c7-4f10-99ee-d49bcf8146b6","job_id":"4f28bf14275241ccaa99e7c2a577c342","message":"Task created and queued for processing"}
+
+Waiting 10s for pipeline to start...
+
+STEP 6: Worker logs (B-roll routing)
+
+
+============================================================
+DONE

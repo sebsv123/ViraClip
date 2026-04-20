@@ -1,0 +1,58 @@
+{
+  "1": {
+    "inputs": {
+      "video": "__INPUT_VIDEO__",
+      "force_rate": 0,
+      "force_size": "Disabled",
+      "custom_width": 512,
+      "custom_height": 512,
+      "frame_load_cap": 0,
+      "skip_first_frames": 0,
+      "select_every_nth": 1,
+      "choose video to load": "default"
+    },
+    "class_type": "VHS_LoadVideo",
+    "_meta": {"title": "Load Input Video"}
+  },
+  "2": {
+    "inputs": {
+      "model_name": "RealESRGAN_x4plus.pth"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {"title": "Load RealESRGAN x4"}
+  },
+  "3": {
+    "inputs": {
+      "upscale_model": ["2", 0],
+      "image": ["1", 0]
+    },
+    "class_type": "ImageUpscaleWithModel",
+    "_meta": {"title": "Upscale Frames x4"}
+  },
+  "4": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "width": 1080,
+      "height": 1920,
+      "crop": "center",
+      "image": ["3", 0]
+    },
+    "class_type": "ImageScale",
+    "_meta": {"title": "Scale to 1080x1920 (9:16)"}
+  },
+  "5": {
+    "inputs": {
+      "frame_rate": 30,
+      "loop_count": 0,
+      "filename_prefix": "enhanced_pexels",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": false,
+      "audio": ["1", 1],
+      "images": ["4", 0]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {"title": "Output Enhanced Video"}
+  }
+}

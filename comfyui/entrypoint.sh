@@ -11,6 +11,25 @@ if [ ! -d "$LTXV_DIR" ]; then
     git clone https://github.com/Lightricks/ComfyUI-LTXVideo "$LTXV_DIR" 2>&1 | tail -5
 fi
 
+# ── Clone ComfyUI-VideoUpscale_WithModel if not present ──────────────────────
+UPSCALE_DIR="/comfyui/custom_nodes/ComfyUI-VideoUpscale_WithModel"
+if [ ! -d "$UPSCALE_DIR" ]; then
+    echo "[ViraClip] Cloning ComfyUI-VideoUpscale_WithModel..."
+    git clone https://github.com/ShmuelRonen/ComfyUI-VideoUpscale_WithModel "$UPSCALE_DIR" 2>&1 | tail -5
+fi
+
+# ── Download RealESRGAN model if not present ──────────────────────────────────
+REALESRGAN_MODEL="/comfyui/models/upscale_models/RealESRGAN_x4plus.pth"
+if [ ! -f "$REALESRGAN_MODEL" ]; then
+    echo "[ViraClip] Downloading RealESRGAN_x4plus.pth (~65MB)..."
+    mkdir -p /comfyui/models/upscale_models
+    wget -q --show-progress \
+        "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth" \
+        -O "$REALESRGAN_MODEL" \
+    && echo "[ViraClip] RealESRGAN model downloaded OK" \
+    || echo "[ViraClip] WARNING: RealESRGAN download failed (will retry on next start)"
+fi
+
 # ── Download LTX-Video model if not present ──────────────────────────────────
 LTXV_MODEL="/comfyui/models/checkpoints/ltxv-2b-0.9.8-distilled-fp8.safetensors"
 if [ ! -f "$LTXV_MODEL" ]; then

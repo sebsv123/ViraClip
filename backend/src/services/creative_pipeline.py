@@ -28,26 +28,26 @@ async def _apply_cinematic_intro(clip_path: Path, output_path: Path) -> bool:
       2. Slight white flash (0.1s at t=0)
       3. Zoom-in from 115% → 100% over the first 0.4s
 
-    Implemented as a single FFmpeg pass with drawbox + eq filters.
+    Implemented as a single FFmpeg pass with drawbox + zoompan filters.
     Returns True on success, False on failure.
     """
     try:
+        # Fixed: proper zoompan for animated zoom, drawbox for letterbox/flash
+        # zoompan: d=12 frames (~0.4s @ 30fps), z zooms from 1.15 to 1.0
         vf = (
-            # Letterbox bars: black drawbox top and bottom, fade out by t=0.35
+            # Zoom in from 115% to 100% over first 0.4s using zoompan
+            "zoompan=z='min(1.15,max(1.0,1.15-0.15*in/12))':d=12:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1920,"
+            # Letterbox bars: black top/bottom, fade out by t=0.35
             "drawbox=x=0:y=0:w=iw:h=ih*0.06:color=black@'if(lt(t,0.35),1-t/0.35,0)':t=fill,"
             "drawbox=x=0:y=ih*0.94:w=iw:h=ih*0.06:color=black@'if(lt(t,0.35),1-t/0.35,0)':t=fill,"
             # White flash at t=0, fades by t=0.12
-            "drawbox=x=0:y=0:w=iw:h=ih:color=white@'if(lt(t,0.12),0.55*(1-t/0.12),0)':t=fill,"
-            # Zoom from 115% → 100% over 0.4s using scale+crop
-            "scale='if(lt(t,0.4),iw*(1.15-0.15*t/0.4),iw)':'if(lt(t,0.4),ih*(1.15-0.15*t/0.4),ih)',"
-            "crop=iw/if(lt(t,0.4),(1.15-0.15*t/0.4),1):ih/if(lt(t,0.4),(1.15-0.15*t/0.4),1):'"
-            "(iw-iw/if(lt(t,0.4),(1.15-0.15*t/0.4),1))/2':"
-            "'(ih-ih/if(lt(t,0.4),(1.15-0.15*t/0.4),1))/2'"
+            "drawbox=x=0:y=0:w=iw:h=ih:color=white@'if(lt(t,0.12),0.55*(1-t/0.12),0)':t=fill"
         )
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-hide_banner", "-loglevel", "quiet", "-y",
             "-i", str(clip_path),
             "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             "-c:a", "copy",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
@@ -150,7 +150,7 @@ class CreativePipeline:
             "loudnorm_applied": False,
             "qa_passed": None,
             "qa_issues": [],
-            # ── Viral Boost tracking ─────────────────────────────────────
+            # ── Viral Boost tracking ─────────────────────────────
             "hook_visual_applied": False,
             "cinematic_intro_applied": False,
             "ltxv_intro_applied": False,
@@ -158,6 +158,7 @@ class CreativePipeline:
             "broll_slots_filled": 0,
             "ltxv_assets_generated": 0,
             "broll_density_coverage": 0.0,
+            "broll_sources": [],  # per-slot: [{keyword, priority, source}]
         }
 
         # ── 1. Multimodal event timeline ──────────────────────────────────────
@@ -312,12 +313,70 @@ class CreativePipeline:
             except Exception as exc:
                 logger.debug("  [Creative] Step 4.8 (Hook visual) skipped: %s", exc)
 
-        # ── 4.9. Cinematic intro (FFmpeg letterbox+flash+zoom, fallback if no LTXV) ─
+        # ── 4.9a. LTXV intro hook (GPU-accelerated, 1.5s animated intro) ─
+        _ltxv_intro_on = os.environ.get("LTXV_INTRO_ENABLED", "true").lower() == "true"
+        if _ltxv_intro_on:
+            logger.info("  [Creative] Step 4.9a: LTXV intro hook...")
+            try:
+                from ..comfyui_bridge import ComfyUIBridge
+                _cfy = ComfyUIBridge()
+                if await _cfy.is_available():
+                    # Extract first frame for LTXV I2V intro
+                    _first_frame = clip_path.with_suffix(".first.jpg")
+                    _extract_proc = await asyncio.create_subprocess_exec(
+                        "ffmpeg", "-y", "-i", str(clip_path),
+                        "-ss", "0", "-vframes", "1",
+                        "-vf", "scale=512:768:force_original_aspect_ratio=decrease,pad=512:768:(ow-iw)/2:(oh-ih)/2:black",
+                        str(_first_frame),
+                        stdout=asyncio.subprocess.DEVNULL,
+                        stderr=asyncio.subprocess.DEVNULL,
+                    )
+                    await asyncio.wait_for(_extract_proc.wait(), timeout=30.0)
+                    if _first_frame.exists():
+                        _intro_out = clip_path.with_name(f"ltxv_intro_{clip_path.name}")
+                        _theme = preset.name if preset else transcript[:40] if transcript else "cinematic"
+                        _ltxv_result = await _cfy.generate_ltxv_intro(
+                            first_frame_path=_first_frame,
+                            theme=_theme,
+                            output_path=_intro_out,
+                            timeout=90.0,
+                        )
+                        if _ltxv_result and _intro_out.exists() and _intro_out.stat().st_size > 0:
+                            # Concat the LTXV intro (1.5s) with the main clip
+                            _concat_out = clip_path.with_name(f"concat_{clip_path.name}")
+                            with open("/tmp/concat_list.txt", "w") as _f:
+                                _f.write(f"file '{_intro_out}'\nfile '{clip_path}'\n")
+                            _concat_proc = await asyncio.create_subprocess_exec(
+                                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                                "-i", "/tmp/concat_list.txt",
+                                "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                                "-c:a", "aac", "-b:a", "128k",
+                                "-movflags", "+faststart",
+                                str(_concat_out),
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
+                            await asyncio.wait_for(_concat_proc.wait(), timeout=120.0)
+                            if _concat_out.exists() and _concat_out.stat().st_size > 0:
+                                clip_path.unlink(missing_ok=True)
+                                _intro_out.unlink(missing_ok=True)
+                                _concat_out.rename(clip_path)
+                                meta["ltxv_intro_applied"] = True
+                                meta["intro_duration_s"] = 1.5
+                                logger.info("  [Creative] ✓ Step 4.9a: LTXV intro hook applied")
+                            else:
+                                _concat_out.unlink(missing_ok=True)
+                        _first_frame.unlink(missing_ok=True)
+                await _cfy.close()
+            except Exception as _ltxv_exc:
+                logger.debug("  [Creative] Step 4.9a (LTXV intro) skipped: %s", _ltxv_exc)
+
+        # ── 4.9b. Cinematic intro (FFmpeg letterbox+flash+zoom, fallback if no LTXV) ─
         _cinematic_on = (vb.cinematic_intro if vb else
                          os.environ.get("CINEMATIC_INTRO_ENABLED", "true").lower() == "true")
         _ltxv_intro_active = meta.get("ltxv_intro_applied", False)
         if not _ltxv_intro_active and _cinematic_on:
-            logger.info("  [Creative] Step 4.9: Cinematic intro (FFmpeg)...")
+            logger.info("  [Creative] Step 4.9b: Cinematic intro (FFmpeg)...")
             try:
                 _intro_out = clip_path.with_name(f"intro_{clip_path.name}")
                 _intro_ok = await _apply_cinematic_intro(clip_path, _intro_out)
@@ -325,11 +384,11 @@ class CreativePipeline:
                     clip_path.unlink(missing_ok=True)
                     _intro_out.rename(clip_path)
                     meta["cinematic_intro_applied"] = True
-                    logger.info("  [Creative] ✓ Step 4.9: Cinematic intro applied")
+                    logger.info("  [Creative] ✓ Step 4.9b: Cinematic intro applied")
                 else:
                     _intro_out.unlink(missing_ok=True)
             except Exception as exc:
-                logger.debug("  [Creative] Step 4.9 (Cinematic intro) skipped: %s", exc)
+                logger.debug("  [Creative] Step 4.9b (Cinematic intro) skipped: %s", exc)
 
         # ── 5. B-roll overlay (density-planned) ────────────────────────────
         logger.info("  [Creative] Step 5/8: B-roll overlay (density-planned)...")
@@ -347,7 +406,7 @@ class CreativePipeline:
             try:
                 from .broll_density_planner import plan_broll_density
                 _energy = float((audio_features or {}).get("energy", 0.5) or 0.5)
-                density_plan = plan_broll_density(
+                density_plan = await plan_broll_density(
                     timeline_events=timeline,
                     clip_duration=clip_dur,
                     transcript=transcript,
@@ -366,15 +425,28 @@ class CreativePipeline:
                 _ltxv_budget = (vb.ltxv_broll_max_per_clip if vb else
                                 int(os.environ.get("LTXV_BROLL_MAX_PER_CLIP", "2")))
                 _ltxv_used = 0
-                # Resolve each slot via the cascade
+                # Resolve each slot via the cascade — pass slot priority for hybrid routing
                 for slot in density_plan.slots:
                     asset = await _broll_ctx.get_for_keyword(
-                        slot.keyword, duration=slot.duration, mood=slot.visual_mode,
+                        slot.keyword,
+                        duration=slot.duration,
+                        mood=slot.visual_mode,
+                        priority=slot.priority,
                     )
                     if asset:
-                        if getattr(asset, 'source', '') in ('t2v', 'ltxv'):
+                        _src = getattr(asset, 'source', 'unknown')
+                        if _src in ('t2v', 'ltxv'):
                             _ltxv_used += 1
                             meta["ltxv_assets_generated"] = _ltxv_used
+                        meta["broll_sources"].append({
+                            "keyword": slot.keyword,
+                            "priority": slot.priority,
+                            "source": _src,
+                        })
+                        logger.info(
+                            "  [Creative] B-roll slot [%s] '%s' → %s",
+                            slot.priority.upper(), slot.keyword, _src,
+                        )
                         evt = TimelineEvent(
                             t=slot.t, type="keyword", strength=0.7,
                             duration=slot.duration,

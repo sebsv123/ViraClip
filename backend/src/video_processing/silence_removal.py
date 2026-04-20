@@ -24,15 +24,15 @@ def _get_ffmpeg_exe() -> str:
 
 logger = logging.getLogger(__name__)
 
-SILENCE_THRESHOLD: float = 0.4   # seconds — gaps longer than this are removed
-MIN_SILENCE_SAVINGS: float = 1.5  # only apply filter if we save at least this many seconds
+SILENCE_THRESHOLD: float = 0.8   # seconds — gaps longer than this are removed (was 0.4; raised to protect dramatic pauses)
+MIN_SILENCE_SAVINGS: float = 3.0  # only apply filter if we save at least this many seconds (was 1.5)
+MAX_COMPRESSION_RATIO: float = 0.30  # never remove more than 30% of a clip's duration
 SILENCE_MODE: str = os.environ.get("SILENCE_MODE", "cut").lower()  # "cut" | "ramp"
 RAMP_SPEED: float = float(os.environ.get("SILENCE_RAMP_SPEED", "2.0"))  # 2x default
 
 FILLER_WORDS = {
     "um", "uh", "er", "erm", "hmm", "hm", "mhm", "ah", "oh",
-    "like", "basically", "literally", "actually", "right", "okay",
-    "so", "well", "you know", "i mean", "i guess", "sort of", "kind of",
+    "like", "basically", "you know", "i mean", "i guess", "sort of", "kind of",
 }
 
 
