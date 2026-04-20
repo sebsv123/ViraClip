@@ -1,12 +1,21 @@
 """
 BRoll Service - AI-powered B-roll injection for viral video enhancement.
 
+Provider priority (configurable via BROLL_PROVIDER_PRIORITY):
+  premium_first (default):
+    1. LTXV / ComfyUI local generation  (best quality, zero API cost)
+    2. T2V Replicate                    (cloud generative, paid)
+    3. Pexels / Pixabay / Coverr stock  (free, lower relevance)
+  stock_first:
+    1. Pexels / Pixabay / Coverr stock
+    2. LTXV / ComfyUI
+    3. T2V Replicate
+
 Pipeline:
   1. Keyword extraction   — Groq llama-3.1-8b-instant extracts 2-3 visual search terms
-  2. Asset fetch          — Pexels API (portrait video); Pixabay API as fallback
-  3. Silence detection    — librosa finds gaps > 1.5 s in segment audio
-  4. FFmpeg overlay       — inserts B-roll with 0.3 s fade-in/out at silence timestamps
-                           (or at t=5 s if no silences found)
+  2. Asset fetch           — ordered by provider priority with quality gating
+  3. Silence detection     — librosa finds gaps > 1.5 s in segment audio
+  4. FFmpeg overlay        — inserts B-roll with fade-in/out at timestamps
 """
 import asyncio
 import json
@@ -20,19 +29,28 @@ from typing import List, Dict, Any, Optional, Tuple
 import httpx
 
 from ..config import Config, get_config
-from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED, LTXV_ENABLED
 from .broll_compositor import compose_overlay, probe_duration
 from .scene_broll_placer import get_insert_timestamps
+from .broll_provider_strategy import (
+    BROLL_PROVIDER_PRIORITY,
+    BROLL_ENABLE_PREMIUM,
+    BROLL_ENABLE_STOCK,
+    ProviderType,
+    get_provider_order,
+    diagnose_providers,
+    passes_quality_gate,
+)
 
 logger = logging.getLogger(__name__)
 
-# Configuraciones B-roll via environment variables para fácil tuning
-_BROLL_DOWNLOAD_TIMEOUT = int(os.environ.get("BROLL_DOWNLOAD_TIMEOUT", "30"))   # seconds per file
-_MIN_SILENCE_SEC = float(os.environ.get("BROLL_MIN_SILENCE_SEC", "1.5"))       # minimum silence gap
-_BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "2.5"))               # seconds of B-roll - capped 1.5-3s for TikTok/Reels
-_FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))             # fade-in / fade-out length - suave
-_CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))               # cache stale days
-_BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "8"))             # max overlays per clip (was 3)
+# ── B-roll tuning ─────────────────────────────────────────────────────────────
+_BROLL_DOWNLOAD_TIMEOUT = int(os.environ.get("BROLL_DOWNLOAD_TIMEOUT", "30"))
+_MIN_SILENCE_SEC = float(os.environ.get("BROLL_MIN_SILENCE_SEC", "1.5"))
+_BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "2.5"))
+_FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))
+_CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))
+_BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "8"))
 
 
 class BrollService:
@@ -133,7 +151,19 @@ class BrollService:
         return ["nature", "landscape", "people"]
 
     # ──────────────────────────────────────────────────────────────────────────
-    # 2. ASSET FETCH (Pexels → Pixabay fallback)
+    # 2. PROVIDER DIAGNOSTICS
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def log_provider_status(self) -> dict:
+        """Log and return availability of all B-roll providers.
+
+        Delegates to the centralised broll_provider_strategy module.
+        """
+        status = diagnose_providers()
+        return status.as_dict()
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3. QUALITY GATING
     # ──────────────────────────────────────────────────────────────────────────
 
     def _is_cache_fresh(self, path: Path) -> bool:
@@ -144,50 +174,192 @@ class BrollService:
         age_days = (_time.time() - path.stat().st_mtime) / 86400
         return age_days <= _CACHE_TTL_DAYS
 
-    async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
-        """Fetch the most relevant B-roll asset for *keyword*.
+    @staticmethod
+    def _passes_quality_gate(path: Path, provider: str) -> bool:
+        """Unified quality gate — delegates to broll_provider_strategy."""
+        return passes_quality_gate(path, provider)
 
-        Strategy: API-first for maximum relevance.
-        1. Query Pexels + Pixabay + Coverr in parallel (best result for this keyword)
-        2. If all APIs fail → fall back to Pexels Photos (static image via API)
-        3. If all APIs are unavailable (no keys / network error) → use local cache
-        Cache is a safety net, not the primary source.
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4. ASSET FETCH — strategy-driven dispatch (single source of truth)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
+        """Fetch the best B-roll asset for *keyword* using provider order
+        from broll_provider_strategy.get_provider_order().
+
+        This is the ONLY method that routes to individual providers.
+        No other file should duplicate this routing logic.
         """
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
+        provider_order = get_provider_order()  # single source of truth
+
+        for provider_type in provider_order:
+            result = await self._try_provider(provider_type, keyword, safe)
+            if result:
+                return result
+
+        logger.warning("[BRoll] ALL PROVIDERS EXHAUSTED for keyword='%s' "
+                       "(priority=%s, order=%s)",
+                       keyword, BROLL_PROVIDER_PRIORITY,
+                       [p.value for p in provider_order])
+        return None
+
+    async def _try_provider(
+        self, provider_type: ProviderType, keyword: str, safe: str
+    ) -> Optional[Path]:
+        """Dispatch to a single provider. Returns Path on success, None on failure."""
+        if provider_type == ProviderType.LOCAL:
+            return self._try_local_cache(keyword, safe)
+        if provider_type == ProviderType.LTXV:
+            return await self._try_ltxv(keyword, safe)
+        if provider_type == ProviderType.ANIMATEDIFF:
+            return await self._try_animatediff(keyword, safe)
+        if provider_type == ProviderType.T2V_REPLICATE:
+            return await self._try_t2v(keyword, safe)
+        if provider_type == ProviderType.STOCK_VIDEO:
+            return await self._try_stock_video(keyword, safe)
+        if provider_type == ProviderType.STOCK_IMAGE:
+            return await self._try_stock_image(keyword, safe)
+        if provider_type == ProviderType.CACHE:
+            return self._try_disk_cache(keyword, safe)
+        return None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 5. INDIVIDUAL PROVIDER METHODS
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _try_local_cache(self, keyword: str, safe: str) -> Optional[Path]:
+        """Check local disk cache for a fresh asset."""
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
+        if self._is_cache_fresh(cached_video):
+            logger.info("[BRoll] ✓ PROVIDER=local keyword='%s' → %s", keyword, cached_video.name)
+            return cached_video
+        if self._is_cache_fresh(cached_photo):
+            logger.info("[BRoll] ✓ PROVIDER=local keyword='%s' → %s", keyword, cached_photo.name)
+            return cached_photo
+        return None
 
-        # ── 1. API-first: query all video sources in parallel ─────────────────
+    async def _try_ltxv(self, keyword: str, safe: str) -> Optional[Path]:
+        """Try LTXV. Returns Path or None."""
+        if not LTXV_ENABLED:
+            logger.debug("[BRoll] LTXV disabled (LTXV_ENABLED=false)")
+            return None
+
+        out_path = self.broll_dir / f"gen_{safe}.mp4"
+
+        try:
+            bridge = ComfyUIBridge()
+            available = await bridge.is_available()
+            if available:
+                prompt = f"Cinematic vertical footage of {keyword}, smooth camera, professional, 4K, no text"
+                result = await bridge.generate_ltxv_broll(prompt, out_path, duration=_BROLL_DURATION)
+                await bridge.close()
+                if result and self._passes_quality_gate(out_path, "ltxv"):
+                    logger.info("[BRoll] ✓ PROVIDER=ltxv keyword='%s' → %s", keyword, out_path.name)
+                    return out_path
+                logger.info("[BRoll] ✗ PROVIDER=ltxv keyword='%s' → failed or quality reject", keyword)
+            else:
+                logger.info("[BRoll] ✗ PROVIDER=ltxv SKIP — ComfyUI not reachable")
+        except Exception as exc:
+            logger.warning("[BRoll] ✗ PROVIDER=ltxv keyword='%s' error: %s", keyword, exc)
+
+        return None
+
+    async def _try_animatediff(self, keyword: str, safe: str) -> Optional[Path]:
+        """Try ComfyUI AnimateDiff. Returns Path or None."""
+        if not COMFYUI_ENABLED:
+            logger.debug("[BRoll] ComfyUI AnimateDiff disabled (COMFYUI_ENABLED=false)")
+            return None
+
+        out_path = self.broll_dir / f"gen_{safe}.mp4"
+
+        try:
+            bridge = ComfyUIBridge()
+            available = await bridge.is_available()
+            if available:
+                prompt = f"Cinematic vertical footage of {keyword}, smooth, professional"
+                result = await bridge.generate_broll(prompt, out_path, duration=_BROLL_DURATION)
+                await bridge.close()
+                if result and self._passes_quality_gate(out_path, "animatediff"):
+                    logger.info("[BRoll] ✓ PROVIDER=animatediff keyword='%s' → %s", keyword, out_path.name)
+                    return out_path
+                logger.info("[BRoll] ✗ PROVIDER=animatediff keyword='%s' → failed", keyword)
+            else:
+                logger.info("[BRoll] ✗ PROVIDER=animatediff SKIP — ComfyUI not reachable")
+        except Exception as exc:
+            logger.warning("[BRoll] ✗ PROVIDER=animatediff keyword='%s' error: %s", keyword, exc)
+
+        return None
+
+    async def _try_t2v(self, keyword: str, safe: str) -> Optional[Path]:
+        """Try T2V Replicate. Returns Path or None."""
+        try:
+            from .t2v_broll_service import T2VBrollService
+            if T2VBrollService.is_available():
+                t2v = T2VBrollService()
+                t2v_prompt = f"Cinematic 4K vertical footage of {keyword}, smooth camera, no text"
+                t2v_out = self.broll_dir / f"t2v_{safe}.mp4"
+                res = await t2v.generate(prompt=t2v_prompt, duration=_BROLL_DURATION, output_path=str(t2v_out))
+                if res and t2v_out.exists() and self._passes_quality_gate(t2v_out, "t2v_replicate"):
+                    logger.info("[BRoll] ✓ PROVIDER=t2v_replicate keyword='%s' → %s", keyword, t2v_out.name)
+                    return t2v_out
+                logger.info("[BRoll] ✗ PROVIDER=t2v_replicate keyword='%s' → failed", keyword)
+        except Exception as exc:
+            logger.debug("[BRoll] ✗ PROVIDER=t2v_replicate keyword='%s' error: %s", keyword, exc)
+
+        return None
+
+    async def _try_stock_video(self, keyword: str, safe: str) -> Optional[Path]:
+        """Try Pexels → Pixabay → Coverr. Returns Path or None."""
+        if not BROLL_ENABLE_STOCK:
+            logger.debug("[BRoll] Stock providers disabled (BROLL_ENABLE_STOCK=false)")
+            return None
+
+        cached_video = self.broll_dir / f"{safe}.mp4"
+
+        # ── Parallel stock video search ───────────────────────────────────────
         pexels_task  = asyncio.create_task(self._search_pexels(keyword))
         pixabay_task = asyncio.create_task(self._search_pixabay(keyword))
         coverr_task  = asyncio.create_task(self._search_coverr(keyword))
 
         results = await asyncio.gather(pexels_task, pixabay_task, coverr_task,
                                        return_exceptions=True)
-        video_urls = [r for r in results if isinstance(r, str) and r]
+        providers = ["pexels_video", "pixabay_video", "coverr_video"]
+        video_urls = [(r, p) for r, p in zip(results, providers) if isinstance(r, str) and r]
 
-        for url in video_urls:
+        for url, provider in video_urls:
             result = await self._download(url, cached_video)
-            if result:
-                logger.info(f"[BRoll] API → downloaded video for '{keyword}': {result.name}")
+            if result and self._passes_quality_gate(cached_video, provider):
+                logger.info("[BRoll] ✓ PROVIDER=%s keyword='%s' → %s", provider, keyword, result.name)
                 return result
+            elif result:
+                logger.info("[BRoll] ✗ PROVIDER=%s keyword='%s' → quality reject", provider, keyword)
 
-        # ── 2. Fallback: Pexels Photos API (static image) ─────────────────────
+        return None
+
+    async def _try_stock_image(self, keyword: str, safe: str) -> Optional[Path]:
+        """Try Pexels Photos. Returns Path or None."""
+        if not BROLL_ENABLE_STOCK:
+            logger.debug("[BRoll] Stock providers disabled (BROLL_ENABLE_STOCK=false)")
+            return None
+
+        cached_photo = self.broll_dir / f"{safe}.jpg"
+
         photo = await self._search_pexels_photos_and_download(keyword, safe)
-        if photo:
-            logger.info(f"[BRoll] API → downloaded photo for '{keyword}': {photo.name}")
+        if photo and self._passes_quality_gate(photo, "pexels_photo"):
+            logger.info("[BRoll] ✓ PROVIDER=pexels_photo keyword='%s' → %s", keyword, photo.name)
             return photo
 
-        # ── 3. Last resort: local cache (APIs down / no keys) ─────────────────
-        if self._is_cache_fresh(cached_video):
-            logger.info(f"[BRoll] Cache fallback (video): {cached_video}")
-            return cached_video
-        if self._is_cache_fresh(cached_photo):
-            logger.info(f"[BRoll] Cache fallback (photo): {cached_photo}")
-            return cached_photo
-
-        logger.warning(f"[BRoll] No asset found for keyword '{keyword}' (APIs + cache exhausted)")
         return None
+
+    def _try_disk_cache(self, keyword: str, safe: str) -> Optional[Path]:
+        """Alias for _try_local_cache (disk cache = local cache)."""
+        return self._try_local_cache(keyword, safe)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 6. API SEARCH HELPERS
+    # ──────────────────────────────────────────────────────────────────────────
 
     async def _search_pexels_photos_and_download(self, keyword: str, safe_name: str) -> Optional[Path]:
         """Search Pexels Photos API and download a portrait image for *keyword*."""
@@ -418,7 +590,8 @@ class BrollService:
         Full B-roll pipeline for a single clip.
 
         1. Extract keywords (or use precomputed_keywords from AI brain)
-        2. Fetch the best matching stock video per keyword
+        2. Fetch best asset per keyword via provider-priority cascade
+           (premium_first: LTXV → T2V → Stock | stock_first: Stock → LTXV → T2V)
         3. Insert B-roll overlays at spoken-word timestamps or scene boundaries
 
         Returns *output_path* on success, *video_path* (original) on failure.
@@ -482,51 +655,15 @@ class BrollService:
             if not keywords:
                 return video_path
 
-            # Step 2 — fetch one asset per keyword (up to max_overlays distinct clips)
+            # Step 2 — fetch one asset per keyword (uses provider-priority cascade)
+            # fetch_broll_asset respects BROLL_PROVIDER_PRIORITY:
+            #   premium_first → LTXV/ComfyUI → T2V → Stock
+            #   stock_first   → Stock → LTXV/ComfyUI → T2V
             broll_assets: List[Path] = []
             for kw in keywords[:max(3, max_overlays)]:
                 asset = await self.fetch_broll_asset(kw)
                 if asset and asset not in broll_assets:
                     broll_assets.append(asset)
-
-            # GPU T2V fallback if no stock assets found
-            if not broll_assets:
-                try:
-                    from .t2v_broll_service import T2VBrollService
-                    if T2VBrollService.is_available():
-                        _t2v = T2VBrollService()
-                        _t2v_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
-                        _t2v_out = self.broll_dir / f"t2v_{'_'.join(keywords[:1])}.mp4"
-                        _t2v_res = await _t2v.generate(
-                            prompt=_t2v_prompt,
-                            duration=_BROLL_DURATION,
-                            output_path=str(_t2v_out),
-                        )
-                        if _t2v_res and _t2v_out.exists():
-                            broll_assets.append(_t2v_out)
-                            logger.info(
-                                f"[BRoll] ✓ T2V ({_t2v_res.get('model', 'ltx')}) generated "
-                                f"B-Roll for: {_t2v_prompt[:40]}"
-                            )
-                except Exception as _t2v_e:
-                    logger.debug(f"[BRoll] T2V generation skipped: {_t2v_e}")
-
-            if not broll_assets and COMFYUI_ENABLED:
-                try:
-                    _cfy = ComfyUIBridge()
-                    _gen_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
-                    _gen_out = self.broll_dir / f"gen_{'_'.join(keywords[:1])}.mp4"
-                    _gen_result = await _cfy.generate_broll(
-                        prompt=_gen_prompt,
-                        output_path=_gen_out,
-                        duration=_BROLL_DURATION,
-                    )
-                    await _cfy.close()
-                    if _gen_result and _gen_out.exists():
-                        broll_assets.append(_gen_out)
-                        logger.info(f"[BRoll] ✓ AnimateDiff generated B-Roll for: {_gen_prompt[:40]}")
-                except Exception as _gen_e:
-                    logger.debug(f"[BRoll] AnimateDiff fallback skipped: {_gen_e}")
 
             if not broll_assets:
                 logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")
