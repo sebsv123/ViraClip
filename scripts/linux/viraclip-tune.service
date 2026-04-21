@@ -1,0 +1,45 @@
+[Unit]
+Description=ViraClip Host Performance Tuning
+Documentation=https://github.com/sebsv123/ViraClip/blob/main/scripts/linux/host-tune.sh
+After=network.target
+Before=docker.service containerd.service
+Wants=network-online.target
+
+# Ensure we run before Docker starts, so containers inherit tuned settings
+# This is critical for CPU governors, ulimits, and NVIDIA persistence mode
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Use the repository path - adjust if installed elsewhere
+# The script must be run as root to modify sysctl, CPU governors, etc.
+ExecStart=/bin/bash /home/_sebastian/CascadeProjects/ViraClip/scripts/linux/host-tune.sh
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=viraclip-tune
+
+# Timeout - tuning should complete within 60 seconds
+TimeoutStartSec=60
+TimeoutStopSec=10
+
+# Security - run as root for sysctl/CPU governor access
+User=root
+Group=root
+
+# Environment
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="VIRACLIP_USER=sebastian"
+
+# Restart behavior - don't restart automatically, tuning is idempotent at boot
+Restart=no
+
+[Install]
+# Start at boot before multi-user target (before Docker)
+WantedBy=multi-user.target
+
+# Also ensure it runs before Docker if Docker is enabled
+# This creates a dependency ordering constraint
+Alias=viraclip-tune.service

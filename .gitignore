@@ -91,3 +91,6 @@ backend/test_output.txt
 # Lockfiles (regenerate on install)
 frontend/bun.lockb
 backend/uv.lock
+
+# Windows scripts (not applicable on Linux server)
+*.bat
