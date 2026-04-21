@@ -20,6 +20,7 @@ Inspired by:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import subprocess
@@ -34,6 +35,23 @@ BGM_LIBRARY_DIR = Path(os.environ.get("BGM_LIBRARY_DIR", "/app/assets/sounds/bgm
 SFX_LIBRARY_DIR = Path(os.environ.get("SFX_LIBRARY_DIR", "/app/sfx_library"))
 
 _AUDIO_EXTS = {".mp3", ".wav", ".ogg", ".m4a", ".aac", ".flac"}
+
+# ── BGM Library Cache ───────────────────────────────────────────────────────
+_BGM_CACHE: Optional[List[BGMTrack]] = None
+
+def _get_cached_library() -> List[BGMTrack]:
+    """Return cached BGM library, building it once on first call."""
+    global _BGM_CACHE
+    if _BGM_CACHE is None:
+        _BGM_CACHE = _scan_bgm_library(BGM_LIBRARY_DIR)
+        for t in _BGM_CACHE:
+            if t.bpm == 0.0:
+                t.bpm = _estimate_bpm_from_filename(t.name)
+            if t.bpm == 0.0:
+                t.bpm = 95.0
+            if t.category == "unknown":
+                t.category = bpm_category(t.bpm)
+    return _BGM_CACHE
 
 
 # ── BPM Range helper ──────────────────────────────────────────────────────────
@@ -126,8 +144,12 @@ def analyse_bpm(audio_path: Path, duration: float = 60.0) -> Dict[str, Any]:
         tempo_arr, beat_frames = librosa.beat.beat_track(
             onset_envelope=onset_env, sr=sr, trim=False
         )
-        # librosa ≥ 0.10 returns array; take scalar
-        bpm = float(np.asarray(tempo_arr).flat[0]) if hasattr(tempo_arr, "__len__") else float(tempo_arr)
+        # librosa ≥ 0.10 returns array; take scalar (with safe numpy fallback)
+        try:
+            import numpy as _np
+            bpm = float(_np.asarray(tempo_arr).flat[0])
+        except Exception:
+            bpm = float(tempo_arr) if not hasattr(tempo_arr, "__len__") else float(list(tempo_arr)[0])
         beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
 
         # Confidence: how consistent is the inter-beat interval?
@@ -196,25 +218,31 @@ def select_bgm(
       2. Any track with smallest BPM distance
     """
     if tracks is None:
-        tracks = _scan_bgm_library(BGM_LIBRARY_DIR)
+        tracks = _get_cached_library()
 
     if not tracks:
         return None
-
-    # Fill in BPM from filename where not yet set
-    for t in tracks:
-        if t.bpm == 0.0:
-            t.bpm = _estimate_bpm_from_filename(t.name)
-        if t.bpm == 0.0:
-            t.bpm = 95.0   # default midtempo
-        if t.category == "unknown":
-            t.category = bpm_category(t.bpm)
 
     target_cat = prefer_category or bpm_category(target_bpm)
     cat_tracks  = [t for t in tracks if t.category == target_cat]
     pool        = cat_tracks if cat_tracks else tracks
 
     return min(pool, key=lambda t: bpm_distance(target_bpm, t.bpm))
+
+
+# ── Video Duration Helper ───────────────────────────────────────────────────
+
+def _get_duration(path: Path) -> float:
+    """Get video duration using ffprobe, fallback to 30.0."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", str(path)],
+            capture_output=True, text=True, timeout=10
+        )
+        return float(json.loads(r.stdout).get("format", {}).get("duration", 30.0))
+    except Exception:
+        return 30.0
 
 
 # ── BGM mix with beat-sync intro ──────────────────────────────────────────────
@@ -241,12 +269,14 @@ async def mix_bgm_beat_synced(
 
     Returns a result dict with bpm, track used, and success flag.
     """
-    # Step 1: BPM analysis
+    # Step 1: BPM analysis with adaptive duration (max 20s for speed)
     bpm_info: Dict[str, Any] = {"bpm": target_bpm or 95.0, "beat_times": [], "confidence": 0.0}
     if target_bpm is None:
         try:
+            _clip_dur = _get_duration(video_path)
+            _analyse_dur = min(_clip_dur, 20.0)
             bpm_info = await asyncio.get_event_loop().run_in_executor(
-                None, analyse_bpm, video_path, 30.0
+                None, analyse_bpm, video_path, _analyse_dur
             )
         except Exception as e:
             logger.warning("[beat_sync] BPM analysis skipped: %s", e)
@@ -358,6 +388,76 @@ def _build_speech_duck_filter(
     )
 
 
+# ── Visual Beat Cuts ──────────────────────────────────────────────────────────
+
+async def apply_beat_cuts(
+    video_path: Path,
+    output_path: Path,
+    beat_times: List[float],
+    clip_duration: float,
+    zoom_factor: float = 1.06,
+) -> bool:
+    """
+    Apply subtle zoom pulses on beat timestamps using FFmpeg zoompan.
+    Creates the "beat-locked visual pulse" effect native to viral content.
+    Only uses beats within clip duration and caps at 8 pulses.
+    """
+    if not beat_times:
+        return False
+
+    valid_beats = [t for t in beat_times if 0.5 < t < clip_duration - 0.5][:8]
+    if not valid_beats:
+        return False
+
+    # Build zoompan expressions: zoom in on beat, return to normal in 0.2s
+    # Each beat gets a 0.2s zoom pulse at zoom_factor
+    zoom_expr_parts = []
+    for bt in valid_beats:
+        zoom_expr_parts.append(
+            f"if(between(t,{bt:.3f},{bt+0.2:.3f}),{zoom_factor},1.0)"
+        )
+
+    # Chain with nested if: first match wins
+    zoom_expr = zoom_expr_parts[0]
+    for part in zoom_expr_parts[1:]:
+        zoom_expr = zoom_expr.replace("1.0)", f"{part})")
+
+    vf = (
+        f"zoompan=z='{zoom_expr}'"
+        f":x='iw/2-(iw/zoom/2)'"
+        f":y='ih/2-(ih/zoom/2)'"
+        f":d=1:s=1080x1920:fps=30"
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", vf,
+        "-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "20",
+        "-c:a", "copy",
+        str(output_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+    if proc.returncode != 0:
+        # NVENC fallback
+        logger.warning("[beat_sync] NVENC failed for beat cuts, retrying with libx264")
+        proc2 = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "20", "-preset", "fast",
+            "-c:a", "copy",
+            str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc2.communicate(), timeout=300.0)
+        return proc2.returncode == 0
+    return True
+
+
 # ── Singleton ─────────────────────────────────────────────────────────────────
 
 class BeatSyncService:
@@ -396,13 +496,54 @@ class BeatSyncService:
             bgm_volume=bgm_volume,
         )
 
+    async def sync_to_beat(
+        self,
+        video_path: Path,
+        output_path: Path,
+        words: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Full beat sync: visual cuts + BGM mix.
+
+        1. Analyse BPM and get beat_times
+        2. Apply visual zoom pulses on beats
+        3. Mix BGM with adaptive ducking
+        """
+        # Step 1: BPM analysis with adaptive duration
+        _clip_dur = _get_duration(video_path)
+        _analyse_dur = min(_clip_dur, 20.0)
+        bpm_info = await asyncio.get_event_loop().run_in_executor(
+            None, analyse_bpm, video_path, _analyse_dur
+        )
+        beat_times = bpm_info.get("beat_times", [])
+
+        # Step 2: Apply visual beat pulses
+        _beat_video = video_path.with_name(f"bv_{video_path.name}")
+        _beat_ok = await apply_beat_cuts(video_path, _beat_video, beat_times, _clip_dur)
+        _source = _beat_video if _beat_ok else video_path
+
+        # Step 3: Mix BGM
+        result = await mix_bgm_beat_synced(
+            video_path=_source,
+            output_path=output_path,
+            target_bpm=bpm_info["bpm"],
+            word_timings=words,
+        )
+
+        # Cleanup temp file
+        if _beat_ok:
+            _beat_video.unlink(missing_ok=True)
+
+        result["cuts_applied"] = len([t for t in beat_times if 0.5 < t < _clip_dur - 0.5])
+        return result
+
     def get_info(self) -> Dict[str, Any]:
         try:
             import librosa
             librosa_available = True
         except ImportError:
             librosa_available = False
-        tracks = _scan_bgm_library(BGM_LIBRARY_DIR)
+        tracks = _get_cached_library()
         return {
             "librosa_available": librosa_available,
             "bgm_library_dir": str(BGM_LIBRARY_DIR),
