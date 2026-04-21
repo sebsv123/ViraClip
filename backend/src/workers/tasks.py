@@ -323,7 +323,7 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
         except Exception as _we:
             logger.warning("Whisper warm-up skipped: %s", _we)
 
-    asyncio.create_task(_warm_whisper())
+    await _warm_whisper()
 
     # Detect hardware and log capabilities
     hw_caps = detect_hardware_capabilities()

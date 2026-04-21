@@ -258,7 +258,6 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    restart: unless-stopped
     labels:
       - "service.description=FastAPI backend API"
       - "service.group=backend"
