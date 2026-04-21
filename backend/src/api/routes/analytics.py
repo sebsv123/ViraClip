@@ -5,14 +5,18 @@ Provides endpoints for system metrics, task statistics, and health monitoring.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+import logging
+from typing import Any, Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...database import get_db
 from ...services.analytics_service import get_analytics_service, AnalyticsService
 from ...services.validation_stats import get_validation_stats_service
 from ...auth_headers import get_signed_user_id
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/analytics", tags=["Analytics Dashboard"])
 
@@ -278,3 +282,209 @@ async def _is_admin(user_id: str) -> bool:
     """Check if user is admin (placeholder - implement proper admin check)."""
     # TODO: Implement proper admin check against DB or config
     return user_id.startswith("admin_") or user_id == "system"
+
+
+# =============================================================================
+# FEEDBACK LOOP & ANALYTICS IMPORT ENDPOINTS (Phase 5.3)
+# =============================================================================
+
+from ...services.analytics_importer import run_feedback_import
+from ...services.feedback_loop_service import FeedbackLoopService
+from ...services.social_auth_service import SocialAuthService
+from ...services.social_publisher_service import SocialPublisherService
+from ...dependencies import get_redis, get_current_user
+
+
+class ImportRequest(BaseModel):
+    days_back: int = 2
+
+
+class RetrainRequest(BaseModel):
+    force: bool = False
+
+
+@router.post("/import", response_model=None)
+async def trigger_analytics_import(
+    request: ImportRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    redis = Depends(get_redis),
+):
+    """
+    Trigger manual analytics import for the authenticated user.
+    
+    - Fetches metrics from all connected platforms (TikTok, Instagram, YouTube)
+    - Runs feedback import to get real performance data
+    - Automatically incorporates data into training batch
+    
+    Returns import results and retraining status.
+    """
+    user_id = current_user.get("id") or current_user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid user token")
+    
+    try:
+        # Initialize services with injected Redis
+        auth_service = SocialAuthService(redis)
+        publisher_service = SocialPublisherService(redis, auth_service)
+        
+        # Run feedback import
+        import_result = await run_feedback_import(
+            user_id=user_id,
+            auth_service=auth_service,
+            publisher_service=publisher_service,
+            days_back=request.days_back,
+        )
+        
+        # Incorporate into feedback loop
+        feedback_service = FeedbackLoopService(db_session=None, redis_client=redis)
+        training_result = await feedback_service.incorporate_analytics_batch(import_result)
+        
+        return {
+            "imported": import_result.get("total_fetched", 0),
+            "errors": import_result.get("errors", 0),
+            "retrained": training_result.get("status") == "retrained",
+            "status": training_result.get("status"),
+            "metrics": training_result.get("metrics"),
+            "total_samples": training_result.get("total_samples"),
+        }
+        
+    except Exception as e:
+        logger.error(f"[analytics_api] Import failed for user {user_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+
+
+@router.get("/model/status", response_model=None)
+async def get_model_status(
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    redis = Depends(get_redis),
+):
+    """
+    Get current virality scorer model status and training statistics.
+    
+    Returns:
+    - Model version and metadata
+    - Training metrics (MSE, R²)
+    - Number of training samples
+    - Last training timestamp
+    """
+    try:
+        feedback_service = FeedbackLoopService(db_session=None, redis_client=redis)
+        stats = await feedback_service.get_training_stats()
+        
+        return {
+            "model_exists": stats.get("model_exists", False),
+            "version": stats.get("model_version"),
+            "metadata": stats.get("model_metadata"),
+            "feedback_batches": stats.get("feedback_batches", 0),
+            "model_size_mb": stats.get("model_size_mb"),
+            "model_modified": stats.get("model_modified"),
+        }
+        
+    except Exception as e:
+        logger.error(f"[analytics_api] Failed to get model status: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get model status: {str(e)}")
+
+
+@router.post("/model/retrain", response_model=None)
+async def force_model_retrain(
+    request: RetrainRequest,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    redis = Depends(get_redis),
+):
+    """
+    Force immediate model retraining (admin only).
+    
+    This endpoint triggers a full retraining cycle using accumulated feedback data.
+    Requires admin role.
+    
+    Returns training metrics and deployment status.
+    """
+    user_id = current_user.get("id") or current_user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid user token")
+    
+    # Check admin role
+    if not await _is_admin(user_id):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    try:
+        feedback_service = FeedbackLoopService(db_session=None, redis_client=redis)
+        
+        # Collect feedback and retrain
+        df = await feedback_service.collect_feedback_batch(days_back=30)
+        
+        if len(df) < feedback_service.min_samples_for_training:
+            return {
+                "status": "insufficient_samples",
+                "total_samples": len(df),
+                "needed": feedback_service.min_samples_for_training,
+            }
+        
+        result = await feedback_service.retrain_model(df=df, validate=True)
+        
+        return {
+            "status": "retrained" if result.get("deployed") else "validation_failed",
+            "metrics": result,
+            "version": result.get("version"),
+            "total_samples": len(df),
+        }
+        
+    except Exception as e:
+        logger.error(f"[analytics_api] Retraining failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Retraining failed: {str(e)}")
+
+
+@router.get("/clips/{clip_id}", response_model=None)
+async def get_clip_platform_metrics(
+    clip_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    redis = Depends(get_redis),
+):
+    """
+    Get platform-specific metrics for a published clip.
+    
+    Reads PublishResult from Redis for all platforms and returns:
+    - TikTok metrics (views, likes, shares, etc.)
+    - Instagram metrics (views, likes, comments, etc.)
+    - YouTube metrics (views, likes, comments, etc.)
+    
+    Only returns metrics for clips owned by the authenticated user.
+    """
+    user_id = current_user.get("id") or current_user.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid user token")
+    
+    try:
+        platforms = ["tiktok", "instagram", "youtube"]
+        results = {}
+        
+        for platform in platforms:
+            key = f"publish_result:{clip_id}:{platform}"
+            data = await redis.get(key)
+            
+            if data:
+                if isinstance(data, dict):
+                    results[platform] = {
+                        "status": data.get("status"),
+                        "platform_post_id": data.get("platform_post_id"),
+                        "platform_url": data.get("platform_url"),
+                        "published_at": data.get("published_at"),
+                        "error_message": data.get("error_message"),
+                        "retry_count": data.get("retry_count", 0),
+                    }
+                else:
+                    results[platform] = {"status": "unknown", "raw": str(data)}
+            else:
+                results[platform] = {"status": "not_published"}
+        
+        return {
+            "clip_id": clip_id,
+            "platforms": results,
+        }
+        
+    except Exception as e:
+        logger.error(f"[analytics_api] Failed to get clip metrics: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to get clip metrics: {str(e)}")
+
+
+__all__ = ["router"]

@@ -46,7 +46,7 @@ class WordTimestamp:
     text: str
     start: float   # seconds
     end: float     # seconds
-    score: float = 0.0      # WhisperX alignment confidence 0-1
+    score: float = 0.5      # WhisperX alignment confidence 0-1 (default 0.5 = neutral)
     emphasis: bool = False  # True if this word should be visually highlighted
 
     @property
@@ -166,11 +166,16 @@ def _ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
-def _build_karaoke_text(words: List[WordTimestamp]) -> str:
+def _is_emphasis_word(word: WordTimestamp, threshold: float = 0.82) -> bool:
+    """Return True when word.score >= threshold (WhisperX high confidence)."""
+    return word.score >= threshold
+
+
+def _build_karaoke_text(words: List[WordTimestamp], emphasis_threshold: float = 0.82) -> str:
     """Build \\k-tagged karaoke text from word list with emphasis support."""
     parts = []
     for w in words:
-        if w.emphasis:
+        if _is_emphasis_word(w, emphasis_threshold):
             # High impact word: bright yellow + slightly larger
             parts.append(
                 f"{{\\k{w.duration_cs}\\c{_YELLOW}\\fscx110\\fscy110}}{w.text}"
@@ -181,19 +186,25 @@ def _build_karaoke_text(words: List[WordTimestamp]) -> str:
     return " ".join(parts)
 
 
-def _build_highlight_text(words: List[WordTimestamp], active_idx: int) -> str:
+def _build_highlight_text(words: List[WordTimestamp], active_idx: int, emphasis_threshold: float = 0.82) -> str:
     """
     Build per-word dialogue line where the active word gets a highlight override.
     Used for karaoke-highlight style — each dialogue event represents one word
     being highlighted while others are shown dimmed.
 
     Emphasis words (high score) use less transparency (H40) even when not active.
+    Active words with emphasis use RED color to differentiate from standard active.
     """
     parts = []
     for i, w in enumerate(words):
         if i == active_idx:
-            parts.append(f"{{\\c{_YELLOW}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
-        elif w.emphasis:
+            if _is_emphasis_word(w, emphasis_threshold):
+                # Active + emphasis = RED color for high confidence words
+                parts.append(f"{{\\c{_RED}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+            else:
+                # Normal active = YELLOW
+                parts.append(f"{{\\c{_YELLOW}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+        elif _is_emphasis_word(w, emphasis_threshold):
             # Emphasis words: less transparent (H40) so they stand out more
             parts.append(f"{{\\alpha&H40&}}{w.text}{{\\alpha&H00&}}")
         else:
@@ -209,6 +220,7 @@ def build_ass_script(
     play_res_y: int = 1920,
     uppercase: bool = True,
     platform: str = "tiktok",
+    emphasis_threshold: float = 0.82,
 ) -> str:
     """
     Build a complete ASS script from caption lines.
@@ -253,14 +265,14 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if is_highlight:
             # One event per word — each word gets the highlight box while active
             for i, w in enumerate(words):
-                text = _build_highlight_text(words, i)
+                text = _build_highlight_text(words, i, emphasis_threshold)
                 events.append(
                     f"Dialogue: 0,{_ass_time(w.start)},{_ass_time(w.end)},"
                     f"Default,,0,0,0,,{text}"
                 )
         else:
             # Full line with \\k timing
-            text = _build_karaoke_text(words)
+            text = _build_karaoke_text(words, emphasis_threshold)
             events.append(
                 f"Dialogue: 0,{_ass_time(line.line_start)},{_ass_time(line.line_end)},"
                 f"Default,,0,0,0,,{text}"
@@ -308,7 +320,7 @@ def segment_words_into_lines(
             text=re.sub(r"[^\w\s''-]", "", (w.get("text") or w.get("word") or "")).strip(),
             start=float(w.get("start", 0)),
             end=float(w.get("end", 0)),
-            score=float(w.get("score", w.get("probability", 0.0))),
+            score=float(w.get("score", w.get("probability", 0.5))),
             emphasis=False,
         )
         for w in words
@@ -409,6 +421,7 @@ async def burn_captions(
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
     caption_decisions: Optional[Dict[str, Any]] = None,
+    emphasis_threshold: float = 0.82,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
@@ -417,6 +430,7 @@ async def burn_captions(
     Args:
         caption_decisions: Optional dict from LangGraph with keys like
             'emphasis_indices' for positional emphasis override.
+        emphasis_threshold: Score threshold for marking words as emphasis (default 0.82).
 
     Returns True on success, False on failure (video is still written as-is).
     """
@@ -429,7 +443,7 @@ async def burn_captions(
 
     ass_content = build_ass_script(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
-        platform=platform,
+        platform=platform, emphasis_threshold=emphasis_threshold,
     )
 
     # ── Subtitle QA: speed guard + emoji injection + profanity filter ──────────
@@ -494,11 +508,12 @@ class CaptionService:
         font_dir: Optional[str] = None,
         platform: str = "tiktok",
         caption_decisions: Optional[Dict[str, Any]] = None,
+        emphasis_threshold: float = 0.82,
     ) -> bool:
         return await burn_captions(
             video_path, output_path, words,
             style=style, font_dir=font_dir, platform=platform,
-            caption_decisions=caption_decisions,
+            caption_decisions=caption_decisions, emphasis_threshold=emphasis_threshold,
         )
 
     def generate_ass(
@@ -508,12 +523,13 @@ class CaptionService:
         play_res_x: int = 1080,
         play_res_y: int = 1920,
         platform: str = "tiktok",
+        emphasis_threshold: float = 0.82,
     ) -> str:
         """Return the raw ASS script string (for preview or saving)."""
         lines = segment_words_into_lines(words)
         return build_ass_script(lines, style=style,
                                 play_res_x=play_res_x, play_res_y=play_res_y,
-                                platform=platform)
+                                platform=platform, emphasis_threshold=emphasis_threshold)
 
     def segment_words(
         self,
@@ -524,7 +540,7 @@ class CaptionService:
         lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line)
         return [
             {
-                "words": [{"text": w.text, "start": w.start, "end": w.end}
+                "words": [{"text": w.text, "start": w.start, "end": w.end, "score": w.score}
                            for w in line.words],
                 "start": line.line_start,
                 "end": line.line_end,
