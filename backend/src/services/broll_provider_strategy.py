@@ -31,11 +31,11 @@ BROLL_PROVIDER_PRIORITY = os.environ.get("BROLL_PROVIDER_PRIORITY", "premium_fir
 BROLL_ENABLE_PREMIUM = os.environ.get("BROLL_ENABLE_PREMIUM", "true").lower() not in ("false", "0", "no")
 BROLL_ENABLE_STOCK = os.environ.get("BROLL_ENABLE_STOCK", "true").lower() not in ("false", "0", "no")
 
-# Quality gate thresholds
-_MIN_ASSET_SIZE_BYTES = int(os.environ.get("BROLL_MIN_ASSET_SIZE", "10000"))      # 10 KB
-_MIN_ASSET_DURATION = float(os.environ.get("BROLL_MIN_ASSET_DURATION", "0.8"))    # 0.8 s
-_MIN_VERTICAL_AR = float(os.environ.get("BROLL_MIN_VERTICAL_AR", "0.7"))          # h/w ≥ 0.7
-_MIN_RESOLUTION_HEIGHT = int(os.environ.get("BROLL_MIN_RESOLUTION_HEIGHT", "480"))  # ≥ 480 px
+# Quality gate thresholds — RAISED for WOW quality (reject mediocre assets)
+_MIN_ASSET_SIZE_BYTES = int(os.environ.get("BROLL_MIN_ASSET_SIZE", "50000"))      # 50 KB (was 10K) — rejects tiny garbage files
+_MIN_ASSET_DURATION = float(os.environ.get("BROLL_MIN_ASSET_DURATION", "2.0"))    # 2.0 s (was 0.8) — ensures meaningful B-roll
+_MIN_VERTICAL_AR = float(os.environ.get("BROLL_MIN_VERTICAL_AR", "0.75"))          # h/w ≥ 0.75 (was 0.7) — stricter vertical
+_MIN_RESOLUTION_HEIGHT = int(os.environ.get("BROLL_MIN_RESOLUTION_HEIGHT", "720"))  # ≥ 720 px (was 480) — HD minimum
 
 
 # ── Provider enum ─────────────────────────────────────────────────────────────
@@ -132,13 +132,28 @@ def diagnose_providers() -> ProviderStatus:
     """Check all provider availability and log the result.
 
     Safe to call at startup — catches all import/config errors.
+    Works both when imported as module and when run standalone.
     """
-    from ..comfyui_bridge import COMFYUI_ENABLED, LTXV_ENABLED
+    # Safe imports with fallbacks for standalone execution
+    try:
+        from ..comfyui_bridge import COMFYUI_ENABLED, LTXV_ENABLED
+    except ImportError:
+        try:
+            from comfyui_bridge import COMFYUI_ENABLED, LTXV_ENABLED
+        except ImportError:
+            COMFYUI_ENABLED = os.environ.get("COMFYUI_ENABLED", "false").lower() == "true"
+            LTXV_ENABLED = os.environ.get("LTXV_ENABLED", "false").lower() == "true"
+
     try:
         from .t2v_broll_service import T2VBrollService
         t2v = T2VBrollService.is_available()
     except Exception:
-        t2v = False
+        try:
+            from t2v_broll_service import T2VBrollService
+            t2v = T2VBrollService.is_available()
+        except Exception:
+            t2v = bool(os.environ.get("T2V_ENABLED", "false").lower() == "true" and
+                       os.environ.get("REPLICATE_API_TOKEN"))
 
     status = ProviderStatus(
         ltxv_enabled=LTXV_ENABLED,
@@ -247,21 +262,23 @@ def passes_quality_gate(path: Path, provider: str, check_motion: bool = True) ->
                         variance = sum((s - avg_size) ** 2 for s in sizes) / len(sizes)
                         motion_score = min(1.0, variance / (avg_size ** 2 + 1)) if avg_size > 0 else 0
 
-                        # Reject low motion (static/photo-like)
-                        if motion_score < 0.3:
-                            logger.warning("[QualityGate] REJECT %s from %s: motion_score %.2f < 0.3 (static)",
-                                           path.name, provider, motion_score)
+                        # Reject low motion (static/photo-like) — RAISED to 0.5 for WOW quality
+                        _MIN_MOTION_SCORE = 0.5
+                        if motion_score < _MIN_MOTION_SCORE:
+                            logger.warning("[QualityGate] REJECT %s from %s: motion_score %.2f < %.1f (too static for WOW)",
+                                           path.name, provider, motion_score, _MIN_MOTION_SCORE)
                             return False
 
-                        # Loop detection: start/mid/end frames should differ
+                        # Loop detection: start/mid/end frames should differ significantly
                         if len(frames) >= 20:
                             start_size = sum(int(frames[i].get("pkt_size", 0)) for i in range(3)) / 3
                             mid_size = sum(int(frames[len(frames)//2 + i].get("pkt_size", 0)) for i in range(3)) / 3
                             end_size = sum(int(frames[-3 + i].get("pkt_size", 0)) for i in range(3)) / 3
                             unique_variance = max(abs(start_size - mid_size), abs(mid_size - end_size), abs(start_size - end_size))
-                            if unique_variance < 500:  # Almost identical = loop/static
-                                logger.warning("[QualityGate] REJECT %s from %s: low unique variance %.0f (loop?)",
-                                               path.name, provider, unique_variance)
+                            _MIN_UNIQUE_VARIANCE = 2000  # RAISED from 500 — stricter loop detection
+                            if unique_variance < _MIN_UNIQUE_VARIANCE:
+                                logger.warning("[QualityGate] REJECT %s from %s: low unique variance %.0f < %.0f (loop/static content)",
+                                               path.name, provider, unique_variance, _MIN_UNIQUE_VARIANCE)
                                 return False
 
     except Exception as exc:
