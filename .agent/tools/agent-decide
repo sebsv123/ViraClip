@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# agent-decide — Record architectural decisions
+
+AGENT_DIR="${AGENT_DIR:-$HOME/CascadeProjects/ViraClip/.agent}"
+DECISIONS_FILE="$AGENT_DIR/memory/semantic/DECISIONS.md"
+
+DATE=$(date +%Y-%m-%d)
+
+record_decision() {
+    local title="$1"
+    local motivation="$2"
+    local alternative="$3"
+    
+    cat >> "$DECISIONS_FILE" << EOF
+
+## $DATE — $title
+- DECISIÓN: $title
+- MOTIVO: $motivation
+- ALTERNATIVA RECHAZADA: $alternative
+
+EOF
+    echo "Decision recorded to $DECISIONS_FILE"
+}
+
+show_help() {
+    cat << 'EOF'
+Usage: agent-decide "Title" "Motivation" "Rejected Alternative"
+
+Example:
+  agent-decide "Redis Cache" "Reduce DB load" "In-memory dict (not shared)"
+
+EOF
+}
+
+if [ $# -lt 3 ]; then
+    show_help
+    exit 1
+fi
+
+record_decision "$1" "$2" "$3"

@@ -69,9 +69,26 @@ async def process_video_task(
     from ..database import AsyncSessionLocal
     from ..services.task_service import TaskService
     from ..workers.progress import ProgressTracker
+    import time
+    import traceback
 
+    # ── STRUCTURED LOGGING: Inicio de job ─────────────────────────────────────
+    job_start_time = time.time()
     set_trace_id(f"task-{task_id}")
-    logger.info(f"Worker processing task {task_id}")
+    logger.info(
+        "[arq:job:start] task_id=%s user_id=%s source_type=%s url=%s params=%s",
+        task_id,
+        user_id,
+        source_type,
+        url[:80] + "..." if len(url) > 80 else url,
+        json.dumps({
+            "processing_mode": processing_mode,
+            "num_clips": num_clips,
+            "include_broll": include_broll,
+            "add_subtitles": add_subtitles,
+            "target_platform": target_platform,
+        }),
+    )
 
     # Create progress tracker
     progress = ProgressTracker(ctx["redis"], task_id)
@@ -209,6 +226,15 @@ async def process_video_task(
                     + (f" after {delay}s delay" if delay else "")
                 )
             
+            # ── STRUCTURED LOGGING: Error con traceback completo ────────────────────
+            logger.error(
+                "[arq:job:error] task_id=%s job_try=%s/%s error=%s traceback=%s",
+                task_id,
+                job_try,
+                max_tries,
+                str(e),
+                traceback.format_exc(),
+            )
             # Re-raise so arq handles retry
             raise
 
@@ -266,6 +292,13 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     from ..utils.cleanup import cleanup_old_clips, cleanup_old_downloads
 
     logger.info("Worker starting up...")
+
+    # ── B-roll provider diagnostics ──────────────────────────────────────────
+    try:
+        from ..services.broll_service import BrollService
+        BrollService().log_provider_status()
+    except Exception as _broll_diag:
+        logger.debug("[startup] B-roll provider diagnostics skipped: %s", _broll_diag)
 
     # ── Whisper model warm-up ────────────────────────────────────────────────
     # Pre-load the Whisper model so the first real task doesn't stall waiting
@@ -358,13 +391,14 @@ class WorkerSettings:
     )
 
     # Retry settings
-    max_tries = 3  # Retry failed jobs up to 3 times
-    job_timeout = 3600  # 1 hour timeout for video processing
+    max_tries = 2  # Retry failed jobs up to 2 times (reduced from 3 to fail faster)
+    job_timeout = 3600  # 1 hour timeout for video processing (1800s minimum as per requirements)
+    keep_result = 3600  # Keep job results for 1 hour
 
     # Worker pool settings
-    # 1 job per worker process keeps max concurrent renders at 3 workers × 1 job × semaphore(2) = 6
-    # Previously max_jobs=2 allowed 3×2×2=12 simultaneous renders on a single machine, saturating CPU/GPU
-    max_jobs = 1
+    # 4 concurrent jobs allows better throughput while still being controlled
+    # With 3 workers × 4 jobs = 12 concurrent renders max (respects CPU/GPU limits)
+    max_jobs = 4
 
     # Startup/shutdown hooks
     on_startup = worker_startup

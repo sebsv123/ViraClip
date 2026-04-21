@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# agent-brain — Query the agentic memory system
+
+set -e
+
+AGENT_DIR="${AGENT_DIR:-$HOME/CascadeProjects/ViraClip/.agent}"
+
+show_help() {
+    cat << 'EOF'
+Usage: agent-brain <command> [args]
+
+Commands:
+  working     — Show current workspace state
+  decisions   — List architectural decisions
+  lessons     — Show learned lessons
+  permissions — Show agent permissions
+  search <q>  — Search memory files
+
+EOF
+}
+
+cmd_working() {
+    cat "$AGENT_DIR/memory/working/WORKSPACE.md" 2>/dev/null || echo "No workspace state found"
+}
+
+cmd_decisions() {
+    cat "$AGENT_DIR/memory/semantic/DECISIONS.md" 2>/dev/null || echo "No decisions recorded"
+}
+
+cmd_lessons() {
+    cat "$AGENT_DIR/memory/semantic/LESSONS.md" 2>/dev/null || echo "No lessons recorded"
+}
+
+cmd_permissions() {
+    cat "$AGENT_DIR/protocols/permissions.md" 2>/dev/null || echo "No permissions defined"
+}
+
+cmd_search() {
+    local query="$1"
+    grep -r "$query" "$AGENT_DIR/memory/" "$AGENT_DIR/protocols/" 2>/dev/null || echo "No matches"
+}
+
+case "${1:-}" in
+    working) cmd_working ;;
+    decisions) cmd_decisions ;;
+    lessons) cmd_lessons ;;
+    permissions) cmd_permissions ;;
+    search) cmd_search "$2" ;;
+    *) show_help ;;
+esac
