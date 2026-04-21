@@ -887,6 +887,27 @@ class BrollService:
             except Exception as _bee_e:
                 logger.debug(f"[BRoll] Effects engine skipped: {_bee_e}")
 
+            # Step 3.6 — Apply entry/exit transitions to each enhanced asset
+            _transitioned_assets: List[Path] = []
+            for _ba in broll_assets:
+                try:
+                    _trans_out = _ba.with_name(f"trans_{_ba.name}")
+                    _trans_result = apply_broll_transitions(
+                        broll_path=str(_ba),
+                        output_path=str(_trans_out),
+                        duration=overlay_duration_s,
+                        transition_duration=0.25
+                    )
+                    if _trans_result and Path(_trans_result).exists():
+                        _transitioned_assets.append(Path(_trans_result))
+                        logger.info(f"[BRoll] ✓ Transitions applied to {_ba.name}")
+                    else:
+                        _transitioned_assets.append(_ba)
+                except Exception as _te:
+                    logger.debug(f"[BRoll] Transition skipped for {_ba.name}: {_te}")
+                    _transitioned_assets.append(_ba)
+            broll_assets = _transitioned_assets
+
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []
             for ts, asset in zip(insert_timestamps, broll_assets):
@@ -941,9 +962,11 @@ def apply_broll_transitions(
         total_frames = int(duration * 30)
         zoom_frames = int(transition_duration * 30)
 
-        # Build filter_complex with zoom-in entry and fade-out exit
+        # Build filter_complex with scale/crop, zoom-in entry and fade-out exit
         filter_complex = (
             f"[0:v]"
+            f"scale=576:1024:force_original_aspect_ratio=increase,"
+            f"crop=576:1024,"
             f"fade=t=in:st=0:d={transition_duration}:alpha=1,"
             f"zoompan=z='if(lte(in,{zoom_frames}),1.0+0.08*in/{zoom_frames},1.08)':"
             f"d={total_frames}:s=576x1024:fps=30,"
@@ -959,13 +982,24 @@ def apply_broll_transitions(
             "ffmpeg", "-y", "-i", broll_path,
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "18",
             "-c:a", "aac", "-b:a", "192k",
             "-pix_fmt", "yuv420p",
             output_path
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            # Fallback to software encoding if NVENC fails
+            logger.warning("[BRoll] NVENC failed, retrying with libx264")
+            cmd[cmd.index("h264_nvenc")] = "libx264"
+            cmd[cmd.index("-rc")] = "-crf"
+            cmd[cmd.index("-qp")] = "18"
+            cmd.insert(cmd.index("-crf") + 2, "-preset")
+            cmd.insert(cmd.index("-preset") + 1, "fast")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
         if result.returncode == 0 and Path(output_path).exists():
             logger.info(f"[BRoll] ✓ Transitions applied: {Path(output_path).name}")
             return output_path
