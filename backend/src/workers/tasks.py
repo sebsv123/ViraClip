@@ -300,69 +300,20 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     except Exception as _broll_diag:
         logger.debug("[startup] B-roll provider diagnostics skipped: %s", _broll_diag)
 
-    # ── Whisper model warm-up ────────────────────────────────────────────────
-    # Pre-load the Whisper model so the first real task doesn't stall waiting
-    # for weights to download or for CTranslate2 to compile the graph.
-    async def _warm_whisper():
-        try:
-            from ..config import get_config as _cfg
-            _c = _cfg()
-            from faster_whisper import WhisperModel
-            _model_size = getattr(_c, "whisper_model_size", "small") or "small"
-            _device = getattr(_c, "whisper_device", "cpu") or "cpu"
-            _compute = getattr(_c, "whisper_compute_type", "int8") or "int8"
-            logger.info(
-                "🔄 Whisper warm-up: loading model=%s device=%s compute=%s ...",
-                _model_size, _device, _compute,
-            )
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: WhisperModel(_model_size, device=_device, compute_type=_compute),
-            )
-            logger.info("✅ Whisper model loaded and ready")
-        except Exception as _we:
-            logger.warning("Whisper warm-up skipped: %s", _we)
-
-    await _warm_whisper()
-
-    # Detect hardware and log capabilities
+    # Detect hardware and log capabilities (rápido, no bloquea)
     hw_caps = detect_hardware_capabilities()
 
     cfg = get_config()
     clips_dir = Path(cfg.temp_dir) / "uploads" / "clips"
     downloads_dir = Path(cfg.temp_dir) / "uploads"
-    
+
     # Aggressive temp cleanup to free disk space
     temp_base = Path(cfg.temp_dir)
     cleanup_temp_files(temp_base / "segments", max_age_hours=12)
     cleanup_temp_files(temp_base / "uploads", max_age_hours=24)
 
-    # B-7 fix: collect filenames referenced by active/queued tasks so we never
-    # delete their output files even if they exceed the retention window.
-    protected_filenames: set = set()
-    try:
-        import asyncpg
-        db_url = cfg.database_url.replace("postgresql+asyncpg://", "postgresql://")
-        conn = await asyncpg.connect(db_url)
-        try:
-            rows = await conn.fetch(
-                """
-                SELECT gc.filename
-                FROM generated_clips gc
-                JOIN tasks t ON gc.task_id = t.id
-                WHERE t.status IN ('queued', 'processing')
-                """
-            )
-            protected_filenames = {row["filename"] for row in rows}
-            if protected_filenames:
-                logger.info(f"[startup cleanup] protecting {len(protected_filenames)} file(s) from active tasks")
-        finally:
-            await conn.close()
-    except Exception as _dbe:
-        logger.warning(f"[startup cleanup] could not fetch active task files ({_dbe}) — proceeding without protection")
-
     # Keep clips for 48 h, downloaded source videos for 24 h
-    clips_deleted, clips_freed = cleanup_old_clips(clips_dir, retention_hours=48, protected_filenames=protected_filenames)
+    clips_deleted, clips_freed = cleanup_old_clips(clips_dir, retention_hours=48)
     dl_deleted, dl_freed = cleanup_old_downloads(downloads_dir, retention_hours=24)
     logger.info(
         f"[startup cleanup] clips={clips_deleted} files freed, "
