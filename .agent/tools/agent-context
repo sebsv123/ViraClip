@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# agent-context — Load and validate workspace context
+
+AGENT_DIR="${AGENT_DIR:-$HOME/CascadeProjects/ViraClip/.agent}"
+REPO_ROOT="${REPO_ROOT:-$HOME/CascadeProjects/ViraClip}"
+
+load_context() {
+    echo "=== ViraClip Workspace Context ==="
+    echo ""
+    
+    # Branch
+    if [ -d "$REPO_ROOT/.git" ]; then
+        echo "Branch: $(cd "$REPO_ROOT" && git branch --show-current 2>/dev/null || echo 'unknown')"
+    fi
+    
+    # Working state
+    if [ -f "$AGENT_DIR/memory/working/WORKSPACE.md" ]; then
+        echo ""
+        echo "--- Workspace State ---"
+        grep "^## " "$AGENT_DIR/memory/working/WORKSPACE.md" | head -5
+    fi
+    
+    # Key decisions
+    if [ -f "$AGENT_DIR/memory/semantic/DECISIONS.md" ]; then
+        echo ""
+        echo "--- Recent Decisions ---"
+        grep "^## " "$AGENT_DIR/memory/semantic/DECISIONS.md" | head -3
+    fi
+    
+    # Lessons
+    if [ -f "$AGENT_DIR/memory/semantic/LESSONS.md" ]; then
+        echo ""
+        echo "--- Active Lessons ---"
+        grep "^## L" "$AGENT_DIR/memory/semantic/LESSONS.md" | head -3
+    fi
+    
+    echo ""
+    echo "=== End Context ==="
+}
+
+load_context

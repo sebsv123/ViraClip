@@ -67,7 +67,7 @@ services:
       - ./backend/src:/app/src
       - ./backend/tests:/app/tests
       - ./backend/scripts:/app/scripts
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -193,8 +193,12 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
       - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
       - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
@@ -249,7 +253,15 @@ services:
       timeout: 15s
       retries: 6
       start_period: 120s
-
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped
+    labels:
+      - "service.description=FastAPI backend API"
+      - "service.group=backend"
 
   worker:
     build:
@@ -260,7 +272,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -327,8 +339,12 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
       - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
       - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
@@ -509,7 +525,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -576,8 +592,12 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
       - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
       - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
@@ -676,7 +696,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -741,8 +761,12 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
       - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
       - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
@@ -847,7 +871,7 @@ services:
     command: [".venv/bin/arq", "src.workers.gpu_tasks.GpuWorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - viraclip_clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -890,8 +914,12 @@ services:
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
       # ── Viral Boost flags ────────────────────────────────────────────
       - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
       - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
       - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
       - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
       - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
@@ -1038,7 +1066,7 @@ services:
       - RUST_LOG=info
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
     depends_on:
       redis:
         condition: service_healthy
@@ -1082,6 +1110,8 @@ services:
 
 
 volumes:
+  shared_temp:
+    driver: local
   uploads:
     driver: local
   viraclip_clips:
