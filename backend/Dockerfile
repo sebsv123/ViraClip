@@ -24,6 +24,9 @@ RUN rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.lis
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 \
     && rm -rf /var/lib/apt/lists/*
 
+# Verify NVENC support in FFmpeg (non-blocking, just warns if not available)
+RUN ffmpeg -encoders 2>&1 | grep nvenc || echo "WARNING: NVENC not available in this FFmpeg build"
+
 # Deno para yt-dlp
 RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_DIR=/root/.deno
