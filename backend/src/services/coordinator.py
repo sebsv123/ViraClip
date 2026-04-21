@@ -740,15 +740,15 @@ class VideoCoordinator:
                         _cap_style = _cap_svc.style_for_template(
                             self.config.get("caption_template", "tiktok_viral"), _platform
                         )
-                        # Get emphasis words from LangGraph creative decisions
-                        _emphasis = creative_meta.get("creative_decisions", {}).get("emphasis_words", [])
+                        # Get caption decisions from LangGraph (includes emphasis_indices)
+                        _caption_decisions = creative_meta.get("creative_decisions", {})
                         _cap_ok = await _cap_svc.burn(
                             video_path=_cap_in,
                             output_path=_cap_out,
                             words=_words_for_editor,
                             style=_cap_style,
                             platform=_platform,
-                            emphasis_words=_emphasis,
+                            caption_decisions=_caption_decisions,
                         )
                         if _cap_ok and _cap_out.exists() and _cap_out.stat().st_size > 0:
                             _cap_in.unlink(missing_ok=True)
