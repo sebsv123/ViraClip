@@ -60,22 +60,10 @@ class ViralEditRules:
     speed_up_sections: float = 1.25  # Speed up boring parts
     slow_mo_impact: float = 0.75     # Slow down on impact
     
-    # Text overlays
-    text_pop_enabled: bool = True
-    text_pop_keywords: List[str] = None
-    
     # Color enhancement
     color_boost_enabled: bool = True
     saturation_boost: float = 1.1
     contrast_boost: float = 1.05
-    
-    def __post_init__(self):
-        if self.text_pop_keywords is None:
-            self.text_pop_keywords = [
-                "free", "secret", "hack", "truth", "revealed",
-                "amazing", "incredible", "shocking", "surprising",
-                "now", "today", "immediately", "finally"
-            ]
 
 
 class SmartAutoEditor:
@@ -183,8 +171,9 @@ class SmartAutoEditor:
         """Detect hook phrases that need zoom effect."""
         decisions = []
         
-        # Check first 3 seconds for hooks
-        first_segment = transcript[:200]  # Approximate first few words
+        # Check first 3 seconds for hooks using word_timings
+        hook_words = [w for w in word_timings if float(w.get("start", 99)) < 3.0]
+        first_segment = " ".join(w.get("word", w.get("text", "")) for w in hook_words)
         
         for pattern in self.IMPACT_PHRASES:
             match = re.search(pattern, first_segment, re.IGNORECASE)
@@ -261,29 +250,30 @@ class SmartAutoEditor:
         
         for i, word_timing in enumerate(word_timings):
             word = word_timing.get("word", word_timing.get("text", "")).lower().strip()
-            
-            # Check if word is a keyword
-            if word in self.rules.text_pop_keywords:
+            word_score = word_timing.get("score", 0.0)
+
+            # Check if word has high alignment score (clear/emphatic pronunciation)
+            if word_score >= 0.88:
                 # Find phrase boundary
                 phrase_start = word_timing.get("start", 0)
                 phrase_end = word_timing.get("end", 0)
-                
+
                 # Extend to next few words for context
                 if i < len(word_timings) - 1:
                     phrase_end = word_timings[i + 1].get("end", phrase_end)
-                
+
                 decisions.append(EditDecision(
                     rule_type=EditRuleType.TEXT_POP,
                     timestamp=phrase_start,
                     duration=phrase_end - phrase_start + 0.5,
-                    confidence=0.75,
+                    confidence=word_score,
                     parameters={
                         "text": word.upper(),
                         "style": "bounce_in",
-                        "position": "center",
+                        "position": "top_safe",  # y=h*0.22 safe zone
                         "color": "#FF0050"  # TikTok red
                     },
-                    reason=f"Keyword emphasis: '{word}'"
+                    reason=f"High score emphasis: '{word}' (score={word_score:.2f})"
                 ))
         
         return decisions
@@ -537,16 +527,9 @@ class SmartAutoEditor:
             logger.warning(f"Unknown preset: {preset_name}")
 
 
-# Global instance
-_auto_editor: Optional[SmartAutoEditor] = None
-
-
 def get_smart_auto_editor(rules: Optional[ViralEditRules] = None) -> SmartAutoEditor:
-    """Get global smart auto-editor instance."""
-    global _auto_editor
-    if _auto_editor is None:
-        _auto_editor = SmartAutoEditor(rules)
-    return _auto_editor
+    """Create new SmartAutoEditor instance per call (no singleton for parallel safety)."""
+    return SmartAutoEditor(rules)
 
 
 async def generate_smart_edits(
