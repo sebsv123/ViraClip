@@ -186,12 +186,18 @@ def _build_highlight_text(words: List[WordTimestamp], active_idx: int) -> str:
     Build per-word dialogue line where the active word gets a highlight override.
     Used for karaoke-highlight style — each dialogue event represents one word
     being highlighted while others are shown dimmed.
+
+    Emphasis words (high score) use less transparency (H40) even when not active.
     """
     parts = []
     for i, w in enumerate(words):
         if i == active_idx:
             parts.append(f"{{\\c{_YELLOW}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+        elif w.emphasis:
+            # Emphasis words: less transparent (H40) so they stand out more
+            parts.append(f"{{\\alpha&H40&}}{w.text}{{\\alpha&H00&}}")
         else:
+            # Regular words: more transparent (H80)
             parts.append(f"{{\\alpha&H80&}}{w.text}{{\\alpha&H00&}}")
     return " ".join(parts)
 
@@ -274,7 +280,8 @@ def segment_words_into_lines(
     max_words_per_line: int = 5,
     max_line_duration: float = 4.0,
     gap_threshold: float = 0.8,
-    emphasis_words: Optional[List[str]] = None,
+    emphasis_threshold: float = 0.88,
+    emphasis_indices: Optional[List[int]] = None,
 ) -> List[CaptionLine]:
     """
     Group word-level timestamps into caption lines suitable for display.
@@ -290,7 +297,8 @@ def segment_words_into_lines(
         max_words_per_line: Target max words per caption bubble.
         max_line_duration: Max display duration before forced split (seconds).
         gap_threshold: Gap between words (seconds) that triggers a line break.
-        emphasis_words: Optional list of words from LangGraph to mark as emphasis.
+        emphasis_threshold: Score threshold for auto-marking emphasis (default 0.88).
+        emphasis_indices: Optional list of word indices from LangGraph to mark as emphasis.
     """
     if not words:
         return []
@@ -300,27 +308,23 @@ def segment_words_into_lines(
             text=re.sub(r"[^\w\s''-]", "", (w.get("text") or w.get("word") or "")).strip(),
             start=float(w.get("start", 0)),
             end=float(w.get("end", 0)),
-            score=float(w.get("score", 0.0)),
+            score=float(w.get("score", w.get("probability", 0.0))),
+            emphasis=False,
         )
         for w in words
         if (w.get("text") or w.get("word") or "").strip()
     ]
 
-    # Mark high-score words as emphasis (top 15% with score > 0.85)
-    if wts:
-        scores = [wt.score for wt in wts if wt.score > 0]
-        if scores:
-            threshold = sorted(scores)[int(len(scores) * 0.85)]
-            for wt in wts:
-                if wt.score >= threshold and wt.score > 0.85:
-                    wt.emphasis = True
+    # Mark high-score words as emphasis (score >= threshold, default 0.88)
+    for wt in wts:
+        if wt.score >= emphasis_threshold:
+            wt.emphasis = True
 
-    # Mark words from LangGraph emphasis list
-    if emphasis_words:
-        _emp_set = {w.lower().strip(".,!?'‼️‼") for w in emphasis_words}
-        for wt in wts:
-            if wt.text.lower().strip(".,!?'‼️‼") in _emp_set:
-                wt.emphasis = True
+    # Mark words from LangGraph emphasis_indices as emphasis (positional override)
+    if emphasis_indices:
+        for idx in emphasis_indices:
+            if 0 <= idx < len(wts):
+                wts[idx].emphasis = True
 
     lines: List[CaptionLine] = []
     current: List[WordTimestamp] = []
@@ -404,15 +408,21 @@ async def burn_captions(
     max_words_per_line: int = 5,
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
-    emphasis_words: Optional[List[str]] = None,
+    caption_decisions: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
     using FFmpeg's `subtitles` filter (libass rendering).
 
+    Args:
+        caption_decisions: Optional dict from LangGraph with keys like
+            'emphasis_indices' for positional emphasis override.
+
     Returns True on success, False on failure (video is still written as-is).
     """
-    lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line, emphasis_words=emphasis_words)
+    # Extract emphasis indices from LangGraph decisions (positional override)
+    emphasis_indices = (caption_decisions or {}).get("emphasis_indices")
+    lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line, emphasis_indices=emphasis_indices)
     if not lines:
         logger.warning("[caption] No words provided — skipping caption burn-in")
         return False
@@ -483,12 +493,12 @@ class CaptionService:
         style: str = "tiktok",
         font_dir: Optional[str] = None,
         platform: str = "tiktok",
-        emphasis_words: Optional[List[str]] = None,
+        caption_decisions: Optional[Dict[str, Any]] = None,
     ) -> bool:
         return await burn_captions(
             video_path, output_path, words,
             style=style, font_dir=font_dir, platform=platform,
-            emphasis_words=emphasis_words,
+            caption_decisions=caption_decisions,
         )
 
     def generate_ass(
