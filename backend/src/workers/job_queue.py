@@ -10,9 +10,9 @@ from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
-# Queue names
-DEFAULT_QUEUE_NAME = "viraclip_cpu_tasks"  # must match WorkerSettings.queue_name
-FAST_QUEUE_NAME = "viraclip_cpu_tasks"
+# Queue names — use arq default queue to avoid queue name mismatch
+DEFAULT_QUEUE_NAME = "default"  # arq default queue name
+FAST_QUEUE_NAME = "default"
 
 
 def _get_redis_settings() -> RedisSettings:
@@ -58,17 +58,17 @@ class JobQueue:
             job_id: Unique ID for the enqueued job
         """
         pool = await cls.get_pool()
-        queue_name = kwargs.pop("_queue_name", DEFAULT_QUEUE_NAME)
-        job = await pool.enqueue_job(
-            function_name, *args, _queue_name=queue_name, **kwargs
-        )
+        # Use arq default queue — queue_name parameter caused mismatch between
+        # backend (viraclip_cpu_tasks) and worker (default), resulting in
+        # jobs stuck in Redis with no worker processing them
+        job = await pool.enqueue_job(function_name, *args, **kwargs)
         if not job:
             raise RuntimeError("Failed to enqueue job")
         job_id = getattr(job, "job_id", None)
         if not job_id:
             raise RuntimeError("Failed to enqueue job: missing job ID")
 
-        logger.info(f"Enqueued job {job_id}: {function_name} on queue {queue_name}")
+        logger.info(f"Enqueued job {job_id}: {function_name} on queue {DEFAULT_QUEUE_NAME}")
         return str(job_id)
 
     @classmethod
@@ -77,10 +77,7 @@ class JobQueue:
     ) -> str:
         # Keep a single queue for now; processing_mode remains available for future
         # dedicated queue routing once multiple worker pools are configured.
-        queue_name = DEFAULT_QUEUE_NAME
-        return await cls.enqueue_job(
-            function_name, *args, _queue_name=queue_name, **kwargs
-        )
+        return await cls.enqueue_job(function_name, *args, **kwargs)
 
     @classmethod
     async def get_job_result(cls, job_id: str):

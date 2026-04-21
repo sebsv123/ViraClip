@@ -382,8 +382,8 @@ class WorkerSettings:
 
     # Functions to run
     functions = [process_video_task, analyze_ab_test, process_scheduled_job]
-    # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
-    queue_name = "viraclip_cpu_tasks"
+    # Use arq default queue — custom queue names cause mismatch between backend and worker
+    queue_name = "default"
 
     # Redis settings from environment
     redis_settings = RedisSettings(
