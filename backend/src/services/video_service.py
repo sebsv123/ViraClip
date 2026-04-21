@@ -53,12 +53,13 @@ from .vfx_service import VFXService
 from .social_distribution_service import SocialDistributionService
 from .phi3_virality_service import Phi3ViralityService, get_phi3_service
 # Guarded import for ConfidenceSubtitleGenerator
+ConfidenceSubtitleGenerator = None  # Initialize to None before try block
+_confidence_subtitle_available = False
 try:
     from .confidence_subtitle_service import ConfidenceSubtitleGenerator
     _confidence_subtitle_available = True
 except (ImportError, Exception):
-    _confidence_subtitle_available = False
-    ConfidenceSubtitleGenerator = None  # type: ignore
+    pass  # ConfidenceSubtitleGenerator remains None
 from .semantic_broll_service import SemanticBrollService
 from .sound_design_service import SoundDesignService, add_viral_sound_effects
 from .hook_visual_service import HookVisualService
@@ -1069,12 +1070,15 @@ class VideoService:
             f"path_exists={os.path.exists(str(output_path))}"
         )
         if _realign_enabled and words_with_confidence and os.path.exists(str(output_path)):
+            _realigner = None  # Initialize before try block
             try:
                 _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "medium")
                 _whisper_device = os.environ.get("WHISPER_DEVICE", "auto")
                 _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "-80"))
 
                 from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+                if ConfidenceSubtitleGenerator is None:
+                    raise ImportError("ConfidenceSubtitleGenerator not available")
                 _realigner = ConfidenceSubtitleGenerator(
                     model_size=_realign_model,
                     device=_whisper_device
