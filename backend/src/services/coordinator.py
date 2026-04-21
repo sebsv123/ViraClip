@@ -14,6 +14,13 @@ from pathlib import Path as _Path
 import gpu_utils
 _Path = _Path
 
+# ── GPU Codec Configuration ─────────────────────────────────────────────────
+try:
+    from .gpu_utils import ffmpeg_codec_flags as _gpu_codec_flags
+    _GPU_CODEC = _gpu_codec_flags(quality="fast")
+except Exception:
+    _GPU_CODEC = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+
 logger = logging.getLogger(__name__)
 
 # ── Emoji keyword map ──────────────────────────────────────────────────────────
@@ -102,14 +109,11 @@ async def _apply_cta_overlay(
         f":enable='between(t,{show_from:.2f},{show_to:.2f})'"
     )
 
-    # Obtener flags de codec con detección automática de hardware (NVENC/VAAPI/CPU)
-    codec_flags = gpu_utils.ffmpeg_codec_flags()
-    
     proc = await _asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
         "-vf", ft,
-        *codec_flags,
+        *_GPU_CODEC,
         "-c:a", "copy",
         str(output_path),
         stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
@@ -170,14 +174,11 @@ async def _apply_emoji_overlays(
 
     vf = ",".join(vf_parts)
 
-    # Obtener flags de codec con detección automática de hardware (NVENC/VAAPI/CPU)
-    codec_flags = gpu_utils.ffmpeg_codec_flags()
-    
     proc = await _asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
         "-vf", vf,
-        *codec_flags,
+        *_GPU_CODEC,
         "-c:a", "copy",
         str(output_path),
         stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
@@ -235,6 +236,11 @@ class VideoCoordinator:
                 return cached
             
             logger.info(f"🎬 Starting coordinator for task {self.task_id}")
+            try:
+                from .gpu_utils import gpu_name as _gpu_name
+                logger.info(f"[GPU] Encoder: {_gpu_name() or 'CPU fallback'} | Codec: {_GPU_CODEC}")
+            except Exception:
+                pass
             
             # PHASE 0.5: Gate 0 — Pre-flight checks (before expensive Whisper call)
             await emit_progress(self.task_id, "preflight", 5, "Running pre-flight checks...")
