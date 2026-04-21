@@ -13,6 +13,7 @@ import os
 import tempfile
 
 from ..utils.async_helpers import run_in_thread
+from .. import gpu_utils
 
 
 def _get_ffmpeg_exe() -> str:
@@ -312,10 +313,12 @@ class VideoService:
             f"max {WORDS_PER_LINE}/group, gap<{MAX_GAP_S}s, span<{MAX_SPAN_S}s)"
         )
 
+        # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
+        codec_flags = gpu_utils.ffmpeg_codec_flags()
         cmd = [
             _get_ffmpeg_exe(), "-y", "-i", video_path,
             "-vf", f"ass={ass_path}:fontsdir=/app/fonts",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            *codec_flags,
             "-c:a", "copy",
             "-movflags", "+faststart",
             output_path,
@@ -389,10 +392,12 @@ class VideoService:
         import subprocess
         import asyncio
         
+        # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
+        codec_flags = gpu_utils.ffmpeg_codec_flags()
         cmd = [
             _get_ffmpeg_exe(), "-y", "-i", video_path,
             "-vf", "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920:force_original_aspect_ratio=decrease,pad=1080:1920:(ow-iw)/2:(oh-ih)/2:black",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            *codec_flags,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
             output_path
@@ -1262,10 +1267,13 @@ class VideoService:
                             _avg_cx = int(sum(pt[1] for pt in _trajectory) / len(_trajectory))
                             _avg_cy = int(sum(pt[2] for pt in _trajectory) / len(_trajectory))
                             import subprocess as _sp2
+                            # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
+                            _codec_flags = gpu_utils.ffmpeg_codec_flags()
                             _ef_cmd = [
                                 _get_ffmpeg_exe(), "-y", "-i", str(output_path),
                                 "-vf", f"crop=in_w:in_h:{max(0,_avg_cx-540)}:{max(0,_avg_cy-960)},scale=1080:1920",
-                                "-c:v", "libx264", "-preset", "fast", "-c:a", "copy",
+                                *_codec_flags,
+                                "-c:a", "copy",
                                 str(polished_path),
                             ]
                             _ef_res = _sp2.run(_ef_cmd, capture_output=True, timeout=60)

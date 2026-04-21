@@ -10,8 +10,9 @@ import os
 import re
 import tempfile
 from typing import List, Dict, Any, Optional
-from pathlib import Path
-_Path = Path
+from pathlib import Path as _Path
+import gpu_utils
+_Path = _Path
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +102,14 @@ async def _apply_cta_overlay(
         f":enable='between(t,{show_from:.2f},{show_to:.2f})'"
     )
 
+    # Obtener flags de codec con detección automática de hardware (NVENC/VAAPI/CPU)
+    codec_flags = gpu_utils.ffmpeg_codec_flags()
+    
     proc = await _asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
         "-vf", ft,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        *codec_flags,
         "-c:a", "copy",
         str(output_path),
         stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
@@ -166,11 +170,14 @@ async def _apply_emoji_overlays(
 
     vf = ",".join(vf_parts)
 
+    # Obtener flags de codec con detección automática de hardware (NVENC/VAAPI/CPU)
+    codec_flags = gpu_utils.ffmpeg_codec_flags()
+    
     proc = await _asyncio.create_subprocess_exec(
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        *codec_flags,
         "-c:a", "copy",
         str(output_path),
         stdout=_asyncio.subprocess.PIPE, stderr=_asyncio.subprocess.PIPE,
