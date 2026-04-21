@@ -52,6 +52,60 @@ _FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))
 _CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))
 _BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "8"))
 
+# ── Semantic keyword classification for generative B-roll ────────────────────
+_MOTION_KEYWORDS = {
+    "run", "race", "crowd", "explosion", "fast", "chase", "build",
+    "construct", "drive", "fly", "jump", "fight", "sport", "traffic",
+    "running", "speed", "motion", "action", "dynamic", "movement"
+}
+_ABSTRACT_KEYWORDS = {
+    "money", "fear", "love", "future", "success", "death", "dream",
+    "freedom", "power", "danger", "opportunity", "wealth", "family",
+    "insurance", "protection", "planning", "financial", "security",
+    "hope", "trust", "growth", "innovation", "challenge", "goal"
+}
+
+def _select_broll_workflow(keyword: str) -> str:
+    """Select appropriate workflow based on keyword semantics."""
+    kw_tokens = set(keyword.lower().split())
+    if kw_tokens & _MOTION_KEYWORDS:
+        return "generate_broll"  # LTXV — better for motion
+    elif kw_tokens & _ABSTRACT_KEYWORDS:
+        return "generate_broll_flux"  # FLUX — better for abstract/emotional
+    else:
+        return "generate_broll"  # default LTXV
+
+def _extract_mood(text: str) -> str:
+    """Extract emotional mood from transcript context."""
+    text_lower = text.lower()
+    if any(w in text_lower for w in ["miedo", "fear", "peligro", "riesgo", "danger", "scary"]):
+        return "tense dramatic dark shadows"
+    elif any(w in text_lower for w in ["éxito", "success", "logro", "victoria", "win", "achieve"]):
+        return "uplifting bright energetic golden"
+    elif any(w in text_lower for w in ["familia", "family", "amor", "love", "care", "together"]):
+        return "warm soft intimate cozy"
+    elif any(w in text_lower for w in ["money", "wealth", "financial", "rich", "profit"]):
+        return "luxurious sleek modern professional"
+    else:
+        return "neutral professional cinematic"
+
+def build_broll_prompt(keyword: str, transcript_context: str = "") -> str:
+    """
+    Build cinematic prompt for ComfyUI from keyword and transcript context.
+    Creates rich, non-literal descriptions that evoke the concept.
+    """
+    base = (
+        f"cinematic vertical video 9:16, {keyword}, "
+        "professional camera movement, shallow depth of field, "
+        "golden hour lighting, high contrast, film grain, "
+        "dynamic composition, no text, no watermark, "
+        "broadcast quality, 4K, masterpiece"
+    )
+    if transcript_context:
+        mood = _extract_mood(transcript_context)
+        base += f", {mood} atmosphere"
+    return base
+
 
 class BrollService:
     """AI-powered B-roll injection service."""
@@ -249,8 +303,10 @@ class BrollService:
             return cached_photo
         return None
 
-    async def _try_ltxv(self, keyword: str, safe: str) -> Optional[Path]:
-        """Try LTXV. Returns Path or None."""
+    async def _try_ltxv(
+        self, keyword: str, safe: str, transcript_context: str = ""
+    ) -> Optional[Path]:
+        """Try LTXV/FLUX generative B-roll based on keyword semantics."""
         if not LTXV_ENABLED:
             logger.debug("[BRoll] LTXV disabled (LTXV_ENABLED=false)")
             return None
@@ -260,16 +316,27 @@ class BrollService:
         try:
             bridge = ComfyUIBridge()
             available = await bridge.is_available()
-            if available:
-                prompt = f"Cinematic vertical footage of {keyword}, smooth camera, professional, 4K, no text"
-                result = await bridge.generate_ltxv_broll(prompt, out_path, duration=_BROLL_DURATION)
-                await bridge.close()
-                if result and self._passes_quality_gate(out_path, "ltxv"):
-                    logger.info("[BRoll] ✓ PROVIDER=ltxv keyword='%s' → %s", keyword, out_path.name)
-                    return out_path
-                logger.info("[BRoll] ✗ PROVIDER=ltxv keyword='%s' → failed or quality reject", keyword)
-            else:
+            if not available:
                 logger.info("[BRoll] ✗ PROVIDER=ltxv SKIP — ComfyUI not reachable")
+                return None
+
+            # Select workflow based on keyword semantics
+            workflow = _select_broll_workflow(keyword)
+            prompt = build_broll_prompt(keyword, transcript_context)
+
+            logger.info(f"[BRoll] Using workflow={workflow} for keyword='{keyword}'")
+
+            if workflow == "generate_broll_flux":
+                result = await bridge.generate_flux_broll(prompt, out_path)
+            else:
+                result = await bridge.generate_ltxv_broll(prompt, out_path, duration=_BROLL_DURATION)
+
+            await bridge.close()
+
+            if result and self._passes_quality_gate(out_path, workflow):
+                logger.info("[BRoll] ✓ PROVIDER=%s keyword='%s' → %s", workflow, keyword, out_path.name)
+                return out_path
+            logger.info("[BRoll] ✗ PROVIDER=%s keyword='%s' → failed or quality reject", workflow, keyword)
         except Exception as exc:
             logger.warning("[BRoll] ✗ PROVIDER=ltxv keyword='%s' error: %s", keyword, exc)
 
@@ -852,3 +919,59 @@ class BrollService:
         except Exception as e:
             logger.error(f"[BRoll] process_clip failed: {e}", exc_info=True)
             return video_path
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# B-ROLL TRANSITIONS — Entry and exit effects for cinematic feel
+# ──────────────────────────────────────────────────────────────────────────────
+
+def apply_broll_transitions(
+    broll_path: str,
+    output_path: str,
+    duration: float,
+    transition_duration: float = 0.25
+) -> Optional[str]:
+    """
+    Apply zoom-punch entry and fade-out exit to B-roll clip.
+    Entry: smooth zoom from 1.0 to 1.08 in first transition_duration seconds
+    Exit: fade-out with slight motion blur in last transition_duration seconds
+    """
+    try:
+        fade_out_start = max(0, duration - transition_duration)
+        total_frames = int(duration * 30)
+        zoom_frames = int(transition_duration * 30)
+
+        # Build filter_complex with zoom-in entry and fade-out exit
+        filter_complex = (
+            f"[0:v]"
+            f"fade=t=in:st=0:d={transition_duration}:alpha=1,"
+            f"zoompan=z='if(lte(in,{zoom_frames}),1.0+0.08*in/{zoom_frames},1.08)':"
+            f"d={total_frames}:s=576x1024:fps=30,"
+            f"fade=t=out:st={fade_out_start}:d={transition_duration}"
+            f"[vout];"
+            f"[0:a]"
+            f"afade=t=in:st=0:d={transition_duration},"
+            f"afade=t=out:st={fade_out_start}:d={transition_duration}"
+            f"[aout]"
+        )
+
+        cmd = [
+            "ffmpeg", "-y", "-i", broll_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]", "-map", "[aout]",
+            "-c:v", "libx264", "-crf", "18", "-preset", "fast",
+            "-c:a", "aac", "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            output_path
+        ]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 and Path(output_path).exists():
+            logger.info(f"[BRoll] ✓ Transitions applied: {Path(output_path).name}")
+            return output_path
+        else:
+            logger.warning(f"[BRoll] Transition filter failed: {result.stderr[:200]}")
+            return None
+    except Exception as e:
+        logger.warning(f"[BRoll] apply_broll_transitions error: {e}")
+        return None
