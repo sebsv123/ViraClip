@@ -704,31 +704,6 @@ class VideoCoordinator:
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
                 _words_for_editor = list(clip.get("words") or [])
 
-                # ── Beat sync (cortes al ritmo de la música) ──────────────────────────
-                if self.config.get("beat_sync", False):
-                    try:
-                        from .beat_sync_service import get_beat_sync_service as _get_beat
-                        _bs_in = _Path(clip["path"])
-                        _bs_out = _bs_in.with_name(f"bs_{_bs_in.name}")
-                        _beat_svc = _get_beat()
-                        _bs_result = await _beat_svc.sync_to_beat(
-                            video_path=_bs_in,
-                            output_path=_bs_out,
-                            words=_words_for_editor,
-                        )
-                        if isinstance(_bs_result, dict) and _bs_result.get("success") \
-                                and _bs_out.exists() and _bs_out.stat().st_size > 0:
-                            _bs_in.unlink(missing_ok=True)
-                            _bs_out.rename(_bs_in)
-                            clip["path"] = str(_bs_in)
-                            clip["beat_sync_applied"] = True
-                            clip["beat_sync_cuts"] = _bs_result.get("cuts_applied", 0)
-                            logger.info("  [BeatSync] %d cuts", _bs_result.get("cuts_applied", 0))
-                        else:
-                            _bs_out.unlink(missing_ok=True)
-                    except Exception as _bs_e:
-                        logger.debug("Beat sync skipped clip %d: %s", index, _bs_e)
-
                 creative_meta: dict = {}
                 try:
                     from .creative_pipeline import get_creative_pipeline
@@ -1064,6 +1039,31 @@ class VideoCoordinator:
                             _duck_out.unlink(missing_ok=True)
                     except Exception as _dk_e:
                         logger.debug("Audio ducking skipped for clip %d: %s", index, _dk_e)
+
+                # ── Beat sync (cortes al ritmo de la música + visual beat pulses) ────
+                if self.config.get("beat_sync", False):
+                    try:
+                        from .beat_sync_service import get_beat_sync_service as _get_beat
+                        _bs_in = _Path(clip["path"])
+                        _bs_out = _bs_in.with_name(f"bs_{_bs_in.name}")
+                        _beat_svc = _get_beat()
+                        _bs_result = await _beat_svc.sync_to_beat(
+                            video_path=_bs_in,
+                            output_path=_bs_out,
+                            words=_words_for_editor,
+                        )
+                        if isinstance(_bs_result, dict) and _bs_result.get("success") \
+                                and _bs_out.exists() and _bs_out.stat().st_size > 0:
+                            _bs_in.unlink(missing_ok=True)
+                            _bs_out.rename(_bs_in)
+                            clip["path"] = str(_bs_in)
+                            clip["beat_sync_applied"] = True
+                            clip["beat_sync_cuts"] = _bs_result.get("cuts_applied", 0)
+                            logger.info("  [BeatSync] %d cuts", _bs_result.get("cuts_applied", 0))
+                        else:
+                            _bs_out.unlink(missing_ok=True)
+                    except Exception as _bs_e:
+                        logger.debug("Beat sync skipped clip %d: %s", index, _bs_e)
 
                 # ── CTA overlay (last 2 s) ─────────────────────────────────────
                 # "Follow for more 🔥" / "Comment below 👇" injected as drawtext
