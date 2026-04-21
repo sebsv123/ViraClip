@@ -28,14 +28,18 @@ import asyncio
 import json
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass, asdict
 from enum import Enum
 import hashlib
+import random
 
 from arq import create_pool
 from arq.connections import RedisSettings
+
+from .social_publisher_service import SocialPublisherService, PublishRequest, PublishResult
+from .social_auth_service import SocialAuthService
 
 logger = logging.getLogger(__name__)
 
@@ -266,12 +270,13 @@ class AutoSchedulerService:
                 
                 task = await task_service.create_task(db, task_data)
                 
-                # Enqueue for processing
+                # Enqueue for processing with publish config
                 from ...workers.queue_router import enqueue
                 await enqueue(
                     await self._get_redis(),
                     "process_video_task",
                     task_id=task.id,
+                    publish_config=publish_config,
                     **task_data
                 )
                 
@@ -301,6 +306,59 @@ class AutoSchedulerService:
                 
         except Exception as e:
             logger.error(f"[Scheduler] Job execution failed: {e}")
+
+    async def schedule_with_optimal_time(
+        self,
+        user_id: str,
+        clip_id: str,
+        platforms: List[str],
+        analytics_data: Dict[str, Any]
+    ) -> Dict[str, datetime]:
+        """
+        Calculate optimal posting times for each platform based on analytics.
+        
+        Args:
+            user_id: User ID
+            clip_id: Clip ID to publish
+            platforms: List of platforms to publish to
+            analytics_data: Dict with best_hours_by_platform structure:
+                {"tiktok": [18, 19, 20], "instagram": [12, 18], "youtube": [15, 16]}
+        
+        Returns:
+            Dict mapping platform to scheduled datetime (within next 48 hours)
+        """
+        now = datetime.now(timezone.utc)
+        best_hours = analytics_data.get("best_hours_by_platform", {})
+        
+        schedule_times: Dict[str, datetime] = {}
+        
+        for platform in platforms:
+            hours = best_hours.get(platform, [12, 18, 20])  # Default hours if not specified
+            
+            # Find next occurrence of each hour within 48 hours
+            candidates: List[datetime] = []
+            
+            for day_offset in range(2):  # Today and tomorrow (48 hours)
+                base_date = now + timedelta(days=day_offset)
+                for hour in hours:
+                    candidate = base_date.replace(hour=hour, minute=0, second=0, microsecond=0)
+                    # Add some randomness (0-15 min) to avoid exact same times
+                    candidate = candidate + timedelta(minutes=random.randint(0, 15))
+                    if candidate > now:
+                        candidates.append(candidate)
+            
+            # Pick the earliest candidate within 48 hours
+            valid_candidates = [c for c in candidates if c <= now + timedelta(hours=48)]
+            
+            if valid_candidates:
+                schedule_times[platform] = min(valid_candidates)
+            else:
+                # Fallback: schedule 24 hours from now at a random best hour
+                fallback_hour = random.choice(hours)
+                schedule_times[platform] = now + timedelta(days=1, hours=fallback_hour - now.hour)
+        
+        logger.info(f"[Scheduler] Optimal times calculated for clip {clip_id}: {schedule_times}")
+        return schedule_times
     
     async def check_trend_triggers(self, trend_data: Dict[str, Any]):
         """
@@ -458,6 +516,72 @@ async def process_scheduled_job(ctx, job_id: str, user_id: str):
     await scheduler.process_scheduled_job(job_id, user_id)
 
 
+# ARQ worker function for publishing clips (called after video processing)
+async def publish_generated_clip(
+    ctx,
+    clip_id: str,
+    user_id: str,
+    cdn_url: str,
+    platforms: List[str],
+    publish_config: Dict[str, Any],
+):
+    """
+    Publish a generated clip to multiple platforms.
+    Called by the video processing worker after clips are generated.
+    """
+    redis = ctx.get("redis")
+    if not redis:
+        logger.error("[publish_generated_clip] No redis in context")
+        return
+    
+    auth_service = SocialAuthService(redis)
+    publisher = SocialPublisherService(redis, auth_service)
+    
+    # Build publish parameters
+    title = publish_config.get("title_template", f"Clip {clip_id}")
+    description = publish_config.get("description", "")
+    hashtags = publish_config.get("hashtags", [])
+    privacy = publish_config.get("privacy", "public")
+    schedule_at = publish_config.get("schedule_at")
+    
+    if schedule_at and isinstance(schedule_at, str):
+        # Parse ISO 8601 datetime
+        schedule_at = datetime.fromisoformat(schedule_at.replace("Z", "+00:00"))
+    
+    for platform in platforms:
+        try:
+            request = PublishRequest(
+                clip_id=clip_id,
+                user_id=user_id,
+                platform=platform,
+                cdn_url=cdn_url,
+                title=title,
+                description=description,
+                hashtags=hashtags,
+                privacy=privacy,
+                schedule_at=schedule_at,
+            )
+            
+            result = await publisher.publish(request)
+            
+            if result.status == "failed":
+                logger.error(
+                    f"[publish_generated_clip] Failed to publish clip {clip_id} to {platform}: "
+                    f"{result.error_message}"
+                )
+            else:
+                logger.info(
+                    f"[publish_generated_clip] Published clip {clip_id} to {platform}: "
+                    f"status={result.status}, url={result.platform_url}"
+                )
+                
+        except Exception as e:
+            logger.error(
+                f"[publish_generated_clip] Exception publishing clip {clip_id} to {platform}: {e}",
+                exc_info=True
+            )
+
+
 __all__ = [
     "AutoSchedulerService",
     "ScheduledJob",
@@ -465,4 +589,5 @@ __all__ = [
     "ScheduleFrequency",
     "TriggerType",
     "process_scheduled_job",
+    "publish_generated_clip",
 ]
