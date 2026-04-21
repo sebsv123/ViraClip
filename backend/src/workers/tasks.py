@@ -282,10 +282,7 @@ async def process_scheduled_job(
 
 
 async def worker_startup(ctx: Dict[str, Any]) -> None:
-    """
-    Run cleanup on worker startup to remove old files.
-    """
-    import asyncio
+    """Startup ligero: solo cleanup. Whisper se carga lazy en el primer job."""
     from pathlib import Path
     from ..config import get_config
     from ..utils.resource_manager import cleanup_temp_files, detect_hardware_capabilities
@@ -293,26 +290,21 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
 
     logger.info("Worker starting up...")
 
-    # ── B-roll provider diagnostics ──────────────────────────────────────────
     try:
         from ..services.broll_service import BrollService
         BrollService().log_provider_status()
-    except Exception as _broll_diag:
-        logger.debug("[startup] B-roll provider diagnostics skipped: %s", _broll_diag)
+    except Exception as e:
+        logger.debug("[startup] B-roll diagnostics skipped: %s", e)
 
-    # Detect hardware and log capabilities (rápido, no bloquea)
-    hw_caps = detect_hardware_capabilities()
-
+    detect_hardware_capabilities()
     cfg = get_config()
-    clips_dir = Path(cfg.temp_dir) / "uploads" / "clips"
-    downloads_dir = Path(cfg.temp_dir) / "uploads"
-
-    # Aggressive temp cleanup to free disk space
     temp_base = Path(cfg.temp_dir)
+    clips_dir = temp_base / "uploads" / "clips"
+    downloads_dir = temp_base / "uploads"
+
     cleanup_temp_files(temp_base / "segments", max_age_hours=12)
     cleanup_temp_files(temp_base / "uploads", max_age_hours=24)
 
-    # Keep clips for 48 h, downloaded source videos for 24 h
     clips_deleted, clips_freed = cleanup_old_clips(clips_dir, retention_hours=48)
     dl_deleted, dl_freed = cleanup_old_downloads(downloads_dir, retention_hours=24)
     logger.info(
@@ -320,6 +312,7 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
         f"downloads={dl_deleted} files freed "
         f"({(clips_freed + dl_freed) // (1024 * 1024):.1f}MB total)"
     )
+    logger.info("✅ Worker ready — polling starts now")
 
 
 # Worker configuration for arq
