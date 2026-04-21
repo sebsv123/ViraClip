@@ -144,11 +144,11 @@ class HookVisualService:
         # Escalar fuente proporcional al video
         font_size = min(hook.font_size, int(video_height * 0.08))
         
-        # Posición Y según configuración
+        # Posición Y según configuración (top es zona segura para TikTok)
         if hook.position == "center":
             y_pos = "(h-text_h)/2"
         elif hook.position == "top":
-            y_pos = "h*0.15"
+            y_pos = "h*0.10"
         else:  # bottom
             y_pos = "h*0.75"
         
@@ -207,30 +207,36 @@ class HookVisualService:
             else:
                 vf_filter = hook_filter
             
-            cmd = [
-                "ffmpeg", "-y",
-                "-i", video_path,
-                "-vf", vf_filter,
-                "-c:v", "libx264",
-                "-crf", "23",
-                "-preset", "fast",
-                "-c:a", "copy",
-                "-movflags", "+faststart",
-                output_path
-            ]
-            
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            
-            if proc.returncode == 0:
+            async def _run_ffmpeg(encoder_args: list) -> int:
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-i", video_path,
+                    "-vf", vf_filter,
+                    *encoder_args,
+                    "-c:a", "copy",
+                    "-movflags", "+faststart",
+                    output_path
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=180.0)
+                if proc.returncode != 0:
+                    logger.warning(f"FFmpeg error: {stderr.decode()[:200]}")
+                return proc.returncode
+
+            # Try NVENC first, fallback to libx264
+            rc = await _run_ffmpeg(["-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "18"])
+            if rc != 0:
+                rc = await _run_ffmpeg(["-c:v", "libx264", "-crf", "18", "-preset", "fast"])
+
+            if rc == 0:
                 logger.info(f"✓ Hook overlay added: {output_path}")
                 return output_path
             else:
-                logger.error(f"FFmpeg error: {stderr.decode()[:500]}")
+                logger.error("Hook overlay FFmpeg failed")
                 return video_path
                 
         except Exception as e:
@@ -278,35 +284,47 @@ class HookVisualService:
             font_color=font_color,
             stroke_color=stroke_color,
             stroke_width=4,
-            position="center",
+            position="top",   # zona superior TikTok-native
             animation="fade_zoom"
         )
 
 
 # Funciones de conveniencia
 async def add_hook_overlay_to_clip(
-    video_path: str,
-    output_path: str,
-    segment_text: str,
+    input_path: Path,
+    output_path: Path,
+    hook_text: str,
+    platform: str = "tiktok",
+    duration: float = 2.0,
     hook_type: str = "insight_reveal",
-    duration: float = 2.0
-) -> str:
+) -> bool:
     """
-    Función simple para añadir hook a un clip
-    
-    Example:
-        await add_hook_overlay_to_clip(
-            "clip.mp4", 
-            "output.mp4",
-            "Este es el texto del segmento",
-            hook_type="curiosity_gap"
-        )
+    Añade hook visual a un clip (firma compatible con coordinator.py).
+
+    Args:
+        input_path: Video original
+        output_path: Video de salida
+        hook_text: Texto del hook a mostrar
+        platform: Plataforma objetivo (tiktok, instagram, etc.)
+        duration: Duración del hook en segundos
+        hook_type: Tipo de hook para estilo visual
+
+    Returns:
+        True si el hook fue aplicado exitosamente
     """
     service = HookVisualService()
-    hook = service.generate_hook_from_segment({
-        "text": segment_text,
-        "hook_type": hook_type
-    }, duration)
-    return await service.add_hook_to_video(video_path, output_path, hook)
+    hook = HookOverlay(
+        text=hook_text,
+        start_time=0.0,
+        duration=duration,
+        font_size=68,
+        font_color="#FFFFFF",
+        stroke_color="#000000",
+        stroke_width=4,
+        position="top",
+        animation="fade_zoom",
+    )
+    result = await service.add_hook_to_video(str(input_path), str(output_path), hook)
+    return Path(result).exists() and Path(result).stat().st_size > 0
 
 
