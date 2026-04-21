@@ -290,6 +290,21 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
 
     logger.info("Worker starting up...")
 
+    # ── FIX: Limpiar locks fantasma de sesiones anteriores ────────────────
+    redis = ctx.get('redis')
+    if redis:
+        try:
+            phantom_keys = await redis.keys('arq:in-progress:*')
+            retry_keys = await redis.keys('arq:retry:*')
+            if phantom_keys:
+                await redis.delete(*phantom_keys)
+                logger.info(f"[startup] Cleared {len(phantom_keys)} phantom in-progress locks")
+            if retry_keys:
+                await redis.delete(*retry_keys)
+                logger.info(f"[startup] Cleared {len(retry_keys)} stale retry keys")
+        except Exception as e:
+            logger.warning(f"[startup] Redis cleanup warning: {e}")
+
     try:
         from ..services.broll_service import BrollService
         BrollService().log_provider_status()
