@@ -60,6 +60,23 @@ try:
     _confidence_subtitle_available = True
 except (ImportError, Exception):
     pass  # ConfidenceSubtitleGenerator remains None
+
+# ── WhisperX Singleton for word-level transcription ───────────────────────────
+_whisperx_model = None
+_whisperx_align_cache: Dict[str, Any] = {}  # {lang: (model, metadata)}
+_whisperx_available = False
+try:
+    import whisperx
+    import torch as _torch
+    _whisperx_available = _torch.cuda.is_available()
+    _WX_DEVICE = "cuda" if _whisperx_available else "cpu"
+    _WX_COMPUTE = "float16" if _whisperx_available else "int8"
+    _WX_MODEL = "large-v3"
+    _WX_BATCH = 24  # optimal for 8.1GB VRAM Blackwell
+    logger.info(f"[WhisperX] Ready — device={_WX_DEVICE} compute={_WX_COMPUTE}")
+except ImportError:
+    logger.warning("[WhisperX] Not installed — using standard Whisper fallback")
+
 from .semantic_broll_service import SemanticBrollService
 from .sound_design_service import SoundDesignService, add_viral_sound_effects
 from .hook_visual_service import HookVisualService
@@ -92,6 +109,150 @@ def get_service_config():
     return _config
 
 UPLOAD_URL_PREFIX = "upload://"
+
+
+# ── WhisperX Transcription Functions ──────────────────────────────────────────
+
+async def transcribe_with_whisperx(audio_path: str, language: str = None) -> dict:
+    """
+    Transcripción con forced alignment word-level usando WhisperX.
+    Cada word tiene: {'word', 'start', 'end', 'score'}
+    score = confianza del modelo de alineación (0.0-1.0)
+    Un score alto indica pronunciación clara/enfática.
+    """
+    global _whisperx_model, _whisperx_align_cache
+
+    if not _whisperx_available:
+        return await _fallback_transcribe(audio_path, language)
+
+    try:
+        import whisperx
+
+        if _whisperx_model is None:
+            logger.info("[WhisperX] Loading large-v3 (~3GB, primera vez 3-5min)...")
+            os.makedirs("/app/models", exist_ok=True)
+            _whisperx_model = whisperx.load_model(
+                _WX_MODEL, _WX_DEVICE,
+                compute_type=_WX_COMPUTE,
+                download_root="/app/models",
+                language=language
+            )
+
+        audio = whisperx.load_audio(audio_path)
+        result = _whisperx_model.transcribe(audio, batch_size=_WX_BATCH, language=language)
+        lang = result.get("language", language or "es")
+
+        if lang not in _whisperx_align_cache:
+            os.makedirs("/app/models/alignment", exist_ok=True)
+            align_model, metadata = whisperx.load_align_model(
+                language_code=lang,
+                device=_WX_DEVICE,
+                model_dir="/app/models/alignment"
+            )
+            _whisperx_align_cache[lang] = (align_model, metadata)
+
+        align_model, metadata = _whisperx_align_cache[lang]
+        result = whisperx.align(
+            result["segments"], align_model, metadata,
+            audio, _WX_DEVICE, return_char_alignments=False
+        )
+        result["language"] = lang
+
+        n_words = sum(len(s.get("words", [])) for s in result["segments"])
+        logger.info(f"[WhisperX] ✅ {n_words} words aligned — lang={lang}")
+        return result
+
+    except Exception as e:
+        logger.error(f"[WhisperX] Error: {e} — fallback activado")
+        return await _fallback_transcribe(audio_path, language)
+
+
+async def _fallback_transcribe(audio_path: str, language: str = None) -> dict:
+    """Fallback to standard faster-whisper transcription."""
+    try:
+        from ..video_processing import get_video_transcript
+        transcript_text = await get_video_transcript(Path(audio_path), language or "es")
+        # Return compatible format without word-level alignment
+        return {
+            "segments": [{"text": transcript_text, "start": 0.0, "end": 0.0, "words": []}],
+            "language": language or "es",
+            "text": transcript_text
+        }
+    except Exception as e:
+        logger.error(f"[WhisperX] Fallback transcription failed: {e}")
+        return {"segments": [], "language": language or "es", "text": ""}
+
+
+def burn_word_subtitles(
+    video_path: str,
+    segments: list,
+    output_path: str,
+    language: str = "es",
+    video_width: int = 1080,
+    video_height: int = 1920
+) -> str:
+    """
+    Genera ASS con énfasis basado en word.score (WhisperX)
+    y lo quema con FFmpeg. Usa NVENC para encoding acelerado.
+    """
+    import tempfile
+
+    try:
+        from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+        gen = ConfidenceSubtitleGenerator()
+
+        fd, ass_path = tempfile.mkstemp(suffix=".ass")
+        os.close(fd)
+
+        result = gen.generate_from_segments(
+            segments=segments,
+            video_width=video_width,
+            video_height=video_height,
+            output_path=ass_path
+        )
+
+        if not result:
+            logger.warning("[Subtitles] ASS vacío — saltando burn")
+            return video_path
+
+        ass_escaped = ass_path.replace("\\", "/").replace(":", "\\:")
+
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-vf", f"ass='{ass_escaped}'",
+            "-c:v", "h264_nvenc",   # NVENC hardware encoding — Blackwell
+            "-preset", "p4",        # balance calidad/velocidad NVENC
+            "-rc", "constqp", "-qp", "18",  # calidad constante (equivale a CRF 18)
+            "-c:a", "copy",
+            output_path
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        if proc.returncode != 0:
+            # Fallback a software si NVENC falla
+            logger.warning("[Subtitles] NVENC falló, reintentando con libx264")
+            cmd[cmd.index("h264_nvenc")] = "libx264"
+            cmd[cmd.index("-preset")] = "-preset"
+            cmd[cmd.index("p4")] = "fast"
+            cmd[cmd.index("-rc")] = "-crf"
+            cmd[cmd.index("-qp")] = "17"
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        if proc.returncode == 0:
+            logger.info(f"[Subtitles] ✅ Burned: {output_path}")
+            return output_path
+        else:
+            logger.error(f"[Subtitles] Burn fallido: {proc.stderr[-300:]}")
+            return video_path
+
+    except Exception as e:
+        logger.error(f"[Subtitles] burn_word_subtitles error: {e}")
+        return video_path
+
+    finally:
+        if 'ass_path' in locals() and os.path.exists(ass_path):
+            os.remove(ass_path)
 
 
 class VideoService:
