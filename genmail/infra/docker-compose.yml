@@ -1,0 +1,51 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: ankane/pgvector:v0.5.1 # Postgres 16 + pgvector
+    container_name: genmail-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-genmail}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-genmail_password}
+      POSTGRES_DB: ${POSTGRES_DB:-genmail}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-genmail} -d ${POSTGRES_DB:-genmail}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: genmail-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  listmonk:
+    image: listmonk/listmonk:latest
+    container_name: genmail-listmonk
+    restart: always
+    ports:
+      - "9000:9000"
+    environment:
+      - TZ=UTC
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
