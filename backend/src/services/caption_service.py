@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 
@@ -45,6 +46,8 @@ class WordTimestamp:
     text: str
     start: float   # seconds
     end: float     # seconds
+    score: float = 0.0      # WhisperX alignment confidence 0-1
+    emphasis: bool = False  # True if this word should be visually highlighted
 
     @property
     def duration_cs(self) -> int:
@@ -100,6 +103,12 @@ def _margin_v(platform: str) -> int:
     return _PLATFORM_MARGIN_V.get(platform.lower(), _PLATFORM_MARGIN_V["default"])
 
 
+# ── Font configuration ─────────────────────────────────────────────────────
+_CAPTION_FONT = os.environ.get("CAPTION_FONT_BOLD", "Arial")
+_KNOWN_SAFE_FONTS = {"Arial", "DejaVu Sans", "Liberation Sans"}
+if _CAPTION_FONT not in _KNOWN_SAFE_FONTS:
+    logger.info("[caption] Using custom font '%s' — ensure it's installed or pass font_dir", _CAPTION_FONT)
+
 # ── Style presets ─────────────────────────────────────────────────────────────
 # MarginV is set to a placeholder string "MARGINV" that is substituted at
 # script-build time with the platform-specific safe-zone value.
@@ -108,27 +117,27 @@ _STYLE_DEFS: Dict[str, str] = {
     # Name,Font,Size,Primary,Secondary,Outline,Back,Bold,Ital,Und,Stk,
     # ScX,ScY,Spacing,Angle,BorderStyle,Outline,Shadow,Align,MarL,MarR,MarV,Enc
     "karaoke": (
-        "Default,TikTokSans-Bold,72,"
+        f"Default,{_CAPTION_FONT},72,"
         f"{_WHITE},{_YELLOW},{_BLACK},{_SEMI_BG},"
         "-1,0,0,0,100,100,0,0,1,3,1,2,10,10,MARGINV,1"
     ),
     "highlight": (
-        "Default,Montserrat-Bold,68,"
+        f"Default,{_CAPTION_FONT},68,"
         f"{_BLACK},{_RED},{_BLACK},{_YELLOW},"
         "-1,0,0,0,100,100,0,0,3,0,0,2,10,10,MARGINV,1"
     ),
     "tiktok": (
-        "Default,TikTokSans-Bold,80,"
+        f"Default,{_CAPTION_FONT},80,"
         f"{_WHITE},{_YELLOW},{_BLACK},{_SEMI_BG},"
         "-1,0,0,0,100,100,1,0,1,4,2,2,10,10,MARGINV,1"
     ),
     "minimal": (
-        "Default,Montserrat-Bold,64,"  # 54→64 más grande
+        f"Default,{_CAPTION_FONT},64,"  # 54→64 más grande
         f"{_WHITE},{_WHITE},{_BLACK},{_SEMI_BG},"  # TRANSP→SEMI_BG fondo visible
         "-1,0,0,0,100,100,0,0,3,2,0,2,10,10,MARGINV,1"  # BorderStyle 1→3 para caja
     ),
     "neon": (
-        "Default,Montserrat-Bold,66,"
+        f"Default,{_CAPTION_FONT},66,"
         f"{_CYAN},{_WHITE},{_CYAN},{_SEMI_BG},"
         "-1,0,0,0,100,100,2,0,1,2,3,2,10,10,MARGINV,1"
     ),
@@ -158,10 +167,17 @@ def _ass_time(seconds: float) -> str:
 
 
 def _build_karaoke_text(words: List[WordTimestamp]) -> str:
-    """Build \\k-tagged karaoke text from word list."""
+    """Build \\k-tagged karaoke text from word list with emphasis support."""
     parts = []
     for w in words:
-        parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
+        if w.emphasis:
+            # High impact word: bright yellow + slightly larger
+            parts.append(
+                f"{{\\k{w.duration_cs}\\c{_YELLOW}\\fscx110\\fscy110}}{w.text}"
+                f"{{\\c{_WHITE}\\fscx100\\fscy100}}"
+            )
+        else:
+            parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
     return " ".join(parts)
 
 
@@ -249,11 +265,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
 # ── Caption line segmentation ─────────────────────────────────────────────────
 
+# Sentence-ending punctuation triggers line breaks
+_SENTENCE_ENDINGS = {".", "!", "?", "…"}
+
+
 def segment_words_into_lines(
     words: List[Dict[str, Any]],
     max_words_per_line: int = 5,
     max_line_duration: float = 4.0,
     gap_threshold: float = 0.8,
+    emphasis_words: Optional[List[str]] = None,
 ) -> List[CaptionLine]:
     """
     Group word-level timestamps into caption lines suitable for display.
@@ -262,12 +283,14 @@ def segment_words_into_lines(
       - Word gaps > gap_threshold seconds (sentence breaks)
       - Lines that would exceed max_words_per_line
       - Lines that would exceed max_line_duration seconds
+      - Sentence-ending punctuation (., !, ?, …)
 
     Args:
-        words: List of dicts with 'text', 'start', 'end' keys (Whisper format).
+        words: List of dicts with 'text', 'start', 'end', 'score' keys (Whisper format).
         max_words_per_line: Target max words per caption bubble.
         max_line_duration: Max display duration before forced split (seconds).
         gap_threshold: Gap between words (seconds) that triggers a line break.
+        emphasis_words: Optional list of words from LangGraph to mark as emphasis.
     """
     if not words:
         return []
@@ -277,10 +300,27 @@ def segment_words_into_lines(
             text=re.sub(r"[^\w\s''-]", "", (w.get("text") or w.get("word") or "")).strip(),
             start=float(w.get("start", 0)),
             end=float(w.get("end", 0)),
+            score=float(w.get("score", 0.0)),
         )
         for w in words
         if (w.get("text") or w.get("word") or "").strip()
     ]
+
+    # Mark high-score words as emphasis (top 15% with score > 0.85)
+    if wts:
+        scores = [wt.score for wt in wts if wt.score > 0]
+        if scores:
+            threshold = sorted(scores)[int(len(scores) * 0.85)]
+            for wt in wts:
+                if wt.score >= threshold and wt.score > 0.85:
+                    wt.emphasis = True
+
+    # Mark words from LangGraph emphasis list
+    if emphasis_words:
+        _emp_set = {w.lower().strip(".,!?'‼️‼") for w in emphasis_words}
+        for wt in wts:
+            if wt.text.lower().strip(".,!?'‼️‼") in _emp_set:
+                wt.emphasis = True
 
     lines: List[CaptionLine] = []
     current: List[WordTimestamp] = []
@@ -290,8 +330,12 @@ def segment_words_into_lines(
         if current:
             gap = wt.start - current[-1].end
             dur = wt.end - current[0].start
+            last_text = current[-1].text.rstrip()
+            # Break on sentence endings, gaps, max words, or max duration
+            ends_sentence = any(last_text.endswith(p) for p in _SENTENCE_ENDINGS)
             if (
-                gap > gap_threshold
+                ends_sentence
+                or gap > gap_threshold
                 or len(current) >= max_words_per_line
                 or dur > max_line_duration
             ):
@@ -319,6 +363,37 @@ def segment_words_into_lines(
 
 # ── FFmpeg burn-in ────────────────────────────────────────────────────────────
 
+async def _run_ffmpeg_caption(
+    ffmpeg_exe: str,
+    video_path: Path,
+    vf: str,
+    output_path: Path,
+) -> bool:
+    """Try NVENC first, fall back to libx264."""
+    for codec_args in [
+        ["-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "20"],
+        ["-c:v", "libx264", "-preset", "fast", "-crf", "20"],
+    ]:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            *codec_args,
+            "-c:a", "copy",
+            str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+        if proc.returncode == 0:
+            return True
+        if b"nvenc" in stderr.lower() or b"h264_nvenc" in stderr.lower():
+            continue  # NVENC not available, try next
+        logger.error("[caption] FFmpeg burn-in failed: %s", stderr.decode()[-500:])
+        return False
+    return False
+
+
 async def burn_captions(
     video_path: Path,
     output_path: Path,
@@ -329,6 +404,7 @@ async def burn_captions(
     max_words_per_line: int = 5,
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
+    emphasis_words: Optional[List[str]] = None,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
@@ -336,7 +412,7 @@ async def burn_captions(
 
     Returns True on success, False on failure (video is still written as-is).
     """
-    lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line)
+    lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line, emphasis_words=emphasis_words)
     if not lines:
         logger.warning("[caption] No words provided — skipping caption burn-in")
         return False
@@ -355,7 +431,7 @@ async def burn_captions(
         if _qa_result.issues:
             logger.debug("[caption] subtitle_qa issues: %s", _qa_result.issues)
     except Exception as _qa_e:
-        logger.debug("[caption] subtitle_qa skipped: %s", _qa_e)
+        logger.warning("[caption] subtitle_qa skipped (no QA applied): %s", _qa_e)
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".ass", delete=False, encoding="utf-8"
@@ -369,19 +445,8 @@ async def burn_captions(
         font_clause = f":fontsdir={font_dir}" if font_dir else ""
         vf = f"subtitles='{safe_ass}'{font_clause}"
 
-        proc = await asyncio.create_subprocess_exec(
-            _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
-            "-i", str(video_path),
-            "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
-            "-c:a", "copy",
-            str(output_path),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
-        if proc.returncode != 0:
-            logger.error("[caption] FFmpeg burn-in failed: %s", stderr.decode()[-500:])
+        success = await _run_ffmpeg_caption(_get_ffmpeg_exe(), video_path, vf, output_path)
+        if not success:
             return False
 
         logger.info("[caption] Burned %d lines (%s style) → %s",
@@ -418,10 +483,12 @@ class CaptionService:
         style: str = "tiktok",
         font_dir: Optional[str] = None,
         platform: str = "tiktok",
+        emphasis_words: Optional[List[str]] = None,
     ) -> bool:
         return await burn_captions(
             video_path, output_path, words,
             style=style, font_dir=font_dir, platform=platform,
+            emphasis_words=emphasis_words,
         )
 
     def generate_ass(
