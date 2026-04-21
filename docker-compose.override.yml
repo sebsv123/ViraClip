@@ -41,7 +41,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu, video, compute, utility]
-        cpus: "14-15"
     cpu_shares: 256
     shm_size: '2gb'
     ulimits:
@@ -169,8 +168,6 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
 
   # ComfyUI - Generative AI (GPU only)
-  # Los args de arranque viven en comfyui/entrypoint.sh (--lowvram por defecto).
-  # Para overridear sin reconstruir: COMFYUI_EXTRA_ARGS="--normalvram" docker-compose up
   comfyui:
     profiles:
       - gpu
@@ -180,7 +177,7 @@ services:
       resources:
         limits:
           cpus: '4.0'
-          memory: 14G  # subido: T5 offloadeado vive en RAM (~5GB)
+          memory: 14G
         reservations:
           cpus: '2.0'
           memory: 8G
