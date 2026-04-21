@@ -85,15 +85,24 @@ class BrollService:
             return await self._apply_yolo_filter(keywords, video_path, clip_duration)
 
         prompt = (
-            "You are a video editor choosing B-roll footage. "
-            "Read this transcript and extract 2-3 SPECIFIC English search terms for stock video footage. "
-            "Rules:\n"
-            "- Keywords MUST directly match a noun/action/place MENTIONED in the transcript\n"
-            "- NO generic motivational words (success, winner, achievement, determination)\n"
-            "- Choose the most VISUAL and CONCRETE thing the speaker is talking about\n"
-            "- Must be searchable on a stock video site (e.g. Pexels, Pixabay)\n"
-            "- Reply with ONLY a JSON array, e.g. [\"stock market chart\", \"office meeting\", \"coffee cup\"]\n\n"
-            f"Transcript: {text[:500]}"
+            "You are a cinematic B-roll director for a viral video. "
+            "Analyze this transcript and extract 2-3 VISUAL CONCEPTS that would make the video WOW.\n\n"
+            "CONTEXT RULES:\n"
+            "1. Keywords must EXACTLY match what the speaker is saying IN THIS MOMENT\n"
+            "2. Choose CINEMATIC, MOVIE-QUALITY visuals (not generic stock footage)\n"
+            "3. Prefer: dynamic motion, dramatic lighting, professional cinematography\n"
+            "4. AVOID: generic motivational concepts, abstract ideas, obvious stock tropes\n"
+            "5. FOCUS ON: specific actions, detailed environments, emotional moments\n\n"
+            "QUALITY CHECK:\n"
+            "- Would this look like a Netflix documentary? → YES = good keyword\n"
+            "- Could this be a movie scene? → YES = good keyword\n"
+            "- Does it have motion and depth? → YES = good keyword\n\n"
+            "EXAMPLES:\n"
+            '- Talking about hard work → ["sweat droplets on forehead close-up", "hands typing furiously on keyboard", "clock hands moving rapidly"]\n'
+            '- Talking about money → ["gold coins falling in slow motion", "luxury car headlights at night", "stack of cash being counted"]\n'
+            '- Talking about nature → ["drone shot of forest canopy", "waves crashing dramatic rocks", "time-lapse blooming flower"]\n\n'
+            "Reply with ONLY a JSON array of cinematic search terms.\n\n"
+            f"TRANSCRIPT: {text[:600]}"
         )
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -655,15 +664,74 @@ class BrollService:
             if not keywords:
                 return video_path
 
-            # Step 2 — fetch one asset per keyword (uses provider-priority cascade)
-            # fetch_broll_asset respects BROLL_PROVIDER_PRIORITY:
-            #   premium_first → LTXV/ComfyUI → T2V → Stock
-            #   stock_first   → Stock → LTXV/ComfyUI → T2V
+            # Step 2 — PREMIUM GENERATION FIRST (explicit calls before cascade)
+            # Try LTXV/ComfyUI/T2V explicitly before falling back to stock APIs
             broll_assets: List[Path] = []
+            premium_attempts = 0
+            premium_success = 0
+            
+            # >>> EXPLICIT PREMIUM ATTEMPTS (before stock fallback) <<<
             for kw in keywords[:max(3, max_overlays)]:
-                asset = await self.fetch_broll_asset(kw)
-                if asset and asset not in broll_assets:
-                    broll_assets.append(asset)
+                if len(broll_assets) >= max_overlays:
+                    break
+                
+                asset = None
+                
+                # 1. Try LTXV first (best quality, local)
+                # Note: _try_ltxv already includes quality gate internally
+                if LTXV_ENABLED:
+                    premium_attempts += 1
+                    try:
+                        asset = await self._try_ltxv(kw, kw.replace(' ', '_')[:30])
+                        if asset:  # Quality gate already applied in _try_ltxv
+                            broll_assets.append(asset)
+                            premium_success += 1
+                            logger.info("[BRoll] ✓ LTXV success for '%s': %s", kw, asset)
+                            continue
+                    except Exception as e:
+                        logger.warning("[BRoll] LTXV failed for '%s': %s", kw, e)
+                
+                # 2. Try AnimateDiff (ComfyUI local)
+                # Note: _try_animatediff already includes quality gate internally
+                if COMFYUI_ENABLED and len(broll_assets) < max_overlays:
+                    premium_attempts += 1
+                    try:
+                        asset = await self._try_animatediff(kw, kw.replace(' ', '_')[:30])
+                        if asset:  # Quality gate already applied in _try_animatediff
+                            broll_assets.append(asset)
+                            premium_success += 1
+                            logger.info("[BRoll] ✓ AnimateDiff success for '%s': %s", kw, asset)
+                            continue
+                    except Exception as e:
+                        logger.warning("[BRoll] AnimateDiff failed for '%s': %s", kw, e)
+                
+                # 3. Try T2V Replicate (cloud)
+                # Note: _try_t2v already includes quality gate internally
+                if len(broll_assets) < max_overlays:
+                    try:
+                        from .t2v_broll_service import T2VBrollService
+                        if T2VBrollService.is_available():
+                            premium_attempts += 1
+                            asset = await self._try_t2v(kw, kw.replace(' ', '_')[:30])
+                            if asset:  # Quality gate already applied in _try_t2v
+                                broll_assets.append(asset)
+                                premium_success += 1
+                                logger.info("[BRoll] ✓ T2V success for '%s': %s", kw, asset)
+                                continue
+                    except Exception as e:
+                        logger.warning("[BRoll] T2V failed for '%s': %s", kw, e)
+                
+                # 4. Stock fallback (only if premium failed)
+                if len(broll_assets) < max_overlays:
+                    logger.info("[BRoll] Premium failed for '%s', falling back to stock", kw)
+                    asset = await self.fetch_broll_asset(kw)
+                    if asset:
+                        broll_assets.append(asset)
+                        logger.info("[BRoll] ✓ Stock fallback for '%s': %s", kw, asset)
+            
+            logger.info("[BRoll] Premium stats: %d/%d successful (%d%%)", 
+                       premium_success, premium_attempts, 
+                       (premium_success/max(premium_attempts,1)*100))
 
             if not broll_assets:
                 logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")

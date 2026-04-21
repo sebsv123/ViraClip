@@ -366,3 +366,85 @@ def generate_health_report(
         summary=summary,
         top_fix=top_fix,
     )
+
+
+def get_health_based_provider_recommendation(
+    report: ClipHealthReport,
+    default_priority: str = "premium_first"
+) -> dict:
+    """
+    Adjust B-roll provider selection based on clip health score.
+    
+    High health clips → prioritize premium (LTXV/AnimateDiff)
+    Low health clips → fall back to stock to save resources
+    
+    Returns provider config dict to pass to broll_provider_strategy.
+    """
+    score = report.overall_score
+    grade = report.grade
+    
+    # Analyze B-roll coverage from report
+    broll_check = next((c for c in report.checks if "B-roll" in c.name), None)
+    has_broll = broll_check and broll_check.status == "pass" if broll_check else False
+    
+    # Decision matrix
+    if score >= 85 and grade in ("A", "A+"):
+        # High quality clip → use BEST premium provider
+        return {
+            "priority": "premium_first",
+            "enable_premium": True,
+            "enable_stock": True,  # Fallback allowed but less likely
+            "preferred_provider": "ltxv",  # Force LTXV for WOW clips
+            "quality_gate": "strict",  # Apply strict quality checks
+            "reason": f"Health score {score:.0f}/100 (Grade {grade}) → Premium B-roll for WOW quality"
+        }
+    elif score >= 70 and grade in ("A", "B"):
+        # Good clip → try premium first, normal fallback
+        return {
+            "priority": "premium_first",
+            "enable_premium": True,
+            "enable_stock": True,
+            "preferred_provider": None,  # Use normal cascade
+            "quality_gate": "normal",
+            "reason": f"Health score {score:.0f}/100 (Grade {grade}) → Premium-first with normal fallback"
+        }
+    elif score >= 50 and grade in ("B", "C"):
+        # Mediocre clip → balanced approach
+        return {
+            "priority": "premium_first",
+            "enable_premium": True,
+            "enable_stock": True,
+            "preferred_provider": None,
+            "quality_gate": "relaxed",  # Relaxed to get something
+            "reason": f"Health score {score:.0f}/100 (Grade {grade}) → Balanced approach"
+        }
+    else:
+        # Low quality clip → save resources, use stock only
+        return {
+            "priority": "stock_first",
+            "enable_premium": False,  # Skip expensive generation
+            "enable_stock": True,
+            "preferred_provider": "stock_video",
+            "quality_gate": "relaxed",
+            "reason": f"Health score {score:.0f}/100 (Grade {grade}) → Stock-only to save resources"
+        }
+
+
+def should_retry_with_premium(
+    report: ClipHealthReport,
+    current_provider: str
+) -> bool:
+    """
+    Determine if a clip should be re-rendered with premium B-roll
+    after an initial stock-only render.
+    
+    Use this when: clip has good health but used stock due to provider failures.
+    """
+    # If health is good but we used stock, retry with premium
+    score_threshold = 75
+    has_broll = any("B-roll" in c.name and c.status == "pass" for c in report.checks)
+    
+    if report.overall_score >= score_threshold and not has_broll and "stock" in current_provider:
+        return True
+    
+    return False
