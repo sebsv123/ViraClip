@@ -313,6 +313,43 @@ ViraClip is open source and welcomes contributions! Whether you're fixing bugs, 
 - Documentation and guides
 - Test coverage expansion
 
+## Host Performance Tuning (Production)
+
+For optimal video rendering performance on Linux servers with NVIDIA GPUs:
+
+### Install Host Tuning Service
+
+```bash
+# Create directory structure
+sudo mkdir -p /opt/viraclip/scripts/linux
+
+# Copy tuning script
+sudo cp scripts/linux/host-tune.sh /opt/viraclip/scripts/linux/
+sudo chmod +x /opt/viraclip/scripts/linux/host-tune.sh
+
+# Install systemd service
+sudo cp scripts/linux/viraclip-tune.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable viraclip-tune.service
+sudo systemctl start viraclip-tune.service
+```
+
+The `host-tune.sh` script optimizes:
+- **Kernel parameters**: vm.swappiness, dirty ratios, network buffers
+- **CPU governor**: Sets all cores to performance mode
+- **NVIDIA GPU**: Persistence mode for faster initialization
+- **Memory**: Disables transparent hugepages, increases file limits
+
+### System Monitoring
+
+Use the monitor script to track resources during renders:
+
+```bash
+./scripts/linux/monitor.sh --interval 30
+```
+
+This monitors GPU utilization, CPU, RAM, and disk I/O every 30 seconds.
+
 ## License
 
 ViraClip is released under the AGPL-3.0 License. See [LICENSE](LICENSE) for details.
