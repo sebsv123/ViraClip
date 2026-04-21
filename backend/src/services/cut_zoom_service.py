@@ -59,13 +59,61 @@ async def apply_cut_zooms(
     if not cut_points:
         logger.debug("[cut_zoom] No cut points, skipping zoom")
         return False
-    
+
+    # ── VALIDACIÓN: obtener duración real del video con ffprobe ────────────
+    video_duration = None
+    try:
+        ffprobe_cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *ffprobe_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        video_duration = float(stdout.decode().strip())
+    except Exception as e:
+        logger.warning(f"[cut_zoom] Could not get video duration: {e}")
+
+    # ── VALIDACIÓN: filtrar timestamps inválidos ───────────────────────────
+    zoom_intervals = []
+    for t in cut_points[:10]:  # Limit to 10 zooms max
+        start = max(0, t - zoom_duration / 2)
+        end = t + zoom_duration / 2
+
+        # Validar contra duración real del video si está disponible
+        if video_duration is not None:
+            if start < 0 or end > video_duration or end <= start:
+                logger.warning(
+                    f"[cut_zoom] Invalid zoom interval discarded: "
+                    f"start={start:.3f}, end={end:.3f}, duration={video_duration:.3f}"
+                )
+                continue
+        else:
+            # Fallback: solo validar que end > start
+            if end <= start:
+                logger.warning(
+                    f"[cut_zoom] Invalid zoom interval (duration unknown): "
+                    f"start={start:.3f}, end={end:.3f}"
+                )
+                continue
+
+        zoom_intervals.append((start, end))
+
+    if not zoom_intervals:
+        logger.warning("[cut_zoom] No valid zoom intervals after validation, skipping zoom")
+        return False
+
     # Get video dimensions using ffmpeg -i (imageio_ffmpeg doesn't bundle ffprobe)
     # Parse dimensions from stderr output like: "Stream #0:0: Video: h264 ... 1920x1080"
     probe_cmd = [
         _get_ffmpeg_exe(), "-i", video_path,
     ]
-    
+
     try:
         proc = await asyncio.create_subprocess_exec(
             *probe_cmd,
@@ -74,7 +122,7 @@ async def apply_cut_zooms(
         )
         _, stderr = await proc.communicate()
         stderr_text = stderr.decode('utf-8', errors='replace')
-        
+
         # Look for pattern like "1920x1080" or "1080x1920"
         import re
         match = re.search(r'(\d{3,4})x(\d{3,4})', stderr_text)
@@ -85,14 +133,6 @@ async def apply_cut_zooms(
     except Exception as e:
         logger.warning(f"[cut_zoom] Could not get dimensions: {e}")
         width, height = 1080, 1920
-    
-    # Build zoompan filter with zoom at each cut point
-    # Use zoompan's time-based expressions
-    zoom_intervals = []
-    for t in cut_points[:10]:  # Limit to 10 zooms max
-        start = max(0, t - zoom_duration / 2)
-        end = t + zoom_duration / 2
-        zoom_intervals.append((start, end))
     
     # Create zoom expression: use first cut point only to avoid FFmpeg max() errors
     if not zoom_intervals:

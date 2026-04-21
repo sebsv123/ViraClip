@@ -30,7 +30,7 @@ class JobQueue:
         """Get or create the Redis connection pool."""
         if cls._pool is None:
             config = get_config()
-            cls._pool = await create_pool(_get_redis_settings())
+            cls._pool = await create_pool(_get_redis_settings(), default_queue_name=DEFAULT_QUEUE_NAME)
             logger.info(
                 f"Created arq Redis pool: {config.redis_host}:{config.redis_port}"
             )

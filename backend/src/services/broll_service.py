@@ -429,7 +429,10 @@ class BrollService:
 
     async def _search_coverr(self, query: str) -> Optional[str]:
         """Search Coverr CC0 video library."""
-        key = os.getenv("COVERR_API_KEY", "")
+        if not self.config.coverr_enabled:
+            logger.debug("[BRoll] Coverr disabled (no API key)")
+            return None
+        key = self.config.coverr_api_key
         if not key:
             return None
         try:
