@@ -42,14 +42,21 @@ RUN uv pip install --no-cache --upgrade "yt-dlp[default]"
 
 # === Core AI: faster-whisper + transformers + librosa + PyTorch CUDA ===
 RUN uv pip install --no-cache \
-    faster-whisper \
+    faster-whisper==1.1.1 \
     transformers \
     sentencepiece \
     librosa \
     scipy \
-    numpy \
-    && uv pip install --no-cache torch torchaudio \
-    --extra-index-url https://download.pytorch.org/whl/cu124
+    numpy
+
+# cu128 requerido para Blackwell (compute capability 12.0)
+# --index-url (no --extra-index-url) para evitar resolver cu124
+RUN uv pip install --no-cache \
+    torch==2.8.0+cu128 \
+    torchaudio==2.8.0+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+RUN uv pip install --no-cache whisperx
 
 # === Scene detection + HTTP ===
 RUN uv pip install --no-cache \
