@@ -97,6 +97,11 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
     CPU path  : libx264 ultrafast — safe fallback.
 
     Returns a dict with keys: codec, preset, extra_args (list of extra ffmpeg flags).
+
+    NOTA: -rc vbr se elimina deliberadamente. Cuando MoviePy inyecta extra_args
+    via ffmpeg_params, el parámetro -rc causa "Unrecognized option" en la mayoría
+    de builds de FFmpeg con nvenc. El modo CQ (constant quality) se activa
+    correctamente con solo -cq + -b:v 0, sin necesidad de declarar -rc explícito.
     """
     use_nvenc = nvenc_available() and cuda_available()
 
@@ -107,9 +112,8 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                 "codec": "h264_nvenc",
                 "preset": "p4",          # nvenc preset: p1(fast)..p7(slow), p4=balanced
                 "extra_args": [
-                    "-rc", "vbr",
-                    "-cq", "22",          # constant quality, equivalent to CRF 22
-                    "-b:v", "0",
+                    "-cq", "22",          # constant quality, equivalente a CRF 22
+                    "-b:v", "0",          # bitrate ilimitado — deja que -cq mande
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "main",
                     "-level", "4.0",
@@ -122,7 +126,6 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                 "codec": "h264_nvenc",
                 "preset": "p3",
                 "extra_args": [
-                    "-rc", "vbr",
                     "-cq", "24",
                     "-b:v", "0",
                     "-pix_fmt", "yuv420p",
@@ -165,7 +168,7 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
 def ffmpeg_codec_flags(quality: str = "high") -> List[str]:
     """
     Convenience: return flat list of FFmpeg flags for use in subprocess calls.
-    e.g. [..., "-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "22", ...]
+    e.g. [..., "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22", ...]
     """
     enc = get_ffmpeg_video_codec_args(quality)
     flags = ["-c:v", enc["codec"], "-preset", enc["preset"]] + enc["extra_args"]
