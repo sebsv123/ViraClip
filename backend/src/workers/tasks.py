@@ -375,11 +375,14 @@ class WorkerSettings:
 # Activate cron jobs after class definition to avoid forward-reference issues
 try:
     from arq import cron
-    from .feedback_cron import periodic_model_retraining  # re-exported shim
+    from ..services.analytics_importer import periodic_analytics_import
+    from ..services.feedback_loop_service import periodic_model_retraining
     from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
     WorkerSettings.cron_jobs = [
         # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
         cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0),
+        # Phase 5.3: daily analytics import (06:00 UTC every day)
+        cron(periodic_analytics_import, hour=6, minute=0),
         # Phase 7.5: daily trending data fetch (03:00 UTC every day)
         cron(fetch_trending_data, hour=3, minute=0),
         # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)

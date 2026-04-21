@@ -54,8 +54,9 @@ class FeedbackLoopService:
     6. Hot-reload en workers si mejora
     """
     
-    def __init__(self, db_session=None):
+    def __init__(self, db_session=None, redis_client=None):
         self.db = db_session
+        self.redis = redis_client
         self.models_dir = Path(os.getenv("VIRACLIP_MODELS_DIR", "/app/models"))
         self.models_dir.mkdir(exist_ok=True, parents=True)
         
@@ -74,46 +75,146 @@ class FeedbackLoopService:
         self.model_version = None
         self.model_metadata = {}
     
-    async def collect_feedback_batch(self, days_back: int = 7) -> pd.DataFrame:
+    async def collect_feedback_batch(
+        self,
+        days_back: int = 7,
+        analytics_updates: Optional[List[dict]] = None
+    ) -> pd.DataFrame:
         """
         Recopila batch de clips con ratings y performance real.
         
         Args:
-            days_back: Días hacia atrás para recopilar datos
+            days_back: Días hacia atrás para recopilar datos (solo si no hay analytics_updates)
+            analytics_updates: Lista de updates del analytics importer (ruta de producción)
             
         Returns:
             DataFrame con features + labels reales
         """
-        if not self.db:
-            logger.warning("[feedback] No DB session — using synthetic demo data")
-            clips_data = self._generate_synthetic_feedback_data(n_samples=500)
-            return pd.DataFrame(clips_data)
+        # Ruta de producción: usar analytics_updates directamente
+        if analytics_updates is not None:
+            logger.info(f"[feedback] Using {len(analytics_updates)} analytics updates")
+            
+            # Convertir a DataFrame
+            if not analytics_updates:
+                # Devolver DataFrame vacío con columnas correctas
+                return pd.DataFrame(columns=[
+                    "clip_id", "duration", "hook_strength", "engagement_score",
+                    "has_captions", "has_broll", "word_score_avg", "beat_sync_enabled",
+                    "lut_applied", "hook_visual_enabled", "clip_duration_bucket",
+                    "predicted_score", "actual_score", "user_rating"
+                ])
+            
+            # Crear DataFrame de los analytics
+            df = pd.DataFrame(analytics_updates)
+            
+            # Añadir columnas de features que vienen de los metadatos del clip
+            # En producción, esto vendría de un JOIN con la tabla de clips
+            # Por ahora, inferimos algunos valores
+            df["duration"] = 30.0  # Default
+            df["hook_strength"] = 50.0
+            df["engagement_score"] = df.get("actual_virality", 50.0)
+            df["has_captions"] = 1
+            df["has_broll"] = 0
+            df["word_score_avg"] = 0.5
+            df["beat_sync_enabled"] = 0
+            df["lut_applied"] = 0
+            df["hook_visual_enabled"] = 0
+            df["clip_duration_bucket"] = 1  # 15-30s
+            df["predicted_score"] = df.get("predicted_virality", 50.0)
+            df["actual_score"] = df.get("actual_virality", 50.0)
+            df["user_rating"] = 3
+            
+            logger.info(f"[feedback] DataFrame created with {len(df)} rows")
+            
+            # Guardar batch para auditoría
+            batch_path = self.feedback_dir / f"feedback_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+            df.to_parquet(batch_path)
+            logger.info(f"[feedback] Batch guardado: {batch_path}")
+            
+            return df
         
-        logger.info(f"[feedback] Recopilando clips de últimos {days_back} días...")
+        # Ruta de DB: usar SQLAlchemy real si hay db_session
+        if self.db:
+            logger.info(f"[feedback] Recopilando clips de últimos {days_back} días desde DB...")
+            
+            try:
+                # Query real con JOIN a ClipAnalytics
+                # Asumiendo que tenemos modelos GeneratedClip y ClipAnalytics
+                from sqlalchemy import select, join
+                from ..database import GeneratedClip, ClipAnalytics
+                
+                cutoff_date = datetime.now() - timedelta(days=days_back)
+                
+                stmt = select(
+                    GeneratedClip.id,
+                    GeneratedClip.duration,
+                    GeneratedClip.hook_strength,
+                    GeneratedClip.engagement_score,
+                    GeneratedClip.has_captions,
+                    GeneratedClip.has_broll,
+                    GeneratedClip.word_score_avg,
+                    GeneratedClip.beat_sync_enabled,
+                    GeneratedClip.lut_applied,
+                    GeneratedClip.hook_visual_enabled,
+                    GeneratedClip.predicted_virality,
+                    ClipAnalytics.actual_virality,
+                    ClipAnalytics.user_rating,
+                ).select_from(
+                    join(GeneratedClip, ClipAnalytics, GeneratedClip.id == ClipAnalytics.clip_id)
+                ).where(
+                    GeneratedClip.created_at >= cutoff_date,
+                    ClipAnalytics.actual_virality.isnot(None)
+                )
+                
+                result = await self.db.execute(stmt)
+                rows = result.fetchall()
+                
+                clips_data = []
+                for row in rows:
+                    # Calcular bucket de duración
+                    duration = row.duration or 30.0
+                    if duration < 15:
+                        bucket = 0
+                    elif duration < 30:
+                        bucket = 1
+                    elif duration < 60:
+                        bucket = 2
+                    else:
+                        bucket = 3
+                    
+                    clips_data.append({
+                        "clip_id": row.id,
+                        "duration": duration,
+                        "hook_strength": row.hook_strength or 50.0,
+                        "engagement_score": row.engagement_score or 50.0,
+                        "has_captions": 1 if row.has_captions else 0,
+                        "has_broll": 1 if row.has_broll else 0,
+                        "word_score_avg": row.word_score_avg or 0.5,
+                        "beat_sync_enabled": 1 if row.beat_sync_enabled else 0,
+                        "lut_applied": 1 if row.lut_applied else 0,
+                        "hook_visual_enabled": 1 if row.hook_visual_enabled else 0,
+                        "clip_duration_bucket": bucket,
+                        "predicted_score": row.predicted_virality or 50.0,
+                        "actual_score": row.actual_virality or 50.0,
+                        "user_rating": row.user_rating or 3,
+                    })
+                
+                df = pd.DataFrame(clips_data)
+                logger.info(f"[feedback] Recopilados {len(df)} clips con feedback desde DB")
+                
+                # Guardar batch
+                batch_path = self.feedback_dir / f"feedback_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+                df.to_parquet(batch_path)
+                
+                return df
+                
+            except Exception as e:
+                logger.warning(f"[feedback] DB query failed: {e}, falling back to synthetic")
         
-        # Query clips con rating Y performance real
-        cutoff_date = datetime.now() - timedelta(days=days_back)
-        
-        # Simular query (en producción usar SQLAlchemy real)
-        # clips = self.db.query(GeneratedClip).filter(
-        #     GeneratedClip.created_at >= cutoff_date,
-        #     GeneratedClip.user_rating.isnot(None)
-        # ).all()
-        
-        # Para demo, crear dataset sintético
-        logger.warning("⚠ Demo mode: usando datos sintéticos")
+        # Fallback: datos sintéticos para desarrollo
+        logger.warning("[feedback] No DB session or analytics — using synthetic demo data")
         clips_data = self._generate_synthetic_feedback_data(n_samples=500)
-        
-        df = pd.DataFrame(clips_data)
-        
-        logger.info(f"[feedback] Recopilados {len(df)} clips con feedback")
-        
-        # Guardar batch para auditoría
-        batch_path = self.feedback_dir / f"feedback_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
-        df.to_parquet(batch_path)
-        logger.info(f"[feedback] Batch guardado: {batch_path}")
-        
-        return df
+        return pd.DataFrame(clips_data)
     
     def _generate_synthetic_feedback_data(self, n_samples: int = 500) -> List[Dict]:
         """Genera datos sintéticos para demo (reemplazar con DB real)."""
@@ -175,13 +276,25 @@ class FeedbackLoopService:
         Returns:
             (X_features, y_target)
         """
+        # Features reales del pipeline
         feature_cols = [
             "duration",
-            "hook_strength",
-            "engagement_score",
+            "hook_strength",       # del segment scoring
+            "engagement_score",    # del viral scorer
             "has_captions",
-            "has_broll"
+            "has_broll",
+            "word_score_avg",      # average de word.score de WhisperX en el clip
+            "beat_sync_enabled",   # bool: tenía beat sync
+            "lut_applied",         # bool: tenía LUT aplicado
+            "hook_visual_enabled", # bool: tenía hook visual
+            "clip_duration_bucket" # 0=<15s, 1=15-30s, 2=30-60s, 3=>60s
         ]
+        
+        # Asegurar que todas las columnas existan, rellenar con 0 si faltan
+        for col in feature_cols:
+            if col not in df.columns:
+                logger.warning(f"[feedback] Feature column '{col}' missing, filling with 0")
+                df[col] = 0
         
         X = df[feature_cols]
         y = df["actual_score"]  # Label = performance REAL, no predicción
@@ -340,14 +453,13 @@ class FeedbackLoopService:
         """Notifica a workers que recarguen el modelo."""
         logger.info("[feedback] Triggering model reload in workers...")
         
-        # Método 1: Redis pub/sub
+        # Método 1: Redis pub/sub usando cliente async
         try:
-            import redis
-            redis_client = redis.Redis.from_url(
-                os.getenv("REDIS_URL", "redis://localhost:6379")
-            )
-            redis_client.publish("viraclip:model_reload", "virality_scorer")
-            logger.info("✅ Reload signal sent via Redis")
+            if self.redis:
+                await self.redis.publish("viraclip:model_reload", "virality_scorer")
+                logger.info("✅ Reload signal sent via Redis")
+            else:
+                logger.warning("⚠ No redis client available for model reload signal")
         except Exception as e:
             logger.warning(f"⚠ Redis signal failed: {e}")
         
@@ -389,19 +501,79 @@ class FeedbackLoopService:
             logger.warning("No model available - returning default score")
             return 50.0
         
-        # Convertir features a formato esperado
+        # Convertir features a formato esperado (features expandidas)
         feature_order = [
             "duration",
             "hook_strength",
             "engagement_score",
             "has_captions",
-            "has_broll"
+            "has_broll",
+            "word_score_avg",
+            "beat_sync_enabled",
+            "lut_applied",
+            "hook_visual_enabled",
+            "clip_duration_bucket"
         ]
         
         X = pd.DataFrame([{k: features.get(k, 0) for k in feature_order}])
         score = float(self.model.predict(X)[0])
         
         return np.clip(score, 0, 100)
+
+    async def incorporate_analytics_batch(
+        self,
+        analytics_result: dict
+    ) -> dict:
+        """
+        Pipeline completo: recibe output de analytics_importer,
+        entrena si hay suficientes muestras, devuelve métricas.
+        
+        Args:
+            analytics_result: Output de run_feedback_import
+            
+        Returns:
+            Dict con status, métricas, etc.
+        """
+        analytics_updates = analytics_result.get("updates", [])
+        
+        if not analytics_updates:
+            logger.info("[feedback] No analytics updates to process")
+            return {"status": "skipped", "reason": "no_updates", "total_samples": 0}
+        
+        logger.info(f"[feedback] Incorporating {len(analytics_updates)} analytics updates")
+        
+        # Convertir a DataFrame
+        df = await self.collect_feedback_batch(analytics_updates=analytics_updates)
+        
+        if len(df) < self.min_samples_for_training:
+            # Guardar para acumular
+            batch_path = self.feedback_dir / f"accumulated_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet"
+            df.to_parquet(batch_path)
+            
+            return {
+                "status": "accumulated",
+                "total_samples": len(df),
+                "needed": self.min_samples_for_training,
+                "batch_path": str(batch_path)
+            }
+        
+        # Entrenar modelo
+        result = await self.retrain_model(df=df, validate=True)
+        
+        if result.get("deployed"):
+            return {
+                "status": "retrained",
+                "metrics": result,
+                "total_samples": len(df),
+                "version": result.get("version")
+            }
+        else:
+            return {
+                "status": "validation_failed",
+                "metrics": result,
+                "total_samples": len(df),
+                "reason": result.get("reason", "unknown")
+            }
     
     async def get_training_stats(self) -> Dict[str, Any]:
         """Obtiene estadísticas de entrenamiento."""
@@ -458,3 +630,10 @@ async def periodic_model_retraining(ctx: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning(f"⚠ Retraining skipped: {result.get('reason', 'unknown')}")
     
     return result
+
+
+__all__ = [
+    "FeedbackLoopService",
+    "get_feedback_service",
+    "periodic_model_retraining",
+]
