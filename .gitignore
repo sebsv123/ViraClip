@@ -94,3 +94,4 @@ backend/uv.lock
 
 # Windows scripts (not applicable on Linux server)
 *.bat
+*.ps1
