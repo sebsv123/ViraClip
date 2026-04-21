@@ -112,8 +112,8 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                 "codec": "h264_nvenc",
                 "preset": "p4",          # nvenc preset: p1(fast)..p7(slow), p4=balanced
                 "extra_args": [
-                    "-cq", "22",          # constant quality, equivalente a CRF 22
-                    "-b:v", "0",          # bitrate ilimitado — deja que -cq mande
+                    "-rc", "constqp", "-qp", "22",  # constant quality, equivalente a CRF 22
+                    "-b:v", "0",          # bitrate ilimitado — deja que -qp mande
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "main",
                     "-level", "4.0",
@@ -126,7 +126,7 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                 "codec": "h264_nvenc",
                 "preset": "p3",
                 "extra_args": [
-                    "-cq", "24",
+                    "-rc", "constqp", "-qp", "24",
                     "-b:v", "0",
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "main",
