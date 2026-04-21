@@ -314,14 +314,34 @@ class ConfidenceSubtitleGenerator:
 
             # Paso 2: Transcribir con faster-whisper (self.model ya esta cargado)
             self._load_model()
-            segments_iter, info = self.model.transcribe(
-                tmp_audio_path,
-                language=language,
-                word_timestamps=True,
-                vad_filter=True,
-                vad_parameters=dict(min_silence_duration_ms=300),
-                beam_size=8
-            )
+            try:
+                segments_iter, info = self.model.transcribe(
+                    tmp_audio_path,
+                    language=language,
+                    word_timestamps=True,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=300),
+                    beam_size=8
+                )
+            except (RuntimeError, Exception) as e:
+                if "out of memory" in str(e).lower() or "cuda" in str(e).lower():
+                    logger.warning(f"[RE-ALIGN] CUDA OOM en transcribe, reintentando con CPU/int8: {e}")
+                    try:
+                        from faster_whisper import WhisperModel
+                        fallback_model = WhisperModel(self.model_size, device="cpu", compute_type="int8")
+                        segments_iter, info = fallback_model.transcribe(
+                            tmp_audio_path,
+                            language=language,
+                            word_timestamps=True,
+                            vad_filter=True,
+                            vad_parameters=dict(min_silence_duration_ms=300),
+                            beam_size=8
+                        )
+                    except Exception as e2:
+                        logger.warning(f"[RE-ALIGN] Fallback CPU/int8 también falló, retornando palabras originales: {e2}")
+                        return original_words or []
+                else:
+                    raise
 
             # Paso 3: Construir lista de palabras con offset de anticipacion
             offset_s = anticipation_offset_ms / 1000.0  # Convertir a segundos

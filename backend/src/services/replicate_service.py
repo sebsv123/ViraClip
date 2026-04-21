@@ -38,11 +38,12 @@ class ReplicateService:
         
     async def is_available(self) -> bool:
         """Check if Replicate service is available."""
+        if not self.config.replicate_enabled:
+            return False
         if not self.api_token:
-            logger.warning("⚠️ REPLICATE_API_TOKEN missing. Replicate unavailable.")
             return False
         return True
-    
+
     async def generate_image(
         self,
         prompt: str,
@@ -52,16 +53,19 @@ class ReplicateService:
     ) -> Optional[Path]:
         """
         Generate an image using Replicate.
-        
+
         Args:
             prompt: Text description
             aspect_ratio: "9:16", "16:9", or "1:1"
             model: Model to use (defaults to Flux Schnell)
             **kwargs: Additional model-specific parameters
-            
+
         Returns:
             Path to generated image, or None if failed
         """
+        if not self.config.replicate_enabled:
+            logger.debug("[Replicate] Service disabled (no API token)")
+            return None
         if not await self.is_available():
             return None
         

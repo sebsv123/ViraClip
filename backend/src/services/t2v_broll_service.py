@@ -88,6 +88,11 @@ class T2VBrollService:
 
         Raises RuntimeError if T2V is disabled or REPLICATE_API_TOKEN not set.
         """
+        from ..config import get_config
+        cfg = get_config()
+        if not cfg.replicate_enabled:
+            logger.debug("[T2V] Replicate disabled (no API token)")
+            return {"clip_path": None, "duration": 0.0, "model": self.model}
         if not T2V_ENABLED:
             raise RuntimeError("T2V disabled — set T2V_ENABLED=true to enable")
         if not REPLICATE_TOKEN:
