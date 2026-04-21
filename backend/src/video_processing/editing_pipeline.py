@@ -671,7 +671,7 @@ def _build_filter_complex(
                 theme_eq = "lowshelf=g=2:f=150:width_type=s:width=200,"
             elif theme == "cool":
                 theme_eq = "highshelf=g=2:f=6000:width_type=s:width=2000,"
-        _dn = "anlmdn=s=7:p=0.002," if denoise_audio else ""
+        _dn = ""  # anlmdn filter removed - not available in container FFmpeg build
         if VOICE_COMPRESS_ON:
             filters.append(
                 f"[0:a]{_dn}highpass=f=80,{theme_eq}"
