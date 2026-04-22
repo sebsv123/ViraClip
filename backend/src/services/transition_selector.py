@@ -16,8 +16,17 @@ class TransitionType(str, Enum):
     NONE = "none"
     CUT = "cut"
     ZOOM_IN = "zoom_in"
+    ZOOM_OUT = "zoom_out"
     FADE = "fade"
     GLITCH = "glitch"
+    BLUR = "blur"
+    SWIPE_LEFT = "swipe_left"
+    SWIPE_RIGHT = "swipe_right"
+    FLASH_WHITE = "flash_white"
+    FLASH_BLACK = "flash_black"
+    MORPH = "morph"
+    SLIDE_UP = "slide_up"
+    SLIDE_DOWN = "slide_down"
 
 
 class TransitionSelector:

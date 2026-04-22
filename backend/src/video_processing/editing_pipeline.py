@@ -623,8 +623,7 @@ def _build_filter_complex(
                 pass
 
             # TransitionSelector: selección template+energy → tipo de transición
-            from ..services.transition_selector import TransitionSelector
-            from ..services.transition_service import TransitionType as _TT
+            from ..services.transition_selector import TransitionSelector, TransitionType as _TT
             _ts = TransitionSelector()
             _selected = _ts.select_transition(
                 template_style=theme or "viral",
