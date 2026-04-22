@@ -722,48 +722,81 @@ class VideoService:
             )
             return None
 
-        # PASO 1: Phi-3-mini Scroll Stop Test — hard 5s timeout to prevent Ollama hangs
-        logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
-        try:
-            phi3_service = get_phi3_service()
-            virality_result = await asyncio.wait_for(
-                phi3_service.score_segment(
-                    segment_text=segment.get("text", ""),
-                    duration=duration,
-                    audio_features=None,
-                ),
-                timeout=5.0,
-            )
-            
-            # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+        # FIX Problema 1: PHI3_ENABLED env var + LLMRouter fallback
+        _phi3_enabled = os.environ.get("PHI3_ENABLED", "true").lower() == "true"
+        virality_result = None
+        if _phi3_enabled:
+            logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
             try:
-                from .viral_scorer_service import get_viral_scorer
-                _mlp = get_viral_scorer()
-                if _mlp.is_available():
-                    _blended = _mlp.blend_with_phi3(
-                        phi3_score=virality_result.total_score,
-                        transcript=segment.get("text", ""),
+                phi3_service = get_phi3_service()
+                virality_result = await asyncio.wait_for(
+                    phi3_service.score_segment(
+                        segment_text=segment.get("text", ""),
                         duration=duration,
-                    )
-                    logger.info(
-                        f"  ↳ MLP blend: Phi3={virality_result.total_score} "
-                        f"→ blended={_blended}"
-                    )
-                    virality_result.total_score = _blended
-            except Exception as _mlp_e:
-                logger.debug(f"  MLP blend skipped: {_mlp_e}")
+                        audio_features=None,
+                    ),
+                    timeout=5.0,
+                )
+                # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+                try:
+                    from .viral_scorer_service import get_viral_scorer
+                    _mlp = get_viral_scorer()
+                    if _mlp.is_available():
+                        _blended = _mlp.blend_with_phi3(
+                            phi3_score=virality_result.total_score,
+                            transcript=segment.get("text", ""),
+                            duration=duration,
+                        )
+                        logger.info(
+                            f"  ↳ MLP blend: Phi3={virality_result.total_score} "
+                            f"→ blended={_blended}"
+                        )
+                        virality_result.total_score = _blended
+                except Exception as _mlp_e:
+                    logger.debug(f"  MLP blend skipped: {_mlp_e}")
 
-            # Actualizar segment con resultados Phi-3
-            segment["virality_score"] = virality_result.total_score
-            segment["phi3_hook_type"] = virality_result.primary_hook_type
-            segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
-            segment["recommended_duration"] = virality_result.recommended_duration
-            
-            logger.info(f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
-                       f"Hook: {virality_result.primary_hook_type}")
-        except Exception as phi3_e:
-            logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
-            virality_result = None
+                # Actualizar segment con resultados Phi-3
+                segment["virality_score"] = virality_result.total_score
+                segment["phi3_hook_type"] = virality_result.primary_hook_type
+                segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
+                segment["recommended_duration"] = virality_result.recommended_duration
+                logger.info(
+                    f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
+                    f"Hook: {virality_result.primary_hook_type}"
+                )
+            except Exception as phi3_e:
+                logger.warning(f"  Phi-3 scoring failed: {phi3_e} — trying LLMRouter fallback")
+                try:
+                    from .llm_router import LLMRouter
+                    llm_router = LLMRouter()
+                    _llm_fallback = await llm_router.score_segments(
+                        [segment.get("text", "")], language="es", num_clips=1
+                    )
+                    if _llm_fallback and _llm_fallback.get("analysis"):
+                        _item = _llm_fallback["analysis"][0]
+                        _vscore = _item.get("virality_score", 50)
+                        class _LLMFallbackScore:
+                            def __init__(self, score, hook_type, scroll_stop, rec_dur):
+                                self.total_score = score
+                                self.primary_hook_type = hook_type
+                                self.scroll_stop_probability = scroll_stop
+                                self.recommended_duration = rec_dur
+                        virality_result = _LLMFallbackScore(
+                            score=_vscore,
+                            hook_type=_item.get("hook_type") or "Content",
+                            scroll_stop=_item.get("scroll_stop_probability", 0.5),
+                            rec_dur=_item.get("recommended_duration", "30-60s"),
+                        )
+                        segment["virality_score"] = virality_result.total_score
+                        segment["phi3_hook_type"] = virality_result.primary_hook_type
+                        segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
+                        segment["recommended_duration"] = virality_result.recommended_duration
+                        logger.info(
+                            f"  ✓ LLMRouter fallback score: {virality_result.total_score}/100"
+                        )
+                except Exception as _llm_fb_e:
+                    logger.warning(f"  LLMRouter fallback also failed: {_llm_fb_e}")
+                    virality_result = None
         
         # PASO 2: Audio spectral analysis — skipped when segment text exists (saves 1-3 min)
         # The Groq AI brain already infers energy/mood from transcript text semantically.

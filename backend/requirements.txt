@@ -1,3 +1,26 @@
+/CascadeProjects/ViraClip version-basica* 3h 56m 31s
+❯ cd /home/_sebastian/CascadeProjects/ViraClip/backend
+  python tests/integration_e2e_test.py
+[2026-04-18 10:51:49 UTC] [INFO] === Phase 1: Environment Verification ===
+[2026-04-18 10:51:49 UTC] [INFO] FFmpeg: ffmpeg version n8.1 Copyright (c) 2000-2026 the FFmpeg developers
+[2026-04-18 10:51:50 UTC] [INFO] ffprobe: ffprobe available
+[2026-04-18 10:51:50 UTC] [WARN] WARNING: Redis check failed: redis Python package not installed
+[2026-04-18 10:51:50 UTC] [INFO] Backend: Backend OK (HTTP 200)
+[2026-04-18 10:51:50 UTC] [INFO] Python: 3.14.4
+[2026-04-18 10:51:50 UTC] [INFO] === Phase 2: Submit Video for Processing ===
+[2026-04-18 10:51:50 UTC] [INFO] Video URL: https://youtu.be/3wgwaxIfUJQ
+[2026-04-18 10:51:50 UTC] [ERROR] FATAL: API returned error status: HTTP 500
+Response: {"detail":"An internal server error occurred. Contact support with the trace ID.","trace_id":"-"}
+[2026-04-18 10:51:50 UTC] [INFO] === Generating Test Report ===
+[2026-04-18 10:51:50 UTC] [INFO] Report saved to: test_output/test_report.md
+
+============================================================
+TEST FAILED (FATAL)
+Report: test_output/test_report.md
+============================================================
+
+~/CascadeProjects/ViraClip/backend version-basica*
+❯ 
 # ViraClip Backend Dependencies
 # Install with: pip install -r requirements.txt
 
