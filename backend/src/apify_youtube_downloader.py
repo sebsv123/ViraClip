@@ -22,8 +22,10 @@ from .config import get_config
 
 logger = logging.getLogger(__name__)
 
-APIFY_YOUTUBE_DOWNLOADER_ACTOR = "bernardo/youtube-downloader"
-APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "epctex/youtube-video-downloader"
+# Working Apify actors (free, active 2025-2026)
+# Fallback chain: streamers/youtube-downloader → apify/youtube-scraper
+APIFY_YOUTUBE_DOWNLOADER_ACTOR = "streamers/youtube-downloader"
+APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "apify/youtube-scraper"
 ALLOWED_APIFY_QUALITIES = {"360", "480", "720", "1080"}
 
 
