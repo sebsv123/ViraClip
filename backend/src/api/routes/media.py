@@ -243,7 +243,7 @@ async def upload_video(request: Request):
         upload_filename = upload.filename or "upload.mp4"
 
         # Create uploads directory
-        uploads_dir = Path(config.temp_dir) / "uploads"
+        uploads_dir = Path(config.temp_dir)
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate unique filename
