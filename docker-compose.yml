@@ -168,7 +168,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -369,7 +369,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -443,7 +443,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -607,7 +607,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -681,7 +681,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -860,7 +860,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
