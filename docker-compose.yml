@@ -27,7 +27,7 @@ services:
       - NEXT_PUBLIC_SELF_HOST=${SELF_HOST:-true}
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
       - NEXT_PUBLIC_LANDING_ONLY_MODE=${NEXT_PUBLIC_LANDING_ONLY_MODE:-false}
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET:-a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456}
       - DATABASE_URL=postgresql://viraclip:viraclip_password@postgres:5432/viraclip
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-viraclip_dev_secret_change_in_production}
       - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:3000}
@@ -60,7 +60,7 @@ services:
       dockerfile: Dockerfile
     container_name: viraclip-backend
     platform: linux/amd64
-    command: [".venv/bin/uvicorn", "src.main_refactored:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: [".venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     volumes:
@@ -107,7 +107,7 @@ services:
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET:-a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456}
       - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://sp.localhost:3000}
       - FREE_PLAN_TASK_LIMIT=${FREE_PLAN_TASK_LIMIT:-10}
