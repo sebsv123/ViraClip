@@ -10,10 +10,13 @@ import base64
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional
 
 import httpx
 
 logger = logging.getLogger(__name__)
+
+COMFYUI_ENABLED: bool = os.environ.get("COMFYUI_ENABLED", "true").lower() == "true"
 
 
 class ComfyUIBridge:
@@ -242,4 +245,25 @@ class ComfyUIBridge:
         except Exception as exc:
             logger.error("[ComfyUIBridge] Download error: %s", exc)
             return False
+
+
+# Module-level helper functions for backward compatibility
+_bridge_instance: Optional[ComfyUIBridge] = None
+
+async def is_available() -> bool:
+    """Check if ComfyUI is available (module-level helper)."""
+    global _bridge_instance
+    if _bridge_instance is None:
+        _bridge_instance = ComfyUIBridge()
+    return await _bridge_instance.is_available()
+
+
+async def generate_broll(prompt: str, duration: float = 3.0, output_path: Optional[Path] = None) -> Optional[str]:
+    """
+    Generate B-roll using ComfyUI (module-level helper).
+    Note: This is a simplified placeholder. For LTX-Video generation,
+    use ComfyUIBridge.generate_ltxv_intro() directly.
+    """
+    logger.warning("[comfyui_bridge] generate_broll() is deprecated, use ComfyUIBridge.generate_ltxv_intro()")
+    return None
 
