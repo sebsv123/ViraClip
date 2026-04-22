@@ -44,3 +44,7 @@ def setup_logger(name: str) -> logging.Logger:
     logger.addHandler(handler)
     
     return logger
+
+
+# Alias de compatibilidad
+get_logger = setup_logger
