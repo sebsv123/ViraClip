@@ -234,7 +234,30 @@ class Phi3ViralityService:
             logger.error(f"Phi-3-mini scoring failed: {e}")
             # Mark Ollama as unavailable to skip retries on subsequent clips
             _ollama_available = False
-            # Fallback to heuristic scoring
+            # Fallback: use Groq via LLMRouter
+            try:
+                from .llm_router import LLMRouter
+                llm_router = LLMRouter()
+                groq_result = await llm_router.score_segments([segment_text], language="es", num_clips=1)
+                if groq_result and groq_result.get("analysis"):
+                    item = groq_result["analysis"][0]
+                    vscore = item.get("virality_score", 50)
+                    return ViralityScore(
+                        pattern_interrupt=int(vscore * 0.8),
+                        curiosity_gap=int(vscore * 0.7),
+                        emotional_spike=int(vscore * 0.6),
+                        shareability=int(vscore * 0.75),
+                        loop_potential=int(vscore * 0.5),
+                        total_score=vscore,
+                        primary_hook_type=item.get("hook_type") or "Content",
+                        scroll_stop_probability=item.get("scroll_stop_probability", 0.5),
+                        recommended_duration=item.get("recommended_duration", "30-60s"),
+                        edit_suggestions=item.get("improvements", []),
+                        hashtag_themes=item.get("hashtag_themes", []),
+                    )
+            except Exception as groq_e:
+                logger.warning(f"Groq fallback also failed: {groq_e}")
+            # Ultimate fallback: heuristic scoring
             return self._fallback_score(segment_text, duration)
     
     def _fallback_score(self, text: str, duration: float) -> ViralityScore:
