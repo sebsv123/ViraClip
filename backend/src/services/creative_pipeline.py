@@ -422,11 +422,6 @@ class CreativePipeline:
                     effected.unlink(missing_ok=True)
             else:
                 logger.info("  [Creative] Step 6/8: Skipped (no preset)")
-                if result and effected.exists() and effected.stat().st_size > 0:
-                    steps_ok.append("step_6_vfx")
-                else:
-                    _mark_fail("step_6_vfx_empty")
-            else:
                 _mark_fail("step_6_vfx_no_preset")
         except ImportError as exc:
             _log_step_error("Step 6 (VFX) - Import", exc, critical=True)
