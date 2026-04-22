@@ -757,7 +757,31 @@ class VideoCoordinator:
                         platform=self.config.get("target_platform", "tiktok"),
                     )
                     clip.update(creative_meta)
-                    logger.info(f"[Coordinator] Creative pipeline completed for clip {index}: enhanced={creative_meta.get('creative_enhanced', False)}")
+
+                    _steps_ok     = creative_meta.get("creative_steps_ok", [])
+                    _steps_failed = creative_meta.get("creative_steps_failed", [])
+                    _enhanced     = creative_meta.get("creative_enhanced", False)
+
+                    if _steps_failed:
+                        logger.warning(
+                            "[Coordinator] ⚠️ Clip %d creative partial — %d/%d steps failed: %s",
+                            index,
+                            len(_steps_failed),
+                            creative_meta.get("creative_steps_total", 0),
+                            _steps_failed,
+                        )
+
+                    if _enhanced:
+                        logger.info(
+                            "[Coordinator] ✅ Clip %d creative enhanced — steps ok: %s",
+                            index, _steps_ok,
+                        )
+                    else:
+                        logger.error(
+                            "[Coordinator] ❌ Clip %d creative_enhanced=False — "
+                            "clip delivered with minimal enhancement. Steps ok: %s | failed: %s",
+                            index, _steps_ok, _steps_failed,
+                        )
                 except ImportError as _ie:
                     logger.error(f"[Coordinator] CRITICAL: Creative pipeline import failed for clip {index}: {_ie}", exc_info=True)
                     clip.pop("words", None)
