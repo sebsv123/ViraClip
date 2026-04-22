@@ -104,6 +104,21 @@ class CreativePipeline:
             "qa_issues": [],
         }
 
+        # Step tracking for granular visibility
+        steps_ok: list[str] = []
+        steps_failed: list[str] = []
+
+        def _mark_ok(name: str, result=None) -> bool:
+            """Mark step as OK only if result is not empty/None."""
+            if result is None or result == [] or result == {} or result is False:
+                steps_failed.append(f"{name}_empty")
+                return False
+            steps_ok.append(name)
+            return True
+
+        def _mark_fail(name: str):
+            steps_failed.append(name)
+
         # ── 1. Multimodal event timeline ──────────────────────────────────────
         logger.info("  [Creative] Step 1/8: Multimodal timeline generation...")
         timeline: list = []
@@ -111,18 +126,39 @@ class CreativePipeline:
             logger.debug("  [Creative] Importing multimodal_detector...")
             from .multimodal_detector import get_multimodal_detector
             logger.debug("  [Creative] multimodal_detector import OK")
-            timeline = await get_multimodal_detector().generate_timeline(
-                video_path=source_video,
-                segment_start=start,
-                segment_end=end,
-                words=words or [],
-            )
-            meta["timeline_events"] = len(timeline)
-            logger.info("  [Creative] ✓ Step 1/8: %d timeline events generated", len(timeline))
+            import asyncio as _asyncio
+            try:
+                timeline = await _asyncio.wait_for(
+                    get_multimodal_detector().generate_timeline(
+                        video_path=source_video,
+                        segment_start=start,
+                        segment_end=end,
+                        words=words or [],
+                    ),
+                    timeout=20.0,
+                )
+            except _asyncio.TimeoutError:
+                timeline = []
+                _mark_fail("step_1_timeline_timeout")
+                logger.warning("  [Creative] ⚠️ Step 1: multimodal_detector timeout (>20s) — skipping")
+
+            if not isinstance(timeline, list):
+                timeline = []
+
+            if timeline:
+                meta["timeline_events"] = len(timeline)
+                steps_ok.append("step_1_timeline")
+                logger.info("  [Creative] ✓ Step 1/8: %d timeline events", len(timeline))
+            else:
+                if "step_1_timeline_timeout" not in steps_failed:
+                    _mark_fail("step_1_timeline_empty")
+                logger.info("  [Creative] Step 1/8: No timeline events (empty result)")
         except ImportError as exc:
             _log_step_error("Step 1 (Timeline) - Import", exc, critical=True)
+            _mark_fail("step_1_timeline")
         except Exception as exc:
             _log_step_error("Step 1 (Timeline)", exc)
+            _mark_fail("step_1_timeline")
 
         # ── 2. Virality prediction ────────────────────────────────────────────
         logger.info("  [Creative] Step 2/8: Virality prediction...")
@@ -149,10 +185,16 @@ class CreativePipeline:
                 viral_pred.score, viral_pred.hook_score,
                 viral_pred.pacing_score, viral_pred.emotion_score,
             )
+            if viral_pred and viral_pred.score is not None:
+                steps_ok.append("step_2_virality")
+            else:
+                _mark_fail("step_2_virality_empty")
         except ImportError as exc:
             _log_step_error("Step 2 (Virality) - Import", exc, critical=True)
+            _mark_fail("step_2_virality")
         except Exception as exc:
             _log_step_error("Step 2 (Virality)", exc)
+            _mark_fail("step_2_virality")
 
         # ── 3. Template selection ─────────────────────────────────────────────
         logger.info("  [Creative] Step 3/8: Template selection...")
@@ -170,10 +212,13 @@ class CreativePipeline:
             )
             meta["preset_used"] = preset.name
             logger.info("  [Creative] ✓ Step 3/8: Template: %s", preset.name)
+            steps_ok.append("step_3_template")
         except ImportError as exc:
             _log_step_error("Step 3 (Template) - Import", exc, critical=True)
+            _mark_fail("step_3_template")
         except Exception as exc:
             _log_step_error("Step 3 (Template)", exc)
+            _mark_fail("step_3_template")
 
         # ── 4. Hook analysis (informational — no reordering yet) ──────────────
         logger.info("  [Creative] Step 4/8: Hook analysis...")
@@ -193,10 +238,13 @@ class CreativePipeline:
                 "  [Creative] ✓ Step 4/8: Hook score=%.2f optimized=%s",
                 hook_result.hook_score, hook_result.already_optimized,
             )
+            steps_ok.append("step_4_hook")
         except ImportError as exc:
             _log_step_error("Step 4 (Hook) - Import", exc)
+            _mark_fail("step_4_hook")
         except Exception as exc:
             _log_step_error("Step 4 (Hook)", exc)
+            _mark_fail("step_4_hook")
 
         # ── 4.5 Hook-flash reorder ────────────────────────────────────────────
         try:
@@ -273,15 +321,21 @@ class CreativePipeline:
                     clip_path.unlink(missing_ok=True)
                     brolled.rename(clip_path)
                     broll_count = len(broll_pairs)
-                    logger.info("  [Creative] ✓ Step 5/8: B-roll: %d overlays applied", broll_count)
+                    logger.info("  [Creative] ✓ Step 5/8: B-roll overlay: %s", brolled.name)
+                    steps_ok.append("step_5_broll")
                 else:
                     brolled.unlink(missing_ok=True)
+                    logger.warning("  [Creative] B-roll render failed, using base clip")
+                    _mark_fail("step_5_broll_render_failed")
             else:
-                logger.info("  [Creative] Step 5/8: No B-roll pairs found")
+                brolled.unlink(missing_ok=True)
+                _mark_fail("step_5_broll_empty")
         except ImportError as exc:
-            _log_step_error("Step 5 (B-roll) - Import", exc, critical=True)
+            _log_step_error("Step 5 (B-roll) - Import", exc)
+            _mark_fail("step_5_broll")
         except Exception as exc:
             _log_step_error("Step 5 (B-roll)", exc)
+            _mark_fail("step_5_broll")
 
         meta["broll_overlays"] = broll_count
 
@@ -317,10 +371,16 @@ class CreativePipeline:
             else:
                 overlayed.unlink(missing_ok=True)
                 logger.debug("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
+            if overlay_result.success and overlayed.exists() and overlayed.stat().st_size > 0:
+                steps_ok.append("step_5_5_overlays")
+            else:
+                _mark_fail("step_5_5_overlays_empty")
         except ImportError as exc:
             _log_step_error("Step 5.5 (Contextual Overlays) - Import", exc)
+            _mark_fail("step_5_5_overlays")
         except Exception as exc:
             _log_step_error("Step 5.5 (Contextual Overlays)", exc)
+            _mark_fail("step_5_5_overlays")
         
         meta["contextual_overlays"] = contextual_overlays
 
@@ -349,10 +409,18 @@ class CreativePipeline:
                     effected.unlink(missing_ok=True)
             else:
                 logger.info("  [Creative] Step 6/8: Skipped (no preset)")
+                if result and effected.exists() and effected.stat().st_size > 0:
+                    steps_ok.append("step_6_vfx")
+                else:
+                    _mark_fail("step_6_vfx_empty")
+            else:
+                _mark_fail("step_6_vfx_no_preset")
         except ImportError as exc:
             _log_step_error("Step 6 (VFX) - Import", exc, critical=True)
+            _mark_fail("step_6_vfx")
         except Exception as exc:
             _log_step_error("Step 6 (VFX)", exc)
+            _mark_fail("step_6_vfx")
 
         # ── 6.5. Speed control (playback speed / dramatic slow-mo) ────────────
         logger.info("  [Creative] Step 6.5/8: Speed control...")
@@ -389,12 +457,17 @@ class CreativePipeline:
                         "  [Creative] ✓ Step 6.5/8: Speed control (speed=%.2fx slowmo=%s)",
                         playback_speed, dramatic_slowmo
                     )
+                    steps_ok.append("step_6_5_speed")
                 else:
                     speed_output.unlink(missing_ok=True)
             else:
                 logger.debug("  [Creative] Step 6.5/8: Skipped (no speed change)")
+        except ImportError as exc:
+            _log_step_error("Step 6.5 (Speed) - Import", exc)
+            _mark_fail("step_6_5_speed")
         except Exception as exc:
             _log_step_error("Step 6.5 (Speed Control)", exc)
+            _mark_fail("step_6_5_speed")
         
         meta["speed_control_applied"] = speed_applied
 
@@ -447,10 +520,16 @@ class CreativePipeline:
                 )
             else:
                 mastered.unlink(missing_ok=True)
+            if loudnorm_applied:
+                steps_ok.append("step_7_audio")
+            else:
+                _mark_fail("step_7_audio_empty")
         except ImportError as exc:
             _log_step_error("Step 7 (Audio) - Import", exc, critical=True)
+            _mark_fail("step_7_audio")
         except Exception as exc:
             _log_step_error("Step 7 (Audio)", exc)
+            _mark_fail("step_7_audio")
 
         meta["sfx_injected"] = sfx_count
         meta["loudnorm_applied"] = loudnorm_applied
@@ -476,19 +555,45 @@ class CreativePipeline:
             )
             meta["qa_passed"] = manifest.qa_passed
             meta["qa_issues"] = manifest.qa_issues
-            meta["creative_enhanced"] = True
+            if manifest.qa_passed:
+                steps_ok.append("step_8_qa")
+            else:
+                _mark_fail("step_8_qa_failed")
             logger.info("  [Creative] ✓ Step 8/8: QA complete (passed=%s)", manifest.qa_passed)
         except ImportError as exc:
             _log_step_error("Step 8 (QA) - Import", exc)
+            _mark_fail("step_8_qa")
         except Exception as exc:
             _log_step_error("Step 8 (QA)", exc)
+            _mark_fail("step_8_qa")
 
-        logger.info("  [Creative] Pipeline complete: enhanced=%s, %d/%d steps succeeded",
-                    meta["creative_enhanced"],
-                    sum(1 for k in ["timeline_events", "viral_score", "preset_used", 
-                                    "zoom_punch_applied", "loudnorm_applied", "qa_passed"] 
-                        if meta.get(k) not in [None, False, 0]),
-                    8)
+        # Pasos core que DEBEN estar ok para considerar enhanced
+        CORE_STEPS = {"step_2_virality", "step_3_template", "step_7_audio"}
+        core_ok = CORE_STEPS.issubset(set(steps_ok))
+        min_ok = len(steps_ok) >= 3
+
+        meta["creative_steps_ok"]     = steps_ok
+        meta["creative_steps_failed"] = steps_failed
+        meta["creative_steps_total"]  = len(steps_ok) + len(steps_failed)
+        meta["creative_enhanced"]     = core_ok and min_ok
+
+        if steps_failed:
+            logger.warning(
+                "  [Creative] ⚠️ Pipeline partial — ok=%s | failed=%s",
+                steps_ok, steps_failed,
+            )
+        else:
+            logger.info(
+                "  [Creative] ✅ Pipeline complete — all %d steps ok: %s",
+                len(steps_ok), steps_ok,
+            )
+
+        if not meta["creative_enhanced"]:
+            logger.error(
+                "  [Creative] ❌ creative_enhanced=False — core steps missing: %s",
+                CORE_STEPS - set(steps_ok),
+            )
+
         return meta
 
 
