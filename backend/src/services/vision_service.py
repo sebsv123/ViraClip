@@ -23,6 +23,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -145,19 +146,24 @@ async def analyze_clip_visually(
     n_frames: int = 8,
 ) -> VisionScore:
     """
-    Analyzes video frames locally with Qwen3-VL-8B via Ollama.
-    Completely free, no API keys. Runs on GPU if available, CPU fallback.
-
-    Falls back gracefully if Ollama is not running — does NOT raise exceptions.
-
+    Analyze a video clip visually using local vision model via Ollama.
+    
+    Extracts representative frames and analyzes them with a vision-language model
+    to score visual virality factors (facial energy, scene composition, etc.)
+    
     Args:
-        video_path: Path to the rendered clip
-        transcript: Full clip transcript text
-        n_frames: Number of representative frames to extract (default 8)
-
+        video_path: Path to the video clip file
+        transcript: Transcript text of the clip segment
+        n_frames: Number of frames to extract for analysis
+        
     Returns:
-        VisionScore — filled if Ollama available, default values if not
+        VisionScore with visual analysis results
     """
+    # FIX Problema 2: VISION_ANALYSIS_ENABLED env var check + fallback
+    if os.environ.get("VISION_ANALYSIS_ENABLED", "true").lower() == "false":
+        logger.info("Vision analysis disabled by VISION_ANALYSIS_ENABLED=false")
+        return VisionScore.unavailable()
+
     available, model = await _check_ollama()
     if not available:
         return VisionScore.unavailable()
@@ -198,8 +204,12 @@ async def analyze_clip_visually(
             },
         }
 
+        # FIX Problema 2: 8s timeout con asyncio.wait_for + manejo de conexión
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(f"{endpoint}/api/generate", json=payload)
+            resp = await asyncio.wait_for(
+                client.post(f"{endpoint}/api/generate", json=payload),
+                timeout=8.0,
+            )
 
         if resp.status_code != 200:
             logger.warning(f"Ollama returned {resp.status_code}: {resp.text[:200]}")
@@ -214,6 +224,9 @@ async def analyze_clip_visually(
         )
         return score
 
+    except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError, asyncio.TimeoutError) as e:
+        logger.warning(f"Vision analysis connection/timeout error: {e} — returning neutral fallback")
+        return VisionScore.unavailable()
     except Exception as e:
         logger.warning(f"Vision analysis failed: {e}")
         return VisionScore.unavailable()
