@@ -272,12 +272,11 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     # for weights to download or for CTranslate2 to compile the graph.
     async def _warm_whisper():
         try:
-            from ..config import get_config as _cfg
-            _c = _cfg()
+            import os
             from faster_whisper import WhisperModel
-            _model_size = getattr(_c, "whisper_model_size", "small") or "small"
-            _device = getattr(_c, "whisper_device", "cpu") or "cpu"
-            _compute = getattr(_c, "whisper_compute_type", "int8") or "int8"
+            _model_size = os.environ.get("WHISPER_MODEL_SIZE", "small")
+            _device = os.environ.get("WHISPER_DEVICE", "cuda")
+            _compute = os.environ.get("WHISPER_COMPUTE_TYPE", "float16")
             logger.info(
                 "🔄 Whisper warm-up: loading model=%s device=%s compute=%s ...",
                 _model_size, _device, _compute,
@@ -296,8 +295,8 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     hw_caps = detect_hardware_capabilities()
 
     cfg = get_config()
-    clips_dir = Path(cfg.temp_dir) / "uploads" / "clips"
-    downloads_dir = Path(cfg.temp_dir) / "uploads"
+    clips_dir = Path(cfg.temp_dir) / "clips"
+    downloads_dir = Path(cfg.temp_dir)
     
     # Aggressive temp cleanup to free disk space
     temp_base = Path(cfg.temp_dir)

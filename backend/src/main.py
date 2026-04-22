@@ -1016,7 +1016,7 @@ async def upload_video(request: Request):
             raise HTTPException(status_code=400, detail="No video file provided")
 
         # Create uploads directory
-        uploads_dir = Path(config.temp_dir) / "uploads"
+        uploads_dir = Path(config.temp_dir)
         uploads_dir.mkdir(parents=True, exist_ok=True)
 
         # Generate unique filename to avoid conflicts
