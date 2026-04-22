@@ -8,11 +8,16 @@ from datetime import datetime
 import logging
 import os
 import re
+import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
+
+# yt-dlp binary path (works in container and local venv)
+YT_DLP_BIN = shutil.which("yt-dlp") or os.path.join(os.path.dirname(sys.executable), "yt-dlp") or "/app/.venv/bin/yt-dlp"
 
 import requests
 import yt_dlp
@@ -567,7 +572,7 @@ def _download_youtube_video_with_ytdlp(
                 pass
 
             cmd = [
-                "yt-dlp",
+                YT_DLP_BIN,
                 "--js-runtimes", "node",
                 "--remote-components", "ejs:github",
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
