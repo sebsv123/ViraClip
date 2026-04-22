@@ -29,6 +29,14 @@ class LLMRouter:
         self.dataset_size = 0
         self.dspy_available = False
         self.finetuned_available = False
+        # FIX Problema 3: Validar GROQ_API_KEY en init
+        import os
+        _groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+        self.groq_available = bool(_groq_key)
+        if not self.groq_available:
+            logger.warning(
+                "[LLMRouter] WARNING: GROQ_API_KEY not set — all LLM calls will use rule-based fallback"
+            )
     
     async def select_backend(
         self,
@@ -116,6 +124,11 @@ class LLMRouter:
         from ..services.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT, build_dynamic_user_prompt
         import httpx
         import os
+        
+        # FIX Problema 3: Check groq_available flag before calling API
+        if not getattr(self, 'groq_available', True):
+            logger.warning("[LLMRouter] Groq unavailable — using rule-based fallback")
+            return self._rule_based_fallback(transcript, language, num_clips)
         
         api_key = os.environ.get("GROQ_API_KEY")
         if not api_key:

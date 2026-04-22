@@ -61,6 +61,13 @@ async def lifespan(app: FastAPI):
         # Initialize database
         await init_db()
         
+        # FIX Problema 3: Startup log for Groq API key
+        import os as _os
+        if _os.environ.get("GROQ_API_KEY", "").strip():
+            logger.info("[STARTUP] Groq API: ✅ configured")
+        else:
+            logger.warning("[STARTUP] Groq API: ❌ missing key — using fallback")
+        
         # Initialize Redis for caching and rate limiting
         from .scaling.redis_manager import get_redis_client
         from .middleware.rate_limiter import init_rate_limiter
