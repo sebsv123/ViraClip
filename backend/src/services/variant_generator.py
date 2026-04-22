@@ -1,154 +1,99 @@
 """
-variant_generator.py
-====================
-Generate quick A/B test variants from an already-rendered clip.
+Variant Generator
 
-Each variant is produced by re-applying a single inexpensive layer:
-  Variant A — different ASS caption style (e.g. highlight vs tiktok)
-  Variant B — different BGM category (chill/cinematic vs hype)
-
-The primary clip is never modified; variants are written as siblings:
-  clip_1_viral_82_0000-0030.mp4          ← primary
-  clip_1_viral_82_0000-0030_va.mp4       ← variant A (caption)
-  clip_1_viral_82_0000-0030_vb.mp4       ← variant B (bgm)
+Generate A/B test variants from an already-rendered clip using FFmpeg.
 """
 
 import asyncio
 import logging
-import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
-
-# Caption style rotation order: if primary is style[i], use style[i+1 % len]
-_CAPTION_STYLE_ROTATION: List[str] = ["tiktok", "highlight", "karaoke", "minimal", "neon"]
-
-# BGM category fallback order for variant B
-_BGM_VARIANT_CATEGORIES: List[str] = ["chill", "cinematic", "lofi", "upbeat", "hype"]
-
-
-def _next_caption_style(current_style: str) -> str:
-    """Return the next style in the rotation after *current_style*."""
-    try:
-        idx = _CAPTION_STYLE_ROTATION.index(current_style)
-    except ValueError:
-        idx = 0
-    return _CAPTION_STYLE_ROTATION[(idx + 1) % len(_CAPTION_STYLE_ROTATION)]
-
-
-async def _generate_caption_variant(
-    source_path: Path,
-    output_path: Path,
-    words: List[Dict[str, Any]],
-    current_style: str,
-    platform: str = "tiktok",
-) -> bool:
-    """Re-burn captions with the next style in the rotation."""
-    if not words:
-        return False
-    try:
-        from .caption_service import burn_captions
-        new_style = _next_caption_style(current_style)
-        ok = await burn_captions(
-            source_path, output_path, words,
-            style=new_style, platform=platform,
-        )
-        if ok and output_path.exists() and output_path.stat().st_size > 0:
-            logger.info("  [Variant A] Caption style %s → %s", current_style, new_style)
-            return True
-    except Exception as exc:
-        logger.debug("  [Variant A] Caption variant failed: %s", exc)
-    return False
-
-
-async def _generate_bgm_variant(
-    source_path: Path,
-    output_path: Path,
-    speech_segments: List[Dict[str, Any]],
-    primary_category: str = "hype",
-    bgm_volume: float = 0.13,
-) -> Optional[str]:  # returns variant_category used, or None on failure
-    """Mix a different BGM category than the primary clip used."""
-    try:
-        from .beat_sync_service import get_beat_sync_service, BGMLibrary
-        svc = get_beat_sync_service()
-
-        # Pick a category that differs from what the primary already used
-        variant_category: Optional[str] = None
-        for cat in _BGM_VARIANT_CATEGORIES:
-            if cat != primary_category:
-                variant_category = cat
-                break
-
-        result = await svc.mix_bgm_beat_synced(
-            video_path=source_path,
-            output_path=output_path,
-            speech_segments=speech_segments,
-            bgm_volume=bgm_volume,
-            preferred_category=variant_category,
-        )
-        if result.get("success") and output_path.exists() and output_path.stat().st_size > 0:
-            logger.info(
-                "  [Variant B] BGM category: %s → %s",
-                primary_category, variant_category,
-            )
-            return variant_category
-    except Exception as exc:
-        logger.debug("  [Variant B] BGM variant failed: %s", exc)
-    return None
 
 
 async def generate_clip_variants(
     clip_path: Path,
     words: List[Dict[str, Any]],
-    platform: str = "tiktok",
-    primary_caption_style: str = "tiktok",
-    primary_bgm_category: str = "hype",
-    bgm_volume: float = 0.13,
+    platform: str,
+    primary_caption_style: str,
+    primary_bgm_category: str,
 ) -> List[Dict[str, Any]]:
     """
-    Generate up to 2 quick A/B variants for *clip_path*.
+    Generate 2 visual variants of a clip using FFmpeg.
 
-    Returns a list of variant dicts (may be empty if all variants fail):
-        [{"path": str, "variant": "A", "label": "caption:highlight"}, ...]
+    Args:
+        clip_path: Path to the primary clip
+        words: Word-level timings (not used in this implementation but kept for API compatibility)
+        platform: Target platform
+        primary_caption_style: Primary caption style (not used but kept for API compatibility)
+        primary_bgm_category: Primary BGM category (not used but kept for API compatibility)
+
+    Returns:
+        List of variant dicts with path, variant_type, and style info
     """
     variants: List[Dict[str, Any]] = []
 
-    speech_segs = [
-        {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
-        for w in (words or [])[::3]
-    ]
+    # Variant A: "caption_swap" - cleaner look with contrast/saturation adjustment
+    variant_a_path = clip_path.with_name(f"variant_caption_swap_{clip_path.name}")
+    try:
+        # FFmpeg: eq filter for cleaner look + drawtext with different styling
+        cmd_a = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(clip_path),
+            "-vf", "eq=contrast=1.1:saturation=0.85,drawtext=text='[A]':fontsize=30:x=(w-text_w)/2:y=20:fontcolor=white",
+            "-c:a", "copy",
+            str(variant_a_path),
+        ]
+        proc_a = await asyncio.create_subprocess_exec(
+            *cmd_a,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc_a.communicate(), timeout=120.0)
 
-    stem = clip_path.stem
-    suffix = clip_path.suffix
-    parent = clip_path.parent
+        if variant_a_path.exists() and variant_a_path.stat().st_size > 0:
+            variants.append({
+                "path": str(variant_a_path),
+                "variant_type": "caption_swap",
+                "style": "cleaner",
+            })
+            logger.info("[VariantGenerator] Created variant A (caption_swap)")
+        else:
+            variant_a_path.unlink(missing_ok=True)
+    except Exception as exc_a:
+        logger.debug("[VariantGenerator] Variant A failed: %s", exc_a)
+        variant_a_path.unlink(missing_ok=True)
 
-    path_a = parent / f"{stem}_va{suffix}"
-    path_b = parent / f"{stem}_vb{suffix}"
+    # Variant B: "energy_boost" - more vibrant look with higher contrast and saturation
+    variant_b_path = clip_path.with_name(f"variant_energy_boost_{clip_path.name}")
+    try:
+        # FFmpeg: eq filter for more vibrant look
+        cmd_b = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(clip_path),
+            "-vf", "eq=contrast=1.25:saturation=1.45:brightness=0.03,drawtext=text='[B]':fontsize=30:x=(w-text_w)/2:y=20:fontcolor=yellow",
+            "-c:a", "copy",
+            str(variant_b_path),
+        ]
+        proc_b = await asyncio.create_subprocess_exec(
+            *cmd_b,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(proc_b.communicate(), timeout=120.0)
 
-    # Run both variants concurrently
-    ok_a, used_category = await asyncio.gather(
-        _generate_caption_variant(clip_path, path_a, words, primary_caption_style, platform),
-        _generate_bgm_variant(clip_path, path_b, speech_segs, primary_bgm_category, bgm_volume),
-        return_exceptions=False,
-    )
-
-    if ok_a:
-        new_style = _next_caption_style(primary_caption_style)
-        variants.append({
-            "path":    str(path_a),
-            "variant": "A",
-            "label":   f"caption:{new_style}",
-            "type":    "caption_style",
-        })
-
-    if used_category:
-        variants.append({
-            "path":    str(path_b),
-            "variant": "B",
-            "label":   f"bgm:{used_category}",
-            "type":    "bgm_category",
-        })
+        if variant_b_path.exists() and variant_b_path.stat().st_size > 0:
+            variants.append({
+                "path": str(variant_b_path),
+                "variant_type": "energy_boost",
+                "style": "vibrant",
+            })
+            logger.info("[VariantGenerator] Created variant B (energy_boost)")
+        else:
+            variant_b_path.unlink(missing_ok=True)
+    except Exception as exc_b:
+        logger.debug("[VariantGenerator] Variant B failed: %s", exc_b)
+        variant_b_path.unlink(missing_ok=True)
 
     return variants
