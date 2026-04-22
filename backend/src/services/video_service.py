@@ -2380,10 +2380,10 @@ class VideoService:
             # Prepare segments for LLM (with improved service)
             segment_texts = [s.get("text") if isinstance(s, dict) else s.text for s in relevant_parts.most_relevant_segments]
             
-            # Use improved LLM service with validation + text-based fallback
-            from .llm_service_improved import ImprovedLLMService
-            llm_service = ImprovedLLMService()
-            virality_data = await llm_service.get_virality_analysis(segment_texts)
+            # Use LLMRouter (Groq) for virality scoring instead of Ollama
+            from .llm_router import LLMRouter
+            llm_router = LLMRouter()
+            virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)
             virality_map = {item.get("segment_index"): item for item in virality_data.get("analysis", [])}
             
             # Log scoring method used
