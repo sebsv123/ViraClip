@@ -1,361 +1,245 @@
 """
-ViraClip-ComfyUI API Bridge
-============================
-Integrates ViraClip FastAPI backend with ComfyUI's workflow execution system.
+ComfyUI Bridge for LTX-Video Integration
 
-Key public API:
-    bridge = ComfyUIBridge()
-    ok     = await bridge.is_available()
-    result = await bridge.enhance_video("/path/to/clip.mp4", "/path/to/enhanced.mp4")
-    broll  = await bridge.generate_broll("tech innovation startup", "/path/to/broll.mp4", duration=2.0)
+Lightweight bridge connecting ViraClip to ComfyUI for LTX-Video I2V generation.
 """
 
 import os
 import json
-import copy
-import shutil
-import logging
+import base64
 import asyncio
+import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
-from dataclasses import dataclass, asdict
-import aiohttp
-import uuid
+
+import httpx
 
 logger = logging.getLogger(__name__)
-
-# ── Config ────────────────────────────────────────────────────────────────────
-COMFYUI_ENABLED  = os.environ.get("COMFYUI_ENABLED", "false").lower() not in ("false", "0", "no")
-COMFYUI_HOST     = os.environ.get("COMFYUI_HOST", "comfyui")
-COMFYUI_PORT     = int(os.environ.get("COMFYUI_PORT", "8188"))
-COMFYUI_API_URL  = os.environ.get("COMFYUI_API_URL", f"http://{COMFYUI_HOST}:{COMFYUI_PORT}")
-COMFYUI_TIMEOUT  = float(os.environ.get("COMFYUI_TIMEOUT", "600"))
-
-# Workflow JSON directory — mounted at /app/comfy_workflows inside worker containers
-_LOCAL_WORKFLOWS = Path(__file__).parent.parent / "comfy_workflows"
-WORKFLOWS_DIR = Path(os.environ.get("WORKFLOWS_DIR", str(_LOCAL_WORKFLOWS)))
-
-# Host-side directory that is bind-mounted to /comfyui/input/ inside the container.
-# Used to place video files where VHS_LoadVideo can find them.
-COMFYUI_INPUT_HOST_DIR = Path(os.environ.get(
-    "COMFYUI_INPUT_HOST_DIR",
-    str(Path.home() / "proyectos" / "ViraClip" / "uploads"),
-))
-
-
-@dataclass
-class WorkflowResult:
-    """Result from a single ComfyUI workflow execution."""
-    prompt_id: str
-    status: str          # "pending" | "running" | "completed" | "error"
-    outputs: Dict[str, Any]
-    execution_time: Optional[float] = None
-    error_message: Optional[str] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
 
 
 class ComfyUIBridge:
     """
-    Production bridge between ViraClip workers and a running ComfyUI instance.
+    Bridge to ComfyUI API for LTX-Video intro generation.
 
-    Public high-level methods
-    ─────────────────────────
-    is_available()                    → bool
-    enhance_video(src, dst)           → Path | None
-    generate_broll(prompt, dst, dur)  → Path | None
-    execute_workflow(name, inputs)    → WorkflowResult
+    Public methods:
+        is_available() -> bool
+        generate_ltxv_intro(first_frame_path, theme, output_path, timeout) -> bool
+        close() -> None
     """
 
-    def __init__(self, base_url: str = COMFYUI_API_URL):
-        self.base_url = base_url.rstrip("/")
-        self.session: Optional[aiohttp.ClientSession] = None
+    def __init__(self):
+        self.host = os.environ.get("COMFYUI_HOST", "localhost")
+        self.port = int(os.environ.get("COMFYUI_PORT", "8188"))
+        self.base_url = f"http://{self.host}:{self.port}"
+        self.client = httpx.AsyncClient(timeout=10.0)
+        logger.debug("[ComfyUIBridge] Initialized with base_url=%s", self.base_url)
 
-    # ── Session management ────────────────────────────────────────────────────
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=COMFYUI_TIMEOUT),
+    async def is_available(self) -> bool:
+        """Check if ComfyUI is reachable via /system_stats endpoint."""
+        try:
+            resp = await self.client.get(
+                f"{self.base_url}/system_stats",
+                timeout=3.0,
             )
-        return self.session
+            return resp.status_code == 200
+        except Exception as exc:
+            logger.debug("[ComfyUIBridge] is_available failed: %s", exc)
+            return False
+
+    async def generate_ltxv_intro(
+        self,
+        first_frame_path: Path,
+        theme: str,
+        output_path: Path,
+        timeout: float = 90.0,
+    ) -> bool:
+        """
+        Generate LTX-Video intro from a single frame using ComfyUI workflow.
+
+        Args:
+            first_frame_path: Path to the first frame image (PNG/JPG)
+            theme: Theme description for the prompt
+            output_path: Where to save the generated video
+            timeout: Max time to wait for generation
+
+        Returns:
+            True if video was generated and saved successfully
+        """
+        try:
+            # Read and encode image to base64
+            image_data = first_frame_path.read_bytes()
+            image_b64 = base64.b64encode(image_data).decode("utf-8")
+
+            # Build LTX-Video I2V workflow
+            workflow = {
+                "1": {
+                    "class_type": "LTXVLoader",
+                    "inputs": {"model": "ltx-video-2b-v0.9.5.safetensors"},
+                },
+                "2": {
+                    "class_type": "LoadImage",
+                    "inputs": {"image": image_b64},
+                },
+                "3": {
+                    "class_type": "LTXVConditioning",
+                    "inputs": {
+                        "positive": f"cinematic {theme} short intro, vertical 9:16, dynamic motion",
+                        "negative": "static, blur, low quality",
+                        "image": ["2", 0],
+                        "frame_rate": 24,
+                        "length": 33,
+                    },
+                },
+                "4": {
+                    "class_type": "KSampler",
+                    "inputs": {
+                        "model": ["1", 0],
+                        "positive": ["3", 0],
+                        "negative": ["3", 1],
+                        "latent_image": ["3", 2],
+                        "seed": 42,
+                        "steps": 20,
+                        "cfg": 3.0,
+                        "sampler_name": "euler",
+                        "scheduler": "sgm_uniform",
+                        "denoise": 0.85,
+                    },
+                },
+                "5": {
+                    "class_type": "VHS_VideoCombine",
+                    "inputs": {
+                        "images": ["4", 0],
+                        "frame_rate": 24,
+                        "loop_count": 0,
+                        "filename_prefix": "ltxv_intro",
+                        "format": "video/h264-mp4",
+                        "save_output": True,
+                    },
+                },
+            }
+
+            # Queue the workflow
+            payload = {"prompt": workflow, "client_id": self._generate_client_id()}
+            resp = await self.client.post(
+                f"{self.base_url}/prompt",
+                json=payload,
+                timeout=10.0,
+            )
+            if resp.status_code != 200:
+                logger.error("[ComfyUIBridge] Failed to queue prompt: %s", resp.text)
+                return False
+
+            data = resp.json()
+            prompt_id = data.get("prompt_id", "")
+            if not prompt_id:
+                logger.error("[ComfyUIBridge] No prompt_id in response")
+                return False
+
+            logger.info("[ComfyUIBridge] Queued LTXV intro generation: %s", prompt_id)
+
+            # Poll for completion
+            video_filename = await self._poll_for_video(prompt_id, timeout)
+            if not video_filename:
+                logger.error("[ComfyUIBridge] No video output after polling")
+                return False
+
+            # Download the video
+            return await self._download_video(video_filename, output_path)
+
+        except Exception as exc:
+            logger.error("[ComfyUIBridge] generate_ltxv_intro failed: %s", exc)
+            return False
 
     async def close(self) -> None:
-        if self.session and not self.session.closed:
-            await self.session.close()
+        """Close the httpx client."""
+        await self.client.aclose()
+        logger.debug("[ComfyUIBridge] Client closed")
 
-    # ── Availability check ────────────────────────────────────────────────────
+    # ── Internal helpers ───────────────────────────────────────────────────
 
-    async def is_available(self, timeout: float = 5.0) -> bool:
-        """Return True if ComfyUI is reachable and healthy."""
-        try:
-            session = await self._get_session()
-            async with session.get(
-                f"{self.base_url}/system_stats",
-                timeout=aiohttp.ClientTimeout(total=timeout),
-            ) as resp:
-                return resp.status == 200
-        except Exception:
-            return False
+    def _generate_client_id(self) -> str:
+        """Generate unique client ID for ComfyUI session."""
+        import uuid
+        return str(uuid.uuid4())
 
-    # ── File upload / download ────────────────────────────────────────────────
+    async def _poll_for_video(self, prompt_id: str, timeout: float) -> str:
+        """Poll /history/{prompt_id} until video is ready or timeout."""
+        deadline = asyncio.get_event_loop().time() + timeout
+        poll_interval = 2.0
 
-    async def upload_file(self, local_path: Path, subfolder: str = "input") -> str:
-        """
-        Upload a file to ComfyUI's /upload/image endpoint.
-        Returns the filename as ComfyUI stored it (used as node input value).
-        """
-        session = await self._get_session()
-        data = aiohttp.FormData()
-        data.add_field(
-            "image",
-            open(str(local_path), "rb"),
-            filename=local_path.name,
-            content_type="application/octet-stream",
-        )
-        data.add_field("subfolder", subfolder)
-        data.add_field("type", "input")
-        async with session.post(f"{self.base_url}/upload/image", data=data) as resp:
-            if resp.status not in (200, 201):
-                raise RuntimeError(f"Upload failed: {resp.status} {await resp.text()}")
-            result = await resp.json()
-            return result.get("name", local_path.name)
-
-    async def download_output(self, filename: str, dest: Path, subfolder: str = "") -> bool:
-        """Download an output file from ComfyUI and save to *dest*.
-        subfolder must match the real subfolder within /comfyui/output/ (usually empty)."""
-        url = f"{self.base_url}/view?filename={filename}&subfolder={subfolder}&type=output"
-        try:
-            session = await self._get_session()
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    return False
-                dest.write_bytes(await resp.read())
-                return True
-        except Exception as exc:
-            logger.debug(f"[ComfyUI] download_output error: {exc}")
-            return False
-
-    # ── High-level pipeline methods ───────────────────────────────────────────
-
-    async def enhance_video(
-        self,
-        video_path: Path,
-        output_path: Path,
-        timeout: float = 600.0,
-    ) -> Optional[Path]:
-        """
-        Run Real-ESRGAN x2 upscaling + face-aware sharpening on a clip.
-        Returns output_path on success, None if ComfyUI is unavailable.
-        """
-        if not await self.is_available():
-            logger.debug("[ComfyUI] enhance_video skipped — ComfyUI not available")
-            return None
-        try:
-            # Copiar el clip a la carpeta bind-mounted en /comfyui/input/
-            # (más fiable que /upload/image para archivos de video)
-            COMFYUI_INPUT_HOST_DIR.mkdir(parents=True, exist_ok=True)
-            video_path = Path(video_path).resolve()
-            dest_in_container = COMFYUI_INPUT_HOST_DIR / video_path.name
-            if dest_in_container.resolve() != video_path:
-                shutil.copy2(video_path, dest_in_container)
-            remote_name = video_path.name
-            logger.info(f"[ComfyUI] enhance_video input ready: {remote_name} (in {COMFYUI_INPUT_HOST_DIR})")
-            result = await self.execute_workflow(
-                "enhance_video",
-                {"__INPUT_VIDEO__": remote_name},
-                timeout=timeout,
-            )
-            if result.status != "completed":
-                logger.warning(f"[ComfyUI] enhance_video workflow error: {result.error_message}")
-                return None
-
-            found = self._first_video_output(result.outputs)
-            if not found:
-                logger.warning("[ComfyUI] enhance_video: no video in outputs")
-                return None
-            out_file, out_sub = found
-
-            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
-            if ok and output_path.exists() and output_path.stat().st_size > 10_000:
-                logger.info(f"[ComfyUI] ✓ Video enhanced → {output_path.name}")
-                return output_path
-            return None
-        except Exception as exc:
-            logger.warning(f"[ComfyUI] enhance_video failed: {exc}")
-            return None
-
-    async def generate_broll(
-        self,
-        prompt: str,
-        output_path: Path,
-        duration: float = 2.0,
-        timeout: float = 300.0,
-    ) -> Optional[Path]:
-        """
-        Generate B-Roll video from a text prompt via AnimateDiff.
-        Returns output_path on success, None if ComfyUI is unavailable.
-        """
-        if not await self.is_available():
-            logger.debug("[ComfyUI] generate_broll skipped — ComfyUI not available")
-            return None
-        try:
-            n_frames = max(8, min(32, int(duration * 8)))  # ~8fps
-            full_prompt = (
-                f"{prompt}, cinematic, professional, high quality, "
-                f"sharp focus, vibrant colors, 4k, portrait orientation"
-            )
-            result = await self.execute_workflow(
-                "generate_broll",
-                {
-                    "__POSITIVE_PROMPT__": full_prompt,
-                    "__N_FRAMES__": n_frames,
-                },
-                timeout=timeout,
-            )
-            if result.status != "completed":
-                logger.warning(f"[ComfyUI] generate_broll workflow error: {result.error_message}")
-                return None
-
-            found = self._first_video_output(result.outputs)
-            if not found:
-                return None
-            out_file, out_sub = found
-
-            ok = await self.download_output(out_file, output_path, subfolder=out_sub)
-            if ok and output_path.exists() and output_path.stat().st_size > 5_000:
-                logger.info(f"[ComfyUI] ✓ B-Roll generated ({prompt[:40]}) → {output_path.name}")
-                return output_path
-            return None
-        except Exception as exc:
-            logger.warning(f"[ComfyUI] generate_broll failed: {exc}")
-            return None
-
-    # ── Generic workflow execution ────────────────────────────────────────────
-
-    async def execute_workflow(
-        self,
-        workflow_name: str,
-        inputs: Dict[str, Any],
-        wait_for_completion: bool = True,
-        timeout: float = COMFYUI_TIMEOUT,
-    ) -> WorkflowResult:
-        """Load a workflow JSON, inject placeholder values, queue it and poll to completion."""
-        try:
-            wf = self._load_workflow(workflow_name)
-            if wf is None:
-                return WorkflowResult("", "error", {}, error_message=f"Workflow not found: {workflow_name}")
-            wf = self._inject_inputs(wf, inputs)
-            prompt_id = await self._queue_prompt(wf)
-            if not wait_for_completion:
-                return WorkflowResult(prompt_id, "pending", {})
-            return await self._wait_for_completion(prompt_id, timeout)
-        except Exception as exc:
-            logger.error(f"[ComfyUI] execute_workflow '{workflow_name}' failed: {exc}")
-            return WorkflowResult("", "error", {}, error_message=str(exc))
-    
-    # ── Internal helpers ──────────────────────────────────────────────────────
-
-    def _load_workflow(self, name: str) -> Optional[Dict[str, Any]]:
-        """Load a workflow JSON file from WORKFLOWS_DIR (try .json suffix automatically)."""
-        for candidate in [
-            WORKFLOWS_DIR / f"{name}.json",
-            WORKFLOWS_DIR / name,
-            Path(name) if Path(name).is_absolute() else None,
-        ]:
-            if candidate and candidate.exists():
-                try:
-                    return json.loads(candidate.read_text(encoding="utf-8"))
-                except Exception as exc:
-                    logger.error(f"[ComfyUI] Failed to parse {candidate}: {exc}")
-        logger.error(f"[ComfyUI] Workflow not found: {name} (looked in {WORKFLOWS_DIR})")
-        return None
-
-    def _inject_inputs(self, workflow: Dict[str, Any], inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Walk the ComfyUI API-format workflow dict (node_id → node) and replace
-        placeholder strings like __KEY__ with values from *inputs*.
-        Also patches EmptyLatentImage batch_size when __N_FRAMES__ is provided.
-        """
-        wf = copy.deepcopy(workflow)
-        n_frames = inputs.get("__N_FRAMES__")
-        for node_id, node in wf.items():
-            if not isinstance(node, dict):
-                continue
-            node_inputs = node.get("inputs", {})
-            if not isinstance(node_inputs, dict):
-                continue
-            for k, v in list(node_inputs.items()):
-                if isinstance(v, str):
-                    for placeholder, replacement in inputs.items():
-                        if placeholder in v:
-                            node_inputs[k] = v.replace(placeholder, str(replacement))
-            if n_frames and node.get("class_type") == "EmptyLatentImage":
-                node_inputs["batch_size"] = int(n_frames)
-        return wf
-
-    async def _queue_prompt(self, workflow: Dict[str, Any]) -> str:
-        """POST workflow to /prompt and return the prompt_id."""
-        session = await self._get_session()
-        payload = {"prompt": workflow, "client_id": str(uuid.uuid4())}
-        async with session.post(f"{self.base_url}/prompt", json=payload) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"queue_prompt failed {resp.status}: {await resp.text()}")
-            data = await resp.json()
-            pid = data.get("prompt_id", "")
-            logger.debug(f"[ComfyUI] Queued prompt {pid}")
-            return pid
-
-    async def _wait_for_completion(self, prompt_id: str, timeout: float) -> WorkflowResult:
-        """Poll /history/{id} until the prompt completes or times out."""
-        loop = asyncio.get_event_loop()
-        t0 = loop.time()
-        while True:
-            elapsed = loop.time() - t0
-            if elapsed > timeout:
-                return WorkflowResult(prompt_id, "error", {}, error_message=f"Timeout after {timeout:.0f}s")
-            session = await self._get_session()
+        while asyncio.get_event_loop().time() < deadline:
             try:
-                async with session.get(f"{self.base_url}/history/{prompt_id}") as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        entry = data.get(prompt_id, {})
-                        if entry:
-                            status_str = entry.get("status", {}).get("status_str", "")
-                            if status_str == "error":
-                                return WorkflowResult(prompt_id, "error", {}, error_message="ComfyUI execution error")
-                            outputs = entry.get("outputs", {})
-                            if outputs:
-                                return WorkflowResult(prompt_id, "completed", outputs, execution_time=elapsed)
-            except Exception as exc:
-                logger.debug(f"[ComfyUI] poll error: {exc}")
-            await asyncio.sleep(2.0)
-
-    def _first_video_output(self, outputs: Dict[str, Any]) -> Optional[tuple]:
-        """Find the first .mp4 in ComfyUI output dict. Returns (filename, subfolder) or None."""
-        for node_outputs in outputs.values():
-            if not isinstance(node_outputs, dict):
-                continue
-            for file_list in node_outputs.values():
-                if not isinstance(file_list, list):
+                resp = await self.client.get(
+                    f"{self.base_url}/history/{prompt_id}",
+                    timeout=5.0,
+                )
+                if resp.status_code != 200:
+                    await asyncio.sleep(poll_interval)
                     continue
-                for item in file_list:
-                    if isinstance(item, dict):
-                        fname = item.get("filename", "")
-                        sub = item.get("subfolder", "")
-                    else:
-                        fname, sub = str(item), ""
-                    if fname.endswith(".mp4") or fname.endswith(".webm"):
-                        return (fname, sub)
-        return None
 
-    async def get_system_stats(self) -> Dict[str, Any]:
-        """Return GPU VRAM + queue info from ComfyUI /system_stats."""
+                data = resp.json()
+                entry = data.get(prompt_id, {})
+                if not entry:
+                    await asyncio.sleep(poll_interval)
+                    continue
+
+                # Check for error status
+                status = entry.get("status", {})
+                if status.get("status_str") == "error":
+                    logger.error("[ComfyUIBridge] Workflow execution error")
+                    return ""
+
+                # Look for video output in node 5 (VHS_VideoCombine)
+                outputs = entry.get("outputs", {})
+                node_5_output = outputs.get("5", {})
+                if node_5_output:
+                    videos = node_5_output.get("videos", [])
+                    if videos:
+                        filename = videos[0].get("filename", "")
+                        if filename:
+                            logger.info("[ComfyUIBridge] Video ready: %s", filename)
+                            return filename
+
+                # Check other nodes for video output
+                for node_id, node_output in outputs.items():
+                    if not isinstance(node_output, dict):
+                        continue
+                    for key, value in node_output.items():
+                        if isinstance(value, list) and value:
+                            for item in value:
+                                if isinstance(item, dict):
+                                    fname = item.get("filename", "")
+                                    if fname and fname.endswith(".mp4"):
+                                        logger.info("[ComfyUIBridge] Video found in node %s: %s", node_id, fname)
+                                        return fname
+
+            except Exception as exc:
+                logger.debug("[ComfyUIBridge] Poll error: %s", exc)
+
+            await asyncio.sleep(poll_interval)
+
+        logger.error("[ComfyUIBridge] Polling timeout after %.0fs", timeout)
+        return ""
+
+    async def _download_video(self, filename: str, output_path: Path) -> bool:
+        """Download video from ComfyUI /view endpoint."""
         try:
-            session = await self._get_session()
-            async with session.get(f"{self.base_url}/system_stats") as resp:
-                return await resp.json() if resp.status == 200 else {}
-        except Exception:
-            return {}
+            url = f"{self.base_url}/view?filename={filename}&type=output"
+            resp = await self.client.get(url, timeout=30.0)
+
+            if resp.status_code != 200:
+                logger.error("[ComfyUIBridge] Download failed: HTTP %s", resp.status_code)
+                return False
+
+            output_path.write_bytes(resp.content)
+
+            if output_path.exists() and output_path.stat().st_size > 0:
+                logger.info("[ComfyUIBridge] ✓ Video saved to %s (%d bytes)", output_path, output_path.stat().st_size)
+                return True
+
+            logger.error("[ComfyUIBridge] Output file empty or missing")
+            return False
+
+        except Exception as exc:
+            logger.error("[ComfyUIBridge] Download error: %s", exc)
+            return False
 

@@ -187,11 +187,14 @@ services:
       - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
       - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -311,11 +314,14 @@ services:
       - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
       - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -382,11 +388,14 @@ services:
       - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
       - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -543,11 +552,14 @@ services:
       - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
       - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -614,11 +626,14 @@ services:
       - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
       - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -689,6 +704,21 @@ services:
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+      # ── Missing config vars (feedback, notifications, admin, etc.) ───
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
+      - FEEDBACK_ENABLED=${FEEDBACK_ENABLED:-false}
+      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
+      - ADMIN_SECRET=${ADMIN_SECRET:-change_me_admin_secret}
+      - ADMIN_ENABLED=${ADMIN_ENABLED:-false}
+      - SELF_HOST=${SELF_HOST:-true}
+      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-ViraClip <onboarding@resend.dev>}"
+      - RUST_AGENT_URL=${RUST_AGENT_URL:-http://rust-agent:8001}
+      - RUST_AGENT_ENABLED=${RUST_AGENT_ENABLED:-false}
+      - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
+      - DATASET_DIR=${DATASET_DIR:-/app/datasets}
     restart: always
     depends_on:
       postgres:
@@ -696,7 +726,7 @@ services:
       redis:
         condition: service_healthy
       ollama:
-        condition: service_healthy
+        condition: service_started   # no esperar healthy, Ollama es opcional
       backend:
         condition: service_healthy
     deploy:
@@ -775,11 +805,14 @@ services:
       - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
       - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
+      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - T2V_ENABLED=${T2V_ENABLED:-true}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -850,6 +883,21 @@ services:
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+      # ── Missing config vars (feedback, notifications, admin, etc.) ───
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
+      - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
+      - FEEDBACK_ENABLED=${FEEDBACK_ENABLED:-false}
+      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
+      - ADMIN_SECRET=${ADMIN_SECRET:-change_me_admin_secret}
+      - ADMIN_ENABLED=${ADMIN_ENABLED:-false}
+      - SELF_HOST=${SELF_HOST:-true}
+      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+      - RESEND_API_KEY=${RESEND_API_KEY}
+      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-ViraClip <onboarding@resend.dev>}"
+      - RUST_AGENT_URL=${RUST_AGENT_URL:-http://rust-agent:8001}
+      - RUST_AGENT_ENABLED=${RUST_AGENT_ENABLED:-false}
+      - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
+      - DATASET_DIR=${DATASET_DIR:-/app/datasets}
     restart: always
     depends_on:
       postgres:
@@ -868,7 +916,6 @@ services:
 
 
   gpu_worker:
-    profiles: ["gpu"]
     build:
       context: ./backend
       dockerfile: Dockerfile
