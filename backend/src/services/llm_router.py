@@ -182,6 +182,18 @@ class LLMRouter:
         # Fallback to Groq for now
         return await self._score_with_groq(transcript, language, num_clips)
     
+    def _rule_based_fallback(self, transcript: str, language: str, num_clips: int) -> str:
+        # FIX: rule-based fallback when Groq is unavailable
+        import json
+        logger.warning("[LLMRouter] Rule-based fallback activated — 0 segments returned")
+        return json.dumps({
+            "segments": [],
+            "viral_potential": "low",
+            "summary": "Fallback mode - Groq unavailable. Please configure GROQ_API_KEY.",
+            "language": language,
+            "total_clips_recommended": 0
+        })
+
     def _language_supported(self, language: str) -> bool:
         """Check if language is supported by local models."""
         # For now, support common languages
