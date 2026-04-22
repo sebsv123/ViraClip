@@ -772,6 +772,12 @@ class VideoService:
                     _llm_fallback = await llm_router.score_segments(
                         [segment.get("text", "")], language="es", num_clips=1
                     )
+                    # Defensive JSON parsing: LLM may return string instead of dict
+                    if isinstance(_llm_fallback, str):
+                        try:
+                            _llm_fallback = json.loads(_llm_fallback)
+                        except (json.JSONDecodeError, ValueError):
+                            _llm_fallback = {}
                     if _llm_fallback and _llm_fallback.get("analysis"):
                         _item = _llm_fallback["analysis"][0]
                         _vscore = _item.get("virality_score", 50)
@@ -2417,6 +2423,12 @@ class VideoService:
             from .llm_router import LLMRouter
             llm_router = LLMRouter()
             virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)
+            # Defensive JSON parsing: LLM may return string instead of dict
+            if isinstance(virality_data, str):
+                try:
+                    virality_data = json.loads(virality_data)
+                except (json.JSONDecodeError, ValueError):
+                    virality_data = {}
             virality_map = {item.get("segment_index"): item for item in virality_data.get("analysis", [])}
             
             # Log scoring method used
