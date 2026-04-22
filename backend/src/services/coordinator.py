@@ -236,6 +236,14 @@ class VideoCoordinator:
                 return cached
             
             logger.info(f"🎬 Starting coordinator for task {self.task_id}")
+            
+            # Set defaults for creative pipeline features
+            self.config.setdefault("beat_sync", True)
+            self.config.setdefault("lut_id", "cinematic_warm")
+            self.config.setdefault("audio_ducking", True)
+            self.config.setdefault("jump_cut", True)
+            self.config.setdefault("denoise_audio", False)
+            
             try:
                 from .gpu_utils import gpu_name as _gpu_name
                 logger.info(f"[GPU] Encoder: {_gpu_name() or 'CPU fallback'} | Codec: {_GPU_CODEC}")
@@ -678,21 +686,23 @@ class VideoCoordinator:
                 if clip is None:
                     raise RuntimeError(f"create_single_clip returned None for clip {index}")
                 
+                # Helper to convert timestamps to seconds (used in multiple places)
+                def _ts_to_s(v) -> float:
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    try:
+                        parts = str(v).strip().split(":")
+                        if len(parts) == 2:
+                            return int(parts[0]) * 60 + float(parts[1])
+                        elif len(parts) == 3:
+                            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        return float(v)
+                    except (ValueError, TypeError):
+                        return float(v)
+                
                 # Post-render validation
                 clip_path = _Path(clip.get("path", ""))
                 if clip_path.exists():
-                    def _ts_to_s(v) -> float:
-                        if isinstance(v, (int, float)):
-                            return float(v)
-                        try:
-                            parts = str(v).strip().split(":")
-                            if len(parts) == 2:
-                                return int(parts[0]) * 60 + float(parts[1])
-                            elif len(parts) == 3:
-                                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-                            return float(v)
-                        except (ValueError, TypeError):
-                            return float(v)
                     expected_duration = _ts_to_s(vs_segment["end_time"]) - _ts_to_s(vs_segment["start_time"])
                     post_validation = await validator.validate_output(
                         output_path=clip_path,
@@ -1087,9 +1097,9 @@ class VideoCoordinator:
                         _duck_out = _duck_in.with_name(f"duck_{_duck_in.name}")
                         _duck_svc = _get_duck_svc()
                         _duck_ok = await _duck_svc.apply_ducking(
-                            input_path=_duck_in,
+                            video_path=_duck_in,
                             output_path=_duck_out,
-                            words=_words_for_editor,
+                            word_timings=_words_for_editor,
                         )
                         if _duck_ok and _duck_out.exists() and _duck_out.stat().st_size > 0:
                             _duck_in.unlink(missing_ok=True)
@@ -1252,7 +1262,7 @@ class VideoCoordinator:
                         hook_score=float(creative_meta.get("hook_score") or vs_segment.get("hook_score") or 0),
                         hook_start=creative_meta.get("hook_start"),
                         hook_type=vs_segment.get("hook_type"),
-                        duration=float(vs_segment.get("end_time", 30) - vs_segment.get("start_time", 0)),
+                        duration=float(_ts_to_s(vs_segment.get("end_time", "00:30")) - _ts_to_s(vs_segment.get("start_time", "00:00"))),
                         platform=self.config.get("target_platform", "tiktok"),
                         loudnorm_applied=bool(creative_meta.get("loudnorm_applied")),
                         sfx_injected=bool(creative_meta.get("sfx_injected")),

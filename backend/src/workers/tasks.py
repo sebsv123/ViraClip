@@ -375,7 +375,7 @@ class WorkerSettings:
         from ..services.feedback_loop_service import periodic_model_retraining
         return [cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0)]
 
-    cron_jobs = _build_cron_jobs.__func__(None) if False else []  # activated below
+    cron_jobs = []
 
 
 # Activate cron jobs after class definition to avoid forward-reference issues
@@ -391,5 +391,11 @@ try:
         # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)
         cron(retrain_scorer_monthly, hour=4, minute=0, day=1),
     ]
-except Exception:  # pragma: no cover
-    pass  # cron stays empty if import fails (test environments)
+except Exception as _cron_err:
+    import logging as _log
+    _log.getLogger(__name__).warning(
+        "[WorkerSettings] cron_jobs registration failed: %s — "
+        "feedback loop and analytics import will NOT run. "
+        "Check imports: analytics_importer, feedback_loop_service, data_pipeline_cron",
+        _cron_err
+    )
