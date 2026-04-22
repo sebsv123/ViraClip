@@ -386,6 +386,19 @@ class CreativePipeline:
 
         # ── 6. Video effects (zoom punch + color grade from preset) ───────────
         logger.info("  [Creative] Step 6/8: Video effects (zoom + grade)...")
+        if preset is None:
+            try:
+                from .smart_templates import Preset
+                preset = Preset(
+                    name="default_fallback",
+                    zoom_punch_enabled=False,
+                    extra_vf_filters=["eq=contrast=1.08:saturation=1.15:brightness=0.01"],
+                    caption_style="standard",
+                    beat_sync=False,
+                )
+                meta["preset_used"] = "default_fallback"
+            except Exception as _fb:
+                logger.warning("  [Creative] Fallback preset failed: %s", _fb)
         try:
             if preset is not None:
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
@@ -495,7 +508,7 @@ class CreativePipeline:
                 sfx_count = sum(1 for e in timeline if e.strength >= 0.6)
                 
                 # Apply audio ducking if enabled and we have word timings
-                if bgm and words:
+                if words:
                     try:
                         from .audio_ducking_service import get_audio_ducking_service
                         ducked = clip_path.with_name(f"ducked_{clip_path.name}")
@@ -567,15 +580,23 @@ class CreativePipeline:
             _log_step_error("Step 8 (QA)", exc)
             _mark_fail("step_8_qa")
 
-        # Pasos core que DEBEN estar ok para considerar enhanced
-        CORE_STEPS = {"step_2_virality", "step_3_template", "step_7_audio"}
-        core_ok = CORE_STEPS.issubset(set(steps_ok))
-        min_ok = len(steps_ok) >= 3
+        # Calculate creative_enhanced based on actual metadata flags (at least 2 must be true)
+        _ok = sum([
+            meta.get("timeline_events", 0) > 0,
+            meta.get("viral_score") is not None,
+            meta.get("preset_used") is not None,
+            meta.get("broll_overlays", 0) > 0,
+            meta.get("loudnorm_applied", False),
+            meta.get("color_grade_applied", False),
+            meta.get("hook_visual_applied", False),
+            meta.get("cinematic_intro_applied", False),
+        ])
+        if _ok >= 2:
+            meta["creative_enhanced"] = True
 
         meta["creative_steps_ok"]     = steps_ok
         meta["creative_steps_failed"] = steps_failed
         meta["creative_steps_total"]  = len(steps_ok) + len(steps_failed)
-        meta["creative_enhanced"]     = core_ok and min_ok
 
         if steps_failed:
             logger.warning(
