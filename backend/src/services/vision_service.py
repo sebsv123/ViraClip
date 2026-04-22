@@ -204,12 +204,9 @@ async def analyze_clip_visually(
             },
         }
 
-        # FIX Problema 2: 8s timeout con asyncio.wait_for + manejo de conexión
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await asyncio.wait_for(
-                client.post(f"{endpoint}/api/generate", json=payload),
-                timeout=8.0,
-            )
+        # FIX: unified 8s timeout via httpx, removed redundant asyncio.wait_for
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(f"{endpoint}/api/generate", json=payload)
 
         if resp.status_code != 200:
             logger.warning(f"Ollama returned {resp.status_code}: {resp.text[:200]}")
@@ -224,7 +221,7 @@ async def analyze_clip_visually(
         )
         return score
 
-    except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError, asyncio.TimeoutError) as e:
+    except (httpx.ConnectError, httpx.TimeoutException, ConnectionRefusedError) as e:
         logger.warning(f"Vision analysis connection/timeout error: {e} — returning neutral fallback")
         return VisionScore.unavailable()
     except Exception as e:
