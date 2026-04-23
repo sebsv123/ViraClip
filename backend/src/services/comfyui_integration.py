@@ -1,6 +1,8 @@
 """
 ComfyUI Integration Service for ViraClip
 Handles AI-powered video processing using ComfyUI backend
+
+Updated: 2026-04-23 - Lazy imports for CI compatibility
 """
 
 import os
@@ -8,12 +10,21 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable
 import asyncio
+import logging
 
-from .comfyui.orchestrator import comfyui_orchestrator
-from .video_service import VideoService as video_service
-from ..core.logger import setup_logger as get_logger
+logger = logging.getLogger(__name__)
 
-logger = get_logger(__name__)
+# Lazy imports - se cargan dentro de los métodos para evitar errores en CI
+_comfyui_orchestrator = None
+_video_service = None
+
+def _get_orchestrator():
+    """Lazy load orchestrator to avoid import errors in CI."""
+    global _comfyui_orchestrator
+    if _comfyui_orchestrator is None:
+        from .comfyui.orchestrator import comfyui_orchestrator
+        _comfyui_orchestrator = comfyui_orchestrator
+    return _comfyui_orchestrator
 
 
 class ComfyUIIntegrationService:
@@ -23,7 +34,6 @@ class ComfyUIIntegrationService:
     """
     
     def __init__(self):
-        self.orchestrator = comfyui_orchestrator
         self.enabled = os.getenv("COMFYUI_ENABLED", "true").lower() == "true"
         self.uploads_path = Path(os.getenv("VIRA_UPLOADS", "./uploads"))
         self.outputs_path = Path(os.getenv("VIRA_OUTPUTS", "./outputs"))
@@ -65,19 +75,21 @@ class ComfyUIIntegrationService:
             if not local_input.exists():
                 shutil.copy2(video_path, local_input)
             
-            # Execute appropriate workflow
+            # Execute appropriate workflow with lazy-loaded orchestrator
+            orchestrator = _get_orchestrator()
+            
             if operation == "subtitles":
-                result = await self.orchestrator.subtitles(
+                result = await orchestrator.subtitles(
                     str(local_input), task_id
                 )
             elif operation == "reframe_9_16":
                 chunk_size = kwargs.get("chunk_size", 300)
-                result = await self.orchestrator.reframe_9_16(
+                result = await orchestrator.reframe_9_16(
                     str(local_input), task_id, chunk_size
                 )
             elif operation == "thumbnail":
                 prompt = kwargs.get("prompt", "cinematic viral thumbnail")
-                result = await self.orchestrator.thumbnail(
+                result = await orchestrator.thumbnail(
                     str(local_input), task_id, prompt
                 )
             elif operation == "broll_transition":
@@ -86,13 +98,14 @@ class ComfyUIIntegrationService:
                 duration = kwargs.get("duration", 1.0)
                 
                 # Copy broll if provided
+                broll_dest = None
                 if broll_path and Path(broll_path).exists():
                     broll_dest = self.uploads_path / f"{task_id}_broll.mp4"
                     shutil.copy2(broll_path, broll_dest)
                 
-                result = await self.orchestrator.add_broll_transition(
+                result = await orchestrator.add_broll_transition(
                     str(local_input),
-                    str(broll_dest) if broll_path else str(local_input),
+                    str(broll_dest) if broll_dest else str(local_input),
                     task_id,
                     transition_type,
                     duration
@@ -165,7 +178,8 @@ class ComfyUIIntegrationService:
     async def health_check(self) -> bool:
         """Check if ComfyUI is available"""
         try:
-            health = await self.orchestrator.health_check()
+            orchestrator = _get_orchestrator()
+            health = await orchestrator.health_check()
             return health.get("status") == "ok"
         except Exception as e:
             logger.warning(f"ComfyUI health check failed: {e}")

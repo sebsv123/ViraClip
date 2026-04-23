@@ -8,6 +8,8 @@ Pipeline:
   base clip → multimodal timeline → virality prediction → template selection
            → hook analysis → B-roll overlay → video effects (zoom punch + grade)
            → audio mastering (loudnorm + SFX) → QA + render manifest
+
+Updated: 2026-04-23 - Added SAM2+LTX Background Composite integration
 """
 
 import logging
