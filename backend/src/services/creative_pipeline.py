@@ -329,7 +329,6 @@ class CreativePipeline:
                     logger.warning("  [Creative] B-roll render failed, using base clip")
                     _mark_fail("step_5_broll_render_failed")
             else:
-                brolled.unlink(missing_ok=True)
                 _mark_fail("step_5_broll_empty")
         except ImportError as exc:
             _log_step_error("Step 5 (B-roll) - Import", exc)
