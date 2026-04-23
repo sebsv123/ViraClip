@@ -73,16 +73,24 @@ class TaskRepository:
                     "batch_id": batch_id,
                 },
             )
-        except Exception:
+        except Exception as _insert_err:
+            logger.warning(
+                f"[create_task] Full INSERT failed ({type(_insert_err).__name__}: {_insert_err}); "
+                f"retrying with legacy schema (processing_mode={processing_mode!r})"
+            )
             await db.rollback()
             result = await db.execute(
                 text("""
                     INSERT INTO tasks (
                         id, user_id, source_id, status, font_family, font_size, font_color,
+                        processing_mode, target_language,
+                        auto_center_face, eye_contact_correction, split_screen,
                         created_at, updated_at
                     )
                     VALUES (
                         :task_id, :user_id, :source_id, :status, :font_family, :font_size, :font_color,
+                        :processing_mode, :target_language,
+                        :auto_center_face, :eye_contact_correction, :split_screen,
                         NOW(), NOW()
                     )
                     RETURNING id
@@ -95,6 +103,11 @@ class TaskRepository:
                     "font_family": font_family,
                     "font_size": font_size,
                     "font_color": font_color,
+                    "processing_mode": processing_mode,
+                    "target_language": target_language,
+                    "auto_center_face": auto_center_face,
+                    "eye_contact_correction": eye_contact_correction,
+                    "split_screen": split_screen,
                 },
             )
         await db.commit()
