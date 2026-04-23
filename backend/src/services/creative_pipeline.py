@@ -247,6 +247,7 @@ class CreativePipeline:
             _mark_fail("step_4_hook")
 
         # ── 4.5 Hook-flash reorder ────────────────────────────────────────────
+        reordered = None
         try:
             _hook_reorder = meta.get("hook_reorder_suggested", False)
             _hook_start   = meta.get("hook_text") and next(
@@ -343,6 +344,8 @@ class CreativePipeline:
         # ── 5.5. Contextual overlays (viral feature: full-screen with corner bubble) ─
         logger.info("  [Creative] Step 5.5/8: Contextual overlays...")
         contextual_overlays = 0
+        overlayed = None
+        overlay_result = None
         try:
             logger.debug("  [Creative] Importing contextual_overlay_engine...")
             from .contextual_overlay_engine import get_contextual_overlay_engine
@@ -387,19 +390,23 @@ class CreativePipeline:
 
         # ── 6. Video effects (zoom punch + color grade from preset) ───────────
         logger.info("  [Creative] Step 6/8: Video effects (zoom + grade)...")
-        if preset is None:
-            try:
+        effected = None
+        try:
+            if preset is None:
+                logger.warning("  [Creative] No preset selected, using default fallback")
                 from .smart_templates import Preset
                 preset = Preset(
                     name="default_fallback",
-                    zoom_punch_enabled=False,
+                    zoom_punch_enabled=True,
+                    zoom_punch_zoom=1.15,
+                    zoom_punch_duration=0.25,
                     extra_vf_filters=["eq=contrast=1.08:saturation=1.15:brightness=0.01"],
                     caption_style="standard",
                     beat_sync=False,
                 )
                 meta["preset_used"] = "default_fallback"
-            except Exception as _fb:
-                logger.warning("  [Creative] Fallback preset failed: %s", _fb)
+        except Exception as _fb:
+            logger.warning("  [Creative] Fallback preset failed: %s", _fb)
         try:
             if preset is not None:
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
@@ -434,6 +441,7 @@ class CreativePipeline:
         # ── 6.5. Speed control (playback speed / dramatic slow-mo) ────────────
         logger.info("  [Creative] Step 6.5/8: Speed control...")
         speed_applied = False
+        speed_output = None
         try:
             # Check if speed control is needed
             playback_speed = segment.get("playback_speed", 1.0)
@@ -485,6 +493,8 @@ class CreativePipeline:
         sfx_count = 0
         loudnorm_applied = False
         ducking_applied = False
+        mastered = None
+        ducked = None
         try:
             logger.debug("  [Creative] Importing smart_audio...")
             from .smart_audio import get_smart_audio, find_bgm_track
