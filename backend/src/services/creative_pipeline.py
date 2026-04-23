@@ -11,8 +11,11 @@ Pipeline:
 """
 
 import logging
+import os
 import traceback
 from pathlib import Path
+
+from .background_composite_service import background_composite_service
 
 logger = logging.getLogger(__name__)
 
@@ -277,67 +280,122 @@ class CreativePipeline:
         except Exception as exc:
             logger.debug("  [Creative] Hook reorder failed: %s", exc)
 
+        # ── Background Composite (SAM2 + LTX) ────────────────────────────
+        _composite_enabled = os.getenv("BACKGROUND_COMPOSITE_ENABLED", "false").lower() == "true"
+        _composite_result = None
+
+        if _composite_enabled:
+            try:
+                _viral_score = segment.get("viral_score",
+                               segment.get("score",
+                               segment.get("virality_score", 5.0)))
+                _duration = float(segment.get("duration", end - start))
+                _prompt = (segment.get("keywords", ["cinematic background"])
+                           if isinstance(segment.get("keywords"), list)
+                           else str(segment.get("keywords", "cinematic background")))
+
+                _composite_result = await background_composite_service.process(
+                    clip_path=str(clip_path),
+                    task_id=task_id,
+                    viral_score=float(_viral_score),
+                    duration=_duration,
+                    broll_prompt=_prompt
+                )
+            except Exception as _e:
+                logger.warning(f"Background composite error, continuing: {_e}")
+                _composite_result = None
+
+        if _composite_result and _composite_result.get("mode_used") == "A":
+            # Mode A: Replace clip with composite result
+            composite_path = Path(_composite_result["output_path"])
+            if composite_path.exists():
+                clip_path.unlink(missing_ok=True)
+                composite_path.rename(clip_path)
+                meta["background_composite_applied"] = True
+                meta["composite_mode"] = "A"
+                logger.info(f"✅ Composite Mode A: {task_id}")
+            # SKIP b-roll logic completely
+        elif _composite_result and _composite_result.get("mode_used") == "C":
+            meta["background_composite_applied"] = False
+            meta["composite_mode"] = "C"
+            logger.info(f"🎯 Clean clip, no B-roll: {task_id}")
+            # SKIP b-roll logic completely
+        else:
+            # mode_used == "B" o composite deshabilitado → ejecutar B-roll normal
+            pass  # continúa con la lógica de B-roll existente
+        # ── Fin Background Composite ──────────────────────────────────────
+
         # ── 5. B-roll overlay ─────────────────────────────────────────────────
         logger.info("  [Creative] Step 5/8: B-roll overlay...")
         broll_count = 0
-        try:
-            logger.debug("  [Creative] Importing contextual_broll & video_effects...")
-            from .contextual_broll import get_contextual_broll
-            from .video_effects import overlay_broll_clips
-            logger.debug("  [Creative] B-roll imports OK")
-            broll_pairs = await get_contextual_broll().get_for_timeline(
-                timeline, max_assets=3
-            )
 
-            # Fallback: if timeline had no hook/impact keyword hits, use LLM to extract
-            # visual keywords from the actual transcript ("what the speaker says")
-            if not broll_pairs and transcript:
-                try:
-                    from .broll_service import BrollService
-                    from .multimodal_detector import TimelineEvent
-                    llm_kws = await BrollService().extract_keywords(transcript)
-                    clip_dur = max(1.0, end - start)
-                    llm_pairs = []
-                    for i, kw in enumerate(llm_kws[:2]):
-                        asset = await get_contextual_broll().get_for_keyword(kw, duration=3.0)
-                        if asset:
-                            t_ins = max(2.0, min(4.0 + i * 7.0, clip_dur - 4.0))
-                            evt = TimelineEvent(
-                                t=t_ins, type="keyword", strength=0.7,
-                                duration=3.0, payload={"word": kw, "category": "broll_llm"},
+        # Solo ejecutar B-roll si no se aplicó composite Mode A o C
+        _skip_broll = (_composite_result and _composite_result.get("mode_used") in ("A", "C"))
+
+        if not _skip_broll:
+            try:
+                logger.debug("  [Creative] Importing contextual_broll & video_effects...")
+                from .contextual_broll import get_contextual_broll
+                from .video_effects import overlay_broll_clips
+                logger.debug("  [Creative] B-roll imports OK")
+                broll_pairs = await get_contextual_broll().get_for_timeline(
+                    timeline, max_assets=3
+                )
+
+                # Fallback: if timeline had no hook/impact keyword hits, use LLM to extract
+                # visual keywords from the actual transcript ("what the speaker says")
+                if not broll_pairs and transcript:
+                    try:
+                        from .broll_service import BrollService
+                        from .multimodal_detector import TimelineEvent
+                        llm_kws = await BrollService().extract_keywords(transcript)
+                        clip_dur = max(1.0, end - start)
+                        llm_pairs = []
+                        for i, kw in enumerate(llm_kws[:2]):
+                            asset = await get_contextual_broll().get_for_keyword(kw, duration=3.0)
+                            if asset:
+                                t_ins = max(2.0, min(4.0 + i * 7.0, clip_dur - 4.0))
+                                evt = TimelineEvent(
+                                    t=t_ins, type="keyword", strength=0.7,
+                                    duration=3.0, payload={"word": kw, "category": "broll_llm"},
+                                )
+                                llm_pairs.append((evt, asset))
+                        if llm_pairs:
+                            broll_pairs = llm_pairs
+                            logger.info(
+                                "  [Creative] B-roll LLM fallback: keywords=%s", llm_kws
                             )
-                            llm_pairs.append((evt, asset))
-                    if llm_pairs:
-                        broll_pairs = llm_pairs
-                        logger.info(
-                            "  [Creative] B-roll LLM fallback: keywords=%s", llm_kws
-                        )
-                except Exception as _fb:
-                    logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
+                    except Exception as _fb:
+                        logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
 
-            brolled = None
-            if broll_pairs:
-                brolled = clip_path.with_name(f"broll_{clip_path.name}")
-                result = await overlay_broll_clips(clip_path, broll_pairs, brolled)
-                if result and brolled.exists() and brolled.stat().st_size > 0:
-                    clip_path.unlink(missing_ok=True)
-                    brolled.rename(clip_path)
-                    broll_count = len(broll_pairs)
-                    logger.info("  [Creative] ✓ Step 5/8: B-roll overlay: %s", brolled.name)
-                    steps_ok.append("step_5_broll")
+                brolled = None
+                if broll_pairs:
+                    brolled = clip_path.with_name(f"broll_{clip_path.name}")
+                    result = await overlay_broll_clips(clip_path, broll_pairs, brolled)
+                    if result and brolled.exists() and brolled.stat().st_size > 0:
+                        clip_path.unlink(missing_ok=True)
+                        brolled.rename(clip_path)
+                        broll_count = len(broll_pairs)
+                        logger.info("  [Creative] ✓ Step 5/8: B-roll overlay: %s", brolled.name)
+                        steps_ok.append("step_5_broll")
+                    else:
+                        brolled.unlink(missing_ok=True)
+                        logger.warning("  [Creative] B-roll render failed, using base clip")
+                        _mark_fail("step_5_broll_render_failed")
                 else:
-                    brolled.unlink(missing_ok=True)
-                    logger.warning("  [Creative] B-roll render failed, using base clip")
-                    _mark_fail("step_5_broll_render_failed")
-            else:
-                brolled.unlink(missing_ok=True)
-                _mark_fail("step_5_broll_empty")
-        except ImportError as exc:
-            _log_step_error("Step 5 (B-roll) - Import", exc)
-            _mark_fail("step_5_broll")
-        except Exception as exc:
-            _log_step_error("Step 5 (B-roll)", exc)
-            _mark_fail("step_5_broll")
+                    _mark_fail("step_5_broll_empty")
+            except ImportError as exc:
+                _log_step_error("Step 5 (B-roll) - Import", exc)
+                _mark_fail("step_5_broll")
+            except Exception as exc:
+                _log_step_error("Step 5 (B-roll)", exc)
+                _mark_fail("step_5_broll")
+        else:
+            logger.info("  [Creative] Step 5/8: B-roll skipped (composite Mode A/C applied)")
+            if _composite_result and _composite_result.get("mode_used") == "A":
+                steps_ok.append("step_5_composite_a")
+            elif _composite_result and _composite_result.get("mode_used") == "C":
+                steps_ok.append("step_5_clean_clip")
 
         meta["broll_overlays"] = broll_count
 
