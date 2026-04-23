@@ -14,14 +14,14 @@ os.environ["SAM2_MIN_VIRAL_SCORE"] = "7.5"
 os.environ["SAM2_MIN_DURATION"] = "12.0"
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_scene_analyzer():
     """Mock scene analyzer with different modes."""
     with patch("src.services.background_composite_service.scene_analyzer") as mock:
         yield mock
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_person_segmentation():
     """Mock person segmentation service."""
     with patch("src.services.background_composite_service.person_segmentation_service") as mock:
@@ -29,7 +29,7 @@ def mock_person_segmentation():
         yield mock
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_composite_engine():
     """Mock composite engine."""
     with patch("src.services.background_composite_service.composite_engine") as mock:
@@ -37,7 +37,7 @@ def mock_composite_engine():
         yield mock
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def mock_comfyui_integration():
     """Mock comfyui integration for LTX background."""
     with patch("src.services.background_composite_service.comfyui_integration") as mock:
