@@ -239,8 +239,9 @@ class ComfyUIOrchestrator:
         }
         return await self._execute(workflow, task_id, "mp4")
 
-    async def add_broll_transition(self, main_clip: str, broll_clip: Optional[str] = None,
-                                   task_id: str, transition_type: str = "fade",
+    async def add_broll_transition(self, main_clip: str, task_id: str,
+                                   broll_clip: Optional[str] = None,
+                                   transition_type: str = "fade",
                                    duration: float = 1.0) -> str:
         """Añadir B-roll con transición. Si no se proporciona broll_clip, se genera con LTX."""
         # Si no hay broll_clip, generarlo con LTX

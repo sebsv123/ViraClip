@@ -104,11 +104,11 @@ class ComfyUIIntegrationService:
                     shutil.copy2(broll_path, broll_dest)
                 
                 result = await orchestrator.add_broll_transition(
-                    str(local_input),
-                    str(broll_dest) if broll_dest else str(local_input),
-                    task_id,
-                    transition_type,
-                    duration
+                    main_clip=str(local_input),
+                    task_id=task_id,
+                    broll_clip=str(broll_dest) if broll_dest else str(local_input),
+                    transition_type=transition_type,
+                    duration=duration,
                 )
             else:
                 logger.error(f"Unknown operation: {operation}")
