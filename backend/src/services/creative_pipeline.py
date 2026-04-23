@@ -314,6 +314,7 @@ class CreativePipeline:
                 except Exception as _fb:
                     logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
 
+            brolled = None
             if broll_pairs:
                 brolled = clip_path.with_name(f"broll_{clip_path.name}")
                 result = await overlay_broll_clips(clip_path, broll_pairs, brolled)
