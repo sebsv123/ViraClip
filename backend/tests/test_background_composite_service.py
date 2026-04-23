@@ -17,14 +17,14 @@ os.environ["SAM2_MIN_DURATION"] = "12.0"
 @pytest.fixture
 def mock_scene_analyzer():
     """Mock scene analyzer with different modes."""
-    with patch("backend.src.services.background_composite_service.scene_analyzer") as mock:
+    with patch("src.services.background_composite_service.scene_analyzer") as mock:
         yield mock
 
 
 @pytest.fixture
 def mock_person_segmentation():
     """Mock person segmentation service."""
-    with patch("backend.src.services.background_composite_service.person_segmentation_service") as mock:
+    with patch("src.services.background_composite_service.person_segmentation_service") as mock:
         mock.extract_person = AsyncMock(return_value="/tmp/person.webm")
         yield mock
 
@@ -32,7 +32,7 @@ def mock_person_segmentation():
 @pytest.fixture
 def mock_composite_engine():
     """Mock composite engine."""
-    with patch("backend.src.services.background_composite_service.composite_engine") as mock:
+    with patch("src.services.background_composite_service.composite_engine") as mock:
         mock.composite = AsyncMock(return_value="/tmp/composite.mp4")
         yield mock
 
@@ -40,7 +40,7 @@ def mock_composite_engine():
 @pytest.fixture
 def mock_comfyui_integration():
     """Mock comfyui integration for LTX background."""
-    with patch("backend.src.services.background_composite_service.comfyui_integration") as mock:
+    with patch("src.services.background_composite_service.comfyui_integration") as mock:
         mock.process_with_comfyui = AsyncMock(return_value="/tmp/background.mp4")
         yield mock
 
@@ -51,7 +51,7 @@ class TestBackgroundCompositeService:
     @pytest.fixture(autouse=True)
     def setup_service(self):
         """Setup service instance for tests."""
-        from backend.src.services.background_composite_service import BackgroundCompositeService
+        from src.services.background_composite_service import BackgroundCompositeService
         self.service = BackgroundCompositeService()
 
     @pytest.mark.asyncio
@@ -129,7 +129,7 @@ class TestBackgroundCompositeService:
             "reason": "talking_head_suitable"
         })
 
-        with patch("backend.src.services.background_composite_service.person_segmentation_service") as mock_seg:
+        with patch("src.services.background_composite_service.person_segmentation_service") as mock_seg:
             mock_seg.extract_person = AsyncMock(return_value=None)
 
             with patch.dict(os.environ, {"BACKGROUND_COMPOSITE_ENABLED": "true"}):
@@ -155,10 +155,10 @@ class TestBackgroundCompositeService:
             "reason": "talking_head_suitable"
         })
 
-        with patch("backend.src.services.background_composite_service.composite_engine") as mock_comp:
+        with patch("src.services.background_composite_service.composite_engine") as mock_comp:
             mock_comp.composite = AsyncMock(return_value=None)
 
-            with patch("backend.src.services.background_composite_service.person_segmentation_service") as mock_seg:
+            with patch("src.services.background_composite_service.person_segmentation_service") as mock_seg:
                 mock_seg.extract_person = AsyncMock(return_value="/tmp/person.webm")
 
                 with patch.dict(os.environ, {"BACKGROUND_COMPOSITE_ENABLED": "true"}):
@@ -200,7 +200,7 @@ class TestSceneAnalyzerIntegration:
     @pytest.mark.asyncio
     async def test_analyzer_timeout_handling(self):
         """Test that analyzer timeouts are handled gracefully."""
-        from backend.src.services.scene_analyzer import SceneAnalyzer
+        from src.services.scene_analyzer import SceneAnalyzer
         
         analyzer = SceneAnalyzer()
         

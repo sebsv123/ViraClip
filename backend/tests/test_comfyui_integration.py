@@ -20,9 +20,9 @@ class TestComfyUILazyImports:
             del sys.modules[mod]
         
         # Mock the orchestrator import to simulate missing ComfyUI
-        with patch.dict("sys.modules", {"backend.src.services.comfyui.orchestrator": None}):
+        with patch.dict("sys.modules", {"src.services.comfyui.orchestrator": None}):
             # Should still be able to import the module
-            from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+            from src.services.comfyui_integration import ComfyUIIntegrationService
             
             # Should be able to instantiate
             service = ComfyUIIntegrationService()
@@ -32,21 +32,21 @@ class TestComfyUILazyImports:
     @pytest.mark.asyncio
     async def test_lazy_orchestrator_loading(self):
         """Test that orchestrator is loaded only when methods are called."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService, _get_orchestrator
+        from src.services.comfyui_integration import ComfyUIIntegrationService, _get_orchestrator
         
         # Create mock orchestrator
         mock_orch = MagicMock()
         mock_orch.subtitles = AsyncMock(return_value="/tmp/output.mp4")
         
-        with patch("backend.src.services.comfyui_integration._comfyui_orchestrator", None):
-            with patch("backend.src.services.comfyui_integration.comfyui_orchestrator", mock_orch):
+        with patch("src.services.comfyui_integration._comfyui_orchestrator", None):
+            with patch("src.services.comfyui_integration.comfyui_orchestrator", mock_orch):
                 orchestrator = _get_orchestrator()
                 assert orchestrator is mock_orch
 
     @pytest.mark.asyncio
     async def test_process_with_comfyui_disabled(self):
         """Test that disabled ComfyUI returns None gracefully."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         service = ComfyUIIntegrationService()
         service.enabled = False
@@ -77,10 +77,10 @@ class TestComfyUIMocking:
     @pytest.mark.asyncio
     async def test_subtitles_operation(self, mock_orchestrator):
         """Test subtitles operation with mocked orchestrator."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         with patch.object(Path, "exists", return_value=True):
-            with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
+            with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
                 service = ComfyUIIntegrationService()
                 service.enabled = True
                 
@@ -98,10 +98,10 @@ class TestComfyUIMocking:
     @pytest.mark.asyncio
     async def test_reframe_operation(self, mock_orchestrator):
         """Test reframe operation with mocked orchestrator."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         with patch.object(Path, "exists", return_value=True):
-            with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
+            with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
                 service = ComfyUIIntegrationService()
                 service.enabled = True
                 
@@ -118,9 +118,9 @@ class TestComfyUIMocking:
     @pytest.mark.asyncio
     async def test_health_check_success(self, mock_orchestrator):
         """Test health check returns True when ComfyUI is healthy."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
-        with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
+        with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
             service = ComfyUIIntegrationService()
             
             result = await service.health_check()
@@ -131,12 +131,12 @@ class TestComfyUIMocking:
     @pytest.mark.asyncio
     async def test_health_check_failure(self):
         """Test health check returns False on error."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         mock_orch = MagicMock()
         mock_orch.health_check = AsyncMock(side_effect=Exception("Connection refused"))
         
-        with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
+        with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
             service = ComfyUIIntegrationService()
             
             result = await service.health_check()
@@ -146,10 +146,10 @@ class TestComfyUIMocking:
     @pytest.mark.asyncio
     async def test_broll_transition_with_video(self, mock_orchestrator):
         """Test B-roll transition with provided B-roll video."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         with patch.object(Path, "exists", return_value=True):
-            with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
+            with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orchestrator):
                 with patch("shutil.copy2"):
                     service = ComfyUIIntegrationService()
                     service.enabled = True
@@ -172,11 +172,11 @@ class TestComfyUIErrorHandling:
     @pytest.mark.asyncio
     async def test_unknown_operation(self):
         """Test handling of unknown operation."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         mock_orch = MagicMock()
         
-        with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
+        with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
             with patch.object(Path, "exists", return_value=True):
                 with patch("shutil.copy2"):
                     service = ComfyUIIntegrationService()
@@ -193,12 +193,12 @@ class TestComfyUIErrorHandling:
     @pytest.mark.asyncio
     async def test_exception_during_processing(self):
         """Test graceful handling of exceptions during processing."""
-        from backend.src.services.comfyui_integration import ComfyUIIntegrationService
+        from src.services.comfyui_integration import ComfyUIIntegrationService
         
         mock_orch = MagicMock()
         mock_orch.subtitles = AsyncMock(side_effect=Exception("Processing failed"))
         
-        with patch("backend.src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
+        with patch("src.services.comfyui_integration._get_orchestrator", return_value=mock_orch):
             with patch.object(Path, "exists", return_value=True):
                 with patch("shutil.copy2"):
                     service = ComfyUIIntegrationService()
