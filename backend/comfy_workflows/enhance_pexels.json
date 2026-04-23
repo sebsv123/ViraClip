@@ -15,7 +15,7 @@
   "2": {
     "class_type": "UpscaleModelLoader",
     "inputs": {
-      "model_name": "RealESRGAN_x2plus.pth"
+      "model_name": "RealESRGAN_x4plus.pth"
     }
   },
   "3": {
@@ -41,7 +41,7 @@
       "images": ["4", 0],
       "frame_rate": 30,
       "loop_count": 0,
-      "filename_prefix": "enhanced",
+      "filename_prefix": "enhanced_pexels",
       "format": "video/h264-mp4",
       "pingpong": false,
       "save_output": true

@@ -27,7 +27,7 @@ services:
       - NEXT_PUBLIC_SELF_HOST=${SELF_HOST:-true}
       - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
       - NEXT_PUBLIC_LANDING_ONLY_MODE=${NEXT_PUBLIC_LANDING_ONLY_MODE:-false}
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET:-a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456}
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
       - DATABASE_URL=postgresql://viraclip:viraclip_password@postgres:5432/viraclip
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-viraclip_dev_secret_change_in_production}
       - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost:3000}
@@ -67,7 +67,7 @@ services:
       - ./backend/src:/app/src
       - ./backend/tests:/app/tests
       - ./backend/scripts:/app/scripts
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -88,7 +88,7 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.3-70b-versatile}
+      - LLM=${LLM:-groq:llama-3.1-8b-instant}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
@@ -96,18 +96,18 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-3600}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET:-a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456}
+      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
       - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://sp.localhost:3000}
       - FREE_PLAN_TASK_LIMIT=${FREE_PLAN_TASK_LIMIT:-10}
@@ -141,7 +141,7 @@ services:
       - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
       - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
       # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
+      - SILENCE_MODE=${SILENCE_MODE:-cut}
       - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
       - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
       # ── EditingPipeline tuning ────────────────────────────────────────
@@ -159,7 +159,6 @@ services:
       - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
       - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
       - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
       - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
       - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
       - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
@@ -168,7 +167,7 @@ services:
       - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
       - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
       - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
       - EP_FADE_ON=${EP_FADE_ON:-true}
       - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
       - EP_CTA_ON=${EP_CTA_ON:-false}
@@ -187,14 +186,27 @@ services:
       - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
       - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
+      # ── ComfyUI / LTXV — activar en .env con COMFYUI_ENABLED=true ────
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - COMFYUI_INPUT_HOST_DIR=/app/temp/uploads
+      - LTXV_ENABLED=${LTXV_ENABLED:-false}
       - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
+      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      # ── B-roll provider ───────────────────────────────────────────────
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
+      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
+      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
+      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
+      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
+      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
+      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
+      - T2V_ENABLED=${T2V_ENABLED:-false}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -212,17 +224,11 @@ services:
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
       - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
       - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      # ── Rust agent sidecar ────────────────────────────────────────────
       - RUST_AGENT_URL=${RUST_AGENT_URL:-http://rust-agent:8001}
       - RUST_AGENT_ENABLED=${RUST_AGENT_ENABLED:-false}
-      # ── LLM optimization ─────────────────────────────────────────────
       - DATASET_DIR=${DATASET_DIR:-/app/datasets}
       - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
       - DSPY_OPTIMIZED_PROMPT_PATH=${DSPY_OPTIMIZED_PROMPT_PATH:-/app/datasets/dspy_optimized_prompt.txt}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
     deploy:
       resources:
         reservations:
@@ -242,6 +248,54 @@ services:
       timeout: 15s
       retries: 6
       start_period: 120s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      - "service.description=FastAPI backend API"
+      - "service.group=backend"
+
+
+  comfyui:
+    build:
+      context: ./comfyui
+      dockerfile: Dockerfile
+    container_name: viraclip-comfyui
+    ports:
+      - "8188:8188"
+    volumes:
+      - ./comfyui/custom_nodes:/comfyui/custom_nodes
+      - ./workflows:/comfyui/workflows
+      - ./transitions:/comfyui/transitions
+      - uploads:/comfyui/input
+      - ~/CascadeProjects/ViraClip/outputs:/comfyui/output
+      - ~/CascadeProjects/ViraClip/models:/comfyui/models
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
+      - CUDA_MODULE_LOADING=LAZY
+      - OMP_NUM_THREADS=8
+      - VIRACLIP_API_URL=http://backend:8000
+    deploy:
+      resources:
+        limits:
+          cpus: '6.0'
+          memory: 10G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8188/system_stats || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 180s
 
 
   worker:
@@ -253,7 +307,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -261,6 +315,10 @@ services:
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
       - ./backend/music:/app/assets/sounds
       - ./backend/comfy_workflows:/app/comfy_workflows
+      - llm_datasets:/app/datasets
+      # ← AÑADIDO: volumen compartido con comfyui para que el bridge pueda
+      #   escribir vídeos que ComfyUI lee desde /comfyui/input
+      - uploads:/app/temp/uploads/broll
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -274,7 +332,7 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.3-70b-versatile}
+      - LLM=${LLM:-groq:llama-3.1-8b-instant}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
@@ -282,16 +340,16 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-3600}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
+      - RENDER_CONCURRENCY=4
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -314,14 +372,71 @@ services:
       - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
       - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
+      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
+      - SILENCE_MODE=${SILENCE_MODE:-cut}
+      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
+      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
+      - EP_SATURATION=${EP_SATURATION:-1.25}
+      - EP_CONTRAST=${EP_CONTRAST:-1.10}
+      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
+      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
+      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
+      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
+      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
+      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
+      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
+      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
+      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
+      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
+      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
+      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
+      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
+      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
+      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
+      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
+      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
+      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
+      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
+      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
+      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_FADE_ON=${EP_FADE_ON:-true}
+      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
+      - EP_CTA_ON=${EP_CTA_ON:-false}
+      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
+      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
+      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
+      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
+      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
+      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
+      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
+      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
+      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
+      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
+      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
+      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
+      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
+      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
+      # ── ComfyUI / LTXV ────────────────────────────────────────────────
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - COMFYUI_INPUT_HOST_DIR=/app/temp/uploads   # ← AÑADIDO: ruta dentro del worker
+      - LTXV_ENABLED=${LTXV_ENABLED:-false}
       - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
+      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
+      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
+      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
+      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
+      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
+      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
+      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
+      - T2V_ENABLED=${T2V_ENABLED:-false}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -339,143 +454,14 @@ services:
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
       - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
       - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
-      - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
-      - COMFYUI_PORT=${COMFYUI_PORT:-8188}
-      - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
-      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
-      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
-      - T2V_MODEL=${T2V_MODEL:-cogvideox}
-      - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
-      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
-      - T2V_CACHE_DIR=${T2V_CACHE_DIR:-/app/models/t2v}
-      - RVC_ENABLED=${RVC_ENABLED:-false}
-      - RVC_MODEL_PATH=${RVC_MODEL_PATH:-/app/models/rvc/model.pth}
-      - ESRGAN_ENABLED=${ESRGAN_ENABLED:-false}
-      - ESRGAN_SCALE=${ESRGAN_SCALE:-2}
-      - UPSCALING_MODEL=${UPSCALING_MODEL:-realesrgan-x2}
-      - UPSCALING_MODELS_DIR=${UPSCALING_MODELS_DIR:-/app/models/esrgan}
-      - TTS_NARRATION_ENABLED=${TTS_NARRATION_ENABLED:-false}
-      - TTS_MODEL=${TTS_MODEL:-xtts-v2}
-      - TTS_LANGUAGE=${TTS_LANGUAGE:-en}
-      - TTS_SNR_THRESHOLD_DB=${TTS_SNR_THRESHOLD_DB:-15.0}
-      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
-      - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
-      - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
+      comfyui:
+        condition: service_started   # ← AÑADIDO: no bloquea si comfyui tarda
     deploy:
       resources:
         reservations:
@@ -491,7 +477,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -499,6 +485,7 @@ services:
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
       - ./backend/music:/app/assets/sounds
       - ./backend/comfy_workflows:/app/comfy_workflows
+      - uploads:/app/temp/uploads/broll   # ← AÑADIDO
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -512,7 +499,7 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.3-70b-versatile}
+      - LLM=${LLM:-groq:llama-3.1-8b-instant}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
@@ -520,16 +507,16 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-3600}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
+      - RENDER_CONCURRENCY=4
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -552,14 +539,70 @@ services:
       - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
       - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
+      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
+      - SILENCE_MODE=${SILENCE_MODE:-cut}
+      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
+      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
+      - EP_SATURATION=${EP_SATURATION:-1.25}
+      - EP_CONTRAST=${EP_CONTRAST:-1.10}
+      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
+      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
+      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
+      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
+      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
+      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
+      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
+      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
+      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
+      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
+      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
+      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
+      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
+      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
+      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
+      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
+      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
+      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
+      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
+      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
+      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_FADE_ON=${EP_FADE_ON:-true}
+      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
+      - EP_CTA_ON=${EP_CTA_ON:-false}
+      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
+      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
+      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
+      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
+      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
+      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
+      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
+      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
+      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
+      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
+      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
+      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
+      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
+      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - COMFYUI_INPUT_HOST_DIR=/app/temp/uploads   # ← AÑADIDO
+      - LTXV_ENABLED=${LTXV_ENABLED:-false}
       - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
+      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
+      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
+      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
+      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
+      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
+      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
+      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
+      - T2V_ENABLED=${T2V_ENABLED:-false}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -577,158 +620,14 @@ services:
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
       - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
       - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
-      - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
-      - COMFYUI_PORT=${COMFYUI_PORT:-8188}
-      - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
-      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
-      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
-      - T2V_MODEL=${T2V_MODEL:-cogvideox}
-      - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
-      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
-      - T2V_CACHE_DIR=${T2V_CACHE_DIR:-/app/models/t2v}
-      - RVC_ENABLED=${RVC_ENABLED:-false}
-      - RVC_MODEL_PATH=${RVC_MODEL_PATH:-/app/models/rvc/model.pth}
-      - ESRGAN_ENABLED=${ESRGAN_ENABLED:-false}
-      - ESRGAN_SCALE=${ESRGAN_SCALE:-2}
-      - UPSCALING_MODEL=${UPSCALING_MODEL:-realesrgan-x2}
-      - UPSCALING_MODELS_DIR=${UPSCALING_MODELS_DIR:-/app/models/esrgan}
-      - TTS_NARRATION_ENABLED=${TTS_NARRATION_ENABLED:-false}
-      - TTS_MODEL=${TTS_MODEL:-xtts-v2}
-      - TTS_LANGUAGE=${TTS_LANGUAGE:-en}
-      - TTS_SNR_THRESHOLD_DB=${TTS_SNR_THRESHOLD_DB:-15.0}
-      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
-      - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
-      - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-      # ── Missing config vars (feedback, notifications, admin, etc.) ───
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
-      - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
-      - FEEDBACK_ENABLED=${FEEDBACK_ENABLED:-false}
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
-      - ADMIN_SECRET=${ADMIN_SECRET:-change_me_admin_secret}
-      - ADMIN_ENABLED=${ADMIN_ENABLED:-false}
-      - SELF_HOST=${SELF_HOST:-true}
-      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-      - RESEND_API_KEY=${RESEND_API_KEY}
-      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-ViraClip <onboarding@resend.dev>}"
-      - RUST_AGENT_URL=${RUST_AGENT_URL:-http://rust-agent:8001}
-      - RUST_AGENT_ENABLED=${RUST_AGENT_ENABLED:-false}
-      - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
-      - DATASET_DIR=${DATASET_DIR:-/app/datasets}
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-      ollama:
-        condition: service_started   # no esperar healthy, Ollama es opcional
-      backend:
-        condition: service_healthy
+      comfyui:
+        condition: service_started   # ← AÑADIDO
     deploy:
       resources:
         reservations:
@@ -744,7 +643,7 @@ services:
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
@@ -752,6 +651,7 @@ services:
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
       - ./backend/music:/app/assets/sounds
       - ./backend/comfy_workflows:/app/comfy_workflows
+      - uploads:/app/temp/uploads/broll   # ← AÑADIDO
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -765,7 +665,7 @@ services:
       - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
       - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
       - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.3-70b-versatile}
+      - LLM=${LLM:-groq:llama-3.1-8b-instant}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
@@ -773,16 +673,16 @@ services:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
       - OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-true}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
+      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
       - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-3600}
+      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
+      - RENDER_CONCURRENCY=4
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -802,17 +702,71 @@ services:
       - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
       - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
-      - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
       - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-true}
+      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
+      - SILENCE_MODE=${SILENCE_MODE:-cut}
+      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
+      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
+      - EP_SATURATION=${EP_SATURATION:-1.25}
+      - EP_CONTRAST=${EP_CONTRAST:-1.10}
+      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
+      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
+      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
+      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
+      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
+      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
+      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
+      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
+      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
+      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
+      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
+      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
+      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
+      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
+      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
+      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
+      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
+      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
+      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
+      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
+      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
+      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
+      - EP_FADE_ON=${EP_FADE_ON:-true}
+      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
+      - EP_CTA_ON=${EP_CTA_ON:-false}
+      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
+      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
+      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
+      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
+      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
+      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
+      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
+      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
+      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
+      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
+      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
+      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
+      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
+      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
+      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      - LTXV_ENABLED=${LTXV_ENABLED:-true}
+      - COMFYUI_INPUT_HOST_DIR=/app/temp/uploads   # ← AÑADIDO
+      - LTXV_ENABLED=${LTXV_ENABLED:-false}
       - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
       - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - T2V_ENABLED=${T2V_ENABLED:-true}
+      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
+      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
+      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
+      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
+      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
+      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
+      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
+      - T2V_ENABLED=${T2V_ENABLED:-false}
       - T2V_MODEL=${T2V_MODEL:-cogvideox}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
@@ -830,82 +784,6 @@ services:
       - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
       - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
       - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-true}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-      # ── Missing config vars (feedback, notifications, admin, etc.) ───
-      - BACKEND_AUTH_SECRET=${BACKEND_AUTH_SECRET}
-      - AUTH_SIGNATURE_TTL_SECONDS=${AUTH_SIGNATURE_TTL_SECONDS:-300}
-      - FEEDBACK_ENABLED=${FEEDBACK_ENABLED:-false}
-      - NOTIFICATIONS_ENABLED=${NOTIFICATIONS_ENABLED:-false}
-      - ADMIN_SECRET=${ADMIN_SECRET:-change_me_admin_secret}
-      - ADMIN_ENABLED=${ADMIN_ENABLED:-false}
-      - SELF_HOST=${SELF_HOST:-true}
-      - NEXT_PUBLIC_APP_URL=${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
-      - RESEND_API_KEY=${RESEND_API_KEY}
-      - "RESEND_FROM_EMAIL=${RESEND_FROM_EMAIL:-ViraClip <onboarding@resend.dev>}"
-      - RUST_AGENT_URL=${RUST_AGENT_URL:-http://rust-agent:8001}
-      - RUST_AGENT_ENABLED=${RUST_AGENT_ENABLED:-false}
-      - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
-      - DATASET_DIR=${DATASET_DIR:-/app/datasets}
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      backend:
-        condition: service_healthy
     deploy:
       resources:
         reservations:
@@ -913,9 +791,18 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      comfyui:
+        condition: service_started   # ← AÑADIDO (era ollama antes, incorrecto)
 
 
   gpu_worker:
+    profiles: ["gpu"]
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -924,8 +811,8 @@ services:
     command: [".venv/bin/arq", "src.workers.gpu_tasks.GpuWorkerSettings"]
     volumes:
       - ./backend/src:/app/src
-      - uploads:/app/temp/uploads
-      - ./exports/clips:/app/exports/clips
+      - shared_temp:/app/temp
+      - viraclip_clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
@@ -938,6 +825,7 @@ services:
       - gpu_models_rvc:/app/models/rvc
       - gpu_models_lora:/app/models/lora
       - gpu_models_lora_cache:/app/models/lora_cache
+      - uploads:/app/temp/uploads/broll   # ← AÑADIDO
     environment:
       - PYTHONPATH=/app
       - PYTHONUNBUFFERED=1
@@ -947,13 +835,12 @@ services:
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
-      - LLM=${LLM:-groq:llama-3.3-70b-versatile}
+      - LLM=${LLM:-groq:llama-3.1-8b-instant}
       - GROQ_API_KEY=${GROQ_API_KEY}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
-      # GPU-specific settings
       - GPU_WORKER_ENABLED=true
       - WHISPER_DEVICE=cuda
       - WHISPER_COMPUTE_TYPE=float16
@@ -965,6 +852,20 @@ services:
       - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
       - COMFYUI_PORT=${COMFYUI_PORT:-8188}
       - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
+      - COMFYUI_INPUT_HOST_DIR=/app/temp/uploads   # ← AÑADIDO
+      - LTXV_ENABLED=${LTXV_ENABLED:-false}
+      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
+      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
+      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
+      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
+      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
+      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
+      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
+      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
+      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
+      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
+      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
+      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
       - T2V_MODEL=${T2V_MODEL:-ltx-video}
       - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
       - T2V_CACHE_DIR=/app/models/t2v
@@ -1004,7 +905,7 @@ services:
     ports:
       - "11434:11434"
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 15 && ollama pull phi3:mini && ollama pull qwen3-vl:8b && wait"]
+    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 15 && ollama pull phi3:mini && wait"]
     deploy:
       resources:
         limits:
@@ -1012,51 +913,12 @@ services:
         reservations:
           memory: 3G
     healthcheck:
-      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q phi3 && ollama list 2>/dev/null | grep -q qwen3-vl && echo ok || exit 1"]
+      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q phi3 && echo ok || exit 1"]
       interval: 15s
       timeout: 30s
-      retries: 120
-      start_period: 300s
+      retries: 60
+      start_period: 60s
 
-  comfyui:
-    build:
-      context: ./comfyui
-      dockerfile: Dockerfile
-    container_name: viraclip-comfyui
-    ports:
-      - "8188:8188"
-    volumes:
-      - ./comfyui/custom_nodes:/comfyui/custom_nodes
-      - ./workflows:/comfyui/workflows
-      - ./transitions:/comfyui/transitions
-      - ~/proyectos/ViraClip/uploads:/comfyui/input
-      - ~/proyectos/ViraClip/outputs:/comfyui/output
-      - ~/proyectos/ViraClip/models:/comfyui/models:ro
-      - comfyui_models:/comfyui/models:rw
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - CUDA_VISIBLE_DEVICES=0
-      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
-      - CUDA_MODULE_LOADING=LAZY
-      - OMP_NUM_THREADS=8
-      - VRACLIP_API_URL=http://backend:8000
-    deploy:
-      resources:
-        limits:
-          cpus: '6.0'
-          memory: 10G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:8188/system_stats || exit 1"]
-      interval: 30s
-      timeout: 15s
-      retries: 5
-      start_period: 180s
 
   redis:
     container_name: viraclip-redis
@@ -1105,10 +967,11 @@ services:
       - RUST_LOG=info
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     volumes:
-      - uploads:/app/temp/uploads
+      - shared_temp:/app/temp
     depends_on:
       redis:
         condition: service_healthy
+
 
   postgres:
     container_name: viraclip-postgres
@@ -1149,7 +1012,11 @@ services:
 
 
 volumes:
+  shared_temp:
+    driver: local
   uploads:
+    driver: local
+  viraclip_clips:
     driver: local
   whisper_models:
     driver: local
@@ -1159,8 +1026,7 @@ volumes:
     driver: local
   ollama_models:
     driver: local
-  comfyui_models:
-    driver: local
+  # comfyui_models eliminado — se usa la carpeta local ~/CascadeProjects/ViraClip/models
   comfyui_output:
     driver: local
   comfyui_input:

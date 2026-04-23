@@ -1,0 +1,112 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "__INPUT_IMAGE__"
+    }
+  },
+  "2": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["13", 0],
+      "text": "worst quality, inconsistent motion, blurry, jittery, distorted, watermark, text, logo"
+    }
+  },
+  "3": {
+    "class_type": "CLIPTextEncode",
+    "inputs": {
+      "clip": ["13", 0],
+      "text": "__POSITIVE_PROMPT__"
+    }
+  },
+  "4": {
+    "class_type": "LTXVImgToVideo",
+    "inputs": {
+      "positive": ["3", 0],
+      "negative": ["2", 0],
+      "vae": ["5", 2],
+      "image": ["1", 0],
+      "width": 576,
+      "height": 1024,
+      "length": 97,
+      "batch_size": 1
+    }
+  },
+  "5": {
+    "class_type": "CheckpointLoaderSimple",
+    "inputs": {
+      "ckpt_name": "ltxv-2b-0.9.8-distilled-fp8.safetensors"
+    }
+  },
+  "6": {
+    "class_type": "LTXVScheduler",
+    "inputs": {
+      "steps": 8,
+      "max_shift": 2.05,
+      "base_shift": 0.95,
+      "stretch": true,
+      "terminal": 0.1
+    }
+  },
+  "7": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "euler"
+    }
+  },
+  "8": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": ["11", 0],
+      "guider": ["12", 0],
+      "sampler": ["7", 0],
+      "sigmas": ["6", 0],
+      "latent_image": ["4", 0]
+    }
+  },
+  "9": {
+    "class_type": "VAEDecodeTiled",
+    "inputs": {
+      "samples": ["8", 0],
+      "vae": ["5", 2],
+      "tile_size": 512,
+      "overlap": 64,
+      "temporal_size": 64,
+      "temporal_overlap": 8
+    }
+  },
+  "10": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": ["9", 0],
+      "frame_rate": 24,
+      "loop_count": 0,
+      "filename_prefix": "ltxv_i2v",
+      "format": "video/h264-mp4",
+      "pingpong": false,
+      "save_output": true
+    }
+  },
+  "11": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 42
+    }
+  },
+  "12": {
+    "class_type": "CFGGuider",
+    "inputs": {
+      "model": ["5", 0],
+      "positive": ["2", 0],
+      "negative": ["3", 0],
+      "cfg": 3.0
+    }
+  },
+  "13": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "t5xxl_fp16.safetensors",
+      "type": "stable_diffusion"
+    }
+  }
+}

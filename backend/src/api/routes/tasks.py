@@ -183,7 +183,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             contextual_overlays = template_params.get("overlay_enabled", contextual_overlays)
             overlay_frequency = template_params.get("overlay_frequency", overlay_frequency)
             audio_ducking = template_params.get("audio_ducking", audio_ducking)
-    if processing_mode not in {"fast", "balanced", "quality"}:
+    if processing_mode not in {"fast", "balanced", "quality", "elite"}:
         processing_mode = config.default_processing_mode
     output_format = data.get("output_format", "vertical")
     if output_format not in {"vertical", "original"}:

@@ -8,79 +8,63 @@
   "2": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "text": "__POSITIVE_PROMPT__",
-      "clip": ["1", 1]
+      "clip": ["1", 1],
+      "text": "__POSITIVE_PROMPT__, cinematic, 9:16 vertical video, professional, smooth motion, high quality"
     }
   },
   "3": {
     "class_type": "CLIPTextEncode",
     "inputs": {
-      "text": "blurry, low quality, watermark, text, logo, nsfw, ugly, deformed, bad anatomy",
-      "clip": ["1", 1]
+      "clip": ["1", 1],
+      "text": "worst quality, low quality, blurry, watermark, text, logo, nsfw"
     }
   },
   "4": {
-    "class_type": "EmptyLatentImage",
+    "class_type": "ADE_AnimateDiffLoaderWithContext",
     "inputs": {
-      "width": 512,
-      "height": 768,
-      "batch_size": 16
+      "model": ["1", 0],
+      "motion_module": "mm_sd_v15_v2.ckpt",
+      "beta_schedule": "autoselect",
+      "motion_scale": 1.0
     }
   },
   "5": {
-    "class_type": "ADE_AnimateDiffLoaderWithContext",
+    "class_type": "EmptyLatentImage",
     "inputs": {
-      "model_name": "mm_sd_v15_v2.ckpt",
-      "beta_schedule": "sqrt_linear (AnimateDiff)",
-      "model": ["1", 0],
-      "context_options": ["6", 0],
-      "motion_lora": null,
-      "ad_settings": null,
-      "sample_settings": null,
-      "motion_scale": 1.0,
-      "apply_v2_models_properly": true
+      "width": 576,
+      "height": 1024,
+      "batch_size": 16
     }
   },
   "6": {
-    "class_type": "ADE_StandardUniformContextOptions",
-    "inputs": {
-      "request_n_frames": 16,
-      "length": 16,
-      "stride": 1,
-      "overlap": 4,
-      "closed_loop": false,
-      "fuse_method": "pyramid"
-    }
-  },
-  "7": {
     "class_type": "KSampler",
     "inputs": {
-      "model": ["5", 0],
+      "model": ["4", 0],
       "positive": ["2", 0],
       "negative": ["3", 0],
-      "latent_image": ["4", 0],
+      "latent_image": ["5", 0],
       "seed": 42,
       "steps": 20,
-      "cfg": 7.5,
+      "cfg": 7.0,
       "sampler_name": "euler_ancestral",
-      "scheduler": "linear",
+      "scheduler": "karras",
       "denoise": 1.0
     }
   },
-  "8": {
+  "7": {
     "class_type": "VAEDecode",
     "inputs": {
-      "samples": ["7", 0],
+      "samples": ["6", 0],
       "vae": ["1", 2]
     }
   },
-  "9": {
+  "8": {
     "class_type": "VHS_VideoCombine",
     "inputs": {
-      "images": ["8", 0],
+      "images": ["7", 0],
       "frame_rate": 8,
       "loop_count": 0,
-      "filename_prefix": "broll_",
+      "filename_prefix": "animatediff_broll",
       "format": "video/h264-mp4",
       "pingpong": false,
       "save_output": true

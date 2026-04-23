@@ -32,31 +32,30 @@ async def test_health():
 
 
 async def test_workflow_simple():
-    """Test 2: Enviar workflow simple de prueba"""
-    print("\n🧪 Test 2: Workflow de prueba...")
+    """Test 2: Enviar workflow LTXV de prueba"""
+    print("\n🧪 Test 2: Workflow LTXV t2v de prueba...")
     
-    # Workflow mínimo: generar una imagen vacía
-    test_workflow = {
-        "1": {
-            "inputs": {"width": 512, "height": 512, "batch_size": 1},
-            "class_type": "EmptyLatentImage"
-        },
-        "2": {
-            "inputs": {"samples": ["1", 0], "vae_name": "taesd"},
-            "class_type": "VAEDecode"
-        },
-        "3": {
-            "inputs": {"filename_prefix": "test", "images": ["2", 0]},
-            "class_type": "SaveImage"
-        }
-    }
+    # Cargar y modificar el workflow real
+    import json
+    workflow_path = Path(__file__).parent / "backend" / "comfy_workflows" / "ltxv_t2v_broll.json"
+    
+    with open(workflow_path) as f:
+        workflow = json.load(f)
+    
+    # Reemplazar placeholders
+    wf_str = json.dumps(workflow)
+    wf_str = wf_str.replace("__POSITIVE_PROMPT__", "futuristic city neon lights vertical")
+    wf_str = wf_str.replace("__THEME__", "tech")
+    workflow = json.loads(wf_str)
     
     try:
-        result = await comfyui_orchestrator._execute(test_workflow, "test_task", "png")
+        result = await comfyui_orchestrator._execute(workflow, "test_ltxv_task", "mp4")
         print(f"✅ Workflow ejecutado: {result}")
         return True
     except Exception as e:
         print(f"❌ Error en workflow: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

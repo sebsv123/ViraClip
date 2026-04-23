@@ -379,23 +379,68 @@ class WorkerSettings:
 
 
 # Activate cron jobs after class definition to avoid forward-reference issues
+def _safe_cron(func, name, **kwargs):
+    """Safely create a cron job with individual error handling."""
+    try:
+        from arq import cron
+        job = cron(func, **kwargs)
+        logger.debug(f"[Scheduler] Registered cron job: {name}")
+        return job
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).warning(
+            f"[Scheduler] Failed to register cron job '{name}': {e} — skipping"
+        )
+        return None
+
+
 try:
-    from arq import cron
     from .feedback_cron import periodic_model_retraining  # re-exported shim
     from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
-    WorkerSettings.cron_jobs = [
-        # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
-        cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0),
-        # Phase 7.5: daily trending data fetch (03:00 UTC every day)
-        cron(fetch_trending_data, hour=3, minute=0),
-        # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)
-        cron(retrain_scorer_monthly, hour=4, minute=0, day=1),
-    ]
+    
+    _cron_jobs = []
+    
+    # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
+    _job = _safe_cron(
+        periodic_model_retraining, 
+        "periodic_model_retraining",
+        hour=2, minute=0, day_of_week=0
+    )
+    if _job:
+        _cron_jobs.append(_job)
+    
+    # Phase 7.5: daily trending data fetch (03:00 UTC every day)
+    _job = _safe_cron(
+        fetch_trending_data,
+        "fetch_trending_data",
+        hour=3, minute=0
+    )
+    if _job:
+        _cron_jobs.append(_job)
+    
+    # Phase 7.5: monthly full scorer retrain (1st of month, 04:00 UTC)
+    _job = _safe_cron(
+        retrain_scorer_monthly,
+        "retrain_scorer_monthly",
+        hour=4, minute=0, day=1
+    )
+    if _job:
+        _cron_jobs.append(_job)
+    
+    WorkerSettings.cron_jobs = _cron_jobs
+    
+    if _cron_jobs:
+        import logging as _log
+        _log.getLogger(__name__).info(
+            f"[WorkerSettings] Successfully registered {len(_cron_jobs)} cron jobs"
+        )
+    
 except Exception as _cron_err:
     import logging as _log
     _log.getLogger(__name__).warning(
-        "[WorkerSettings] cron_jobs registration failed: %s — "
+        "[WorkerSettings] cron_jobs setup failed: %s — "
         "feedback loop and analytics import will NOT run. "
-        "Check imports: analytics_importer, feedback_loop_service, data_pipeline_cron",
+        "Check imports: feedback_loop_service, data_pipeline_cron",
         _cron_err
     )
+    WorkerSettings.cron_jobs = []
