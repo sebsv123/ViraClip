@@ -2431,7 +2431,16 @@ class VideoService:
             # Use LLMRouter (Groq) for virality scoring instead of Ollama
             from .llm_router import LLMRouter
             llm_router = LLMRouter()
-            virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)
+            try:
+                virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)
+            except Exception as _llm_err:
+                # Degrade gracefully on 429/5xx/network: continue with rule-based fallback so pipeline isn't blocked
+                logger.warning(
+                    f"[VIRALITY] LLMRouter.score_segments failed ({type(_llm_err).__name__}: {_llm_err}) — falling back to rule-based scoring"
+                )
+                virality_data = llm_router._rule_based_fallback(
+                    "\n".join(segment_texts or []), "es", num_clips
+                )
             # Defensive JSON parsing: LLM may return string instead of dict
             if isinstance(virality_data, str):
                 try:
