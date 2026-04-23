@@ -2,6 +2,8 @@
 Tests for Phase 9 Creative Engine services.
 All tests are CPU-only and mock external dependencies (FFmpeg subprocesses,
 Phi-3 LLM, MLP scorer) so they run without hardware or network access.
+
+Updated: 2026-04-23 - Added background composite integration tests
 """
 
 import asyncio
@@ -540,3 +542,161 @@ class TestContextualBroll:
         pairs = await self.broll.get_for_timeline(timeline)
         # No assets found → empty list (graceful)
         assert pairs == []
+
+
+# ── creative_pipeline with background composite ────────────────────────────────
+
+class TestCreativePipelineBackgroundComposite:
+    """Test pipeline behavior with background composite service."""
+
+    @pytest.mark.asyncio
+    async def test_pipeline_continues_when_composite_fails(self, tmp_path):
+        """Pipeline should NOT fail when background composite returns error."""
+        from src.services.creative_pipeline import CreativePipeline
+
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x" * 500)
+        source = tmp_path / "src.mp4"
+
+        pipeline = CreativePipeline()
+
+        segment = {
+            "start_time": 0.0,
+            "end_time": 30.0,
+            "transcript": "test",
+            "viral_score": 8.5,
+            "duration": 15.0,
+        }
+        words = [{"word": "test", "start": 1.0, "end": 1.5}]
+
+        # Mock all services but make background composite fail
+        with (
+            patch("src.services.multimodal_detector.get_multimodal_detector") as mock_det,
+            patch("src.services.virality_engine.get_virality_engine") as mock_eng,
+            patch("src.services.smart_templates.get_template_selector") as mock_tmpl,
+            patch("src.services.hook_engine.get_hook_engine") as mock_hook,
+            patch("src.services.smart_audio.get_smart_audio") as mock_audio,
+            patch("src.services.learning_loop.get_learning_loop") as mock_qa,
+            patch("src.services.creative_pipeline.background_composite_service") as mock_bg,
+        ):
+            from src.services.multimodal_detector import TimelineEvent
+            from src.services.virality_engine import ViralityPrediction
+            from src.services.smart_templates import PRESETS
+            from src.services.hook_engine import HookResult
+
+            mock_det.return_value.generate_timeline = AsyncMock(
+                return_value=[TimelineEvent(t=0.0, type="keyword", strength=0.9, duration=0.4)]
+            )
+            mock_eng.return_value.predict = AsyncMock(return_value=ViralityPrediction(
+                score=75.0, hook_score=80.0, pacing_score=70.0, emotion_score=65.0,
+                improvements=["test"]
+            ))
+            mock_tmpl.return_value.select = MagicMock(return_value=PRESETS["tiktok_viral"])
+            mock_hook.return_value.find_best_hook = MagicMock(
+                return_value=HookResult(0.0, 0.4, "test", 0.88, False, True)
+            )
+            mock_audio.return_value.master = AsyncMock(return_value=clip)
+
+            from src.services.learning_loop import RenderManifest
+            mock_manifest = MagicMock()
+            mock_manifest.qa_passed = True
+            mock_qa.return_value.post_render_analysis = AsyncMock(return_value=mock_manifest)
+
+            # Make background composite raise exception
+            mock_bg.process = AsyncMock(side_effect=Exception("Composite service failed"))
+
+            # This should NOT raise - pipeline continues
+            meta = await pipeline.enhance(
+                clip_path=clip,
+                source_video=source,
+                segment=segment,
+                words=words,
+                audio_features={"energy": 0.6},
+                task_id="composite-error-test",
+                clip_index=0,
+                platform="tiktok",
+            )
+
+            assert isinstance(meta, dict)
+            assert "creative_enhanced" in meta
+            assert meta.get("background_composite_applied") is None  # Not set due to error
+            mock_bg.process.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_pipeline_skips_broll_when_composite_mode_a(self, tmp_path):
+        """B-roll should be skipped when composite returns Mode A."""
+        from src.services.creative_pipeline import CreativePipeline
+
+        clip = tmp_path / "clip.mp4"
+        clip.write_bytes(b"x" * 500)
+        source = tmp_path / "src.mp4"
+
+        pipeline = CreativePipeline()
+
+        segment = {
+            "start_time": 0.0,
+            "end_time": 30.0,
+            "transcript": "test",
+            "viral_score": 8.5,
+            "duration": 15.0,
+        }
+        words = [{"word": "test", "start": 1.0, "end": 1.5}]
+
+        with (
+            patch("src.services.multimodal_detector.get_multimodal_detector") as mock_det,
+            patch("src.services.virality_engine.get_virality_engine") as mock_eng,
+            patch("src.services.smart_templates.get_template_selector") as mock_tmpl,
+            patch("src.services.hook_engine.get_hook_engine") as mock_hook,
+            patch("src.services.smart_audio.get_smart_audio") as mock_audio,
+            patch("src.services.learning_loop.get_learning_loop") as mock_qa,
+            patch("src.services.creative_pipeline.background_composite_service") as mock_bg,
+            patch("src.services.contextual_broll.get_contextual_broll") as mock_broll,
+        ):
+            from src.services.multimodal_detector import TimelineEvent
+            from src.services.virality_engine import ViralityPrediction
+            from src.services.smart_templates import PRESETS
+            from src.services.hook_engine import HookResult
+
+            mock_det.return_value.generate_timeline = AsyncMock(
+                return_value=[TimelineEvent(t=0.0, type="keyword", strength=0.9, duration=0.4)]
+            )
+            mock_eng.return_value.predict = AsyncMock(return_value=ViralityPrediction(
+                score=75.0, hook_score=80.0, pacing_score=70.0, emotion_score=65.0,
+                improvements=["test"]
+            ))
+            mock_tmpl.return_value.select = MagicMock(return_value=PRESETS["tiktok_viral"])
+            mock_hook.return_value.find_best_hook = MagicMock(
+                return_value=HookResult(0.0, 0.4, "test", 0.88, False, True)
+            )
+            mock_audio.return_value.master = AsyncMock(return_value=clip)
+
+            from src.services.learning_loop import RenderManifest
+            mock_manifest = MagicMock()
+            mock_manifest.qa_passed = True
+            mock_qa.return_value.post_render_analysis = AsyncMock(return_value=mock_manifest)
+
+            # Return Mode A (composite successful)
+            mock_bg.process = AsyncMock(return_value={
+                "mode_used": "A",
+                "output_path": str(clip),
+                "success": True,
+                "reason": "ok"
+            })
+
+            mock_broll.return_value.get_for_timeline = AsyncMock(return_value=[])
+
+            meta = await pipeline.enhance(
+                clip_path=clip,
+                source_video=source,
+                segment=segment,
+                words=words,
+                audio_features={"energy": 0.6},
+                task_id="composite-mode-a-test",
+                clip_index=0,
+                platform="tiktok",
+            )
+
+            assert meta.get("composite_mode") == "A"
+            assert meta.get("background_composite_applied") is True
+            # B-roll should be skipped
+            mock_broll.return_value.get_for_timeline.assert_not_called()

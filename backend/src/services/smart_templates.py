@@ -2,6 +2,8 @@
 Smart Templates
 
 Content-adaptive rendering presets per platform and virality score.
+
+Updated: 2026-04-23 - Added zoom_punch_zoom and zoom_punch_duration fields
 """
 
 import logging
@@ -17,6 +19,9 @@ class Preset:
     extra_vf_filters: "list[str]" = field(default_factory=list)
     caption_style: str = "default"
     beat_sync: bool = False
+    # Campos adicionales esperados por creative_pipeline
+    zoom_punch_zoom: float = 1.15
+    zoom_punch_duration: float = 0.25
 
 
 # 4 core presets as specified
@@ -24,6 +29,8 @@ _PRESETS: "dict[str, Preset]" = {
     "viral_energetic": Preset(
         name="viral_energetic",
         zoom_punch_enabled=True,
+        zoom_punch_zoom=1.2,
+        zoom_punch_duration=0.3,
         extra_vf_filters=["eq=contrast=1.1:saturation=1.2:brightness=0.02"],
         caption_style="bold_center",
         beat_sync=True,
@@ -31,6 +38,8 @@ _PRESETS: "dict[str, Preset]" = {
     "cinematic_calm": Preset(
         name="cinematic_calm",
         zoom_punch_enabled=False,
+        zoom_punch_zoom=1.0,
+        zoom_punch_duration=0.0,
         extra_vf_filters=["eq=contrast=1.05:saturation=0.95:brightness=0.0"],
         caption_style="elegant_bottom",
         beat_sync=False,
@@ -38,6 +47,8 @@ _PRESETS: "dict[str, Preset]" = {
     "talking_head": Preset(
         name="talking_head",
         zoom_punch_enabled=False,
+        zoom_punch_zoom=1.0,
+        zoom_punch_duration=0.0,
         extra_vf_filters=[],
         caption_style="standard_bottom",
         beat_sync=False,
@@ -45,6 +56,8 @@ _PRESETS: "dict[str, Preset]" = {
     "high_energy": Preset(
         name="high_energy",
         zoom_punch_enabled=True,
+        zoom_punch_zoom=1.25,
+        zoom_punch_duration=0.35,
         extra_vf_filters=["eq=contrast=1.2:saturation=1.3:brightness=0.05"],
         caption_style="bold_large",
         beat_sync=True,
