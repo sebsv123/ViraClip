@@ -22,6 +22,19 @@ def _get_ffmpeg_exe() -> str:
     except Exception:
         return "ffmpeg"
 
+
+def _test_nvenc() -> bool:
+    """Test if h264_nvenc encoder is actually usable by FFmpeg."""
+    try:
+        r = subprocess.run(
+            [_get_ffmpeg_exe(), "-f", "lavfi", "-i", "nullsrc=s=1x1:d=0.1",
+             "-c:v", "h264_nvenc", "-f", "null", "-"],
+            capture_output=True, timeout=5
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
 _PLATFORM_VF: dict = {
     "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
     "reels":    "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
@@ -462,12 +475,24 @@ def create_optimized_clip(
             else:
                 from ..gpu_utils import get_ffmpeg_video_codec_args as _get_enc
                 _enc = _get_enc("high")
-                encoding_settings = {
-                    "codec": _enc["codec"],
-                    "preset": _enc.get("preset", "ultrafast"),
-                    "ffmpeg_params": _enc.get("extra_args", []),
-                }
-                logger.info(f"Using encoding: {encoding_settings['codec']}")
+                # Proactive NVENC test: if nvenc fails, fall back to libx264
+                USE_NVENC = _enc["codec"] == "h264_nvenc" and _test_nvenc()
+                if USE_NVENC:
+                    # Use NVENC-compatible params for MoviePy (no -rc constqp)
+                    encoding_settings = {
+                        "codec": "h264_nvenc",
+                        "preset": _enc.get("preset", "p4"),
+                        "ffmpeg_params": ["-rc", "vbr", "-cq", "20", "-pix_fmt", "yuv420p"],
+                    }
+                    logger.info(f"Using GPU encoding: h264_nvenc (tested OK)")
+                else:
+                    # Safe fallback to libx264
+                    encoding_settings = {
+                        "codec": "libx264",
+                        "preset": "ultrafast",
+                        "ffmpeg_params": ["-crf", "22", "-pix_fmt", "yuv420p"],
+                    }
+                    logger.info(f"Using encoding: libx264 (NVENC unavailable or failed test)")
 
             _fps_used = clip.fps or 30
 

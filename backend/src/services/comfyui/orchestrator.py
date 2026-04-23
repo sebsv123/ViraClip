@@ -3,11 +3,15 @@ ComfyUIOrchestrator - Integración ViraClip con ComfyUI
 Optimizado para RTX 5070 8GB VRAM
 """
 
+import os
 import aiohttp
 import asyncio
 import random
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class ComfyUIOrchestrator:
@@ -86,9 +90,10 @@ class ComfyUIOrchestrator:
         }
         return await self._execute(workflow, task_id, "mp4")
     
-    async def thumbnail(self, keyframe_path: str, task_id: str, 
+    async def thumbnail(self, keyframe_path: str, task_id: str,
                         prompt: str = "cinematic viral thumbnail") -> str:
-        """Generar thumbnail con SDXL-Turbo GGUF"""
+        """Generar thumbnail con SDXL-Turbo"""
+        sdxl_model = os.getenv("COMFYUI_SDXL_MODEL", "sd_xl_turbo_1.0_fp16.safetensors")
         workflow = {
             "1": {
                 "inputs": {
@@ -114,10 +119,9 @@ class ComfyUIOrchestrator:
             },
             "4": {
                 "inputs": {
-                    "unet_name": "turbo-xl-Q4_0.gguf",
-                    "weight_dtype": "default"
+                    "ckpt_name": sdxl_model
                 },
-                "class_type": "UnetLoaderGGUF"
+                "class_type": "CheckpointLoaderSimple"
             },
             "5": {
                 "inputs": {
@@ -150,11 +154,100 @@ class ComfyUIOrchestrator:
             }
         }
         return await self._execute(workflow, task_id, "png")
-    
-    async def add_broll_transition(self, main_clip: str, broll_clip: str, 
+
+    async def generate_broll_with_ltx(self, prompt: str, task_id: str,
+                                      duration_seconds: float = 3.0) -> str:
+        """Generar B-roll desde texto usando LTX-Video"""
+        frames = int(duration_seconds * 24)
+        negative_prompt = "worst quality, inconsistent motion, blurry, jittery, distorted, watermark, text, logo"
+        ltx_model = os.getenv("COMFYUI_LTX_MODEL", "ltxv-2b-0.9.8-distilled-fp8.safetensors")
+
+        workflow = {
+            "1": {
+                "inputs": {
+                    "ckpt_name": ltx_model
+                },
+                "class_type": "CheckpointLoaderSimple"
+            },
+            "2": {
+                "inputs": {
+                    "text": prompt,
+                    "clip": ["1", 1]
+                },
+                "class_type": "CLIPTextEncode"
+            },
+            "3": {
+                "inputs": {
+                    "text": negative_prompt,
+                    "clip": ["1", 1]
+                },
+                "class_type": "CLIPTextEncode"
+            },
+            "4": {
+                "inputs": {
+                    "width": 576,
+                    "height": 1024,
+                    "length": frames,
+                    "batch_size": 1
+                },
+                "class_type": "EmptyLTXVLatentVideo"
+            },
+            "5": {
+                "inputs": {
+                    "steps": 25,
+                    "max_shift": 2.05,
+                    "base_shift": 0.95,
+                    "stretch": True,
+                    "terminal": 0.1
+                },
+                "class_type": "LTXVScheduler"
+            },
+            "6": {
+                "inputs": {
+                    "seed": random.randint(1, 1000000),
+                    "model": ["1", 0],
+                    "positive": ["2", 0],
+                    "negative": ["3", 0],
+                    "latent_image": ["4", 0],
+                    "cfg": 3.5
+                },
+                "class_type": "LTXVSampler"
+            },
+            "7": {
+                "inputs": {
+                    "samples": ["6", 0],
+                    "vae": ["1", 2]
+                },
+                "class_type": "LTXVDecoder"
+            },
+            "8": {
+                "inputs": {
+                    "images": ["7", 0],
+                    "frame_rate": 24,
+                    "format": "video/h264-mp4",
+                    "crf": 23
+                },
+                "class_type": "VHS_VideoCombine"
+            },
+            "10": {
+                "inputs": {
+                    "video": ["8", 0],
+                    "filename_prefix": f"{task_id}_broll_ltx"
+                },
+                "class_type": "VHS_SaveVideo"
+            }
+        }
+        return await self._execute(workflow, task_id, "mp4")
+
+    async def add_broll_transition(self, main_clip: str, broll_clip: Optional[str] = None,
                                    task_id: str, transition_type: str = "fade",
                                    duration: float = 1.0) -> str:
-        """Añadir B-roll con transición"""
+        """Añadir B-roll con transición. Si no se proporciona broll_clip, se genera con LTX."""
+        # Si no hay broll_clip, generarlo con LTX
+        if not broll_clip:
+            broll_prompt = f"cinematic B-roll footage, {task_id}, professional quality, smooth motion"
+            broll_clip = await self.generate_broll_with_ltx(broll_prompt, task_id, duration_seconds=3.0)
+
         frames = int(duration * 30)
         workflow = {
             "1": {
@@ -180,7 +273,7 @@ class ComfyUIOrchestrator:
                     "transition_frames": frames,
                     "transition_type": transition_type
                 },
-                "class_type": "VHS_VideoConcatenate"
+                "class_type": "VHS_VideoConcat"
             },
             "4": {
                 "inputs": {
@@ -248,12 +341,28 @@ class ComfyUIOrchestrator:
         """Verificar estado de ComfyUI"""
         try:
             async with aiohttp.ClientSession() as session:
+                # Check system stats
                 async with session.get(
                     f"{self.url}/system_stats",
                     timeout=aiohttp.ClientTimeout(total=5)
                 ) as resp:
                     if resp.status == 200:
-                        return {"status": "ok", "data": await resp.json()}
+                        system_data = await resp.json()
+
+                        # Check available models in CheckpointLoaderSimple
+                        try:
+                            async with session.get(
+                                f"{self.url}/object_info/CheckpointLoaderSimple",
+                                timeout=aiohttp.ClientTimeout(total=5)
+                            ) as model_resp:
+                                if model_resp.status == 200:
+                                    model_info = await model_resp.json()
+                                    ckpt_list = model_info.get("CheckpointLoaderSimple", {}).get("input", {}).get("required", {}).get("ckpt_name", [[]])[0]
+                                    logger.info(f"Available CheckpointLoaderSimple models: {ckpt_list}")
+                        except Exception as e:
+                            logger.warning(f"Could not fetch CheckpointLoaderSimple models: {e}")
+
+                        return {"status": "ok", "data": system_data}
                     return {"status": "error", "code": resp.status}
         except Exception as e:
             return {"status": "error", "message": str(e)}

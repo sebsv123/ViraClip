@@ -318,11 +318,34 @@ class GpuWorkerSettings:
 
 
 # Activate GPU cron jobs — weekly LoRA retrain (Sunday 02:30 UTC)
+def _safe_cron_gpu(func, name, **kwargs):
+    """Safely create a cron job with individual error handling."""
+    try:
+        from arq import cron
+        job = cron(func, **kwargs)
+        logger.debug(f"[Scheduler] Registered GPU cron job: {name}")
+        return job
+    except Exception as e:
+        logger.warning(f"[Scheduler] Failed to register GPU cron job '{name}': {e} — skipping")
+        return None
+
+
 try:
-    from arq import cron
     from .data_pipeline_cron import retrain_lora_weekly
-    GpuWorkerSettings.cron_jobs = [
-        cron(retrain_lora_weekly, hour=2, minute=30, day_of_week=0),
-    ]
-except Exception:  # pragma: no cover
-    pass  # cron stays empty in test / no-arq environments
+    
+    _job = _safe_cron_gpu(
+        retrain_lora_weekly,
+        "retrain_lora_weekly",
+        hour=2, minute=30, day_of_week=0
+    )
+    GpuWorkerSettings.cron_jobs = [_job] if _job else []
+    
+    if _job:
+        logger.info(f"[GpuWorkerSettings] Successfully registered GPU cron job")
+        
+except Exception as _cron_err:
+    logger.warning(
+        f"[GpuWorkerSettings] GPU cron_jobs setup failed: {_cron_err} — "
+        "LoRA weekly retrain will NOT run."
+    )
+    GpuWorkerSettings.cron_jobs = []

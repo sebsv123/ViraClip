@@ -2343,9 +2343,14 @@ class VideoService:
                     self.broll_opportunities = payload.get("broll_opportunities")
 
             relevant_parts = None
-            
-            # Try cached analysis from parameter first
-            if cached_analysis_json:
+
+            # Elite mode bypasses all analysis caches to force fresh high-quality analysis
+            _bypass_analysis_cache = (processing_mode == "elite")
+            if _bypass_analysis_cache:
+                logger.info("[CACHE] Bypassing AI analysis cache for elite mode — forcing fresh analysis")
+
+            # Try cached analysis from parameter first (skip if bypassing)
+            if cached_analysis_json and not _bypass_analysis_cache:
                 try:
                     cached_analysis = json.loads(cached_analysis_json)
                     segments = cached_analysis.get("most_relevant_segments", [])
@@ -2361,14 +2366,15 @@ class VideoService:
                 except Exception as e:
                     logger.error(f"[CACHE] Failed to parse cached AI analysis: {e}", exc_info=True)
                     relevant_parts = None
-            
-            # Try Smart Cache for AI analysis
-            if relevant_parts is None:
+
+            # Try Smart Cache for AI analysis (keyed by video hash + processing_mode)
+            if relevant_parts is None and not _bypass_analysis_cache:
                 video_hash = cache_manager._generate_file_hash(video_path)
-                cached_ai = await cache_manager.get("ai_analysis", video_hash)
+                cache_key_mode = f"{video_hash}:{processing_mode}"
+                cached_ai = await cache_manager.get("ai_analysis", cache_key_mode)
                 if cached_ai:
                     relevant_parts = _SimpleResult(cached_ai["data"])
-                    logger.info(f"[CACHE] Smart cache HIT for AI analysis: {len(cached_ai['data'].get('most_relevant_segments', []))} segments")
+                    logger.info(f"[CACHE] Smart cache HIT for AI analysis ({processing_mode}): {len(cached_ai['data'].get('most_relevant_segments', []))} segments")
 
             if relevant_parts is None:
                 # AI analysis with retry logic
@@ -2380,21 +2386,24 @@ class VideoService:
                     max_retries=2,
                     context={"stage": "ai_analysis", "task_id": task_id}
                 )
-                # Cache in smart cache
-                cache_payload = {
-                    "summary": getattr(relevant_parts, "summary", None),
-                    "key_topics": getattr(relevant_parts, "key_topics", []),
-                    "most_relevant_segments": [
-                        s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else vars(s))
-                        for s in (relevant_parts.most_relevant_segments or [])
-                    ],
-                    "broll_opportunities": [
-                        o if isinstance(o, dict) else (o.model_dump() if hasattr(o, "model_dump") else vars(o))
-                        for o in (getattr(relevant_parts, "broll_opportunities", None) or [])
-                    ],
-                }
-                await cache_manager.set("ai_analysis", video_hash, cache_payload)
-                logger.info(f"[CACHE] Saved AI analysis to smart cache")
+                # Cache in smart cache (only for non-elite modes to avoid polluting cache)
+                if not _bypass_analysis_cache:
+                    video_hash = cache_manager._generate_file_hash(video_path)
+                    cache_key_mode = f"{video_hash}:{processing_mode}"
+                    cache_payload = {
+                        "summary": getattr(relevant_parts, "summary", None),
+                        "key_topics": getattr(relevant_parts, "key_topics", []),
+                        "most_relevant_segments": [
+                            s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else vars(s))
+                            for s in (relevant_parts.most_relevant_segments or [])
+                        ],
+                        "broll_opportunities": [
+                            o if isinstance(o, dict) else (o.model_dump() if hasattr(o, "model_dump") else vars(o))
+                            for o in (getattr(relevant_parts, "broll_opportunities", None) or [])
+                        ],
+                    }
+                    await cache_manager.set("ai_analysis", cache_key_mode, cache_payload)
+                    logger.info(f"[CACHE] Saved AI analysis to smart cache ({processing_mode})")
 
             # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
             if progress_callback:
@@ -2429,7 +2438,13 @@ class VideoService:
                     virality_data = json.loads(virality_data)
                 except (json.JSONDecodeError, ValueError):
                     virality_data = {}
-            virality_map = {item.get("segment_index"): item for item in virality_data.get("analysis", [])}
+            # Ensure virality_data is a dict
+            if not isinstance(virality_data, dict):
+                virality_data = {}
+            analysis = virality_data.get("analysis", [])
+            if not isinstance(analysis, list):
+                analysis = []
+            virality_map = {item.get("segment_index"): item for item in analysis if isinstance(item, dict)}
             
             # Log scoring method used
             if virality_map:

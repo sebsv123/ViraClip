@@ -21,6 +21,7 @@ import httpx
 
 from ..config import Config, get_config
 from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from .comfyui_integration import comfyui_integration
 from .broll_compositor import compose_overlay, probe_duration
 from .scene_broll_placer import get_insert_timestamps
 
@@ -144,10 +145,11 @@ class BrollService:
         age_days = (_time.time() - path.stat().st_mtime) / 86400
         return age_days <= _CACHE_TTL_DAYS
 
-    async def fetch_broll_asset(self, keyword: str) -> Optional[Path]:
+    async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None) -> Optional[Path]:
         """Fetch the most relevant B-roll asset for *keyword*.
 
-        Strategy: API-first for maximum relevance.
+        Strategy: API-first for maximum relevance (unless BROLL_USE_LTX is enabled).
+        0. If BROLL_USE_LTX="true", try LTX-Video generation first
         1. Query Pexels + Pixabay + Coverr in parallel (best result for this keyword)
         2. If all APIs fail → fall back to Pexels Photos (static image via API)
         3. If all APIs are unavailable (no keys / network error) → use local cache
@@ -156,6 +158,24 @@ class BrollService:
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
+
+        # ── 0. LTX-Video generation (if enabled) ─────────────────────────────
+        if os.getenv("BROLL_USE_LTX", "true").lower() == "true" and video_path and task_id:
+            try:
+                logger.info("🎬 Generating B-roll with LTX-Video via ComfyUI")
+                _ltx_result = await comfyui_integration.process_with_comfyui(
+                    task_id=task_id,
+                    video_path=video_path,
+                    operation="broll_transition",
+                    broll_path=None,
+                    transition_type="fade",
+                    duration=3.0
+                )
+                if _ltx_result and Path(_ltx_result).exists():
+                    logger.info(f"[BRoll] ✓ LTX-Video generated B-Roll: {_ltx_result}")
+                    return Path(_ltx_result)
+            except Exception as _ltx_e:
+                logger.warning(f"⚠️ LTX B-roll failed, falling back to stock footage: {_ltx_e}")
 
         # ── 1. API-first: query all video sources in parallel ─────────────────
         pexels_task  = asyncio.create_task(self._search_pexels(keyword))
@@ -248,7 +268,8 @@ class BrollService:
 
     async def _search_coverr(self, query: str) -> Optional[str]:
         """Search Coverr CC0 video library."""
-        key = os.getenv("COVERR_API_KEY", "")
+        # Check config first (allows session-level disable), then env
+        key = self.config.coverr_api_key or os.getenv("COVERR_API_KEY", "")
         if not key:
             return None
         try:
@@ -257,6 +278,11 @@ class BrollService:
                     "https://api.coverr.co/videos",
                     params={"keywords": query, "token": key, "per_page": 5},
                 )
+                if resp.status_code == 401:
+                    logger.warning("[BRoll] Coverr API key invalid (401) — disabling Coverr for this session")
+                    # Disable Coverr by clearing the key in this config instance
+                    self.config.coverr_api_key = ""
+                    return None
                 resp.raise_for_status()
                 data = resp.json()
                 for item in data.get("hits", []):
@@ -484,8 +510,9 @@ class BrollService:
 
             # Step 2 — fetch one asset per keyword (up to max_overlays distinct clips)
             broll_assets: List[Path] = []
+            _task_id = Path(video_path).stem if video_path else f"broll_{int(asyncio.get_event_loop().time())}"
             for kw in keywords[:max(3, max_overlays)]:
-                asset = await self.fetch_broll_asset(kw)
+                asset = await self.fetch_broll_asset(kw, video_path=video_path, task_id=_task_id)
                 if asset and asset not in broll_assets:
                     broll_assets.append(asset)
 

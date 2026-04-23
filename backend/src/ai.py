@@ -584,18 +584,60 @@ def _text_based_transcript_analysis(
                                 "start_s": _ts_to_secs(start), "end_s": _ts_to_secs(end)})
 
     if not parsed:
-        # Treat whole transcript as one segment
+        # No timestamps detected → split transcript into time-based windows
         dur = video_duration or 60.0
-        return TranscriptAnalysis(
-            most_relevant_segments=[TranscriptSegment(
+        window_size = 40.0   # 40s clips
+        step = 30.0          # overlap of 10s
+        segments: List[TranscriptSegment] = []
+        
+        # Distribute transcript text proportionally across windows
+        total_chars = len(transcript)
+        
+        start_s = 0.0
+        while start_s < dur:
+            end_s = min(start_s + window_size, dur)
+            # Avoid degenerate tiny final window
+            if end_s - start_s < 15.0 and segments:
+                break
+            
+            # Slice text proportionally to window position
+            if dur > 0 and total_chars > 0:
+                char_start = int((start_s / dur) * total_chars)
+                char_end = int((end_s / dur) * total_chars)
+                seg_text = transcript[char_start:char_end].strip() or transcript[:500]
+            else:
+                seg_text = transcript[:500]
+            
+            segments.append(TranscriptSegment(
+                start_time=_secs_to_ts(start_s),
+                end_time=_secs_to_ts(end_s),
+                text=seg_text[:500],
+                relevance_score=0.5,
+                reasoning="Time-window fallback (LLM unavailable, no timestamps detected)",
+                virality=ViralityAnalysis(
+                    hook_score=10, engagement_score=10,
+                    value_score=10, shareability_score=10,
+                    virality_reasoning="Fallback heuristic - time-window segmentation",
+                ),
+            ))
+            start_s += step
+            if len(segments) >= num_segments * 2:
+                break
+        
+        # Ensure at least one segment
+        if not segments:
+            segments.append(TranscriptSegment(
                 start_time="00:00", end_time=_secs_to_ts(dur),
                 text=transcript[:500], relevance_score=0.5,
-                reasoning="Full transcript (no timestamps detected)",
+                reasoning="Full transcript (very short video)",
                 virality=ViralityAnalysis(hook_score=10, engagement_score=10,
                                           value_score=10, shareability_score=10,
                                           virality_reasoning="Fallback heuristic"),
-            )],
-            summary="Auto-generated summary (LLM unavailable)",
+            ))
+        
+        return TranscriptAnalysis(
+            most_relevant_segments=segments[:num_segments * 2],
+            summary="Auto-generated summary (LLM unavailable — time-window fallback)",
             key_topics=[], broll_opportunities=None, campaign_strategy=None,
         )
 

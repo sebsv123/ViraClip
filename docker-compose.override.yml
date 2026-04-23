@@ -169,8 +169,6 @@ services:
 
   # ComfyUI - Generative AI (GPU only)
   comfyui:
-    profiles:
-      - gpu
     environment:
       - COMFYUI_EXTRA_ARGS=${COMFYUI_EXTRA_ARGS:---lowvram --use-split-cross-attention --disable-smart-memory}
     deploy:
