@@ -1,0 +1,45 @@
+name: ✨ Feature Request
+description: Propose a new feature or improvement
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user need or pain point are you trying to solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the feature, including UX/API surface if relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you've thought about and why they're worse.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - backend (FastAPI)
+        - worker (arq)
+        - frontend (Next.js)
+        - waitlist
+        - comfyui
+        - infrastructure
+        - documentation
+
+  - type: textarea
+    id: extras
+    attributes:
+      label: Additional context
+      description: Mockups, links, references, etc.

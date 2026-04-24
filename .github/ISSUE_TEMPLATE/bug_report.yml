@@ -1,0 +1,82 @@
+name: 🐛 Bug Report
+description: Something is broken or behaves unexpectedly
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out as much detail as you can.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear, one-paragraph description of the bug.
+      placeholder: When I do X, Y happens but I expect Z.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal, ordered steps that consistently reproduce the bug.
+      placeholder: |
+        1. Run `docker compose up -d`
+        2. POST `/tasks` with payload …
+        3. Observe error in worker logs
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: Include error messages, stack traces, or screenshots.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Affected component
+      multiple: true
+      options:
+        - backend (FastAPI)
+        - worker (arq)
+        - frontend (Next.js)
+        - waitlist
+        - comfyui
+        - infrastructure (docker, nginx)
+        - documentation
+
+  - type: input
+    id: version
+    attributes:
+      label: Commit / version
+      description: Output of `git rev-parse --short HEAD`
+      placeholder: 0fcb155
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Docker version, GPU model (if relevant)
+      placeholder: |
+        OS: CachyOS / Ubuntu 22.04
+        Docker: 27.x
+        GPU: RTX 5070 (8 GB VRAM)
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste only the pertinent lines, scrubbed of secrets.
+      render: shell

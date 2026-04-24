@@ -1,0 +1,28 @@
+# CODEOWNERS for ViraClip
+# These owners are automatically requested for review on PRs that touch the matching paths.
+# Order matters — later patterns take precedence.
+# https://docs.github.com/en/repositories/managing-your-repositories-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything
+*                                   @sebsv123
+
+# Backend
+/backend/                           @sebsv123
+/backend/src/api/                   @sebsv123
+/backend/src/domains/               @sebsv123
+/backend/src/core/                  @sebsv123
+/backend/src/workers/               @sebsv123
+
+# Frontend & Waitlist
+/frontend/                          @sebsv123
+/waitlist/                          @sebsv123
+
+# Infra & DevOps
+/docker-compose.yml                 @sebsv123
+/nginx/                             @sebsv123
+/.github/                           @sebsv123
+/comfyui/                           @sebsv123
+
+# Documentation
+/docs/                              @sebsv123
+*.md                                @sebsv123
