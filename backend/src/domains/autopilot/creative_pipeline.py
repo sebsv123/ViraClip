@@ -677,8 +677,8 @@ class CreativePipeline:
 
         if not meta["creative_enhanced"]:
             logger.error(
-                "  [Creative] ❌ creative_enhanced=False — core steps missing: %s",
-                CORE_STEPS - set(steps_ok),
+                "  [Creative] ❌ creative_enhanced=False — failed steps: %s",
+                set(steps_failed),
             )
 
         return meta

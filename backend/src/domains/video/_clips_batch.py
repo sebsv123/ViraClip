@@ -88,6 +88,7 @@ except (ImportError, Exception):
     ConfidenceSubtitleGenerator = None  # type: ignore
 
 from . import _helpers, _subtitles, _transcript
+from ._clip_renderer import create_single_clip
 from ._helpers import get_ffmpeg_exe, get_service_config
 from .vfx_service import VFXService
 

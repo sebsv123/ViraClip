@@ -279,7 +279,7 @@ async def create_single_clip(
             audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
             audio_temp.close()
             audio_ss = 0.0 if use_extracted_segment else start_seconds
-            cmd = [_get_ffmpeg_exe(), "-y", "-ss", str(audio_ss), "-i", str(video_path),
+            cmd = [get_ffmpeg_exe(), "-y", "-ss", str(audio_ss), "-i", str(video_path),
                    "-t", str(duration), "-vn", "-acodec", "pcm_s16le",
                    "-ar", "16000", "-ac", "1", audio_temp.name]
             subprocess.run(cmd, capture_output=True, timeout=60)
@@ -398,7 +398,7 @@ async def create_single_clip(
                 _audio_for_groq = output_dir / f"audio_gw_{clip_index}.wav"
                 _audio_ss_gw = 0.0 if use_extracted_segment else start_seconds
                 _cmd_gw = [
-                    _get_ffmpeg_exe(), "-y",
+                    get_ffmpeg_exe(), "-y",
                     "-ss", str(_audio_ss_gw), "-i", str(video_path),
                     "-t", str(min(duration, 60.0)),
                     "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -442,7 +442,7 @@ async def create_single_clip(
                 audio_temp_path = output_dir / f"audio_temp_{clip_index}.wav"
                 audio_ss2 = 0.0 if use_extracted_segment else start_seconds
                 cmd_extract = [
-                    _get_ffmpeg_exe(), "-y",
+                    get_ffmpeg_exe(), "-y",
                     "-ss", str(audio_ss2), "-i", str(video_path),
                     "-t", str(duration),
                     "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
@@ -773,7 +773,7 @@ async def create_single_clip(
                         # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
                         _codec_flags = gpu_utils.ffmpeg_codec_flags()
                         _ef_cmd = [
-                            _get_ffmpeg_exe(), "-y", "-i", str(output_path),
+                            get_ffmpeg_exe(), "-y", "-i", str(output_path),
                             "-vf", f"crop=in_w:in_h:{max(0,_avg_cx-540)}:{max(0,_avg_cy-960)},scale=1080:1920",
                             *_codec_flags,
                             "-c:a", "copy",

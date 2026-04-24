@@ -614,7 +614,7 @@ def _build_filter_complex(
                 _nce = NarrativeCutEngine()
                 _cut_pts = _nce.find_narrative_cuts(
                     transcript=segment_text or "",
-                    words_with_timestamps=words or [],
+                    words_with_timestamps=[],  # words not available in this scope
                     audio_silences=[],
                 )
                 if _cut_pts:

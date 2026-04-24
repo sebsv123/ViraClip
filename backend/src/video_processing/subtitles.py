@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Tuple
 import logging
 
 from moviepy import TextClip, ColorClip, VideoFileClip
+from moviepy.video.fx import CrossFadeIn, CrossFadeOut
 
 logger = logging.getLogger(__name__)
 

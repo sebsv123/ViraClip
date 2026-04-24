@@ -10,7 +10,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ...core.cache_manager import (
     cache_transcript_smart,
@@ -19,7 +19,11 @@ from ...core.cache_manager import (
 )
 from ...core.error_handler import execute_with_recovery
 from ...core.metrics_service import get_metrics_collector
+from ...domains.broll.broll_service import BrollService
+from ...utils.async_helpers import run_in_thread
+from ...video_processing.hook_analysis import analyze_segment_virality
 from ...video_processing.niche_analysis import analyze_content_niche, optimize_for_platform
+from ...video_processing.utils import parse_timestamp_to_seconds
 from ...youtube_utils import async_get_youtube_video_info, get_youtube_video_id
 
 from . import _clips, _helpers, _transcript
