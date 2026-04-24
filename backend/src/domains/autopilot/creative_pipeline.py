@@ -17,7 +17,7 @@ import os
 import traceback
 from pathlib import Path
 
-from ..domains.video.background_composite_service import background_composite_service
+from ...domains.video.background_composite_service import background_composite_service
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +129,7 @@ class CreativePipeline:
         timeline: list = []
         try:
             logger.debug("  [Creative] Importing multimodal_detector...")
-            from ..domains.detection.multimodal_detector import get_multimodal_detector
+            from ...domains.detection.multimodal_detector import get_multimodal_detector
             logger.debug("  [Creative] multimodal_detector import OK")
             import asyncio as _asyncio
             try:
@@ -170,7 +170,7 @@ class CreativePipeline:
         viral_pred = None
         try:
             logger.debug("  [Creative] Importing virality_engine...")
-            from ..domains.virality.virality_engine import get_virality_engine
+            from ...domains.virality.virality_engine import get_virality_engine
             logger.debug("  [Creative] virality_engine import OK")
             viral_pred = await get_virality_engine().predict(
                 transcript=transcript,
@@ -206,7 +206,7 @@ class CreativePipeline:
         preset = None
         try:
             logger.debug("  [Creative] Importing smart_templates...")
-            from .smart_templates import get_template_selector
+            from ...services.smart_templates import get_template_selector
             logger.debug("  [Creative] smart_templates import OK")
             energy = float((audio_features or {}).get("energy", 0.5) or 0.5)
             preset = get_template_selector().select(
@@ -229,7 +229,7 @@ class CreativePipeline:
         logger.info("  [Creative] Step 4/8: Hook analysis...")
         try:
             logger.debug("  [Creative] Importing hook_engine...")
-            from ..domains.virality.hook_engine import get_hook_engine
+            from ...domains.virality.hook_engine import get_hook_engine
             logger.debug("  [Creative] hook_engine import OK")
             hook_result = get_hook_engine().find_best_hook(
                 words=words or [],
@@ -261,7 +261,7 @@ class CreativePipeline:
                 None,
             )
             if _hook_reorder and _hook_start and float(_hook_start) > 3.0:
-                from ..domains.virality.hook_reorder import prepend_hook_flash
+                from ...domains.virality.hook_reorder import prepend_hook_flash
                 _hook_end = _hook_start + 0.5
                 reordered = clip_path.with_name(f"hook_{clip_path.name}")
                 result = await prepend_hook_flash(
@@ -337,8 +337,8 @@ class CreativePipeline:
         if not _skip_broll:
             try:
                 logger.debug("  [Creative] Importing contextual_broll & video_effects...")
-                from ..domains.broll.contextual_broll import get_contextual_broll
-                from ..domains.video.video_effects import overlay_broll_clips
+                from ...domains.broll.contextual_broll import get_contextual_broll
+                from ...domains.video.video_effects import overlay_broll_clips
                 logger.debug("  [Creative] B-roll imports OK")
                 broll_pairs = await get_contextual_broll().get_for_timeline(
                     timeline, max_assets=3
@@ -348,8 +348,8 @@ class CreativePipeline:
                 # visual keywords from the actual transcript ("what the speaker says")
                 if not broll_pairs and transcript:
                     try:
-                        from ..domains.broll.broll_service import BrollService
-                        from ..domains.detection.multimodal_detector import TimelineEvent
+                        from ...domains.broll.broll_service import BrollService
+                        from ...domains.detection.multimodal_detector import TimelineEvent
                         llm_kws = await BrollService().extract_keywords(transcript)
                         clip_dur = max(1.0, end - start)
                         llm_pairs = []
@@ -408,7 +408,7 @@ class CreativePipeline:
         overlay_result = None
         try:
             logger.debug("  [Creative] Importing contextual_overlay_engine...")
-            from ..domains.broll.contextual_overlay_engine import get_contextual_overlay_engine
+            from ...domains.broll.contextual_overlay_engine import get_contextual_overlay_engine
             logger.debug("  [Creative] contextual_overlay_engine import OK")
             
             overlay_engine = get_contextual_overlay_engine()
@@ -454,7 +454,7 @@ class CreativePipeline:
         try:
             if preset is None:
                 logger.warning("  [Creative] No preset selected, using default fallback")
-                from .smart_templates import Preset
+                from ...services.smart_templates import Preset
                 preset = Preset(
                     name="default_fallback",
                     zoom_punch_enabled=True,
@@ -470,7 +470,7 @@ class CreativePipeline:
         try:
             if preset is not None:
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
-                from ..domains.video.video_effects import apply_preset_effects
+                from ...domains.video.video_effects import apply_preset_effects
                 logger.debug("  [Creative] video_effects import OK")
                 peak_events = [e for e in timeline if e.type == "audio_peak"]
                 effected = clip_path.with_name(f"vfx_{clip_path.name}")
@@ -508,7 +508,7 @@ class CreativePipeline:
             dramatic_slowmo = segment.get("dramatic_slowmo", False)
             
             if playback_speed != 1.0 or dramatic_slowmo:
-                from ..domains.video.speed_control_service import get_speed_control_service
+                from ...domains.video.speed_control_service import get_speed_control_service
                 
                 speed_svc = get_speed_control_service()
                 speed_output = clip_path.with_name(f"speed_{clip_path.name}")
@@ -557,7 +557,7 @@ class CreativePipeline:
         ducked = None
         try:
             logger.debug("  [Creative] Importing smart_audio...")
-            from ..domains.audio.smart_audio import get_smart_audio, find_bgm_track
+            from ...domains.audio.smart_audio import get_smart_audio, find_bgm_track
             logger.debug("  [Creative] smart_audio import OK")
             mastered = clip_path.with_name(f"mastered_{clip_path.name}")
             bgm = find_bgm_track()
@@ -576,7 +576,7 @@ class CreativePipeline:
                 # Apply audio ducking if enabled and we have word timings
                 if words:
                     try:
-                        from ..domains.audio.audio_ducking_service import get_audio_ducking_service
+                        from ...domains.audio.audio_ducking_service import get_audio_ducking_service
                         ducked = clip_path.with_name(f"ducked_{clip_path.name}")
                         duck_result = await get_audio_ducking_service().apply_ducking(
                             video_path=clip_path,
@@ -618,7 +618,7 @@ class CreativePipeline:
         logger.info("  [Creative] Step 8/8: QA + render manifest...")
         try:
             logger.debug("  [Creative] Importing learning_loop...")
-            from ..domains.feedback.learning_loop import get_learning_loop
+            from ...domains.feedback.learning_loop import get_learning_loop
             logger.debug("  [Creative] learning_loop import OK")
             manifest = await get_learning_loop().post_render_analysis(
                 clip_path=clip_path,

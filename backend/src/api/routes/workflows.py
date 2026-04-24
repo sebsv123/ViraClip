@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ...services.workflow_automation import (
+from ...domains.autopilot.workflow_automation import (
     WorkflowNodeType,
     get_workflow_service,
 )
