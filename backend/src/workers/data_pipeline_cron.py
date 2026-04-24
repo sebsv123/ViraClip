@@ -98,7 +98,7 @@ async def fetch_trending_data(ctx: Dict[str, Any]) -> Dict[str, Any]:
 
     # ── 2. Viral Trend Service refresh ───────────────────────────────────────
     try:
-        from ..services.viral_trend_service import ViralTrendService
+        from ..domains.virality.viral_trend_service import ViralTrendService
         vts = ViralTrendService()
         await vts.refresh_all()
         results["fetched"]["viral_trends"] = "refreshed"

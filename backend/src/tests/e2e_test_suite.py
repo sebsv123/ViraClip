@@ -666,7 +666,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test ML virality prediction."""
-        from ..services.ml_virality_predictor import predict_virality_ml
+        from ..domains.virality.ml_virality_predictor import predict_virality_ml
         
         logs.append("Testing ML virality prediction...")
         

@@ -171,7 +171,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     # NEW: Viral template (overrides individual settings if provided)
     viral_template = data.get("viral_template")
     if viral_template:
-        from ...services.viral_templates import get_viral_template_service
+        from ...domains.virality.viral_templates import get_viral_template_service
         template_params = get_viral_template_service().get_template_config(viral_template)
         if template_params:
             # Apply template overrides
