@@ -113,7 +113,7 @@ class BrollService:
         if not video_path or clip_duration <= 0:
             return keywords
         try:
-            from .yolo_detector import get_visual_context, filter_keywords_with_yolo
+            from ..domains.detection.yolo_detector import get_visual_context, filter_keywords_with_yolo
             ctx = await get_visual_context(video_path, clip_duration)
             filtered = filter_keywords_with_yolo(keywords, ctx["detected_labels"])
             if filtered != keywords:

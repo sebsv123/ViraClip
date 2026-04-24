@@ -75,7 +75,7 @@ class BackgroundCompositeService:
         if mode == "A":
             logger.info(f"🎨 Modo A activado para {task_id} — composite SAM2+LTX")
 
-            from .person_segmentation import person_segmentation_service
+            from ..domains.detection.person_segmentation import person_segmentation_service
             from .composite_engine import composite_engine
 
             # Lanzar en paralelo

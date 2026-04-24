@@ -1,4 +1,4 @@
 from .scene_analyzer import scene_analyzer
-from .person_segmentation import person_segmentation_service
+from ..domains.detection.person_segmentation import person_segmentation_service
 from .composite_engine import composite_engine
 from .background_composite_service import background_composite_service

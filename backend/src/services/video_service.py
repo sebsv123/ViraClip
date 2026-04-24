@@ -63,7 +63,7 @@ except (ImportError, Exception):
 from .semantic_broll_service import SemanticBrollService
 from .sound_design_service import SoundDesignService, add_viral_sound_effects
 from .hook_visual_service import HookVisualService
-from .face_detection_service import FaceDetectionService
+from ..domains.detection.face_detection_service import FaceDetectionService
 from ..video_processing.export_profiles import ExportService, Platform, get_ffmpeg_export_command
 from ..video_processing.audio_analysis import analyze_audio_virality, extract_audio_from_video
 from ..video_processing.narrative_cut_engine import NarrativeCutEngine, detect_hesitations
