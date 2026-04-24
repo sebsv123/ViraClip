@@ -89,6 +89,7 @@ except (ImportError, Exception):
     _confidence_subtitle_available = False
     ConfidenceSubtitleGenerator = None  # type: ignore
 
+from . import _clip_polish as _polish
 from . import _helpers, _subtitles, _transcript
 from ._helpers import get_ffmpeg_exe, get_service_config
 from .vfx_service import VFXService
@@ -1101,12 +1102,7 @@ async def create_single_clip(
         logger.info("  ✓ Platform export: skipped (no hardsubs) — stream copy used in BGM pass")
 
     # Step 4.6: Translation & Dubbing
-    if target_language and target_language != "eng":
-        from ...domains.captions.translation_service import TranslationService
-        translator = TranslationService()
-        dubbed_path = output_path.with_name(f"dubbed_{output_path.name}")
-        await translator.dub_clip(output_path, dubbed_path, target_language)
-        output_path = dubbed_path
+    output_path = await _polish.apply_translation_dubbing(output_path, target_language)
 
     # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
     # Falls back to niche-based static track when BGM library is empty.
@@ -1150,77 +1146,22 @@ async def create_single_clip(
         except Exception as _fb_music_e:
             logger.warning(f"  All music paths skipped: {_fb_music_e}")
 
-    # Step 4.10b: Audio Ducking — auto-lower BGM when speaker talks (sidechain)
-    try:
-        from ...domains.audio.audio_ducking_service import get_audio_ducking_service
-        _duck_svc = get_audio_ducking_service()
-        if _duck_svc.enabled and words_with_confidence:
-            _duck_out = output_path.with_name(f"duck_{output_path.name}")
-            _duck_result = await _duck_svc.apply_ducking(
-                video_path=output_path,
-                output_path=_duck_out,
-                word_timings=words_with_confidence,
-            )
-            if _duck_result.success and _duck_out.exists():
-                _duck_out.replace(output_path)
-                logger.info(f"  ✓ Audio ducking applied ({_duck_result.ducked_segments} segments)")
-    except Exception as _duck_e:
-        logger.debug(f"  Audio ducking skipped: {_duck_e}")
+    # Step 4.10b: Audio ducking
+    output_path = await _polish.apply_audio_ducking(output_path, words_with_confidence)
 
-    # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task started at render launch)
-    # Skip if Step 4.3 (BrollService) already applied B-roll — prevents double overlay.
-    _step43_ran = _get_cfg_broll().broll_enabled
-    if _broll_prefetch_task is not None and not _step43_ran:
-        try:
-            from ...domains.broll.pexels_service import overlay_broll_on_clip
-            _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
-            if _broll_path:
-                _broll_out = output_path.with_name(f"broll_{output_path.name}")
-                ok = overlay_broll_on_clip(
-                    output_path, _broll_path, _broll_out,
-                    broll_start=0.3, broll_end=0.6,
-                )
-                if ok and _broll_out.exists():
-                    _broll_out.replace(output_path)
-                    logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
-            else:
-                logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
-        except asyncio.TimeoutError:
-            logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
-            _broll_prefetch_task.cancel()
-        except Exception as _br_e:
-            logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
+    # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task)
+    output_path = await _polish.apply_pexels_broll(
+        output_path, segment, _broll_prefetch_task,
+        broll_already_applied=_get_cfg_broll().broll_enabled,
+    )
 
     logger.info(f"Created clip {clip_index + 1}: {duration:.1f}s")
 
     # ClipValidator: post-render A/V sync + quality check
-    try:
-        from ...domains.validation.clip_validator import get_clip_validator
-        _cv = get_clip_validator()
-        _cv_report = await _cv.validate_output(
-            output_path,
-            expected_duration=duration,
-            words=words_with_confidence,
-        )
-        if not _cv_report.get("valid", True):
-            logger.warning(f"  ⚠ ClipValidator issues: {_cv_report.get('issues', [])}")
-        else:
-            logger.debug(f"  ✓ ClipValidator passed")
-    except Exception as _cv_e:
-        logger.debug(f"  ClipValidator skipped: {_cv_e}")
+    await _polish.validate_clip_output(output_path, duration, words_with_confidence)
 
-    # Phase 3.5: Hook slow-motion (opt-in via HOOK_SLOWMO_ENABLED=true)
-    try:
-        from ...video_processing.hook_slowmo import maybe_apply_hook_slowmo
-        _sm_applied = maybe_apply_hook_slowmo(
-            output_path,
-            virality_score=segment.get("virality_score", 0),
-            inplace=True,
-        )
-        if _sm_applied:
-            logger.info(f"  ↳ Hook slo-mo applied to clip {clip_index + 1}")
-    except Exception as _sm_e:
-        logger.debug(f"  Hook slo-mo skipped: {_sm_e}")
+    # Phase 3.5: Hook slow-motion (opt-in)
+    _polish.apply_hook_slowmo(output_path, segment.get("virality_score", 0), clip_index)
 
     # ── V4 Elite: Visual scoring + Scene rhythm ──────────────────────
     text_virality = segment.get("virality_score", 0)
@@ -1228,14 +1169,8 @@ async def create_single_clip(
     vision_data: dict = {}
     rhythm_data: dict = {}
 
-    # Scene rhythm analysis (PySceneDetect — always runs, no GPU needed)
-    try:
-        from ...utils.scene_analysis import analyze_clip_rhythm, detect_loop_potential
-        rhythm_data = analyze_clip_rhythm(output_path)
-        loop_data = detect_loop_potential(output_path)
-        rhythm_data.update(loop_data)
-    except Exception as e:
-        logger.debug(f"Scene analysis skipped: {e}")
+    # Scene rhythm analysis (PySceneDetect)
+    rhythm_data = _polish.analyze_scene_rhythm(output_path)
 
     # ViralityEngine: unified hook+pacing+emotion+phi3 score (replaces manual blend)
     try:
@@ -1359,48 +1294,12 @@ async def create_single_clip(
             logger.debug(f"  AI Thumbnail skipped: {_aith_e}")
 
     # Viral metadata: LLM-generated hashtags + SEO title
-    viral_meta: dict = {}
-    try:
-        viral_meta = await generate_viral_metadata(
-            text=segment.get("text", ""),
-            platform=target_platform,
-        )
-        logger.info(
-            f"  ✓ Viral metadata: '{viral_meta.get('title', '')}' "
-            f"({len(viral_meta.get('hashtags', []))} hashtags)"
-        )
-    except Exception as _vm_e:
-        logger.debug(f"  Viral metadata skipped: {_vm_e}")
+    viral_meta = await _polish.generate_viral_metadata_safe(segment, target_platform)
 
     # Phase 8.3: LSTM/CNN engagement prediction (drop-off curve)
-    engagement_data: dict = {}
-    try:
-        from ...domains.virality.engagement_prediction_service import get_engagement_predictor
-        import asyncio as _asyncio
-        _predictor = get_engagement_predictor()
-        _loop = _asyncio.get_event_loop()
-        _eng = await _loop.run_in_executor(
-            None,
-            lambda: _predictor.predict_engagement_curve(
-                words=words_with_confidence,
-                audio_features=audio_features,
-                duration=duration,
-            ),
-        )
-        engagement_data = {
-            "engagement_curve":   _eng["curve"],
-            "drop_off_points":    _eng["drop_off_points"],
-            "hook_insertion_pts": _eng["hook_points"],
-            "retention_score":    _eng["retention_score"],
-            "engagement_method":  _eng["predicted_by"],
-        }
-        logger.info(
-            f"  ✓ Engagement curve [{_eng['predicted_by']}]: "
-            f"retention={_eng['retention_score']}% "
-            f"drop-offs={_eng['drop_off_points']}"
-        )
-    except Exception as _ep_e:
-        logger.debug(f"  Engagement prediction skipped: {_ep_e}")
+    engagement_data = await _polish.predict_engagement(
+        words_with_confidence or [], audio_features or {}, duration,
+    )
 
     # ── Recommendation Engine — personalized suggestions per user ─────
     _recommendations: list = []
@@ -1454,39 +1353,11 @@ async def create_single_clip(
             logger.info(f"  ✓ Auto-published to: {[r['platform'] for r in _publish_results if r['status'] == 'published']}")
         except Exception as _pub_e:
             logger.debug(f"  Auto-publish skipped: {_pub_e}")
-    # ── Quality Validator — criterios de calidad antes de entregar ──────
-    _quality_report: dict = {}
-    try:
-        from ...domains.validation.quality_validator import validate_clip
-        _qr = validate_clip(
-            clip_path=output_path,
-            clip_info={"duration": duration, "virality_score": final_virality},
-        )
-        _quality_report = {
-            "quality_level": _qr.quality_level.value if hasattr(_qr.quality_level, "value") else str(_qr.quality_level),
-            "passed": _qr.passed,
-            "issues": [c.message for c in _qr.checks if not c.passed],
-        }
-        if not _qr.passed:
-            logger.warning(f"  ⚠ Quality issues: {_quality_report['issues'][:2]}")
-        else:
-            logger.debug(f"  ✓ Quality: {_quality_report['quality_level']}")
-    except Exception as _qval_e:
-        logger.debug(f"  QualityValidator skipped: {_qval_e}")
+    # ── Quality Validator ─────────────────────────────────────────────
+    _quality_report = _polish.validate_quality(output_path, duration, final_virality)
 
-    # ── Audio Recommendation — sugerir música ideal para este clip ────
-    _audio_recs: list = []
-    try:
-        from ...domains.audio.audio_recommendation import recommend_music_for_video
-        _arecs = await recommend_music_for_video(output_path, count=3)
-        _audio_recs = [
-            {"title": r.title, "genre": r.genre.value if hasattr(r.genre, "value") else str(r.genre), "mood": r.mood, "bpm": r.bpm}
-            for r in _arecs[:3]
-        ]
-        if _audio_recs:
-            logger.debug(f"  ✓ Audio recs: {[r['title'] for r in _audio_recs]}")
-    except Exception as _arec_e:
-        logger.debug(f"  Audio recommendation skipped: {_arec_e}")
+    # ── Audio Recommendation ──────────────────────────────────────────
+    _audio_recs = await _polish.recommend_audio(output_path)
 
     # ── Variant Generator — generar variante A/B automática ────────────
     _variants: list = []
@@ -1505,45 +1376,14 @@ async def create_single_clip(
         except Exception as _var_e:
             logger.debug(f"  Variant generator skipped: {_var_e}")
 
-    # ── Clip Health Service — reporte accionable de salud del clip ─────
-    _clip_health: dict = {}
-    try:
-        from ...domains.validation.clip_health_service import generate_health_report
-        _health_report = generate_health_report(
-            clip_id=str(clip_index + 1),
-            virality_score=final_virality,
-            hook_score=segment.get("hook_score") if segment else None,
-            hook_type=segment.get("hook_type") if segment else None,
-            duration=duration,
-            platform=target_platform,
-            has_subtitles=bool(segment and segment.get("text")),
-            hashtag_count=len(viral_meta.get("hashtags", [])),
-            zoom_punch_applied=bool(os.environ.get("CUT_ZOOM_ENABLED", "true") == "true"),
-        )
-        _clip_health = _health_report.to_dict()
-        if _clip_health.get("grade") in ("D", "F"):
-            logger.warning(f"  ⚠ Clip health grade={_clip_health['grade']} top_fix={_clip_health.get('top_fix','')}")
-        else:
-            logger.info(f"  ✓ Clip health grade={_clip_health.get('grade','?')} score={_clip_health.get('overall_score',0):.0f}")
-    except Exception as _ch_e:
-        logger.debug(f"  Clip health skipped: {_ch_e}")
+    # ── Clip Health Service ───────────────────────────────────────────
+    _clip_health = _polish.generate_clip_health_report(
+        clip_index, final_virality, segment, duration, target_platform, viral_meta,
+    )
     # ─────────────────────────────────────────────────────────────────
 
-    # LTXV Intro (opt-in con LTXV_INTRO_ENABLED=true). Se ejecuta DESPUÉS
-    # de todo el procesado porque la intro se prepende como clip nuevo
-    # (no afecta a timestamps de los subtítulos ya quemados).
-    try:
-        from ...domains.broll.ltxv_intro_service import LTXVIntroService
-        _intro_out = await LTXVIntroService.maybe_prepend_intro(
-            clip_path=output_path,
-            theme=segment.get("theme") or segment.get("hook_type"),
-            virality_score=float(final_virality or 0.0),
-        )
-        if _intro_out and Path(_intro_out).exists():
-            output_path = Path(_intro_out)
-            logger.info("  ✓ LTXV intro prepended")
-    except Exception as _intro_e:
-        logger.debug(f"  LTXV intro skipped: {_intro_e}")
+    # LTXV Intro (opt-in via LTXV_INTRO_ENABLED=true)
+    output_path = await _polish.maybe_prepend_intro(output_path, segment, final_virality)
 
     return {
         "clip_id": clip_index + 1,
