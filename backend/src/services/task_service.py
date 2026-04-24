@@ -293,9 +293,8 @@ class TaskService:
         speed_ramp_enabled: bool = True,
         use_scene_detection: bool = True,
         force_fresh: bool = False,
-        # ComfyUI AI features
+        # ComfyUI AI features (Phase 10)
         use_comfyui_reframe: bool = False,
-        use_comfyui_subtitles: bool = False,
         use_comfyui_thumbnail: bool = False,
         thumbnail_prompt: str = "cinematic viral thumbnail",
         comfyui_chunk_size: int = 300,
@@ -732,12 +731,6 @@ class TaskService:
                                     info["comfyui_thumbnail"] = str(thumb_result)
                                     logger.info("  [Clip %d] Phase 10b ✓", i + 1)
                             
-                            # ComfyUI Subtitle Enhancement (if enabled)
-                            if use_comfyui_subtitles and add_subtitles:
-                                logger.info("  [Clip %d] Phase 10c: ComfyUI subtitle enhancement...", i + 1)
-                                # Note: Subtitle enhancement would be integrated with existing subtitle flow
-                                info["comfyui_subtitles"] = True
-                                
                         except Exception as _cu_e:
                             logger.warning("Phase 10 ComfyUI skipped for clip %d: %s", i, _cu_e)
                     # ─────────────────────────────────────────────────────────────────

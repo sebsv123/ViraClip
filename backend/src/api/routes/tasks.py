@@ -200,6 +200,10 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         target_platform = "all"
     generate_ab_variants = bool(data.get("generate_ab_variants", False))  # P3.5
     num_clips = max(3, min(10, int(data.get("num_clips", 6))))
+    
+    # ComfyUI AI features (Phase 10)
+    use_comfyui_reframe = bool(data.get("use_comfyui_reframe", False))
+    use_comfyui_thumbnail = bool(data.get("use_comfyui_thumbnail", False))
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -273,6 +277,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             speed_ramp_enabled=speed_ramp_enabled,
             use_scene_detection=use_scene_detection,
             force_fresh=force_fresh,
+            use_comfyui_reframe=use_comfyui_reframe,
+            use_comfyui_thumbnail=use_comfyui_thumbnail,
         )
 
         # Save source metadata for resume/retries in environments without sources.url column
