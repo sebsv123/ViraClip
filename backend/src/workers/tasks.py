@@ -70,7 +70,7 @@ async def process_video_task(
         Dict with processing results
     """
     from ..database import AsyncSessionLocal
-    from ..services.task_service import TaskService
+    from ..domains.autopilot.task_service import TaskService
     from ..workers.progress import ProgressTracker
 
     set_trace_id(f"task-{task_id}")

@@ -245,7 +245,7 @@ class AutoSchedulerService:
         
         try:
             # Create task for source
-            from ....services.task_service import TaskService
+            from ....domains.autopilot.task_service import TaskService
             from ....database import get_db
             
             task_service = TaskService()
@@ -346,7 +346,7 @@ class AutoSchedulerService:
         # This could search YouTube, news, etc.
         
         # For now, create a task that will search and process
-        from ....services.task_service import TaskService
+        from ....domains.autopilot.task_service import TaskService
         
         task_service = TaskService()
         

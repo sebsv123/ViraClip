@@ -18,7 +18,7 @@ import shutil
 
 from ...database import get_db
 from ...database import AsyncSessionLocal
-from ...services.task_service import TaskService
+from ...domains.autopilot.task_service import TaskService
 from ...domains.billing.billing_service import BillingService, BillingLimitExceeded
 from ...auth_headers import get_signed_user_id, USER_ID_HEADER
 from ...workers.job_queue import JobQueue
