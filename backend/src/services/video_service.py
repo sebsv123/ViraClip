@@ -1732,7 +1732,7 @@ class VideoService:
 
         # ClipValidator: post-render A/V sync + quality check
         try:
-            from .clip_validator import get_clip_validator
+            from ..domains.validation.clip_validator import get_clip_validator
             _cv = get_clip_validator()
             _cv_report = await _cv.validate_output(
                 output_path,
@@ -1994,7 +1994,7 @@ class VideoService:
         # ── Quality Validator — criterios de calidad antes de entregar ──────
         _quality_report: dict = {}
         try:
-            from .quality_validator import validate_clip
+            from ..domains.validation.quality_validator import validate_clip
             _qr = validate_clip(
                 clip_path=output_path,
                 clip_info={"duration": duration, "virality_score": final_virality},
@@ -2045,7 +2045,7 @@ class VideoService:
         # ── Clip Health Service — reporte accionable de salud del clip ─────
         _clip_health: dict = {}
         try:
-            from .clip_health_service import generate_health_report
+            from ..domains.validation.clip_health_service import generate_health_report
             _health_report = generate_health_report(
                 clip_id=str(clip_index + 1),
                 virality_score=final_virality,
