@@ -39,7 +39,7 @@ from ..utils.resource_manager import (
     cleanup_temp_files,
     should_throttle_processing,
 )
-from .comfyui_integration import comfyui_integration
+from ..domains.broll.comfyui_integration import comfyui_integration
 
 logger = logging.getLogger(__name__)
 

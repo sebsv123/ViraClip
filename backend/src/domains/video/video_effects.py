@@ -11,7 +11,7 @@ import asyncio
 import logging
 import tempfile
 from pathlib import Path
-from ...services.broll_compositor import compose_overlay_multi
+from ...domains.broll.broll_compositor import compose_overlay_multi
 
 logger = logging.getLogger(__name__)
 

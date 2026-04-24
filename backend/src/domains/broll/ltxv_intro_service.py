@@ -73,7 +73,7 @@ class LTXVIntroService:
 
         # 2) Generar intro
         try:
-            from ..comfyui_bridge import ComfyUIBridge
+            from ...comfyui_bridge import ComfyUIBridge
             bridge = ComfyUIBridge()
             try:
                 ok = await bridge.generate_ltxv_intro(

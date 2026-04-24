@@ -19,8 +19,8 @@ from typing import List, Dict, Any, Optional, Tuple
 
 import httpx
 
-from ..config import Config, get_config
-from ..comfyui_bridge import COMFYUI_ENABLED, ComfyUIBridge  # ComfyUIBridge reservado para LTXV intro
+from ...config import Config, get_config
+from ...comfyui_bridge import COMFYUI_ENABLED, ComfyUIBridge  # ComfyUIBridge reservado para LTXV intro
 from .comfyui_integration import comfyui_integration
 from .broll_compositor import compose_overlay, probe_duration
 from .scene_broll_placer import get_insert_timestamps
@@ -113,7 +113,7 @@ class BrollService:
         if not video_path or clip_duration <= 0:
             return keywords
         try:
-            from ..domains.detection.yolo_detector import get_visual_context, filter_keywords_with_yolo
+            from ...domains.detection.yolo_detector import get_visual_context, filter_keywords_with_yolo
             ctx = await get_visual_context(video_path, clip_duration)
             filtered = filter_keywords_with_yolo(keywords, ctx["detected_labels"])
             if filtered != keywords:
@@ -491,7 +491,7 @@ class BrollService:
 
                 # YOLO augmentation: detect objects actually visible in the clip
                 try:
-                    from ..video_processing.object_detection import detect_objects_in_video
+                    from ...video_processing.object_detection import detect_objects_in_video
                     yolo_kws = await detect_objects_in_video(video_path, max_frames=4)
                     if yolo_kws:
                         for kw in reversed(yolo_kws[:2]):
