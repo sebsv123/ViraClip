@@ -229,7 +229,7 @@ async def train_virality_lora(
         f"[gpu] Training LoRA '{style_name}' | base={base_model} | steps={num_steps}"
     )
 
-    from ..services.lora_training_service import LoRATrainingService
+    from ..domains.feedback.lora_training_service import LoRATrainingService
 
     service = LoRATrainingService()
     result = await service.train(

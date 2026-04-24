@@ -507,7 +507,7 @@ async def analyze_clip(
     # Competitor benchmark: log which features competitors lead on for this category
     # so the pipeline can apply compensating effects (no hard dependency — pure advisory)
     try:
-        from .competitor_analysis import CompetitorAnalysisService
+        from ..domains.feedback.competitor_analysis import CompetitorAnalysisService
         _ca = CompetitorAnalysisService()
         _gaps = _ca.get_feature_gaps_for_category(category)
         if _gaps:

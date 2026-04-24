@@ -377,7 +377,7 @@ class WorkerSettings:
     @staticmethod
     def _build_cron_jobs():
         from arq import cron
-        from ..services.feedback_loop_service import periodic_model_retraining
+        from ..domains.feedback.feedback_loop_service import periodic_model_retraining
         return [cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0)]
 
     cron_jobs = []

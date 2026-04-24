@@ -618,7 +618,7 @@ class CreativePipeline:
         logger.info("  [Creative] Step 8/8: QA + render manifest...")
         try:
             logger.debug("  [Creative] Importing learning_loop...")
-            from .learning_loop import get_learning_loop
+            from ..domains.feedback.learning_loop import get_learning_loop
             logger.debug("  [Creative] learning_loop import OK")
             manifest = await get_learning_loop().post_render_analysis(
                 clip_path=clip_path,
