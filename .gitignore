@@ -50,6 +50,11 @@ temp/
 exports/
 downloads/
 output/
+outputs/
+uploads/
+.archive/
+backend-old/
+.cleanup-backup/
 .claude/
 
 # Log files generados en runtime
@@ -87,6 +92,8 @@ test-results/
 backend/test_report_*.json
 backend/test_run_*.log
 backend/test_output.txt
+test_ltx_workflow.json
+test_sam2_workflow.json
 
 # Lockfiles (regenerate on install)
 frontend/bun.lockb
@@ -95,3 +102,6 @@ backend/uv.lock
 # Windows scripts (not applicable on Linux server)
 *.bat
 *.ps1
+models/*.safetensors
+models/*.pth
+models/*.pt
