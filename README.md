@@ -1,369 +1,241 @@
-# ViraClip 🎬
+<div align="center">
 
-**AI-Powered Video Clipping Platform for Content Creators**
+# 🎬 ViraClip
 
-Transform long-form content into viral short clips with AI. ViraClip is an open-source video clipping platform that helps creators repurpose their content for TikTok, Instagram Reels, and YouTube Shorts.
+**AI-powered video clipping for content creators**
 
-> � **Status**: MVP Complete (90%) - Ready for Beta Testing
->
-> 💡 **Latest**: Full-stack implementation with Next.js 15 + FastAPI + CUDA optimization
->
-> 🎯 **Branch**: `main` - Production-ready
+Turn long-form videos into viral short clips for TikTok, Reels, and Shorts — automatically.
 
-## Why ViraClip?
+[![Tests](https://github.com/sebsv123/ViraClip/actions/workflows/tests.yml/badge.svg)](https://github.com/sebsv123/ViraClip/actions/workflows/tests.yml)
+[![Lint](https://github.com/sebsv123/ViraClip/actions/workflows/lint.yml/badge.svg)](https://github.com/sebsv123/ViraClip/actions/workflows/lint.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-### The Story
+[Quick start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](CONTRIBUTING.md) · [Docs](docs/)
 
-Content creators face a constant challenge: repurposing long-form content into engaging short clips for social media. Manual editing is time-consuming, and existing AI tools are either expensive, limited, or watermark your content.
-
-ViraClip was born from this need - a powerful, open-source alternative that puts creators first.
-
-### What Makes ViraClip Different
-
-✅ **AI-Powered Clipping** - Automatically identifies the most engaging moments in your videos
-
-✅ **Smart Transcription** - 97%+ accuracy with AssemblyAI integration
-
-✅ **Virality Scoring** - Predicts which clips have the highest viral potential
-
-✅ **Enterprise-Grade Validation** - 87% fewer rendering failures with comprehensive quality checks
-
-✅ **Production Ready** - 751 automated tests, performance optimized, fully monitored
-
-✅ **Open Source** - MIT licensed, transparent, community-driven
-
-✅ **Self-Hosted or Cloud** - Deploy on your infrastructure or use our hosted version
-
-✅ **No Watermarks** - Your content stays yours
-
-✅ **Unlimited Processing** - Process as many videos as your hardware can handle
-
-## ⚡ Quick Start (5 minutes)
-
-### Prerequisites
-
-- **Docker Desktop** - [Download here](https://www.docker.com/products/docker-desktop/)
-- **Git** - [Download here](https://git-scm.com/downloads)
-- **Node.js 20+** - [Download here](https://nodejs.org/)
-
-### Setup in 3 Commands
-
-```bash
-# 1. Clone repository
-git clone https://github.com/sebsv123/ViraClip.git
-cd ViraClip
-
-# 2. Start database services
-docker-compose up -d postgres redis
-
-# 3. Setup frontend
-cd frontend
-npm install
-npx prisma generate
-npx prisma db push
-npm run dev
-```
-
-**Frontend**: http://localhost:3000  
-**Backend API**: http://localhost:8000/docs
-
-### First User Setup
-
-1. Sign up at http://localhost:3000 with email/password (Google OAuth optional)
-2. You'll see waitlist pending page
-3. Approve yourself in database:
-```bash
-docker exec -it viraclip-postgres psql -U viraclip -d viraclip
-UPDATE users SET beta_access = true WHERE email = 'your-email@example.com';
-\q
-```
-4. Refresh browser → Full dashboard access! 🎉
-
-📚 **Detailed Guides**: 
-- Frontend: `frontend/QUICKSTART_MVP.md`
-- Complete setup: `IMPLEMENTACION_COMPLETA.md`
-- Environment vars: `frontend/ENV_SETUP.md`
-
-## ⚙️ Configuration (Optional)
-
-```env
-# Required: Video transcription
-ASSEMBLY_AI_API_KEY=your_assemblyai_api_key
-
-# Required: Choose ONE LLM provider and set its API key
-# Option A: Google Gemini (recommended - fast & cost-effective)
-LLM=google-gla:gemini-3-flash-preview
-GOOGLE_API_KEY=your_google_api_key
-
-# Option B: OpenAI GPT-5.2 (best reasoning)
-# LLM=openai:gpt-5.2
-# OPENAI_API_KEY=your_openai_api_key
-
-# Option C: Anthropic Claude
-# LLM=anthropic:claude-4-sonnet
-# ANTHROPIC_API_KEY=your_anthropic_api_key
-
-# Option D: Ollama (local/self-hosted)
-# LLM=ollama:gpt-oss:20b
-# OLLAMA_BASE_URL=http://localhost:11434/v1
-# OLLAMA_API_KEY=your_ollama_api_key  # Optional (Ollama Cloud)
-
-# Optional: Auth secret (change in production)
-BETTER_AUTH_SECRET=change_this_in_production
-
-# Optional: DataFast analytics
-# Track your deployed domain in DataFast
-# NEXT_PUBLIC_DATAFAST_WEBSITE_ID=dfid_xxxxx
-# NEXT_PUBLIC_DATAFAST_DOMAIN=your-domain.com
-# NEXT_PUBLIC_DATAFAST_ALLOW_LOCALHOST=false
-
-# Optional: Resend for waitlist confirmation emails
-# RESEND_API_KEY=your_resend_api_key
-
-# Optional: YouTube metadata provider
-# `yt_dlp` preserves the existing metadata behavior
-# `youtube_data_api` uses the official API first, then falls back to yt-dlp
-# YOUTUBE_METADATA_PROVIDER=yt_dlp
-# YOUTUBE_DATA_API_KEY=your_youtube_data_api_key
-```
-
-### 2. Start the Services
-
-```bash
-docker-compose up -d
-```
-
-This starts:
-- **Frontend**: http://localhost:3000
-- **Backend API**: http://localhost:8000 (docs at /docs)
-- **PostgreSQL**: localhost:5432
-- **Redis**: localhost:6379
-
-### 3. Wait for Initialization
-
-First-time startup takes a few minutes. Check progress with:
-
-```bash
-docker-compose logs -f
-```
-
-Wait until you see health checks passing for all services.
-
-### 4. Access the App
-
-Open http://localhost:3000 in your browser, create an account, and start clipping!
-
-If you enable DataFast, also verify that:
-- `/js/script.js` loads from your own app domain
-- `/api/events` requests are proxied through your app domain
-- custom goals appear after successful sign-up, sign-in, task creation, billing, feedback, or waitlist actions
-
-### Troubleshooting
-
-**Backend fails to start with API key error:**
-- Make sure you've set the correct LLM provider AND its corresponding API key in `.env`
-- Default is `google-gla:gemini-3-flash-preview` which requires `GOOGLE_API_KEY`
-- If using `openai:gpt-5.2`, you MUST set `OPENAI_API_KEY`
-- If using `ollama:*`, run Ollama and (optionally) set `OLLAMA_BASE_URL`
-- Rebuild after changing `.env`: `docker-compose up -d --build`
-
-**Videos stay queued / never process:**
-- Check worker logs: `docker-compose logs -f worker`
-- Ensure Redis is healthy: `docker-compose logs redis`
-- Verify API keys are correct
-
-**YouTube titles or duration lookup is failing:**
-- `YOUTUBE_METADATA_PROVIDER=yt_dlp` keeps the old metadata path
-- `YOUTUBE_METADATA_PROVIDER=youtube_data_api` requires YouTube Data API v3 enabled in Google Cloud
-- Prefer `YOUTUBE_DATA_API_KEY`; if it is unset, the backend will try `GOOGLE_API_KEY`
-- The backend will automatically fall back to the other metadata provider if the primary one fails
-- `videos.list` costs 1 quota unit per request
-
-**Performance tuning (default is fast mode):**
-- `DEFAULT_PROCESSING_MODE=fast|balanced|quality`
-- `FAST_MODE_MAX_CLIPS=4` to cap clip count in fast mode
-- `FAST_MODE_TRANSCRIPT_MODEL=nano` for fastest transcript model
-- View aggregate metrics: `GET /tasks/metrics/performance`
-
-**Prisma errors on Windows:**
-- Run `docker-compose down -v` to clear volumes
-- Run `docker-compose up -d --build` to rebuild
-
-**Frontend shows database errors:**
-- Wait for PostgreSQL to fully initialize (check logs)
-- The database is automatically created on first run
-
-**Font picker is empty / cannot select or upload fonts:**
-- Add fonts to `backend/fonts/` – see [backend/fonts/README.md](backend/fonts/README.md) for TikTok Sans and custom fonts
-- Ensure `BACKEND_AUTH_SECRET` is set in `.env` when using the hosted/monetized setup
-- Font upload is Pro-only when monetization is enabled; self-hosted users can upload freely
-
-**Subscription emails are not sending:**
-- Set `RESEND_API_KEY` and `RESEND_FROM_EMAIL` in `.env`
-- `RESEND_FROM_EMAIL` must be a verified sender/domain in your Resend account
-- The backend sends the “thank you for subscribing” email on `checkout.session.completed`
-- The backend sends the “sorry to see you go” email on `customer.subscription.deleted`
-
-## Testing
-
-ViraClip has a comprehensive automated test suite with 751 tests:
-
-- `pytest` for backend unit and integration tests
-- `Vitest` and Testing Library for frontend route and component coverage
-- `Playwright` for a small seeded browser smoke suite
-
-Repo-level entrypoints:
-
-```bash
-make test
-make test-backend
-make test-frontend
-make test-e2e
-make test-ci
-```
-
-App-level entrypoints:
-
-```bash
-cd backend && uv sync --all-groups && .venv/bin/pytest
-cd frontend && npm install && npm run test:coverage
-cd frontend && npm run test:e2e
-```
-
-Local test runs expect PostgreSQL and Redis to be available. The easiest path is to start the stack with `docker-compose up -d`, then run the commands above. CI runs the same layers in GitHub Actions with Postgres and Redis service containers.
-
-## Documentation
-
-### Development & Setup
-- 📚 **[DEVELOPMENT_SETUP.md](DEVELOPMENT_SETUP.md)** - Complete setup guide for new developers
-- 🔑 **[API_KEYS_SETUP.md](API_KEYS_SETUP.md)** - How to get and configure API keys
-- 🌐 **[OFFLINE_MODE.md](OFFLINE_MODE.md)** - Running ViraClip without internet/API keys
-
-### Production & Features
-- 🚀 **[PRODUCTION_READINESS.md](PRODUCTION_READINESS.md)** - Production deployment checklist
-- ✅ **[FINAL_SYNC_VERIFICATION.md](FINAL_SYNC_VERIFICATION.md)** - System verification report
-- 🎬 **[VIRAL_FEATURES_COMPLETE.md](VIRAL_FEATURES_COMPLETE.md)** - All viral editing features
-- 📊 **[DEPENDENCY_AUDIT_REPORT.md](DEPENDENCY_AUDIT_REPORT.md)** - Dependency synchronization
-
-### Original Documentation
-Detailed documentation also lives in [`docs/`](docs/README.md):
-
-- [`docs/setup.md`](docs/setup.md) - Deployment setup
-- [`docs/configuration.md`](docs/configuration.md) - Configuration options
-- [`docs/app-guide.md`](docs/app-guide.md) - User guide
-- [`docs/architecture.md`](docs/architecture.md) - System architecture
-- [`docs/api-reference.md`](docs/api-reference.md) - API documentation
-- [`docs/development.md`](docs/development.md) - Development guide
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues
-
-## Features
-
-### Core Capabilities
-- 🎬 **AI Video Clipping** - Automatically extract viral moments from long-form content
-- 📝 **Smart Transcription** - AssemblyAI-powered transcription with 97%+ accuracy
-- 🎯 **Virality Scoring** - AI predicts which clips will perform best
-- 🎨 **Auto Captions** - Dynamic, customizable subtitles with bounce, karaoke, and fade effects
-- 🔊 **Audio Mastering** - EBU R128 loudness normalization and audio enhancement
-- 🎞️ **Creative Effects** - Zoom punch, color grading, B-roll overlays
-- 📊 **Analytics Dashboard** - Track validation stats, failure patterns, and performance metrics
-
-### Advanced Features (Session 6+)
-- ✅ **Clip Validation System** - Pre/post render validation with automatic retry
-- ✅ **Smart Error Recovery** - Intelligent retry logic for transient FFmpeg failures
-- ✅ **Validation Analytics** - Track metrics, identify patterns, monitor trends
-- ✅ **Configurable Thresholds** - Environment-based validation tuning
-- ✅ **Learning Loop QA** - Comprehensive quality assurance with ClipValidator integration
-
-### Production Ready
-- 🏗️ **Docker Deployment** - Full stack with PostgreSQL, Redis, frontend, backend, workers
-- 🧪 **751 Automated Tests** - Comprehensive test coverage across all features
-- ⚡ **Performance Optimized** - Redis caching, async processing, connection pooling
-- 📈 **Monitoring & Metrics** - Built-in analytics and health checks
-- 🔒 **Enterprise Validation** - 87% fewer rendering failures
-
-## Hosted Billing Emails
-
-When you run ViraClip with monetization enabled (`SELF_HOST=false`), subscription lifecycle emails are sent through Resend by the backend:
-
-- `checkout.session.completed` sends the thank-you-for-subscribing email
-- `customer.subscription.deleted` sends the sorry-to-see-you-go email
-
-Required env vars for this flow:
-
-- `RESEND_API_KEY`
-- `RESEND_FROM_EMAIL`
-- `BACKEND_AUTH_SECRET`
-- `STRIPE_SECRET_KEY`
-- `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRICE_ID`
-
-### Local Development (Without Docker)
-
-See [CLAUDE.md](CLAUDE.md) for detailed development instructions.
-
-## Contributing
-
-ViraClip is open source and welcomes contributions! Whether you're fixing bugs, adding features, or improving documentation, we'd love your help.
-
-**Key Areas:**
-- Video processing pipeline improvements
-- New creative effects and transitions
-- Performance optimizations
-- Documentation and guides
-- Test coverage expansion
-
-## Host Performance Tuning (Production)
-
-For optimal video rendering performance on Linux servers with NVIDIA GPUs:
-
-### Install Host Tuning Service
-
-```bash
-# Create directory structure
-sudo mkdir -p /opt/viraclip/scripts/linux
-
-# Copy tuning script
-sudo cp scripts/linux/host-tune.sh /opt/viraclip/scripts/linux/
-sudo chmod +x /opt/viraclip/scripts/linux/host-tune.sh
-
-# Install systemd service
-sudo cp scripts/linux/viraclip-tune.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable viraclip-tune.service
-sudo systemctl start viraclip-tune.service
-```
-
-The `host-tune.sh` script optimizes:
-- **Kernel parameters**: vm.swappiness, dirty ratios, network buffers
-- **CPU governor**: Sets all cores to performance mode
-- **NVIDIA GPU**: Persistence mode for faster initialization
-- **Memory**: Disables transparent hugepages, increases file limits
-
-### System Monitoring
-
-Use the monitor script to track resources during renders:
-
-```bash
-./scripts/linux/monitor.sh --interval 30
-```
-
-This monitors GPU utilization, CPU, RAM, and disk I/O every 30 seconds.
-
-## License
-
-ViraClip is released under the AGPL-3.0 License. See [LICENSE](LICENSE) for details.
-
-## Acknowledgments
-
-**Inspired by SupoClip** - ViraClip builds upon the excellent foundation laid by SupoClip, extending it with enterprise-grade validation, advanced analytics, and production-ready features for creators who need reliability at scale.
-
-## Links
-
-- 🌐 **Website**: [viraclip.com](https://www.viraclip.com)
-- 📖 **Documentation**: [docs/](docs/README.md)
-- 🐛 **Issues**: [GitHub Issues](https://github.com/sebsv123/ViraClip/issues)
-- 💬 **Discussions**: [GitHub Discussions](https://github.com/sebsv123/ViraClip/discussions)
+</div>
 
 ---
 
-**Made with ❤️ for content creators everywhere**
+## ✨ What is ViraClip?
+
+ViraClip ingests a long video (YouTube URL or upload), transcribes it, scores the most viral moments with AI, and renders ready-to-publish vertical short-form clips with subtitles, B-roll, captions, and platform-specific export presets.
+
+It is **open-source**, **self-hostable**, and **GPU-accelerated** end-to-end.
+
+```
+URL  ─►  Download  ─►  Whisper transcript  ─►  AI virality scoring
+          │
+          └─►  Per-clip pipeline:
+                 Subtitles  →  B-roll  →  Beat-sync BGM  →  Polish  →  Export
+```
+
+## 🚀 Quick start
+
+```bash
+git clone https://github.com/sebsv123/ViraClip.git
+cd ViraClip
+cp .env.example .env       # add at least ASSEMBLY_AI_API_KEY + one LLM provider key
+docker compose up -d --build
+```
+
+Then open:
+
+| Service          | URL                                         |
+|------------------|---------------------------------------------|
+| Frontend         | <http://localhost:3000>                     |
+| Backend API docs | <http://localhost:8000/docs>                |
+| Postgres         | `localhost:5432` (`viraclip` / env-driven)  |
+| Redis            | `localhost:6379`                            |
+
+The first build pulls heavy ML images (CUDA, Whisper, ComfyUI). After that, `docker compose up -d` is fast.
+
+> **Need GPU acceleration?** Make sure NVIDIA Container Toolkit is installed. CPU-only mode also works but transcription/clip rendering will be ~5–10× slower.
+
+## 🎯 Features
+
+### Pipeline
+- 🎬 **AI clip selection** — LLM ranks segments by virality and hook strength
+- 📝 **Word-level transcription** — `faster-whisper` with GPU acceleration
+- 🪄 **Multi-style subtitles** — ASS-rendered TikTok/CapCut/Hormozi presets
+- 🎞️ **B-roll generation** — Pexels, ComfyUI (LTXV), Stability AI, Replicate
+- 🎵 **Beat-synced BGM** — automatic BPM matching + sidechain ducking
+- 🔊 **Audio polish** — denoising, voice enhancement, EBU R128 loudness
+- 🎨 **Visual polish** — LUT grading, vignette, cut-zoom, hook slo-mo
+- 📱 **Platform exports** — TikTok / Reels / Shorts presets out of the box
+
+### Platform
+- 🚦 **Async worker queue** — `arq` + Redis for concurrent rendering
+- 💾 **Smart caching** — Redis + disk-tier cache for transcripts and AI analysis
+- 📊 **Observability** — Prometheus-friendly metrics, structured logging
+- 🔐 **Auth** — `better-auth` with email/password + Google OAuth
+- 💳 **Billing (optional)** — Stripe subscriptions with Resend lifecycle emails
+- 🔄 **Self-host or hosted** — same codebase, toggled via `SELF_HOST` env var
+
+## 🧱 Architecture
+
+```
+┌──────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│  Next.js 15  │───►│   FastAPI API    │───►│   arq worker    │
+│  (frontend)  │    │  (REST + SSE)    │    │  (clip render)  │
+└──────────────┘    └──────────────────┘    └─────────────────┘
+       │                     │                       │
+       │              ┌──────┴──────┐                │
+       └─────────────►│  Postgres   │◄───────────────┘
+                      │   Redis     │
+                      └─────────────┘
+                             ▲
+                             │
+                      ┌──────┴──────┐
+                      │  ComfyUI    │  (optional, GPU)
+                      │  Ollama     │  (optional, local LLM)
+                      └─────────────┘
+```
+
+Backend code is organised by **business domain** instead of one big `services/` folder:
+
+```
+backend/src/
+├── api/                  # HTTP routes
+├── core/                 # cache, metrics, error handling, observability
+├── domains/
+│   ├── ai/               # LLMs, vision, editorial brain
+│   ├── audio/            # music, SFX, voice, beat sync
+│   ├── autopilot/        # task orchestration
+│   ├── billing/
+│   ├── broll/            # generative + stock B-roll
+│   ├── captions/         # subtitles + translation
+│   ├── detection/        # CV / face / scene
+│   ├── feedback/         # learning loops
+│   ├── notifications/
+│   ├── publishing/       # social distribution
+│   ├── thumbnails/
+│   ├── upscaling/
+│   ├── validation/       # QA & health
+│   ├── video/            # clip rendering pipeline
+│   └── virality/         # scoring, hooks, ML
+├── repositories/         # DB access
+├── workers/              # arq worker entrypoints
+└── agents/               # agent pipelines
+```
+
+See [`docs/architecture.md`](docs/architecture.md) for the full diagram.
+
+## ⚙️ Configuration
+
+ViraClip is configured via environment variables. A complete annotated template is in [`.env.example`](.env.example). The minimum required:
+
+```env
+# Transcription
+ASSEMBLY_AI_API_KEY=...
+
+# One of the following LLM providers
+LLM=google-gla:gemini-2.0-flash
+GOOGLE_API_KEY=...
+
+# Or:
+# LLM=openai:gpt-4o
+# OPENAI_API_KEY=...
+
+# Or fully local:
+# LLM=ollama:qwen2.5:7b
+# OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+```
+
+| Section            | Doc                                                              |
+|--------------------|------------------------------------------------------------------|
+| All config keys    | [`docs/configuration.md`](docs/configuration.md)                 |
+| Getting API keys   | [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md)                         |
+| Production deploy  | [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md)                             |
+| Troubleshooting    | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)                       |
+
+## 🧪 Testing
+
+> **Status (current):** lint runs in CI; the test suite is being rebuilt after the recent backend domain refactor. Smoke testing via `docker compose up -d` + creating a task end-to-end is the current verification baseline. Contributions to test coverage are very welcome.
+
+When tests are present:
+
+```bash
+make test            # backend + frontend unit tests
+make test-backend    # pytest with Postgres + Redis service containers
+make test-frontend   # Vitest + React Testing Library
+make test-e2e        # Playwright smoke flows
+make test-ci         # full CI matrix
+```
+
+Local runs expect Postgres and Redis. Easiest path: `docker compose up -d postgres redis`, then `make test`.
+
+## 🛠️ Local development
+
+Pre-requisites: Docker, Node 20+, Python 3.11+, [`uv`](https://github.com/astral-sh/uv).
+
+```bash
+# Frontend live reload
+cd frontend && npm install && npm run dev
+
+# Backend live reload (in another shell)
+cd backend && uv sync && .venv/bin/uvicorn src.main:app --reload --port 8000
+
+# Worker
+cd backend && .venv/bin/arq src.workers.tasks.WorkerSettings
+```
+
+Coding style and PR workflow are described in [`CONTRIBUTING.md`](CONTRIBUTING.md). Pre-commit hooks (`ruff`, `prettier`, `detect-secrets`, conventional commits) are pre-configured — install with:
+
+```bash
+pip install pre-commit && pre-commit install --hook-type pre-commit --hook-type commit-msg
+```
+
+## 📚 Documentation
+
+- 🏗️ [`docs/architecture.md`](docs/architecture.md) — system architecture
+- 🔧 [`docs/configuration.md`](docs/configuration.md) — config reference
+- 🚀 [`docs/setup.md`](docs/setup.md) — deployment setup
+- 📖 [`docs/api-reference.md`](docs/api-reference.md) — REST API
+- 🧑‍💻 [`docs/development.md`](docs/development.md) — developer guide
+- 🆘 [`docs/troubleshooting.md`](docs/troubleshooting.md) — common issues
+- 📋 [`AGENTS.md`](AGENTS.md) — repository conventions for AI/human contributors
+- 🔒 [`SECURITY.md`](SECURITY.md) — security policy
+- 📓 [`CHANGELOG.md`](CHANGELOG.md) — release notes
+
+## 🤝 Contributing
+
+Pull requests are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/development.md`](docs/development.md) before starting. Good first issues are tagged [`good first issue`](https://github.com/sebsv123/ViraClip/issues?q=is%3Aopen+label%3A%22good+first+issue%22).
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/) and the [Contributor Covenant](.github/CODE_OF_CONDUCT.md).
+
+## 🛡️ Security
+
+Found a vulnerability? Please **do not** open a public issue. See [`SECURITY.md`](SECURITY.md) for our responsible disclosure process.
+
+## 📝 License
+
+ViraClip is released under the [AGPL-3.0](LICENSE) license. If you offer ViraClip — modified or not — as a network service, you must release your source under the same license.
+
+For commercial licensing without AGPL obligations, please open a [GitHub discussion](https://github.com/sebsv123/ViraClip/discussions).
+
+## 🙏 Acknowledgments
+
+ViraClip stands on the shoulders of giants:
+
+- [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) — GPU-accelerated transcription
+- [`pydantic-ai`](https://github.com/pydantic/pydantic-ai) — LLM orchestration
+- [`ComfyUI`](https://github.com/comfyanonymous/ComfyUI) — generative B-roll
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — robust YouTube ingestion
+- [Pexels](https://www.pexels.com/) — free stock B-roll
+- [AssemblyAI](https://www.assemblyai.com/) — transcription API
+
+…and the SupoClip project, which inspired the original architecture.
+
+---
+
+<div align="center">
+
+**Made for content creators who ship.**
+
+[Website](https://www.viraclip.com) · [Issues](https://github.com/sebsv123/ViraClip/issues) · [Discussions](https://github.com/sebsv123/ViraClip/discussions)
+
+</div>
