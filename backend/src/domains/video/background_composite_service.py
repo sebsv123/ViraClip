@@ -157,7 +157,7 @@ class BackgroundCompositeService:
         Genera un video de FONDO con LTX-Video directamente desde un prompt
         semánticamente relacionado con el clip. Aspecto 9:16 (576x1024).
         """
-        from .comfyui.orchestrator import comfyui_orchestrator
+        from ..broll.comfyui.orchestrator import comfyui_orchestrator
 
         # Normalizar prompt: acepta str o list[str]
         if isinstance(prompt, list):
