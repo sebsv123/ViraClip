@@ -179,7 +179,7 @@ async def generate_tts_narration(
     set_trace_id(f"gpu-tts-{task_id}")
     logger.info(f"[gpu] Generating TTS for task {task_id} | model={model} | lang={language}")
 
-    from ..services.tts_service import TTSService
+    from ..domains.audio.tts_service import TTSService
 
     service = TTSService()
     result = await service.synthesize(

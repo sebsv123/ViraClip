@@ -217,7 +217,7 @@ async def apply_music_auto(
     Downloads, normalizes to -14 LUFS, and mixes with sidechain ducking.
     Returns attribution info if the sound requires it (CC-BY licenses).
     """
-    from ...services.freesound_service import get_freesound_service
+    from ...domains.audio.freesound_service import get_freesound_service
 
     clip = await ClipRepository.get_clip_by_id(db, clip_id)
     if not clip:

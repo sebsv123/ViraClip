@@ -629,7 +629,7 @@ class TaskService:
                     # ── Viral Editing: Audio Denoise (opt-in) ────────────────────────
                     if info is not None and denoise_audio:
                         try:
-                            from .audio_denoiser import denoise_audio as _denoise
+                            from ..domains.audio.audio_denoiser import denoise_audio as _denoise
                             from pathlib import Path as _Path
                             _dn_in = _Path(info["path"])
                             _dn_out = _dn_in.with_name(f"dn_{_dn_in.name}")

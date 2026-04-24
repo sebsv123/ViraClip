@@ -557,7 +557,7 @@ class CreativePipeline:
         ducked = None
         try:
             logger.debug("  [Creative] Importing smart_audio...")
-            from .smart_audio import get_smart_audio, find_bgm_track
+            from ..domains.audio.smart_audio import get_smart_audio, find_bgm_track
             logger.debug("  [Creative] smart_audio import OK")
             mastered = clip_path.with_name(f"mastered_{clip_path.name}")
             bgm = find_bgm_track()
@@ -576,7 +576,7 @@ class CreativePipeline:
                 # Apply audio ducking if enabled and we have word timings
                 if words:
                     try:
-                        from .audio_ducking_service import get_audio_ducking_service
+                        from ..domains.audio.audio_ducking_service import get_audio_ducking_service
                         ducked = clip_path.with_name(f"ducked_{clip_path.name}")
                         duck_result = await get_audio_ducking_service().apply_ducking(
                             video_path=clip_path,
