@@ -92,7 +92,7 @@ async def upscale_clip(
     set_trace_id(f"gpu-upscale-{task_id}")
     logger.info(f"[gpu] Upscaling clip for task {task_id} | {scale_factor}x | model={model}")
 
-    from ..services.upscaling_service import UpscalingService
+    from ..domains.upscaling.upscaling_service import UpscalingService
 
     service = UpscalingService()
     result = await service.upscale(

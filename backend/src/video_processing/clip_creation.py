@@ -637,7 +637,7 @@ def create_clips_from_segments(
 
     # Generate thumbnails for each clip
     try:
-        from ..services.thumbnail_service import generate_viral_thumbnail
+        from ..domains.thumbnails.thumbnail_service import generate_viral_thumbnail
         for clip in clips_info:
             thumbnail_filename = clip["filename"].replace(".mp4", ".png")
             thumbnail_path = output_dir / "thumbnails" / thumbnail_filename
