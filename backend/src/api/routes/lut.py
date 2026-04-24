@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from ...services.lut_service import get_lut_service
+from ...domains.video.lut_service import get_lut_service
 
 router = APIRouter(prefix="/lut", tags=["LUT Color Grading"])
 

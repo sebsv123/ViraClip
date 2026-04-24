@@ -17,7 +17,7 @@ import os
 import traceback
 from pathlib import Path
 
-from .background_composite_service import background_composite_service
+from ..domains.video.background_composite_service import background_composite_service
 
 logger = logging.getLogger(__name__)
 
@@ -338,7 +338,7 @@ class CreativePipeline:
             try:
                 logger.debug("  [Creative] Importing contextual_broll & video_effects...")
                 from .contextual_broll import get_contextual_broll
-                from .video_effects import overlay_broll_clips
+                from ..domains.video.video_effects import overlay_broll_clips
                 logger.debug("  [Creative] B-roll imports OK")
                 broll_pairs = await get_contextual_broll().get_for_timeline(
                     timeline, max_assets=3
@@ -470,7 +470,7 @@ class CreativePipeline:
         try:
             if preset is not None:
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
-                from .video_effects import apply_preset_effects
+                from ..domains.video.video_effects import apply_preset_effects
                 logger.debug("  [Creative] video_effects import OK")
                 peak_events = [e for e in timeline if e.type == "audio_peak"]
                 effected = clip_path.with_name(f"vfx_{clip_path.name}")
@@ -508,7 +508,7 @@ class CreativePipeline:
             dramatic_slowmo = segment.get("dramatic_slowmo", False)
             
             if playback_speed != 1.0 or dramatic_slowmo:
-                from .speed_control_service import get_speed_control_service
+                from ..domains.video.speed_control_service import get_speed_control_service
                 
                 speed_svc = get_speed_control_service()
                 speed_output = clip_path.with_name(f"speed_{clip_path.name}")

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ...services.video_compression import (
+from ...domains.video.video_compression import (
     CompressionPreset,
     VideoCodec,
     get_compression_service,

@@ -9,7 +9,7 @@ except ImportError:
 import numpy as np
 from typing import List, Dict, Any, Optional
 from pathlib import Path
-from ..utils.async_helpers import run_in_thread
+from ...utils.async_helpers import run_in_thread
 
 logger = logging.getLogger(__name__)
 

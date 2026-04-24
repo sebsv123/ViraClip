@@ -134,7 +134,7 @@ async def generate_optical_flow_transition(
     set_trace_id(f"gpu-transition-{task_id}")
     logger.info(f"[gpu] Generating optical flow transition for task {task_id}")
 
-    from ..services.optical_flow_service import OpticalFlowService
+    from ..domains.video.optical_flow_service import OpticalFlowService
 
     service = OpticalFlowService()
     result = await service.generate_transition(

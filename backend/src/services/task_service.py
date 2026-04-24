@@ -18,7 +18,7 @@ from ..repositories.task_repository import TaskRepository
 from ..repositories.source_repository import SourceRepository
 from ..repositories.clip_repository import ClipRepository
 from ..repositories.cache_repository import CacheRepository
-from .video_service import VideoService
+from ..domains.video.video_service import VideoService
 from ..domains.notifications.task_completion_email_service import (
     TaskCompletionEmailService,
     TaskCompletionRecipient,
@@ -659,7 +659,7 @@ class TaskService:
                     # ── Viral Editing: Jump Cuts + Zoom Transitions (opt-in) ─────────
                     if info is not None and jump_cut:
                         try:
-                            from .cut_zoom_service import apply_jump_cuts_with_zoom
+                            from ..domains.video.cut_zoom_service import apply_jump_cuts_with_zoom
                             from pathlib import Path as _Path
                             _jc_in = _Path(info["path"])
                             _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
