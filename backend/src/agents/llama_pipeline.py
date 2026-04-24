@@ -56,7 +56,7 @@ def build_hook_tool():
     def rewrite_hook(segment_text: str, language: str = "es") -> dict:
         """Rewrite the hook of a segment to maximize virality."""
         try:
-            from ..services.ai_prompts import build_hook_rewriter_prompt
+            from ..domains.ai.ai_prompts import build_hook_rewriter_prompt
             return {"hook_text": segment_text[:100], "hook_type": "question", "emotional_trigger": "curiosity"}
         except Exception as e:
             logger.error("[HookTool] Failed: %s", e)
@@ -176,7 +176,7 @@ def build_memory_tool():
         Use this BEFORE deciding edit style to leverage past successful patterns.
         """
         try:
-            from ..services.rag_memory import query_clip_memory
+            from ..domains.ai.rag_memory import query_clip_memory
             results = query_clip_memory(
                 query_text=transcript_excerpt,
                 mood=mood,
@@ -301,12 +301,12 @@ async def run_llama_pipeline(
     """
     if not LLAMA_AVAILABLE:
         logger.warning("[LlamaPipeline] Falling back to SubagentPipeline (llama-index not installed)")
-        from ..services.subagent_pipeline import SubagentPipeline
+        from ..domains.ai.subagent_pipeline import SubagentPipeline
         return await SubagentPipeline().run(clip_context)
 
     workflow = build_llama_pipeline(groq_api_key)
     if not workflow:
-        from ..services.subagent_pipeline import SubagentPipeline
+        from ..domains.ai.subagent_pipeline import SubagentPipeline
         return await SubagentPipeline().run(clip_context)
 
     try:
@@ -321,5 +321,5 @@ async def run_llama_pipeline(
         return {"pipeline_status": "completed", "llama_result": str(result)}
     except Exception as e:
         logger.error("[LlamaPipeline] Workflow failed: %s", e, exc_info=True)
-        from ..services.subagent_pipeline import SubagentPipeline
+        from ..domains.ai.subagent_pipeline import SubagentPipeline
         return await SubagentPipeline().run(clip_context)

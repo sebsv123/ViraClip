@@ -117,7 +117,7 @@ from .optical_flow_transitions import (
 
 # Import generate_clip_thumbnail from correct location
 try:
-    from ..services.ai_thumbnail_service import generate_clip_thumbnail
+    from ..domains.ai.ai_thumbnail_service import generate_clip_thumbnail
 except ImportError:
     # Fallback if service not available
     def generate_clip_thumbnail(*args, **kwargs):
