@@ -20,7 +20,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import httpx
 
 from ..config import Config, get_config
-from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from ..comfyui_bridge import COMFYUI_ENABLED, ComfyUIBridge  # ComfyUIBridge reservado para LTXV intro
 from .comfyui_integration import comfyui_integration
 from .broll_compositor import compose_overlay, probe_duration
 from .scene_broll_placer import get_insert_timestamps
@@ -160,19 +160,31 @@ class BrollService:
         cached_photo = self.broll_dir / f"{safe}.jpg"
 
         # ── 0. LTX-Video generation (if enabled) ─────────────────────────────
-        if os.getenv("BROLL_USE_LTX", "true").lower() == "true" and video_path and task_id:
+        # IMPORTANTE: aquí queremos un CLIP DE BROLL puro generado por LTX a
+        # partir del keyword, no una concatenación con el video original.
+        # Antes se pedía "broll_transition" que devolvía main+xfade+broll;
+        # ahora se pide "broll_generate" (orchestrator.generate_broll_with_ltx)
+        # y guardamos el resultado en el cache local por keyword.
+        if os.getenv("BROLL_USE_LTX", "true").lower() == "true" and task_id:
             try:
-                logger.info("🎬 Generating B-roll with LTX-Video via ComfyUI")
+                prompt = f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical"
+                logger.info(f"🎬 Generating B-roll with LTX-Video: '{keyword}'")
                 _ltx_result = await comfyui_integration.process_with_comfyui(
-                    task_id=task_id,
-                    video_path=video_path,
-                    operation="broll_transition",
-                    broll_path=None,
-                    transition_type="fade",
-                    duration=3.0
+                    task_id=f"{task_id}_broll_{safe}",
+                    video_path=None,  # not used for pure generation
+                    operation="broll_generate",
+                    prompt=prompt,
+                    duration=3.0,
+                    width=608,   # 9:16-ish at LTX step=32 (608x1088)
+                    height=1088,
                 )
                 if _ltx_result and Path(_ltx_result).exists():
-                    logger.info(f"[BRoll] ✓ LTX-Video generated B-Roll: {_ltx_result}")
+                    # Promote into keyword-cache for future reuse
+                    try:
+                        shutil.copy2(_ltx_result, cached_video)
+                    except Exception as _copy_e:
+                        logger.debug(f"[BRoll] No pude cachear LTX en {cached_video}: {_copy_e}")
+                    logger.info(f"[BRoll] ✓ LTX B-roll generated for '{keyword}': {_ltx_result}")
                     return Path(_ltx_result)
             except Exception as _ltx_e:
                 logger.warning(f"⚠️ LTX B-roll failed, falling back to stock footage: {_ltx_e}")
@@ -538,22 +550,33 @@ class BrollService:
                 except Exception as _t2v_e:
                     logger.debug(f"[BRoll] T2V generation skipped: {_t2v_e}")
 
+            # Último recurso: LTX-Video directo vía ComfyUIOrchestrator.
+            # (ComfyUIBridge.generate_broll era un placeholder que retornaba
+            # None; migrado a la operation "broll_generate" que sí invoca el
+            # workflow LTX real.)
             if not broll_assets and COMFYUI_ENABLED:
                 try:
-                    _cfy = ComfyUIBridge()
                     _gen_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
-                    _gen_out = self.broll_dir / f"gen_{'_'.join(keywords[:1])}.mp4"
-                    _gen_result = await _cfy.generate_broll(
-                        prompt=_gen_prompt,
-                        output_path=_gen_out,
+                    _task_ns = f"brollgen_{'_'.join(keywords[:1]) or 'fallback'}"
+                    _gen_result = await comfyui_integration.process_with_comfyui(
+                        task_id=_task_ns,
+                        video_path=None,
+                        operation="broll_generate",
+                        prompt=f"cinematic B-roll footage of {_gen_prompt}, smooth motion, 9:16 vertical",
                         duration=_BROLL_DURATION,
+                        width=608,
+                        height=1088,
                     )
-                    await _cfy.close()
-                    if _gen_result and _gen_out.exists():
+                    if _gen_result and Path(_gen_result).exists():
+                        _gen_out = self.broll_dir / f"gen_{'_'.join(keywords[:1]) or 'fallback'}.mp4"
+                        try:
+                            shutil.copy2(_gen_result, _gen_out)
+                        except Exception:
+                            _gen_out = Path(_gen_result)
                         broll_assets.append(_gen_out)
-                        logger.info(f"[BRoll] ✓ AnimateDiff generated B-Roll for: {_gen_prompt[:40]}")
+                        logger.info(f"[BRoll] ✓ LTX-Video fallback generated B-Roll for: {_gen_prompt[:40]}")
                 except Exception as _gen_e:
-                    logger.debug(f"[BRoll] AnimateDiff fallback skipped: {_gen_e}")
+                    logger.debug(f"[BRoll] LTX fallback skipped: {_gen_e}")
 
             if not broll_assets:
                 logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")

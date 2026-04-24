@@ -105,9 +105,12 @@ class BackgroundCompositeService:
                         "reason": "ltx_background_failed"
                     }
 
-                # Componer
+                # Componer (original + mask SAM2 + fondo LTX)
                 composite_result = await composite_engine.composite(
-                    person_result, bg_result, task_id
+                    original_clip=clip_path,
+                    mask_clip=person_result,
+                    background_clip=bg_result,
+                    task_id=task_id,
                 )
 
                 if composite_result is None:
@@ -147,24 +150,41 @@ class BackgroundCompositeService:
         self,
         clip_path: str,
         task_id: str,
-        prompt: str,
-        duration: float
+        prompt,
+        duration: float,
     ) -> Optional[str]:
-        """Genera fondo con LTX-Video via comfyui_integration."""
-        from .comfyui_integration import comfyui_integration
+        """
+        Genera un video de FONDO con LTX-Video directamente desde un prompt
+        semánticamente relacionado con el clip. Aspecto 9:16 (576x1024).
+        """
+        from .comfyui.orchestrator import comfyui_orchestrator
+
+        # Normalizar prompt: acepta str o list[str]
+        if isinstance(prompt, list):
+            keywords = ", ".join(str(k) for k in prompt if k)
+        else:
+            keywords = str(prompt or "")
+
+        # Construir prompt cinematográfico
+        full_prompt = (
+            f"cinematic background, {keywords}, "
+            "atmospheric lighting, shallow depth of field, "
+            "subtle camera motion, 35mm film, photorealistic, high quality"
+        ).strip(", ")
 
         try:
-            result = await comfyui_integration.process_with_comfyui(
+            result = await comfyui_orchestrator.generate_broll_with_ltx(
+                prompt=full_prompt,
                 task_id=f"{task_id}_bg",
-                video_path=clip_path,
-                operation="broll_transition",
-                broll_path=None,
-                transition_type="fade",
-                duration=min(duration, 8.0)
+                duration_seconds=min(max(duration, 3.0), 8.0),
+                width=576,
+                height=1024,
             )
+            if result:
+                logger.info(f"[LTX-BG] ✅ Fondo generado: {result}")
             return result
         except Exception as e:
-            logger.warning(f"LTX background generation failed: {e}")
+            logger.warning(f"[LTX-BG] Generation failed: {e}")
             return None
 
 

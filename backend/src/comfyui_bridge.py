@@ -72,49 +72,103 @@ class ComfyUIBridge:
             image_data = first_frame_path.read_bytes()
             image_b64 = base64.b64encode(image_data).decode("utf-8")
 
-            # Build LTX-Video I2V workflow
+            # Build LTX-Video I2V workflow using correct nodes
+            # Nodes: CheckpointLoaderSimple -> CLIPTextEncode (x2) -> LoadImage
+            #        -> LTXVBaseSampler (with cond_images) -> VAEDecode -> VHS_VideoCombine
             workflow = {
                 "1": {
-                    "class_type": "LTXVLoader",
-                    "inputs": {"model": "ltx-video-2b-v0.9.5.safetensors"},
+                    "class_type": "CheckpointLoaderSimple",
+                    "inputs": {"ckpt_name": "ltx-video-2b-v0.9.5.safetensors"},
                 },
                 "2": {
-                    "class_type": "LoadImage",
-                    "inputs": {"image": image_b64},
+                    "class_type": "CLIPTextEncode",
+                    "inputs": {
+                        "clip": ["1", 1],
+                        "text": f"cinematic {theme} short intro, vertical 9:16, dynamic motion, high quality",
+                    },
                 },
                 "3": {
-                    "class_type": "LTXVConditioning",
+                    "class_type": "CLIPTextEncode",
                     "inputs": {
-                        "positive": f"cinematic {theme} short intro, vertical 9:16, dynamic motion",
-                        "negative": "static, blur, low quality",
-                        "image": ["2", 0],
-                        "frame_rate": 24,
-                        "length": 33,
+                        "clip": ["1", 1],
+                        "text": "static, blur, low quality, watermark, text",
                     },
                 },
                 "4": {
-                    "class_type": "KSampler",
+                    "class_type": "LoadImage",
+                    "inputs": {"image": image_b64},
+                },
+                "5": {
+                    "class_type": "LTXVAddLatentGuide",
+                    "inputs": {
+                        "positive": ["2", 0],
+                        "negative": ["3", 0],
+                        "vae": ["1", 2],
+                        "image": ["4", 0],
+                        "latent": ["6", 0],
+                        "strength": 1.0,
+                        "latent_idx": 0,
+                    },
+                },
+                "6": {
+                    "class_type": "EmptyLTXVLatentVideo",
+                    "inputs": {
+                        "width": 576,
+                        "height": 1024,
+                        "length": 33,
+                        "batch_size": 1,
+                    },
+                },
+                "7": {
+                    "class_type": "BasicGuider",
                     "inputs": {
                         "model": ["1", 0],
-                        "positive": ["3", 0],
-                        "negative": ["3", 1],
-                        "latent_image": ["3", 2],
-                        "seed": 42,
-                        "steps": 20,
-                        "cfg": 3.0,
-                        "sampler_name": "euler",
+                        "conditioning": ["5", 0],
+                    },
+                },
+                "8": {
+                    "class_type": "KSamplerSelect",
+                    "inputs": {"sampler_name": "euler"},
+                },
+                "9": {
+                    "class_type": "BasicScheduler",
+                    "inputs": {
+                        "model": ["1", 0],
                         "scheduler": "sgm_uniform",
+                        "steps": 20,
                         "denoise": 0.85,
                     },
                 },
-                "5": {
+                "10": {
+                    "class_type": "RandomNoise",
+                    "inputs": {"noise_seed": 42},
+                },
+                "11": {
+                    "class_type": "SamplerCustomAdvanced",
+                    "inputs": {
+                        "noise": ["10", 0],
+                        "guider": ["7", 0],
+                        "sampler": ["8", 0],
+                        "sigmas": ["9", 0],
+                        "latent_image": ["5", 2],
+                    },
+                },
+                "12": {
+                    "class_type": "VAEDecode",
+                    "inputs": {
+                        "vae": ["1", 2],
+                        "samples": ["11", 0],
+                    },
+                },
+                "13": {
                     "class_type": "VHS_VideoCombine",
                     "inputs": {
-                        "images": ["4", 0],
+                        "images": ["12", 0],
                         "frame_rate": 24,
                         "loop_count": 0,
                         "filename_prefix": "ltxv_intro",
                         "format": "video/h264-mp4",
+                        "pix_fmt": "yuv420p",
                         "save_output": True,
                     },
                 },
@@ -191,11 +245,11 @@ class ComfyUIBridge:
                     logger.error("[ComfyUIBridge] Workflow execution error")
                     return ""
 
-                # Look for video output in node 5 (VHS_VideoCombine)
+                # Look for video output in node 13 (VHS_VideoCombine)
                 outputs = entry.get("outputs", {})
-                node_5_output = outputs.get("5", {})
-                if node_5_output:
-                    videos = node_5_output.get("videos", [])
+                node_13_output = outputs.get("13", {})
+                if node_13_output:
+                    videos = node_13_output.get("videos", [])
                     if videos:
                         filename = videos[0].get("filename", "")
                         if filename:
