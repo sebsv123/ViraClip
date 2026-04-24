@@ -150,7 +150,7 @@ class LearningLoop:
         
         # Enhanced validation using ClipValidator
         try:
-            from .clip_validator import get_clip_validator
+            from ..domains.validation.clip_validator import get_clip_validator
             validator = get_clip_validator()
             validation_result = await validator.validate_output(
                 output_path=output,
