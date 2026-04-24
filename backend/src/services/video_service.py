@@ -55,7 +55,7 @@ from .social_distribution_service import SocialDistributionService
 from .phi3_virality_service import Phi3ViralityService, get_phi3_service
 # Guarded import for ConfidenceSubtitleGenerator
 try:
-    from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+    from ..domains.captions.confidence_subtitle_service import ConfidenceSubtitleGenerator
     _confidence_subtitle_available = True
 except (ImportError, Exception):
     _confidence_subtitle_available = False
@@ -1117,7 +1117,7 @@ class VideoService:
                 _whisper_device = os.environ.get("WHISPER_DEVICE", "auto")
                 _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "0"))
 
-                from .confidence_subtitle_service import ConfidenceSubtitleGenerator
+                from ..domains.captions.confidence_subtitle_service import ConfidenceSubtitleGenerator
                 _realigner = ConfidenceSubtitleGenerator(
                     model_size=_realign_model,
                     device=_whisper_device
@@ -1546,7 +1546,7 @@ class VideoService:
         # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
         if add_subtitles and words_with_confidence:
             try:
-                from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
+                from ..domains.captions.caption_service import CaptionService as _CS, burn_captions as _burn_caps
                 logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
                 _cap_style_raw = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
                 _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw  # Nunca usar minimal - texto invisible
@@ -1639,7 +1639,7 @@ class VideoService:
 
         # Step 4.6: Translation & Dubbing
         if target_language and target_language != "eng":
-            from .translation_service import TranslationService
+            from ..domains.captions.translation_service import TranslationService
             translator = TranslationService()
             dubbed_path = output_path.with_name(f"dubbed_{output_path.name}")
             await translator.dub_clip(output_path, dubbed_path, target_language)

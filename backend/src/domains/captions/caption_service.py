@@ -348,7 +348,7 @@ async def burn_captions(
 
     # ── Subtitle QA: speed guard + emoji injection + profanity filter ──────────
     try:
-        from ..video_processing.subtitle_qa import run_subtitle_qa as _run_qa
+        from ...video_processing.subtitle_qa import run_subtitle_qa as _run_qa
         _qa_result = _run_qa(ass_content, apply_fixes=True, inject_emoji=True, censor_profanity=False)
         if _qa_result.fixed_content:
             ass_content = _qa_result.fixed_content

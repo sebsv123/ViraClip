@@ -208,8 +208,8 @@ class TranslationService:
         output_path: Path,
         target_lang: str,
     ) -> None:
-        from ..video_processing import load_cached_transcript_data
-        from ..video_processing.utils import parse_timestamp_to_seconds
+        from ...video_processing import load_cached_transcript_data
+        from ...video_processing.utils import parse_timestamp_to_seconds
 
         # Load transcript cache
         transcript = load_cached_transcript_data(video_path)
@@ -300,7 +300,7 @@ class TranslationService:
         self, audio_path: Path, target_lang: str = "en"
     ) -> str:
         """Translate transcript text to target language (text-only, no audio)."""
-        from ..video_processing import load_cached_transcript_data
+        from ...video_processing import load_cached_transcript_data
         transcript = load_cached_transcript_data(audio_path.with_suffix(".mp4"))
         text = (transcript or {}).get("text", "")
         return _translate_text(text, target_lang) if text else ""
