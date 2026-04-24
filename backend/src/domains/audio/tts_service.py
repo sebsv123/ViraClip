@@ -201,7 +201,7 @@ async def maybe_add_narration(
         return False
 
     try:
-        from ..video_processing.audio_analysis import measure_snr
+        from ...video_processing.audio_analysis import measure_snr
         snr = await measure_snr(str(video_path))
         if snr >= snr_threshold:
             logger.debug(f"[TTS] SNR={snr:.1f}dB ≥ threshold={snr_threshold} — skipping narration")

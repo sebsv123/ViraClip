@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from ..constants import FFPROBE_TIMEOUT, DEFAULT_VIDEO_DURATION
+from ...constants import FFPROBE_TIMEOUT, DEFAULT_VIDEO_DURATION
 
 logger = logging.getLogger(__name__)
 

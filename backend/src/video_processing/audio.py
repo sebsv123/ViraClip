@@ -150,7 +150,7 @@ def get_background_music_for_niche(niche: str = "general", config_obj=None, vide
     if video_path and video_path.exists():
         try:
             import asyncio as _asyncio
-            from ..services.audio_analysis import get_audio_analysis_service
+            from ..domains.audio.audio_analysis import get_audio_analysis_service
             _aa = get_audio_analysis_service()
             _loop = _asyncio.new_event_loop()
             _audio_data = _loop.run_until_complete(_aa.analyze_audio(video_path, extract_music_info=False))
@@ -185,7 +185,7 @@ def get_background_music_for_niche(niche: str = "general", config_obj=None, vide
     # 2.5. BackgroundMusicService: Pixabay mood-search with adaptive volume metadata
     try:
         import asyncio as _asyncio2
-        from ..services.background_music_service import BackgroundMusicService as _BMS
+        from ..domains.audio.background_music_service import BackgroundMusicService as _BMS
         _bms = _BMS()
         _bms_loop = _asyncio2.new_event_loop()
         _bms_tracks = _bms_loop.run_until_complete(_bms.search_music(mood=niche, duration=30))
@@ -206,7 +206,7 @@ def get_background_music_for_niche(niche: str = "general", config_obj=None, vide
     if os.environ.get("FREESOUND_API_KEY", "") and os.environ.get("FREESOUND_AUTO_MATCH", "true").lower() == "true":
         try:
             import asyncio as _asyncio
-            from ..services.freesound_service import FreesoundService as _FS
+            from ..domains.audio.freesound_service import FreesoundService as _FS
             _fs_svc = _FS()
             _fs_cache = Path(_cfg.temp_dir) / "freesound_bgm"
             _fs_cache.mkdir(parents=True, exist_ok=True)
@@ -465,7 +465,7 @@ def mix_background_music(
     try:
         if ducking_enabled and word_timings:
             # Ducking PREDICTIVO basado en timestamps de palabras
-            from ..services.audio_ducking_service import build_word_aware_ducking_filter
+            from ..domains.audio.audio_ducking_service import build_word_aware_ducking_filter
             _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
             if _ducking_mode == "predictive":
                 _voice_ratio      = float(os.environ.get("DUCKING_VOICE_RATIO", "0.80"))

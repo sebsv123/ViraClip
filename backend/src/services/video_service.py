@@ -61,7 +61,7 @@ except (ImportError, Exception):
     _confidence_subtitle_available = False
     ConfidenceSubtitleGenerator = None  # type: ignore
 from .semantic_broll_service import SemanticBrollService
-from .sound_design_service import SoundDesignService, add_viral_sound_effects
+from ..domains.audio.sound_design_service import SoundDesignService, add_viral_sound_effects
 from .hook_visual_service import HookVisualService
 from ..domains.detection.face_detection_service import FaceDetectionService
 from ..video_processing.export_profiles import ExportService, Platform, get_ffmpeg_export_command
@@ -1194,7 +1194,7 @@ class VideoService:
         _tts_enabled = os.environ.get("TTS_NARRATION_ENABLED", "false").lower() == "true"
         if _tts_enabled:
             try:
-                from .voice_synthesis import VoiceSynthesisService, VoiceStyle
+                from ..domains.audio.voice_synthesis import VoiceSynthesisService, VoiceStyle
                 _vs_svc = VoiceSynthesisService()
                 _tts_out = output_path.with_name(f"tts_{output_path.name}")
                 _vs_result = await _vs_svc.narrate_video(
@@ -1388,7 +1388,7 @@ class VideoService:
         _beat_times: List[float] = []
         _beat_bpm: float = 0.0
         try:
-            from .beat_sync_service import analyse_bpm as _analyse_bpm
+            from ..domains.audio.beat_sync_service import analyse_bpm as _analyse_bpm
             _bpm_result = await _analyse_bpm(audio_path=output_path)
             _beat_bpm   = _bpm_result.get("bpm", 0.0)
             _beat_times = _bpm_result.get("beat_times", [])
@@ -1648,7 +1648,7 @@ class VideoService:
         # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
         # Falls back to niche-based static track when BGM library is empty.
         try:
-            from .beat_sync_service import get_beat_sync_service as _get_bs
+            from ..domains.audio.beat_sync_service import get_beat_sync_service as _get_bs
             _music_out = output_path.with_name(f"music_{output_path.name}")
             _speech_segs = [
                 {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
@@ -1689,7 +1689,7 @@ class VideoService:
 
         # Step 4.10b: Audio Ducking — auto-lower BGM when speaker talks (sidechain)
         try:
-            from .audio_ducking_service import get_audio_ducking_service
+            from ..domains.audio.audio_ducking_service import get_audio_ducking_service
             _duck_svc = get_audio_ducking_service()
             if _duck_svc.enabled and words_with_confidence:
                 _duck_out = output_path.with_name(f"duck_{output_path.name}")
@@ -2014,7 +2014,7 @@ class VideoService:
         # ── Audio Recommendation — sugerir música ideal para este clip ────
         _audio_recs: list = []
         try:
-            from .audio_recommendation import recommend_music_for_video
+            from ..domains.audio.audio_recommendation import recommend_music_for_video
             _arecs = await recommend_music_for_video(output_path, count=3)
             _audio_recs = [
                 {"title": r.title, "genre": r.genre.value if hasattr(r.genre, "value") else str(r.genre), "mood": r.mood, "bpm": r.bpm}
