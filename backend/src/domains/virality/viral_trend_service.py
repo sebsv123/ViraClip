@@ -35,7 +35,7 @@ from dataclasses import dataclass
 import redis.asyncio as aioredis
 import httpx
 
-from ..utils.cache_manager import redis_cache, invalidate_cache
+from ...utils.cache_manager import redis_cache, invalidate_cache
 
 logger = logging.getLogger(__name__)
 

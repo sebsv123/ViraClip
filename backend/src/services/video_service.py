@@ -76,7 +76,7 @@ from ..video_processing.silence_removal import (
 from ..video_processing.audio import denoise_audio, apply_voice_enhancement
 from ..video_processing.editing_pipeline import EditingPipeline
 from ..video_processing.thumbnail_selector import select_best_thumbnail
-from .viral_metadata_service import generate_viral_metadata
+from ..domains.virality.viral_metadata_service import generate_viral_metadata
 from ..comfyui_bridge import COMFYUI_ENABLED  # ComfyUIBridge retirado (métodos inexistentes)
 
 logger = logging.getLogger(__name__)
@@ -739,7 +739,7 @@ class VideoService:
                 )
                 # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
                 try:
-                    from .viral_scorer_service import get_viral_scorer
+                    from ..domains.virality.viral_scorer_service import get_viral_scorer
                     _mlp = get_viral_scorer()
                     if _mlp.is_available():
                         _blended = _mlp.blend_with_phi3(
@@ -870,7 +870,7 @@ class VideoService:
         # Single analysis pass that drives: LUT, caption style, B-roll
         # density/duration, BGM category, SFX emphasis, zoom intensity.
         try:
-            from .clip_intelligence import build_clip_profile_async as _build_profile_async
+            from ..domains.virality.clip_intelligence import build_clip_profile_async as _build_profile_async
             _clip_profile = await _build_profile_async(
                 segment=segment,
                 duration=duration,
@@ -1776,7 +1776,7 @@ class VideoService:
 
         # ViralityEngine: unified hook+pacing+emotion+phi3 score (replaces manual blend)
         try:
-            from .virality_engine import get_virality_engine
+            from ..domains.virality.virality_engine import get_virality_engine
             _ve = get_virality_engine()
             _ve_pred = await _ve.predict(
                 transcript=segment.get("text", ""),
@@ -1912,7 +1912,7 @@ class VideoService:
         # Phase 8.3: LSTM/CNN engagement prediction (drop-off curve)
         engagement_data: dict = {}
         try:
-            from .engagement_prediction_service import get_engagement_predictor
+            from ..domains.virality.engagement_prediction_service import get_engagement_predictor
             import asyncio as _asyncio
             _predictor = get_engagement_predictor()
             _loop = _asyncio.get_event_loop()
@@ -1942,7 +1942,7 @@ class VideoService:
         # ── Recommendation Engine — personalized suggestions per user ─────
         _recommendations: list = []
         try:
-            from .recommendation_engine import get_recommendation_engine
+            from ..domains.virality.recommendation_engine import get_recommendation_engine
             _rec_engine = get_recommendation_engine()
             _user_id_rec = segment.get("user_id", "") or ""
             if _user_id_rec:

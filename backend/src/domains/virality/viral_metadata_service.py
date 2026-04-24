@@ -53,7 +53,7 @@ async def generate_viral_metadata(
     # Try LLM generation
     try:
         if llm_client is None:
-            from .llm_service import LLMService
+            from ..services.llm_service import LLMService
             llm_client = LLMService()
 
         prompt = _PROMPT_TEMPLATE.format(

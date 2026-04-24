@@ -427,7 +427,7 @@ def apply_category_rules(
 
     The narrative structure injects strategic timing for zoom/flash moments.
     """
-    from .clip_intelligence import ClipProfile  # avoid circular at module level
+    from ..domains.virality.clip_intelligence import ClipProfile  # avoid circular at module level
 
     rule = CATEGORY_RULES.get(category_key, CATEGORY_RULES[_DEFAULT_CATEGORY])
 

@@ -170,7 +170,7 @@ class CreativePipeline:
         viral_pred = None
         try:
             logger.debug("  [Creative] Importing virality_engine...")
-            from .virality_engine import get_virality_engine
+            from ..domains.virality.virality_engine import get_virality_engine
             logger.debug("  [Creative] virality_engine import OK")
             viral_pred = await get_virality_engine().predict(
                 transcript=transcript,
@@ -229,7 +229,7 @@ class CreativePipeline:
         logger.info("  [Creative] Step 4/8: Hook analysis...")
         try:
             logger.debug("  [Creative] Importing hook_engine...")
-            from .hook_engine import get_hook_engine
+            from ..domains.virality.hook_engine import get_hook_engine
             logger.debug("  [Creative] hook_engine import OK")
             hook_result = get_hook_engine().find_best_hook(
                 words=words or [],
@@ -261,7 +261,7 @@ class CreativePipeline:
                 None,
             )
             if _hook_reorder and _hook_start and float(_hook_start) > 3.0:
-                from .hook_reorder import prepend_hook_flash
+                from ..domains.virality.hook_reorder import prepend_hook_flash
                 _hook_end = _hook_start + 0.5
                 reordered = clip_path.with_name(f"hook_{clip_path.name}")
                 result = await prepend_hook_flash(
