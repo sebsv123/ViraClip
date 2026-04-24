@@ -48,7 +48,7 @@ async def generate_broll_t2v(
     set_trace_id(f"gpu-broll-{task_id}-{clip_index}")
     logger.info(f"[gpu] Generating B-roll for task {task_id} | prompt='{prompt[:60]}...'")
 
-    from ..services.t2v_broll_service import T2VBrollService
+    from ..domains.broll.t2v_broll_service import T2VBrollService
 
     service = T2VBrollService()
     result = await service.generate(

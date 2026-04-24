@@ -337,7 +337,7 @@ class CreativePipeline:
         if not _skip_broll:
             try:
                 logger.debug("  [Creative] Importing contextual_broll & video_effects...")
-                from .contextual_broll import get_contextual_broll
+                from ..domains.broll.contextual_broll import get_contextual_broll
                 from ..domains.video.video_effects import overlay_broll_clips
                 logger.debug("  [Creative] B-roll imports OK")
                 broll_pairs = await get_contextual_broll().get_for_timeline(
@@ -348,7 +348,7 @@ class CreativePipeline:
                 # visual keywords from the actual transcript ("what the speaker says")
                 if not broll_pairs and transcript:
                     try:
-                        from .broll_service import BrollService
+                        from ..domains.broll.broll_service import BrollService
                         from ..domains.detection.multimodal_detector import TimelineEvent
                         llm_kws = await BrollService().extract_keywords(transcript)
                         clip_dur = max(1.0, end - start)
@@ -408,7 +408,7 @@ class CreativePipeline:
         overlay_result = None
         try:
             logger.debug("  [Creative] Importing contextual_overlay_engine...")
-            from .contextual_overlay_engine import get_contextual_overlay_engine
+            from ..domains.broll.contextual_overlay_engine import get_contextual_overlay_engine
             logger.debug("  [Creative] contextual_overlay_engine import OK")
             
             overlay_engine = get_contextual_overlay_engine()

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 import aiofiles
 import httpx
-from ..config import Config
+from ...config import Config
 
 logger = logging.getLogger(__name__)
 

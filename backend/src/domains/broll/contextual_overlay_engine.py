@@ -80,7 +80,7 @@ class ContextualOverlayEngine:
         
         try:
             # Step 1: Detect visual keywords
-            from ..domains.detection.visual_keyword_detector import get_visual_keyword_detector
+            from ...domains.detection.visual_keyword_detector import get_visual_keyword_detector
             
             detector = get_visual_keyword_detector()
             
@@ -132,7 +132,7 @@ class ContextualOverlayEngine:
             content_results = await asyncio.gather(*overlay_tasks, return_exceptions=True)
             
             # Build overlay events
-            from ..video_processing.overlay_renderer import OverlayEvent, OverlayStyle
+            from ...video_processing.overlay_renderer import OverlayEvent, OverlayStyle
             
             overlay_events = []
             for kw, content in zip(keywords, content_results):
@@ -159,7 +159,7 @@ class ContextualOverlayEngine:
             logger.info(f"Fetched content for {len(overlay_events)}/{len(keywords)} keywords")
             
             # Step 3: Render overlays
-            from ..video_processing.overlay_renderer import get_overlay_renderer
+            from ...video_processing.overlay_renderer import get_overlay_renderer
             
             renderer = get_overlay_renderer()
             

@@ -48,7 +48,7 @@ from ...services.metrics_service import get_metrics_collector, timed_stage
 from ...services.error_handler import with_retry, execute_with_recovery, get_circuit_breaker
 from ...services.concurrency_optimizer import parallel_map, run_with_timeout, ParallelBatchProcessor
 from ...services.llm_service import LLMService
-from ...services.broll_service import BrollService
+from ...domains.broll.broll_service import BrollService
 from ...services.elite_ai_service import EliteAIService
 from .vfx_service import VFXService
 from ...domains.publishing.social_distribution_service import SocialDistributionService
@@ -60,9 +60,9 @@ try:
 except (ImportError, Exception):
     _confidence_subtitle_available = False
     ConfidenceSubtitleGenerator = None  # type: ignore
-from ...services.semantic_broll_service import SemanticBrollService
+from ...domains.broll.semantic_broll_service import SemanticBrollService
 from ...domains.audio.sound_design_service import SoundDesignService, add_viral_sound_effects
-from ...services.hook_visual_service import HookVisualService
+from ...domains.broll.hook_visual_service import HookVisualService
 from ...domains.detection.face_detection_service import FaceDetectionService
 from ...video_processing.export_profiles import ExportService, Platform, get_ffmpeg_export_command
 from ...video_processing.audio_analysis import analyze_audio_virality, extract_audio_from_video
@@ -666,7 +666,7 @@ class VideoService:
             from ...config import get_config as _get_cfg_fa
             _cfg_fa = _get_cfg_fa()
             if getattr(_cfg_fa, "broll_enabled", False) and getattr(_cfg_fa, "pexels_api_key", ""):
-                from ...services.pexels_service import prefetch_broll_for_clip as _pfetch
+                from ...domains.broll.pexels_service import prefetch_broll_for_clip as _pfetch
                 _broll_cache_dir = Path(tempfile.gettempdir()) / "viraclip_broll"
                 _broll_theme = segment.get("theme") or "nature"
                 _broll_prefetch_task = asyncio.create_task(
@@ -1486,7 +1486,7 @@ class VideoService:
         from ...config import get_config as _get_cfg_broll
         if _get_cfg_broll().broll_enabled:
             try:
-                from ...services.broll_service import BrollService
+                from ...domains.broll.broll_service import BrollService
                 _broll_svc = BrollService()
                 _broll_out = output_path.with_name(f"broll_{output_path.name}")
                 _broll_kw_override = (_clip_profile.ai_keywords
@@ -1513,7 +1513,7 @@ class VideoService:
         _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
         if _ctx_overlays_env and segment and words_with_confidence:
             try:
-                from ...services.contextual_overlay_engine import ContextualOverlayEngine
+                from ...domains.broll.contextual_overlay_engine import ContextualOverlayEngine
                 _ctx_engine = ContextualOverlayEngine()
                 _ctx_out = output_path.with_name(f"ctx_{output_path.name}")
                 _ctx_result = await _ctx_engine.apply_overlays(
@@ -1709,7 +1709,7 @@ class VideoService:
         _step43_ran = _get_cfg_broll().broll_enabled
         if _broll_prefetch_task is not None and not _step43_ran:
             try:
-                from ...services.pexels_service import overlay_broll_on_clip
+                from ...domains.broll.pexels_service import overlay_broll_on_clip
                 _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
                 if _broll_path:
                     _broll_out = output_path.with_name(f"broll_{output_path.name}")
@@ -2070,7 +2070,7 @@ class VideoService:
         # de todo el procesado porque la intro se prepende como clip nuevo
         # (no afecta a timestamps de los subtítulos ya quemados).
         try:
-            from ...services.ltxv_intro_service import LTXVIntroService
+            from ...domains.broll.ltxv_intro_service import LTXVIntroService
             _intro_out = await LTXVIntroService.maybe_prepend_intro(
                 clip_path=output_path,
                 theme=segment.get("theme") or segment.get("hook_type"),
