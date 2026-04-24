@@ -83,7 +83,7 @@ class ViraClipTester:
             # Import here to catch import errors
             logger.info("[IMPORT] Importing ViraClip services...")
             try:
-                from src.services.video_service import VideoService
+                from src.domains.video.video_service import VideoService
                 from src.services.metrics_service import get_metrics_collector
                 from src.services.cache_manager import get_cache_manager
                 result["stages"]["imports"] = "SUCCESS"

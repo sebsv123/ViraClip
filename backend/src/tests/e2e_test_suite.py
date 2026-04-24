@@ -326,7 +326,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test video downloading."""
-        from ..services.video_service import VideoService
+        from ..domains.video.video_service import VideoService
         
         test_url = video_urls[0] if video_urls else "https://www.youtube.com/watch?v=test"
         
@@ -384,7 +384,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test viral content analysis."""
-        from ..services.video_service import VideoService
+        from ..domains.video.video_service import VideoService
         
         logs.append("Testing viral analysis...")
         
@@ -415,7 +415,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test clip generation."""
-        from ..services.video_service import VideoService
+        from ..domains.video.video_service import VideoService
         
         logs.append("Testing clip generation...")
         
@@ -453,7 +453,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test effects application."""
-        from ..services.vfx_service import apply_viral_effects
+        from ..domains.video.vfx_service import apply_viral_effects
         
         logs.append("Testing viral effects...")
         

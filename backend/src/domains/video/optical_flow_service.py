@@ -72,7 +72,7 @@ class OpticalFlowService:
         duration: float,
         dest: Path,
     ) -> Dict[str, Any]:
-        from ..video_processing.optical_flow_transitions import (
+        from ...video_processing.optical_flow_transitions import (
             apply_optical_flow_transition,
             get_transition_capabilities,
         )
@@ -99,7 +99,7 @@ class OpticalFlowService:
     @staticmethod
     def is_available() -> bool:
         try:
-            from ..video_processing.optical_flow_transitions import get_transition_capabilities
+            from ...video_processing.optical_flow_transitions import get_transition_capabilities
             caps = get_transition_capabilities()
             return bool(caps.get("xfade") or caps.get("raft") or caps.get("crossfade"))
         except Exception:

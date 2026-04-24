@@ -41,7 +41,7 @@ from .api.routes.tasks import router as tasks_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
 from .api.routes.clips import router as clips_router
-from .services.video_service import UPLOAD_URL_PREFIX
+from .domains.video.video_service import UPLOAD_URL_PREFIX
 
 config = Config()
 
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
         
         # LUTService: auto-download film LUTs if not present
         try:
-            from .services.lut_service import get_lut_service as _get_lut
+            from .domains.video.lut_service import get_lut_service as _get_lut
             _lut_svc = _get_lut()
             _lut_info = _lut_svc.get_info()
             if _lut_info["cube_files_present"] == 0:
