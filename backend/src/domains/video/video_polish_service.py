@@ -94,7 +94,7 @@ class VideoPolishService:
         
         if sam2_enabled:
             try:
-                from ...services.enhanced_tracking_service import get_enhanced_tracking_service, TrackingMode
+                from ...core.enhanced_tracking_service import get_enhanced_tracking_service, TrackingMode
                 logger.info("🎯 Using enhanced SAM2 tracking for face-centering: %s", input_path.name)
                 
                 # Use enhanced tracking service

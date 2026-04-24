@@ -488,7 +488,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test export quality."""
-        from ..services.platform_presets import apply_export_preset
+        from ..core.platform_presets import apply_export_preset
         
         logs.append("Testing export quality...")
         
@@ -523,7 +523,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test cache system."""
-        from ..services.cache_manager import get_cache_manager
+        from ..core.cache_manager import get_cache_manager
         
         logs.append("Testing cache system...")
         
@@ -548,7 +548,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test error handling and recovery."""
-        from ..services.error_handler import execute_with_recovery
+        from ..core.error_handler import execute_with_recovery
         
         logs.append("Testing error recovery...")
         
@@ -576,7 +576,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test concurrent processing."""
-        from ..services.concurrency_optimizer import get_concurrency_optimizer
+        from ..core.concurrency_optimizer import get_concurrency_optimizer
         
         logs.append("Testing concurrency...")
         
