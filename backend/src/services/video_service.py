@@ -1154,7 +1154,7 @@ class VideoService:
         _esrgan_enabled = os.environ.get("ESRGAN_ENABLED", "false").lower() == "true"
         if _esrgan_enabled:
             try:
-                from .upscaling_service import UpscalingService
+                from ..domains.upscaling.upscaling_service import UpscalingService
                 _esrgan_svc = UpscalingService()
                 if _esrgan_svc.is_available():
                     _esrgan_out = output_path.with_name(f"up_{output_path.name}")
