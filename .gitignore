@@ -116,6 +116,6 @@ uploads/
 # Separate projects living in the same parent folder (not part of ViraClip)
 genmail/
 
-# Ignore embedded git repos in custom_nodes
-comfyui/custom_nodes/*/.git/
-comfyui/custom_nodes/.git/
+# Ignore all embedded git repos in comfyui custom_nodes (prevents submodule warnings)
+comfyui/custom_nodes/
+comfyui/.git/
