@@ -8,7 +8,7 @@ Transform long-form content into viral short clips with AI. ViraClip is an open-
 >
 > 💡 **Latest**: Full-stack implementation with Next.js 15 + FastAPI + CUDA optimization
 >
-> 🎯 **Branch**: `version-basica` - Production-ready MVP with zero paid APIs
+> 🎯 **Branch**: `main` - Production-ready
 
 ## Why ViraClip?
 
@@ -49,10 +49,9 @@ ViraClip was born from this need - a powerful, open-source alternative that puts
 ### Setup in 3 Commands
 
 ```bash
-# 1. Clone repository (branch: version-basica)
+# 1. Clone repository
 git clone https://github.com/sebsv123/ViraClip.git
 cd ViraClip
-git checkout version-basica
 
 # 2. Start database services
 docker-compose up -d postgres redis

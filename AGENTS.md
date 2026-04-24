@@ -2,7 +2,14 @@
 
 ## Project Structure & Module Organization
 This repository is a monorepo with three apps:
-- `backend/`: FastAPI + async worker code (`src/api`, `src/services`, `src/repositories`, `src/workers`).
+- `backend/`: FastAPI + async worker code organised by domain.
+  - `src/api/` HTTP routes
+  - `src/core/` cross-cutting infrastructure (cache, metrics, error handling, observability, etc.)
+  - `src/domains/` business logic grouped by domain: `ai`, `audio`, `autopilot`, `billing`, `broll`, `captions`, `detection`, `feedback`, `notifications`, `publishing`, `thumbnails`, `upscaling`, `validation`, `video`, `virality`
+  - `src/repositories/` DB access
+  - `src/workers/` arq workers
+  - `src/agents/` agent pipelines
+  - `src/utils/` shared utilities
 - `frontend/`: main Next.js app (`src/app`, `src/components`, `src/lib`, `prisma/`).
 - `waitlist/`: separate Next.js marketing/waitlist app.
 

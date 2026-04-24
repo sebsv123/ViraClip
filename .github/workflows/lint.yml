@@ -1,0 +1,92 @@
+name: Lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Detect which parts of the repo changed ───────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      waitlist: ${{ steps.filter.outputs.waitlist }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/lint.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/lint.yml'
+            waitlist:
+              - 'waitlist/**'
+              - '.github/workflows/lint.yml'
+
+  # ── Backend: ruff lint + format check ────────────────────────────────────
+  backend-lint:
+    needs: changes
+    if: needs.changes.outputs.backend == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v4
+      - name: Install ruff
+        run: uv tool install ruff
+      - name: Ruff check
+        run: ruff check backend/
+      - name: Ruff format check
+        run: ruff format --check backend/
+
+  # ── Frontend: eslint + tsc ───────────────────────────────────────────────
+  frontend-lint:
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+  # ── Waitlist: same as frontend ───────────────────────────────────────────
+  waitlist-lint:
+    needs: changes
+    if: needs.changes.outputs.waitlist == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: waitlist
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: waitlist/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - name: TypeScript check
+        run: npx tsc --noEmit
