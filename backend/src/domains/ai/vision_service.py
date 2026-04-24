@@ -31,7 +31,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 try:
-    from ..utils.scene_analysis import extract_representative_frames
+    from ...utils.scene_analysis import extract_representative_frames
 except ImportError:  # pragma: no cover
     extract_representative_frames = None  # type: ignore
 
@@ -86,7 +86,7 @@ _ollama_vision_model: Optional[str] = None
 
 
 async def _get_ollama_endpoint() -> str:
-    from ..config import get_config
+    from ...config import get_config
     cfg = get_config()
     return getattr(cfg, "ollama_base_url", _OLLAMA_DEFAULT).rstrip("/")
 
@@ -99,7 +99,7 @@ async def _check_ollama() -> tuple[bool, str]:
 
     try:
         import httpx
-        from ..config import get_config
+        from ...config import get_config
         cfg = get_config()
         endpoint = await _get_ollama_endpoint()
         vision_model = getattr(cfg, "ollama_vision_model", "qwen3-vl:8b")

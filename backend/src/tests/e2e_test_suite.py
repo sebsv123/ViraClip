@@ -732,7 +732,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test AI thumbnail generation."""
-        from ..services.ai_thumbnail_service import generate_clip_thumbnail
+        from ..domains.ai.ai_thumbnail_service import generate_clip_thumbnail
         
         logs.append("Testing thumbnail generation...")
         

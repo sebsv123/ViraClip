@@ -14,10 +14,10 @@ except ImportError:
     PYDANTIC_AI_AVAILABLE = False
     Agent = None
 
-from ..config import Config, get_config
-from ..ai import ViralityAnalysis, TranscriptSegment
-from ..utils.async_helpers import run_in_thread
-from ..repositories.campaign_repository import CampaignRepository
+from ...config import Config, get_config
+from ...ai import ViralityAnalysis, TranscriptSegment
+from ...utils.async_helpers import run_in_thread
+from ...repositories.campaign_repository import CampaignRepository
 
 # Optional imports for visual/audio analysis
 try:
@@ -335,7 +335,7 @@ class EliteAIService:
                 # Prefer duration_seconds over end_time; clamp to platform bounds (45-120s)
                 if "duration_seconds" in c:
                     _dur = max(45, min(120, int(c["duration_seconds"])))
-                    from ..video_utils import parse_timestamp_to_seconds as _pts
+                    from ...video_utils import parse_timestamp_to_seconds as _pts
                     _start_s = _pts(raw_start)
                     _end_s = _start_s + _dur
                     raw_end = f"{int(_end_s) // 60:02d}:{int(_end_s) % 60:02d}"
@@ -404,8 +404,8 @@ class EliteAIService:
         The Master V4 Elite Orchestrator.
         Full End-to-End Cycle: Analyze -> Plan -> VFX -> Style -> Social.
         """
-        from ..domains.video.video_service import VideoService
-        from ..domains.publishing.social_distribution_service import SocialDistributionService
+        from ...domains.video.video_service import VideoService
+        from ...domains.publishing.social_distribution_service import SocialDistributionService
         
         logger.info(f"💎 V4 Elite: Starting Full Agentic Cycle for Task {task_id}")
         

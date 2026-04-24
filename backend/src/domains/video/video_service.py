@@ -47,12 +47,12 @@ from ...services.cache_manager import get_cache_manager, cache_transcript_smart,
 from ...services.metrics_service import get_metrics_collector, timed_stage
 from ...services.error_handler import with_retry, execute_with_recovery, get_circuit_breaker
 from ...services.concurrency_optimizer import parallel_map, run_with_timeout, ParallelBatchProcessor
-from ...services.llm_service import LLMService
+from ...domains.ai.llm_service import LLMService
 from ...domains.broll.broll_service import BrollService
-from ...services.elite_ai_service import EliteAIService
+from ...domains.ai.elite_ai_service import EliteAIService
 from .vfx_service import VFXService
 from ...domains.publishing.social_distribution_service import SocialDistributionService
-from ...services.phi3_virality_service import Phi3ViralityService, get_phi3_service
+from ...domains.ai.phi3_virality_service import Phi3ViralityService, get_phi3_service
 # Guarded import for ConfidenceSubtitleGenerator
 try:
     from ...domains.captions.confidence_subtitle_service import ConfidenceSubtitleGenerator
@@ -767,7 +767,7 @@ class VideoService:
             except Exception as phi3_e:
                 logger.warning(f"  Phi-3 scoring failed: {phi3_e} — trying LLMRouter fallback")
                 try:
-                    from ...services.llm_router import LLMRouter
+                    from ...domains.ai.llm_router import LLMRouter
                     llm_router = LLMRouter()
                     _llm_fallback = await llm_router.score_segments(
                         [segment.get("text", "")], language="es", num_clips=1
@@ -1409,7 +1409,7 @@ class VideoService:
         if _narrative:
             _cat_rule_flash = True  # default allow
             try:
-                from ...services.editorial_brain import CATEGORY_RULES as _CAT_RULES
+                from ...domains.ai.editorial_brain import CATEGORY_RULES as _CAT_RULES
                 _cat_key = getattr(_clip_profile, "content_category", "")
                 _cat_rule_flash = _CAT_RULES.get(_cat_key, list(_CAT_RULES.values())[0]).flash_allowed if _cat_key else True
             except Exception:
@@ -1796,7 +1796,7 @@ class VideoService:
             from ...config import get_config
             cfg = get_config()
             if getattr(cfg, "vision_analysis_enabled", True):
-                from ...services.vision_service import analyze_clip_visually, blend_with_text_score
+                from ...domains.ai.vision_service import analyze_clip_visually, blend_with_text_score
                 vision_score = await analyze_clip_visually(
                     output_path,
                     transcript=segment.get("text", ""),
@@ -1832,7 +1832,7 @@ class VideoService:
             from ...config import get_config
             cfg = get_config()
             if getattr(cfg, "vision_analysis_enabled", True):
-                from ...services.vision_service import score_thumbnail_frame
+                from ...domains.ai.vision_service import score_thumbnail_frame
                 from ...utils.scene_analysis import extract_representative_frames
                 import tempfile, shutil
 
@@ -1878,7 +1878,7 @@ class VideoService:
         # AI Thumbnail variants — generate viral-optimized thumbnail alternatives
         if os.environ.get("AI_THUMBNAIL_ENABLED", "true").lower() == "true":
             try:
-                from ...services.ai_thumbnail_service import AIThumbnailService, ThumbnailStyle
+                from ...domains.ai.ai_thumbnail_service import AIThumbnailService, ThumbnailStyle
                 _thumb_svc = AIThumbnailService(output_dir=output_path.parent)
                 _thumb_result = await _thumb_svc.generate_thumbnail(
                     video_path=output_path,
@@ -2420,7 +2420,7 @@ class VideoService:
             # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
             if progress_callback:
                 await progress_callback(55, "Preparing creative plan...", "processing")
-            from ...services.elite_ai_service import EliteCreativePlan as _EliteCreativePlan
+            from ...domains.ai.elite_ai_service import EliteCreativePlan as _EliteCreativePlan
             elite_plan = _EliteCreativePlan(
                 clips=[], global_vibe="Standard", brand_consistency_plan="Default brand voice",
                 custom_hashtags=[]
@@ -2441,7 +2441,7 @@ class VideoService:
             segment_texts = [s.get("text") if isinstance(s, dict) else s.text for s in relevant_parts.most_relevant_segments]
             
             # Use LLMRouter (Groq) for virality scoring instead of Ollama
-            from ...services.llm_router import LLMRouter
+            from ...domains.ai.llm_router import LLMRouter
             llm_router = LLMRouter()
             try:
                 virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)

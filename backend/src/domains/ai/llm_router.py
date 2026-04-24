@@ -121,7 +121,7 @@ class LLMRouter:
         num_clips: int
     ) -> Dict[str, Any]:
         """Score using Groq (teacher model)."""
-        from ..services.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT, build_dynamic_user_prompt
+        from ...domains.ai.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT, build_dynamic_user_prompt
         import httpx
         import os
         

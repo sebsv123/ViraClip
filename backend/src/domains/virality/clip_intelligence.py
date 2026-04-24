@@ -424,7 +424,7 @@ async def build_clip_profile_async(
 
     # Step 2: Editorial Brain — category identification + narrative structure
     try:
-        from ...services.editorial_brain import analyze_clip, apply_category_rules
+        from ...domains.ai.editorial_brain import analyze_clip, apply_category_rules
         category, narrative = await analyze_clip(
             segment=segment,
             duration=duration,

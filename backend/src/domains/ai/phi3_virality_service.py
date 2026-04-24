@@ -132,7 +132,7 @@ class Phi3ViralityService:
         self.model = "phi3:mini"  # 3.8B params, MIT license
         self.timeout = httpx.Timeout(30.0, connect=5.0)
         try:
-            from ..domains.virality.viral_trend_service import ViralTrendService
+            from ...domains.virality.viral_trend_service import ViralTrendService
             self.trend_service = ViralTrendService()
         except Exception:
             self.trend_service = None
