@@ -702,7 +702,7 @@ class EndToEndTestSuite:
         metrics: Dict[str, Any]
     ) -> bool:
         """Test multi-language support."""
-        from ..services.multilanguage_service import detect_language, get_language_config
+        from ..domains.captions.multilanguage_service import detect_language, get_language_config
         
         logs.append("Testing multi-language support...")
         
