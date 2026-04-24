@@ -3,9 +3,11 @@ Narrative Cut Engine - Intelligent cut point detection
 Detects natural break points for seamless editing
 """
 import logging
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 

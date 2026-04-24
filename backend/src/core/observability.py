@@ -13,6 +13,8 @@ from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+
 # Context variables for request tracking
 request_id_var: ContextVar[str] = ContextVar('request_id', default='')
 user_id_var: ContextVar[str] = ContextVar('user_id', default='')

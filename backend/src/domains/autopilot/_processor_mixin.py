@@ -39,6 +39,7 @@ from ...utils.resource_manager import (
 )
 from ...utils.video_extraction import cleanup_extracted_segments, extract_segments_fast
 from ...video_processing.utils import parse_timestamp_to_seconds
+from ._helpers import build_hook_title as _build_hook_title
 
 logger = logging.getLogger(__name__)
 

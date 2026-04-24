@@ -349,7 +349,8 @@ class AutoSchedulerService:
         from ....domains.autopilot.task_service import TaskService
         
         task_service = TaskService()
-        
+
+        from ....database import get_db
         async for db in get_db():
             # Create trend-based task
             task_data = {
