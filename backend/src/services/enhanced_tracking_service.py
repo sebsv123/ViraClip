@@ -65,7 +65,7 @@ class EnhancedTrackingService:
         try:
             if mode == TrackingMode.FACE or mode == TrackingMode.AUTO:
                 # Use existing SAM2 face tracking
-                from .face_tracking_service import track_person_sam2
+                from ..domains.detection.face_tracking_service import track_person_sam2
                 return track_person_sam2(video_path, start_time, end_time)
             
             elif mode == TrackingMode.PERSON:
@@ -155,7 +155,7 @@ class EnhancedTrackingService:
         # Placeholder for object tracking
         # Would use object detection (YOLO) + SAM2 tracking
         logger.debug("Object tracking not yet implemented, using face tracking fallback")
-        from .face_tracking_service import track_person_sam2
+        from ..domains.detection.face_tracking_service import track_person_sam2
         return track_person_sam2(video_path, start_time, end_time)
     
     async def _detect_person_center(

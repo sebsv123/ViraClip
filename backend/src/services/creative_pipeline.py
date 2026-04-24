@@ -129,7 +129,7 @@ class CreativePipeline:
         timeline: list = []
         try:
             logger.debug("  [Creative] Importing multimodal_detector...")
-            from .multimodal_detector import get_multimodal_detector
+            from ..domains.detection.multimodal_detector import get_multimodal_detector
             logger.debug("  [Creative] multimodal_detector import OK")
             import asyncio as _asyncio
             try:
@@ -349,7 +349,7 @@ class CreativePipeline:
                 if not broll_pairs and transcript:
                     try:
                         from .broll_service import BrollService
-                        from .multimodal_detector import TimelineEvent
+                        from ..domains.detection.multimodal_detector import TimelineEvent
                         llm_kws = await BrollService().extract_keywords(transcript)
                         clip_dur = max(1.0, end - start)
                         llm_pairs = []
