@@ -257,7 +257,7 @@ def auto_update_creator_template(
 
     template_name = winner["template"]
     try:
-        from ..services.creator_profile_service import get_profile, save_profile, update_profile
+        from ..domains.feedback.creator_profile_service import get_profile, save_profile, update_profile
         profile = get_profile(user_id)
         if profile and getattr(profile, "caption_style", None) != template_name:
             update_profile(user_id, {"caption_style": template_name})

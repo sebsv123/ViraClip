@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from typing import Dict, Any, Optional
 import logging
 
-from ..services.feedback_loop_service import get_feedback_service, FeedbackLoopService
+from ..domains.feedback.feedback_loop_service import get_feedback_service, FeedbackLoopService
 from ..database import get_db
 from sqlalchemy.orm import Session
 

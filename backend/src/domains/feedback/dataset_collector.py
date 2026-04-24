@@ -207,7 +207,7 @@ class DatasetCollector:
         if output_file is None:
             output_file = str(self.dataset_dir / "finetuning_dataset.jsonl")
         
-        from ..services.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT
+        from ...services.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT
         
         exported = 0
         with open(output_file, "w", encoding="utf-8") as out_f:

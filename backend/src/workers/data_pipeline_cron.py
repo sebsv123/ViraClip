@@ -23,7 +23,7 @@ except Exception:
     AsyncSessionLocal = None  # type: ignore
 
 try:
-    from ..services.lora_training_service import LoRATrainingService
+    from ..domains.feedback.lora_training_service import LoRATrainingService
 except Exception:
     LoRATrainingService = None  # type: ignore
 

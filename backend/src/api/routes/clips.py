@@ -60,7 +60,7 @@ async def rate_clip(
     # Feed into dataset collector for LLM training (non-blocking)
     if body.task_id:
         try:
-            from ...services.dataset_collector import get_dataset_collector
+            from ...domains.feedback.dataset_collector import get_dataset_collector
             from ...config import get_config
             collector = get_dataset_collector(get_config().dataset_dir)
             thumbs = "thumbs_up" if body.rating >= 4 else ("thumbs_down" if body.rating <= 2 else "neutral")
@@ -94,7 +94,7 @@ async def thumbs_clip(
     # Feed into dataset collector
     if body.task_id:
         try:
-            from ...services.dataset_collector import get_dataset_collector
+            from ...domains.feedback.dataset_collector import get_dataset_collector
             from ...config import get_config
             collector = get_dataset_collector(get_config().dataset_dir)
             await collector.add_user_feedback(
