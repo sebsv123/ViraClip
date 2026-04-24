@@ -77,7 +77,7 @@ from ..video_processing.audio import denoise_audio, apply_voice_enhancement
 from ..video_processing.editing_pipeline import EditingPipeline
 from ..video_processing.thumbnail_selector import select_best_thumbnail
 from .viral_metadata_service import generate_viral_metadata
-from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from ..comfyui_bridge import COMFYUI_ENABLED  # ComfyUIBridge retirado (métodos inexistentes)
 
 logger = logging.getLogger(__name__)
 # Global config instance for static methods
@@ -1574,18 +1574,14 @@ class VideoService:
                 except Exception as _fb_e:
                     logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
 
-        # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
-        if COMFYUI_ENABLED:
-            try:
-                _cfy = ComfyUIBridge()
-                _cfy_out = output_path.with_name(f"cfy_{output_path.name}")
-                _cfy_result = await _cfy.enhance_video(output_path, _cfy_out)
-                await _cfy.close()
-                if _cfy_result and _cfy_out.exists():
-                    output_path = _cfy_out
-                    logger.info("  ✓ ComfyUI: GPU upscale (RealESRGAN x2)")
-            except Exception as _cfy_e:
-                logger.debug(f"  ComfyUI enhance skipped: {_cfy_e}")
+        # Step 4.7: [Reservado] Real-ESRGAN upscale vía ComfyUI.
+        #   Implementación anterior llamaba `ComfyUIBridge.enhance_video()`,
+        #   un método que no existía → AttributeError capturado en silencio.
+        #   Para reactivarlo hace falta:
+        #     1) Instalar ComfyUI-ReActor o ComfyUI_UltimateSDUpscale en custom_nodes.
+        #     2) Añadir un workflow en ComfyUIOrchestrator (p.ej. `enhance_video`).
+        #     3) Exponerlo por `comfyui_integration.process_with_comfyui("enhance")`.
+        #   Mantenemos el bloque desactivado para no generar ruido en logs.
 
         # Step 4.8: Sound Design (efectos de sonido virales)
         try:
@@ -2069,6 +2065,22 @@ class VideoService:
         except Exception as _ch_e:
             logger.debug(f"  Clip health skipped: {_ch_e}")
         # ─────────────────────────────────────────────────────────────────
+
+        # LTXV Intro (opt-in con LTXV_INTRO_ENABLED=true). Se ejecuta DESPUÉS
+        # de todo el procesado porque la intro se prepende como clip nuevo
+        # (no afecta a timestamps de los subtítulos ya quemados).
+        try:
+            from .ltxv_intro_service import LTXVIntroService
+            _intro_out = await LTXVIntroService.maybe_prepend_intro(
+                clip_path=output_path,
+                theme=segment.get("theme") or segment.get("hook_type"),
+                virality_score=float(final_virality or 0.0),
+            )
+            if _intro_out and Path(_intro_out).exists():
+                output_path = Path(_intro_out)
+                logger.info("  ✓ LTXV intro prepended")
+        except Exception as _intro_e:
+            logger.debug(f"  LTXV intro skipped: {_intro_e}")
 
         return {
             "clip_id": clip_index + 1,

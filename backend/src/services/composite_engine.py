@@ -1,9 +1,17 @@
 """
-CompositeEngine - Compone persona sobre fondo generado
+CompositeEngine - Compone persona sobre fondo LTX usando FFmpeg puro.
+
+Entrada:
+  - original_clip: video original del sujeto (la persona)
+  - mask_clip: video greyscale con la máscara SAM2 (blanco=persona, negro=fondo)
+  - background_clip: fondo generado con LTX-Video (misma duración aprox.)
+
+Filter_complex FFmpeg:
+  [1:v][2:v] alphamerge [person_rgba];
+  [0:v][person_rgba] overlay=shortest=1:format=auto [out]
 """
 
 import os
-import shutil
 import asyncio
 import logging
 from pathlib import Path
@@ -13,105 +21,96 @@ logger = logging.getLogger(__name__)
 
 
 class CompositeEngine:
-    """Compone persona segmentada sobre fondo generado."""
+    """Compone persona segmentada sobre fondo generado vía FFmpeg."""
 
     async def composite(
         self,
-        person_clip: str,
+        original_clip: str,
+        mask_clip: str,
         background_clip: str,
-        task_id: str
+        task_id: str,
     ) -> Optional[str]:
         """
-        Compone persona sobre fondo generado.
-        Retorna ruta del video compuesto o None si falla.
+        Compone original (persona) + mask + background con FFmpeg.
+        Devuelve ruta del MP4 resultante o None si falla.
         """
         try:
-            # Importar orchestrator
-            from .comfyui.orchestrator import comfyui_orchestrator
+            orig = Path(original_clip)
+            mask = Path(mask_clip)
+            bg = Path(background_clip)
 
-            # Copiar ambos archivos al input de ComfyUI
-            comfyui_input = Path(os.getenv("COMFYUI_INPUT_DIR", "/comfyui/input"))
+            for p in (orig, mask, bg):
+                if not p.exists():
+                    logger.error(f"[Composite] Missing input: {p}")
+                    return None
 
-            person_filename = f"{task_id}_person_input.webm"
-            bg_filename = f"{task_id}_bg_input.mp4"
+            # Output path: prefer explicit VIRA_OUTPUTS, else colocate with pipeline clips
+            outputs_dir = Path(
+                os.getenv("VIRA_OUTPUTS")
+                or (Path(os.getenv("TEMP_DIR", "/app/temp/uploads")) / "clips")
+            )
+            outputs_dir.mkdir(parents=True, exist_ok=True)
+            out_path = outputs_dir / f"{task_id}_composite.mp4"
 
-            person_dst = comfyui_input / person_filename
-            bg_dst = comfyui_input / bg_filename
-
-            try:
-                shutil.copy2(person_clip, person_dst)
-                shutil.copy2(background_clip, bg_dst)
-                logger.info(f"📁 Copied person and background to ComfyUI")
-            except Exception as e:
-                logger.error(f"❌ Failed to copy inputs: {e}")
-                return None
-
-            # Workflow de composición
-            workflow = {
-                "1": {
-                    "inputs": {
-                        "video": person_filename,
-                        "force_rate": 24,
-                        "frame_load_cap": 0,
-                        "choose video to upload": "input"
-                    },
-                    "class_type": "VHS_LoadVideo"
-                },
-                "2": {
-                    "inputs": {
-                        "video": bg_filename,
-                        "force_rate": 24,
-                        "frame_load_cap": 0,
-                        "choose video to upload": "input"
-                    },
-                    "class_type": "VHS_LoadVideo"
-                },
-                "3": {
-                    "inputs": {
-                        "destination": ["2", 0],
-                        "source": ["1", 0],
-                        "x": 0,
-                        "y": 0,
-                        "resize_source": True
-                    },
-                    "class_type": "ImageCompositeMasked"
-                },
-                "4": {
-                    "inputs": {
-                        "images": ["3", 0],
-                        "frame_rate": 24,
-                        "loop_count": 0,
-                        "filename_prefix": f"{task_id}_composite",
-                        "format": "video/h264-mp4",
-                        "crf": 18,
-                        "save_metadata": False
-                    },
-                    "class_type": "VHS_VideoCombine"
-                }
-            }
-
-            # Ejecutar con timeout
-            timeout = int(os.getenv("COMFYUI_TIMEOUT", "600"))
-
-            logger.info(f"🎬 Starting composite for {task_id}")
-
-            result = await asyncio.wait_for(
-                comfyui_orchestrator._execute(workflow, f"{task_id}_comp", "mp4"),
-                timeout=timeout
+            # Ajustamos el tamaño de mask y bg al del original para evitar offsets
+            # y usamos scale2ref. El filtro final es:
+            #   - Escalar bg y mask al mismo tamaño que el original
+            #   - alphamerge: alpha del original tomado de la Y del mask
+            #   - overlay: bg + persona_rgba
+            filter_complex = (
+                "[1:v][0:v]scale2ref=w=iw:h=ih[bg_s][orig];"      # bg_s match orig
+                "[2:v][orig]scale2ref=w=iw:h=ih[mask_s][orig2];"    # mask_s match orig
+                "[orig2][mask_s]alphamerge[person];"
+                "[bg_s][person]overlay=0:0:shortest=1:format=auto[out]"
             )
 
-            if result and Path(result).exists():
-                logger.info(f"✅ Composite complete: {result}")
-                return result
-            else:
-                logger.warning(f"⚠️ Composite returned no output for {task_id}")
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", str(orig),       # [0:v] + audio
+                "-i", str(bg),         # [1:v]
+                "-i", str(mask),       # [2:v]
+                "-filter_complex", filter_complex,
+                "-map", "[out]",
+                "-map", "0:a?",        # audio original si existe
+                "-c:v", "libx264",
+                "-preset", "medium",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ]
+
+            timeout = int(os.getenv("COMPOSITE_TIMEOUT", "300"))
+            logger.info(f"[Composite] Running FFmpeg for {task_id} -> {out_path.name}")
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.error(f"[Composite] ⏱️ Timeout after {timeout}s for {task_id}")
                 return None
 
-        except asyncio.TimeoutError:
-            logger.error(f"⏱️ Composite timeout for {task_id}")
-            return None
+            if proc.returncode != 0:
+                err_tail = (stderr or b"").decode(errors="ignore")[-500:]
+                logger.warning(f"[Composite] FFmpeg failed (rc={proc.returncode}): {err_tail}")
+                return None
+
+            if not out_path.exists() or out_path.stat().st_size == 0:
+                logger.warning(f"[Composite] Output missing or empty: {out_path}")
+                return None
+
+            logger.info(f"[Composite] ✅ Done: {out_path}")
+            return str(out_path)
+
         except Exception as e:
-            logger.error(f"❌ Composite error for {task_id}: {e}")
+            logger.error(f"[Composite] ❌ Error for {task_id}: {e}")
             return None
 
 

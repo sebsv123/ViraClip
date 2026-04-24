@@ -35,8 +35,13 @@ class ComfyUIIntegrationService:
     
     def __init__(self):
         self.enabled = os.getenv("COMFYUI_ENABLED", "true").lower() == "true"
-        self.uploads_path = Path(os.getenv("VIRA_UPLOADS", "./uploads"))
-        self.outputs_path = Path(os.getenv("VIRA_OUTPUTS", "./outputs"))
+        # Shared `uploads` volume: worker=/app/temp/uploads/broll -> comfyui=/comfyui/input
+        self.uploads_path = Path(
+            os.getenv("VIRA_UPLOADS", os.getenv("COMFYUI_SHARED_INPUT_DIR", "/app/temp/uploads/broll"))
+        )
+        self.uploads_path.mkdir(parents=True, exist_ok=True)
+        self.outputs_path = Path(os.getenv("VIRA_OUTPUTS", "/app/temp/uploads/comfy_out"))
+        self.outputs_path.mkdir(parents=True, exist_ok=True)
     
     async def process_with_comfyui(
         self,
@@ -64,21 +69,35 @@ class ComfyUIIntegrationService:
             return None
         
         try:
-            # Copy video to ComfyUI input directory
-            comfy_input = f"/comfyui/input/{task_id}.mp4"
+            # Copy video to ComfyUI input directory (solo si hay input video)
             local_input = self.uploads_path / f"{task_id}.mp4"
-            
+
             if progress_callback:
                 await progress_callback(10, f"Preparing {operation}...")
-            
-            # Ensure file is accessible to ComfyUI container
-            if not local_input.exists():
+
+            # Operaciones text-to-video (ej. broll_generate) no necesitan input.
+            if video_path is not None and not local_input.exists():
                 shutil.copy2(video_path, local_input)
             
             # Execute appropriate workflow with lazy-loaded orchestrator
             orchestrator = _get_orchestrator()
             
-            if operation == "subtitles":
+            if operation == "broll_generate":
+                # Generate a pure B-roll clip from a text prompt (LTX-Video).
+                # No input video needed, no concatenation. Returns path of the
+                # synthetic clip so the caller can insert it wherever it wants.
+                prompt = kwargs.get("prompt") or "cinematic B-roll footage, smooth motion"
+                duration_s = float(kwargs.get("duration", 3.0))
+                width = int(kwargs.get("width", 768))
+                height = int(kwargs.get("height", 512))
+                result = await orchestrator.generate_broll_with_ltx(
+                    prompt=prompt,
+                    task_id=task_id,
+                    duration_seconds=duration_s,
+                    width=width,
+                    height=height,
+                )
+            elif operation == "subtitles":
                 result = await orchestrator.subtitles(
                     str(local_input), task_id
                 )
@@ -116,12 +135,20 @@ class ComfyUIIntegrationService:
             
             if progress_callback:
                 await progress_callback(90, f"{operation} complete")
-            
-            # Return path to result
+
+            # El orchestrator ya devuelve un path local descargado vía /view.
+            # Lo propagamos tal cual; fabricar otro path aquí era un bug que
+            # hacía que `Path(result).exists()` fallase siempre en el caller.
             if result:
-                output_file = self.outputs_path / f"{task_id}_{operation}.mp4"
-                return output_file
-            
+                result_path = Path(result)
+                if result_path.exists():
+                    return result_path
+                logger.warning(
+                    f"[ComfyUI] operation={operation} returned path that "
+                    f"does not exist: {result}"
+                )
+                return None
+
             return None
             
         except Exception as e:
