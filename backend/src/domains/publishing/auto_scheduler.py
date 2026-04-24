@@ -245,8 +245,8 @@ class AutoSchedulerService:
         
         try:
             # Create task for source
-            from ...services.task_service import TaskService
-            from ...database import get_db
+            from ....services.task_service import TaskService
+            from ....database import get_db
             
             task_service = TaskService()
             
@@ -267,7 +267,7 @@ class AutoSchedulerService:
                 task = await task_service.create_task(db, task_data)
                 
                 # Enqueue for processing
-                from ...workers.queue_router import enqueue
+                from ....workers.queue_router import enqueue
                 await enqueue(
                     await self._get_redis(),
                     "process_video_task",
@@ -346,7 +346,7 @@ class AutoSchedulerService:
         # This could search YouTube, news, etc.
         
         # For now, create a task that will search and process
-        from ...services.task_service import TaskService
+        from ....services.task_service import TaskService
         
         task_service = TaskService()
         

@@ -118,7 +118,7 @@ def trigger_ab_winner(user_id: str, min_viral_posts: int = 5):
     Manually trigger A/B winner selection for a user.
     If a template has ≥ min_viral_posts viral clips, it becomes the user's default.
     """
-    from ...services.performance_webhook_service import auto_update_creator_template
+    from ...domains.publishing.performance_webhook_service import auto_update_creator_template
     winner = auto_update_creator_template(user_id, min_viral_posts)
     if winner:
         return {"updated": True, "new_template": winner, "user_id": user_id}
