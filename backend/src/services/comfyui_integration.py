@@ -155,53 +155,6 @@ class ComfyUIIntegrationService:
             logger.error(f"ComfyUI {operation} failed: {e}", exc_info=True)
             return None
     
-    async def enhance_clip_with_ai(
-        self,
-        task_id: str,
-        clip_path: Path,
-        options: Dict[str, Any],
-        progress_callback: Optional[Callable] = None
-    ) -> Path:
-        """
-        Enhance a clip with AI features
-        
-        Options:
-            - reframe_9_16: Convert to vertical format
-            - enhance_thumbnail: Generate AI thumbnail
-            - add_broll: Add B-roll transitions
-        """
-        current_path = clip_path
-        
-        if options.get("reframe_9_16"):
-            if progress_callback:
-                await progress_callback(30, "Reframing to 9:16...")
-            
-            result = await self.process_with_comfyui(
-                task_id, current_path, "reframe_9_16",
-                progress_callback
-            )
-            if result:
-                current_path = result
-        
-        if options.get("enhance_thumbnail"):
-            if progress_callback:
-                await progress_callback(60, "Generating AI thumbnail...")
-            
-            await self.process_with_comfyui(
-                f"{task_id}_thumb", current_path, "thumbnail",
-                progress_callback,
-                prompt=options.get("thumbnail_prompt", "cinematic viral thumbnail")
-            )
-        
-        if options.get("add_broll"):
-            if progress_callback:
-                await progress_callback(80, "Adding B-roll transitions...")
-            
-            # This would integrate with existing B-roll logic
-            pass
-        
-        return current_path
-    
     async def health_check(self) -> bool:
         """Check if ComfyUI is available"""
         try:

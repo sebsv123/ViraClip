@@ -49,6 +49,9 @@ async def process_video_task(
     speed_ramp_enabled: bool = True,
     use_scene_detection: bool = True,
     force_fresh: bool = False,
+    # ComfyUI AI features (Phase 10)
+    use_comfyui_reframe: bool = False,
+    use_comfyui_thumbnail: bool = False,
 ) -> Dict[str, Any]:
     """
     Background worker task to process a video.
@@ -130,6 +133,8 @@ async def process_video_task(
                 speed_ramp_enabled=speed_ramp_enabled,
                 use_scene_detection=use_scene_detection,
                 force_fresh=force_fresh,
+                use_comfyui_reframe=use_comfyui_reframe,
+                use_comfyui_thumbnail=use_comfyui_thumbnail,
                 progress_callback=update_progress,
                 should_cancel=should_cancel,
                 clip_ready_callback=clip_ready_callback,

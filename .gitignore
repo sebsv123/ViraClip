@@ -105,3 +105,6 @@ backend/uv.lock
 models/*.safetensors
 models/*.pth
 models/*.pt
+# Ignore embedded git repos in custom_nodes
+comfyui/custom_nodes/*/.git/
+comfyui/custom_nodes/.git/
