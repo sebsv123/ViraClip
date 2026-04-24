@@ -56,7 +56,7 @@ class PersonSegmentationService:
         Devuelve None si falla; el caller degrada a Modo B.
         """
         try:
-            from .comfyui.orchestrator import comfyui_orchestrator
+            from ..broll.comfyui.orchestrator import comfyui_orchestrator
 
             # 1) Copiar clip al volumen compartido `uploads`.
             #    En el worker está montado en /app/temp/uploads/broll;

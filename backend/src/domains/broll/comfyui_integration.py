@@ -22,7 +22,7 @@ def _get_orchestrator():
     """Lazy load orchestrator to avoid import errors in CI."""
     global _comfyui_orchestrator
     if _comfyui_orchestrator is None:
-        from .comfyui.orchestrator import comfyui_orchestrator
+        from .comfyui.orchestrator import comfyui_orchestrator  # noqa: this still works since comfyui/ was moved here too
         _comfyui_orchestrator = comfyui_orchestrator
     return _comfyui_orchestrator
 
