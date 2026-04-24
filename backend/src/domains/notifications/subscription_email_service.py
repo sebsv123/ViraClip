@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ..config import Config
-from ..models import User
+from ...config import Config
+from ...models import User
 from .email_service import EmailContent, ResendEmailService, first_name_for
 
 

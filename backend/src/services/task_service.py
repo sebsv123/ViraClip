@@ -19,7 +19,7 @@ from ..repositories.source_repository import SourceRepository
 from ..repositories.clip_repository import ClipRepository
 from ..repositories.cache_repository import CacheRepository
 from .video_service import VideoService
-from .task_completion_email_service import (
+from ..domains.notifications.task_completion_email_service import (
     TaskCompletionEmailService,
     TaskCompletionRecipient,
 )

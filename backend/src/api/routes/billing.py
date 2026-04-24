@@ -10,7 +10,7 @@ from ...auth_headers import USER_ID_HEADER, get_signed_user_id
 from ...config import get_config
 from ...database import get_db
 from ...models import User
-from ...services.subscription_email_service import SubscriptionEmailService
+from ...domains.notifications.subscription_email_service import SubscriptionEmailService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/billing", tags=["billing"])

@@ -6,7 +6,7 @@ from typing import Optional
 
 import resend
 
-from ..config import Config
+from ...config import Config
 
 
 @dataclass(frozen=True)
