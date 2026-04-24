@@ -1,92 +1,64 @@
-# SupoClip Documentation
+# ViraClip Documentation
 
-This directory is the canonical documentation hub for SupoClip.
+Canonical documentation hub for ViraClip. If you only have time for one file, read the [project README](../README.md) first; this folder goes deeper.
 
-If you are new to the project, start here:
+## Recommended reading paths
 
-1. Read [Setup](./setup.md) to get the app running.
-2. Review [Configuration](./configuration.md) to understand environment variables and operating modes.
-3. Use [App Guide](./app-guide.md) to learn the user-facing parts of the product.
-4. Use [Architecture](./architecture.md) to understand how the system works end to end.
-5. Use [Troubleshooting](./troubleshooting.md) when something goes wrong.
+**For operators (running the stack):**
 
-## Documentation Map
+1. [Setup](./setup.md) — Docker-first install + first-run checklist.
+2. [Configuration](./configuration.md) — every environment variable, organised by feature.
+3. [Troubleshooting](./troubleshooting.md) — startup failures, stuck tasks, auth/font/billing/YouTube issues.
 
-- [Setup](./setup.md)
-  - Docker-first installation
-  - Local development commands
-  - First-run checklist
-  - Production-minded setup notes
-- [Configuration](./configuration.md)
-  - Required API keys
-  - DataFast analytics settings
-  - Processing modes
-  - Auth and monetization settings
-  - YouTube auth rotation settings
-  - Feedback and email configuration
-- [App Guide](./app-guide.md)
-  - Main screens and routes
-  - Core user workflows
-  - Admin features
-  - Hosted versus self-host differences
-- [Architecture](./architecture.md)
-  - Frontend, backend, worker, Redis, PostgreSQL
-  - Queue and SSE progress flow
-  - Video processing pipeline
-  - Database model overview
-- [API Reference](./api-reference.md)
-  - Frontend proxy routes
-  - Backend endpoints
-  - Admin and billing endpoints
-  - Notes on auth and streaming
-- [Development](./development.md)
-  - Repository layout
-  - Commands for each app
-  - Common workflows
-  - Where to modify major features
-- [Troubleshooting](./troubleshooting.md)
-  - Startup failures
-  - Stuck tasks
-  - Auth, fonts, billing, and YouTube issues
-  - Performance and recovery guidance
+**For developers (writing code):**
 
-## What SupoClip Is
+1. [Development](./development.md) — repo layout, per-app commands, common workflows.
+2. [Architecture](./architecture.md) — frontend/backend/worker/Redis/Postgres flow, video pipeline, DB model.
+3. [API Reference](./api-reference.md) — frontend proxy routes, backend endpoints, auth and streaming notes.
 
-SupoClip is an open-source AI video clipping application. It takes long-form videos, transcribes them, uses an LLM to select the most promising short segments, and renders vertical or source-aspect clips with subtitles and optional effects.
+**For product and support:**
 
-The current repository snapshot includes:
+1. [App Guide](./app-guide.md) — main screens, routes, user workflows, hosted vs self-host differences.
+2. [Troubleshooting](./troubleshooting.md).
 
-- `frontend/`: the main Next.js application
-- `backend/`: the FastAPI API and ARQ worker code
-- Root-level infrastructure files such as `docker-compose.yml`, `init.sql`, `.env.example`, and `start.sh`
+## Documentation map
 
-Repository guidance still mentions a separate `waitlist/` app, but that directory is not present in this checkout. The documentation in this folder reflects the repository as it exists now.
+| Doc | What is in it |
+|---|---|
+| [`setup.md`](./setup.md) | Docker install, local dev commands, production-minded setup notes |
+| [`configuration.md`](./configuration.md) | API keys, processing modes, auth, monetisation, analytics, YouTube auth |
+| [`app-guide.md`](./app-guide.md) | Screens, routes, core workflows, admin features |
+| [`architecture.md`](./architecture.md) | Components, queues, SSE progress, DB model |
+| [`api-reference.md`](./api-reference.md) | Endpoints (frontend proxy + backend), auth, streaming |
+| [`development.md`](./development.md) | Where to modify major features, how to add domains/services |
+| [`troubleshooting.md`](./troubleshooting.md) | Common failures and fixes |
+| [`archive/`](./archive/) | Historical docs preserved for reference (not maintained) |
 
-## Recommended Reading Paths
+## Related root-level docs
 
-For operators:
+These live outside `docs/` because they are project-wide rather than user-facing:
 
-1. [Setup](./setup.md)
-2. [Configuration](./configuration.md)
-3. [Troubleshooting](./troubleshooting.md)
+- [`README.md`](../README.md) — project overview, quick start, badges
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — branch strategy, commit conventions, PR checklist
+- [`AGENTS.md`](../AGENTS.md) — repository conventions for AI/human contributors
+- [`SECURITY.md`](../SECURITY.md) — responsible disclosure
+- [`CHANGELOG.md`](../CHANGELOG.md) — release notes
+- [`DEPLOY_GUIDE.md`](../DEPLOY_GUIDE.md) — deployment recipes
+- [`API_KEYS_SETUP.md`](../API_KEYS_SETUP.md) — how to obtain provider keys
+- [`TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) — root-level troubleshooting (overlaps with the docs version; will be merged in a future cleanup)
 
-For developers:
+## What ViraClip is
 
-1. [Development](./development.md)
-2. [Architecture](./architecture.md)
-3. [API Reference](./api-reference.md)
+ViraClip is an open-source, GPU-accelerated AI video clipping platform. It ingests a long video (YouTube URL or upload), transcribes it with `faster-whisper`, picks the most viral segments with an LLM, and renders ready-to-publish vertical short-form clips with subtitles, B-roll, music, and platform-specific export presets.
 
-For product and support:
+The repository contains three apps:
 
-1. [App Guide](./app-guide.md)
-2. [Troubleshooting](./troubleshooting.md)
+- `frontend/` — main Next.js 15 app (creator dashboard, billing, admin)
+- `waitlist/` — standalone Next.js marketing/waitlist app
+- `backend/` — FastAPI API + `arq` worker, organised by domain under `backend/src/domains/` with cross-cutting infrastructure under `backend/src/core/`
 
-## Existing Documentation Outside `docs/`
+Plus optional services: ComfyUI for generative B-roll, Ollama for local LLMs, and an nginx reverse-proxy reference config.
 
-This new docs tree replaces the need to hunt across several markdown files, but these older documents still contain useful context:
+## Contributing to the docs
 
-- [`README.md`](../README.md)
-- [`QUICKSTART.md`](../QUICKSTART.md)
-- [`CLAUDE.md`](../CLAUDE.md)
-- [`REFACTORING_COMPLETE.md`](../REFACTORING_COMPLETE.md)
-- [`backend/REFACTORING_GUIDE.md`](../backend/REFACTORING_GUIDE.md)
+Docs follow the same flow as code: open a PR with a `docs(scope): summary` commit. See [`CONTRIBUTING.md`](../CONTRIBUTING.md). Old material that is no longer accurate should be moved to [`archive/`](./archive/) rather than deleted, so that history stays inspectable.
