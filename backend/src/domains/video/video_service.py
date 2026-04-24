@@ -43,10 +43,10 @@ from ...config import Config
 from ...video_processing.hook_analysis import analyze_segment_virality, compare_hook_strength
 from ...video_processing.niche_analysis import analyze_content_niche, optimize_for_platform
 from ...video_processing.virality_tuner import get_tuner
-from ...services.cache_manager import get_cache_manager, cache_transcript_smart, get_cached_transcript_smart
-from ...services.metrics_service import get_metrics_collector, timed_stage
-from ...services.error_handler import with_retry, execute_with_recovery, get_circuit_breaker
-from ...services.concurrency_optimizer import parallel_map, run_with_timeout, ParallelBatchProcessor
+from ...core.cache_manager import get_cache_manager, cache_transcript_smart, get_cached_transcript_smart
+from ...core.metrics_service import get_metrics_collector, timed_stage
+from ...core.error_handler import with_retry, execute_with_recovery, get_circuit_breaker
+from ...core.concurrency_optimizer import parallel_map, run_with_timeout, ParallelBatchProcessor
 from ...domains.ai.llm_service import LLMService
 from ...domains.broll.broll_service import BrollService
 from ...domains.ai.elite_ai_service import EliteAIService
@@ -1294,7 +1294,7 @@ class VideoService:
                 _sam2_active = os.environ.get("SAM2_ENABLED", "false").lower() == "true"
                 if _sam2_active:
                     try:
-                        from ...services.enhanced_tracking_service import EnhancedTrackingService
+                        from ...core.enhanced_tracking_service import EnhancedTrackingService
                         _ets = EnhancedTrackingService()
                         _trajectory = await _ets.track_subject(
                             video_path=output_path,

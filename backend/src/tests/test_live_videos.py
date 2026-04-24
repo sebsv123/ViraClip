@@ -84,8 +84,8 @@ class ViraClipTester:
             logger.info("[IMPORT] Importing ViraClip services...")
             try:
                 from src.domains.video.video_service import VideoService
-                from src.services.metrics_service import get_metrics_collector
-                from src.services.cache_manager import get_cache_manager
+                from src.core.metrics_service import get_metrics_collector
+                from src.core.cache_manager import get_cache_manager
                 result["stages"]["imports"] = "SUCCESS"
             except ImportError as e:
                 error_msg = f"Import failed: {str(e)}"

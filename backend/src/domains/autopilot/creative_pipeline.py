@@ -206,7 +206,7 @@ class CreativePipeline:
         preset = None
         try:
             logger.debug("  [Creative] Importing smart_templates...")
-            from ...services.smart_templates import get_template_selector
+            from ...core.smart_templates import get_template_selector
             logger.debug("  [Creative] smart_templates import OK")
             energy = float((audio_features or {}).get("energy", 0.5) or 0.5)
             preset = get_template_selector().select(
@@ -454,7 +454,7 @@ class CreativePipeline:
         try:
             if preset is None:
                 logger.warning("  [Creative] No preset selected, using default fallback")
-                from ...services.smart_templates import Preset
+                from ...core.smart_templates import Preset
                 preset = Preset(
                     name="default_fallback",
                     zoom_punch_enabled=True,

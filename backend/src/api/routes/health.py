@@ -12,9 +12,9 @@ from sqlalchemy import text
 from ...database import get_db
 from ...scaling.redis_manager import get_redis_manager
 from ...caching import get_cache
-from ...services.metrics_service import get_metrics_collector
-from ...services.cache_manager import get_cache_manager
-from ...services.concurrency_optimizer import get_optimizer
+from ...core.metrics_service import get_metrics_collector
+from ...core.cache_manager import get_cache_manager
+from ...core.concurrency_optimizer import get_optimizer
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/health", tags=["health"])
