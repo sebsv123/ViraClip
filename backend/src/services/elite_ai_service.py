@@ -405,7 +405,7 @@ class EliteAIService:
         Full End-to-End Cycle: Analyze -> Plan -> VFX -> Style -> Social.
         """
         from .video_service import VideoService
-        from .social_distribution_service import SocialDistributionService
+        from ..domains.publishing.social_distribution_service import SocialDistributionService
         
         logger.info(f"💎 V4 Elite: Starting Full Agentic Cycle for Task {task_id}")
         

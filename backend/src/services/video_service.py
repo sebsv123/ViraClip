@@ -51,7 +51,7 @@ from .llm_service import LLMService
 from .broll_service import BrollService
 from .elite_ai_service import EliteAIService
 from .vfx_service import VFXService
-from .social_distribution_service import SocialDistributionService
+from ..domains.publishing.social_distribution_service import SocialDistributionService
 from .phi3_virality_service import Phi3ViralityService, get_phi3_service
 # Guarded import for ConfidenceSubtitleGenerator
 try:
@@ -1974,7 +1974,7 @@ class VideoService:
         _auto_publish = os.environ.get("AUTO_PUBLISH_ENABLED", "false").lower() == "true"
         if _auto_publish and segment.get("auto_publish_platforms"):
             try:
-                from .social_publisher import publish_to_all, PublishRequest, Platform as SocialPlatform
+                from ..domains.publishing.social_publisher import publish_to_all, PublishRequest, Platform as SocialPlatform
                 _platforms = segment.get("auto_publish_platforms", [target_platform])
                 _caption = viral_meta.get("description") or segment.get("text", "")[:200]
                 _hashtags = viral_meta.get("hashtags", [])

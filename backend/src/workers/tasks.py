@@ -251,7 +251,7 @@ async def process_scheduled_job(
     set_trace_id(f"schedule-{job_id}")
     logger.info(f"[Scheduler] Running job {job_id} for user {user_id}")
     try:
-        from ..services.auto_scheduler import AutoSchedulerService
+        from ..domains.publishing.auto_scheduler import AutoSchedulerService
         svc = AutoSchedulerService()
         await svc.process_scheduled_job(job_id=job_id, user_id=user_id)
         return {"status": "completed", "job_id": job_id}
