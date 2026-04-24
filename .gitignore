@@ -105,6 +105,17 @@ backend/uv.lock
 models/*.safetensors
 models/*.pth
 models/*.pt
+models/**/*.safetensors
+models/**/*.pth
+models/**/*.pt
+
+# Generated runtime outputs (not versioned)
+exports/
+uploads/
+
+# Separate projects living in the same parent folder (not part of ViraClip)
+genmail/
+
 # Ignore embedded git repos in custom_nodes
 comfyui/custom_nodes/*/.git/
 comfyui/custom_nodes/.git/

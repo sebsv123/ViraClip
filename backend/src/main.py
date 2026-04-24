@@ -7,21 +7,15 @@ if hasattr(_sys.stdout, 'buffer'):
 if hasattr(_sys.stderr, 'buffer'):
     _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
-from .youtube_utils import *
-from .video_processing import (
-    apply_transition_effect,
-    get_available_transitions,
-)
-from .ai import *
+from .video_processing import get_available_transitions
 from .config import Config
-from .caption_templates import get_template_info, get_template_names
-from datetime import datetime
+from .caption_templates import get_template_info
 from contextlib import asynccontextmanager
 from pathlib import Path
 import logging
-import json
-import asyncio
-from typing import Dict, Any
+import shutil
+import uuid
+from typing import List
 
 # Configure logging — UTF-8 handlers
 logging.basicConfig(
@@ -35,22 +29,19 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy import text
 
-from .models import User, Task, Source, GeneratedClip
 from .database import init_db, close_db, get_db, AsyncSessionLocal
-from .auth_headers import get_signed_user_id, USER_ID_HEADER
+from .auth_headers import USER_ID_HEADER
 from .api.routes.tasks import router as tasks_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
-#from .api.routes.social import router as social_router
 from .api.routes.clips import router as clips_router
-from .services.video_service import VideoService, UPLOAD_URL_PREFIX
-from .services.llm_service import LLMService
+from .services.video_service import UPLOAD_URL_PREFIX
 
 config = Config()
 
@@ -156,44 +147,12 @@ try:
 except Exception as _wf_e:
     import logging as _log; _log.getLogger(__name__).warning(f"Workflows router skipped: {_wf_e}")
 
-# LUT Service — cinematic color grading management
+# LUT Service — cinematic color grading
 try:
-    from fastapi import APIRouter as _AR2
-    _lut_router = _AR2(prefix="/luts", tags=["luts"])
-
-    @_lut_router.get("/")
-    def list_luts():
-        from .services.lut_service import get_lut_service
-        return get_lut_service().get_info()
-
-    @_lut_router.post("/download")
-    async def download_luts():
-        from .services.lut_service import get_lut_service
-        result = await get_lut_service().download_luts()
-        return result
-
-    app.include_router(_lut_router)
-except Exception as _lut_re:
-    import logging as _log; _log.getLogger(__name__).warning(f"LUT router skipped: {_lut_re}")
-
-# Competitor Analysis — benchmarking endpoint
-try:
-    from fastapi import APIRouter as _AR
-    _comp_router = _AR(prefix="/competitor", tags=["competitor"])
-
-    @_comp_router.get("/analysis")
-    def get_competitor_analysis():
-        from .services.competitor_analysis import get_competitive_analysis
-        return get_competitive_analysis()
-
-    @_comp_router.get("/report")
-    def get_competitor_report():
-        from .services.competitor_analysis import generate_competitor_report
-        return {"report": generate_competitor_report()}
-
-    app.include_router(_comp_router)
-except Exception as _ca_e:
-    import logging as _log; _log.getLogger(__name__).warning(f"Competitor router skipped: {_ca_e}")
+    from .api.routes.lut import router as lut_router
+    app.include_router(lut_router)
+except Exception as _lut_e:
+    logger.warning(f"LUT router skipped: {_lut_e}")
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"
@@ -201,18 +160,9 @@ clips_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/clips", StaticFiles(directory=str(clips_dir)), name="clips")
 
 
-def _get_authenticated_user_id(request: Request) -> str:
-    if config.monetization_enabled:
-        return get_signed_user_id(request, config)
-
-    user_id = request.headers.get("user_id") or request.headers.get(USER_ID_HEADER)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="User authentication required")
-    return user_id
-
-
-def _resolve_uploaded_video_path(url: str) -> Path:
-    return VideoService.resolve_local_video_path(url)
+# ── Upload directory ─────────────────────────────────────────────────────────
+UPLOAD_DIR = Path(config.temp_dir) / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/")
@@ -232,9 +182,121 @@ async def check_database_health(db: AsyncSession = Depends(get_db)):
         return {"status": "unhealthy", "database": "disconnected", "error": str(e)}
 
 
-@app.post("/start")
-async def start_task(request: Request):
-    """Start a new task for authenticated users"""
+# ── Upload endpoints ─────────────────────────────────────────────────────────
+
+@app.post("/upload")
+async def upload_video(request: Request):
+    """Upload a single video file"""
+    try:
+        import aiofiles
+
+        user_id = request.headers.get("user_id") or request.headers.get(USER_ID_HEADER)
+        if not user_id:
+            raise HTTPException(status_code=401, detail="User authentication required")
+
+        form_data = await request.form()
+        video_file = form_data.get("video")
+        if not video_file or not hasattr(video_file, "filename"):
+            raise HTTPException(status_code=400, detail="No video file provided")
+
+        uploads_dir = Path(config.temp_dir)
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        file_extension = Path(video_file.filename).suffix
+        unique_filename = f"{uuid.uuid4()}{file_extension}"
+        video_path = uploads_dir / unique_filename
+
+        async with aiofiles.open(video_path, "wb") as f:
+            await f.write(await video_file.read())
+
+        return {"message": "Video uploaded successfully", "video_path": f"{UPLOAD_URL_PREFIX}{unique_filename}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error uploading video: {e}")
+        raise HTTPException(status_code=500, detail=f"Error uploading video: {e}")
+
+
+@app.post("/api/upload-batch")
+async def upload_batch(files: List[UploadFile] = File(...)):
+    """Batch upload of up to 20 video files"""
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Maximum 20 videos per batch")
+    uploaded = []
+    for file in files:
+        if not file.content_type or not file.content_type.startswith("video/"):
+            raise HTTPException(status_code=400, detail=f"{file.filename} is not a valid video")
+        unique_filename = f"{uuid.uuid4()}{Path(file.filename).suffix.lower()}"
+        file_path = UPLOAD_DIR / unique_filename
+        with open(file_path, "wb") as buf:
+            shutil.copyfileobj(file.file, buf)
+        uploaded.append({"filename": unique_filename, "original_name": file.filename,
+                         "size": file.size, "url": f"/uploads/{unique_filename}"})
+    return {"uploaded": len(uploaded), "files": uploaded}
+
+
+# ── Asset endpoints ───────────────────────────────────────────────────────────
+
+@app.get("/fonts")
+async def get_available_fonts():
+    """List available font files"""
+    fonts_dir = Path(__file__).parent.parent / "fonts"
+    if not fonts_dir.exists():
+        return {"fonts": []}
+    return {"fonts": [{"name": f.stem, "display_name": f.stem.replace("-", " ").replace("_", " ").title(),
+                       "file_path": str(f)} for f in fonts_dir.glob("*.ttf")]}
+
+
+@app.get("/fonts/{font_name}")
+async def get_font_file(font_name: str):
+    """Serve a specific font file"""
+    font_path = Path(__file__).parent.parent / "fonts" / f"{font_name}.ttf"
+    if not font_path.exists():
+        raise HTTPException(status_code=404, detail="Font not found")
+    return FileResponse(str(font_path), media_type="font/ttf",
+                        headers={"Cache-Control": "public, max-age=31536000"})
+
+
+@app.get("/transitions")
+async def list_transitions():
+    """List available transition effects"""
+    return {"transitions": [{"name": Path(t).stem,
+                             "display_name": Path(t).stem.replace("_", " ").replace("-", " ").title(),
+                             "file_path": t} for t in get_available_transitions()]}
+
+
+@app.get("/caption-templates")
+async def get_caption_templates():
+    """List available caption templates"""
+    return {"templates": get_template_info()}
+
+
+@app.get("/broll/search")
+async def search_broll(query: str, count: int = 5, orientation: str = "portrait"):
+    """Search for B-roll footage from Pexels"""
+    if not config.pexels_api_key:
+        raise HTTPException(status_code=503, detail="B-roll service not configured")
+    from .video_processing.broll import search_broll_videos, get_video_download_url
+    videos = await search_broll_videos(query, orientation=orientation, per_page=count)
+    return {"query": query, "total": len(videos),
+            "videos": [{"id": v.get("id"), "duration": v.get("duration"),
+                        "thumbnail": v.get("image"),
+                        "download_url": get_video_download_url(v, quality="hd", orientation=orientation),
+                        "user": v.get("user", {}).get("name", "Unknown")} for v in videos]}
+
+
+@app.get("/broll/status")
+async def broll_status():
+    """Check B-roll service availability"""
+    return {"configured": bool(config.pexels_api_key),
+            "provider": "pexels" if config.pexels_api_key else None}
+
+
+# POST /start               → use POST /tasks/ (ARQ queue)
+# POST /start-with-progress → use POST /tasks/ (ARQ queue)
+# GET  /tasks/{id}          → see api/routes/tasks.py
+# GET  /tasks/{id}/clips    → see api/routes/clips.py
     if config.monetization_enabled:
         raise HTTPException(status_code=404, detail="Not found")
 

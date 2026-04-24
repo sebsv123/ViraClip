@@ -524,7 +524,7 @@ services:
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
       - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
       - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4
+      - RENDER_CONCURRENCY=2
       - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
       - SELF_HOST=${SELF_HOST:-true}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
@@ -639,9 +639,11 @@ services:
       redis:
         condition: service_healthy
       comfyui:
-        condition: service_started   # ← AÑADIDO
+        condition: service_started
     deploy:
       resources:
+        limits:
+          memory: 6G
         reservations:
           devices:
             - driver: nvidia
@@ -650,6 +652,7 @@ services:
 
 
   worker-3:
+    profiles: ["scale"]
     build: ./backend
     container_name: viraclip-worker-3
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
@@ -918,6 +921,7 @@ services:
 
 
   ollama:
+    profiles: ["vision"]
     image: ollama/ollama:latest
     container_name: viraclip-ollama
     volumes:
@@ -925,19 +929,18 @@ services:
     ports:
       - "11434:11434"
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c", "ollama serve & sleep 15 && ollama pull phi3:mini && wait"]
     deploy:
       resources:
         limits:
-          memory: 4G
+          memory: 8G
         reservations:
-          memory: 3G
+          memory: 4G
     healthcheck:
-      test: ["CMD-SHELL", "ollama list 2>/dev/null | grep -q phi3 && echo ok || exit 1"]
-      interval: 15s
-      timeout: 30s
-      retries: 60
-      start_period: 60s
+      test: ["CMD-SHELL", "ollama list 2>/dev/null && echo ok || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
 
 
   redis:
