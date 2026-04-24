@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import Optional
 
-from ..config import Config
+from ...config import Config
 from .email_service import EmailContent, ResendEmailService, first_name_for
 
 
