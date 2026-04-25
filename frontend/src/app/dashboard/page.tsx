@@ -1,13 +1,41 @@
-﻿"use client";
+"use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, memo, useMemo } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
-  Zap, Plus, Video, Settings, LogOut, Film, Clock, CheckCircle,
-  Loader2, AlertCircle, ArrowRight, BarChart3, Sparkles, X, Link2
+  Plus,
+  Film,
+  Clock,
+  CheckCircle,
+  Loader2,
+  AlertCircle,
+  ArrowRight,
+  BarChart3,
+  Sparkles,
+  X,
+  Link2,
+  Play,
+  TrendingUp,
+  Calendar,
+  MoreVertical,
+  Trash2,
+  Video,
+  Settings,
+  LogOut,
+  Zap,
+  Smartphone,
+  Monitor,
+  Subtitles,
+  Scissors,
+  ScanEye
 } from "lucide-react";
 import Link from "next/link";
 import { useSession, signOut } from "@/lib/auth-client";
 import { useRouter } from "next/navigation";
+import { AppShell } from "@/components/app-shell";
+import { ShimmerButton } from "@/components/ui/shimmer-button";
+import { MagicCard } from "@/components/ui/magic-card";
+import { cn } from "@/lib/utils";
 
 interface Task {
   id: string;
@@ -15,7 +43,7 @@ interface Task {
   source_title?: string;
   source_type?: string;
   clips_count?: number;
-  status: string;
+  status: "pending" | "processing" | "completed" | "failed" | "queued";
   progress?: number;
   progress_message?: string;
   created_at: string;
@@ -23,464 +51,621 @@ interface Task {
 
 function formatDate(dateString: string) {
   return new Intl.DateTimeFormat("en-US", {
-    month: "short", day: "numeric", year: "numeric",
+    month: "short", day: "numeric",
   }).format(new Date(dateString));
 }
 
-function Sidebar() {
-  const router = useRouter();
-  const { data: session } = useSession();
-  const user = session?.user;
-  const navItems = [
-    { icon: Video, label: "Dashboard", href: "/dashboard" },
-    { icon: Film, label: "My Clips", href: "/list" },
-    { icon: Settings, label: "Settings", href: "/settings" },
-  ];
-  const initials = user?.name
-    ? user.name.split(" ").map((n: string) => n[0]).join("").slice(0, 2).toUpperCase()
-    : user?.email?.[0]?.toUpperCase() ?? "?";
-
-  return (
-    <aside className="w-64 bg-[#0a0a0f] border-r border-white/5 min-h-screen flex flex-col">
-      <div className="p-6">
-        <Link href="/dashboard" className="flex items-center gap-3">
-          <div className="relative w-10 h-10">
-            <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
-            <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
-              <Zap className="w-5 h-5 text-cyan-400" />
-            </div>
-          </div>
-          <span className="text-xl font-bold">Vira<span className="text-cyan-400">Clip</span></span>
-        </Link>
-      </div>
-      <nav className="flex-1 px-4">
-        <div className="space-y-1">
-          {navItems.map((item) => {
-            const Icon = item.icon;
-            const active = typeof window !== "undefined" && window.location.pathname === item.href;
-            return (
-              <Link key={item.label} href={item.href}
-                className={`flex items-center gap-3 px-4 py-3 rounded-xl transition-all ${
-                  active ? "bg-cyan-500/10 text-cyan-400 border border-cyan-500/20" : "text-gray-400 hover:bg-white/5 hover:text-white"
-                }`}>
-                <Icon className="w-5 h-5" />
-                <span className="font-medium">{item.label}</span>
-              </Link>
-            );
-          })}
-        </div>
-      </nav>
-      <div className="p-4 border-t border-white/5 space-y-3">
-        {/* User info card */}
-        {user && (
-          <div className="flex items-center gap-3 px-3 py-3 rounded-xl bg-white/5 border border-white/8">
-            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-cyan-500 to-purple-500 flex items-center justify-center flex-shrink-0 text-sm font-bold text-black">
-              {initials}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium text-white truncate">{user.name || "User"}</p>
-              <p className="text-xs text-gray-500 truncate">{user.email}</p>
-            </div>
-            <div className="w-2 h-2 rounded-full bg-green-400 flex-shrink-0" title="Online" />
-          </div>
-        )}
-        <button
-          onClick={async () => { await signOut(); router.push("/sign-in"); }}
-          className="flex items-center gap-3 px-4 py-2.5 w-full rounded-xl text-gray-400 hover:bg-red-500/10 hover:text-red-400 transition-all">
-          <LogOut className="w-4 h-4" />
-          <span className="font-medium text-sm">Sign Out</span>
-        </button>
-      </div>
-    </aside>
-  );
+function formatRelativeTime(dateString: string) {
+  const date = new Date(dateString);
+  const now = new Date();
+  const diffInHours = Math.floor((now.getTime() - date.getTime()) / (1000 * 60 * 60));
+  
+  if (diffInHours < 1) return "Just now";
+  if (diffInHours < 24) return `${diffInHours}h ago`;
+  if (diffInHours < 48) return "Yesterday";
+  return formatDate(dateString);
 }
 
-function TaskCard({ task }: { task: Task }) {
-  const statusIcons: Record<string, JSX.Element> = {
-    completed: <CheckCircle className="w-5 h-5 text-green-400" />,
-    processing: <Loader2 className="w-5 h-5 animate-spin text-cyan-400" />,
-    queued: <Clock className="w-5 h-5 text-amber-400" />,
-    failed: <AlertCircle className="w-5 h-5 text-red-400" />,
-    error: <AlertCircle className="w-5 h-5 text-red-400" />,
+// Status Badge Component
+const StatusBadge = memo(function StatusBadge({ status, progress }: { status: Task["status"]; progress?: number }) {
+  const configs = {
+    pending: { color: "text-amber-400 bg-amber-400/10 border-amber-400/20", icon: Clock, label: "Pending" },
+    queued: { color: "text-blue-400 bg-blue-400/10 border-blue-400/20", icon: Loader2, label: "Queued" },
+    processing: { color: "text-violet-400 bg-violet-400/10 border-violet-400/20", icon: Loader2, label: "Processing" },
+    completed: { color: "text-green-400 bg-green-400/10 border-green-400/20", icon: CheckCircle, label: "Completed" },
+    failed: { color: "text-red-400 bg-red-400/10 border-red-400/20", icon: AlertCircle, label: "Failed" },
   };
-  const statusColors: Record<string, string> = {
-    completed: "bg-green-500/10 border-green-500/20",
-    processing: "bg-cyan-500/10 border-cyan-500/20",
-    queued: "bg-amber-500/10 border-amber-500/20",
-    failed: "bg-red-500/10 border-red-500/20",
-    error: "bg-red-500/10 border-red-500/20",
-  };
-  const title = task.title || task.source_title || "Untitled Project";
+  
+  const config = configs[status] || configs.pending;
+  const Icon = config.icon;
+  
   return (
-    <Link href={`/tasks/${task.id}`}>
-      <div className={`p-5 rounded-2xl border ${statusColors[task.status] || "bg-white/5 border-white/10"} hover:scale-[1.02] transition-transform cursor-pointer group`}>
-        <div className="flex items-start justify-between mb-4">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center">
-              <Film className="w-6 h-6 text-cyan-400" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-white group-hover:text-cyan-400 transition-colors line-clamp-1">{title}</h3>
-              <p className="text-sm text-gray-500">{task.source_type || "video"} &bull; {task.clips_count ?? 0} clips</p>
-            </div>
-          </div>
-          {statusIcons[task.status] || <Clock className="w-5 h-5 text-gray-400" />}
-        </div>
-        {(task.status === "processing" || task.status === "queued") && (
-          <div className="mb-3">
-            <div className="flex justify-between text-xs text-gray-500 mb-1">
-              <span>{task.status === "queued" ? "Waiting in queue..." : (task.progress_message || "Processing...")}</span>
-              <span>{task.progress ?? 0}%</span>
-            </div>
-            <div className="w-full bg-white/10 rounded-full h-1.5">
-              <div
-                className="bg-cyan-400 h-1.5 rounded-full transition-all duration-500"
-                style={{ width: `${task.progress ?? 0}%` }}
-              />
-            </div>
-          </div>
-        )}
-        <div className="flex items-center justify-between">
-          <span className="text-xs text-gray-500">{formatDate(task.created_at)}</span>
-          <ArrowRight className="w-4 h-4 text-gray-500 group-hover:text-cyan-400 transition-colors" />
-        </div>
-      </div>
-    </Link>
-  );
-}
-
-function Toggle({ label, desc, checked, onChange }: { label: string; desc?: string; checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      onClick={() => onChange(!checked)}
-      className={`flex items-start gap-3 p-3 rounded-xl border transition-all text-left w-full ${checked ? "bg-cyan-500/10 border-cyan-500/30" : "bg-white/3 border-white/8 hover:border-white/20"}`}>
-      <div className={`mt-0.5 w-4 h-4 rounded flex-shrink-0 flex items-center justify-center border transition-all ${checked ? "bg-cyan-500 border-cyan-500" : "border-white/30"}`}>
-        {checked && <svg className="w-2.5 h-2.5 text-black" fill="none" viewBox="0 0 10 10"><path d="M1.5 5l2.5 2.5 4.5-4.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>}
-      </div>
-      <div>
-        <div className="text-sm font-medium text-white">{label}</div>
-        {desc && <div className="text-xs text-gray-500 mt-0.5">{desc}</div>}
-      </div>
-    </button>
-  );
-}
-
-function NewClipModal({ onClose, onCreated }: { onClose: () => void; onCreated: () => void }) {
-  const [url, setUrl] = useState("");
-  const [mode, setMode] = useState("balanced");
-  const [numClips, setNumClips] = useState(3);
-  const [platform, setPlatform] = useState("all");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  // Feature toggles
-  const [jumpCut, setJumpCut] = useState(true);
-  const [zoomOnCuts, setZoomOnCuts] = useState(true);
-  const [autoFace, setAutoFace] = useState(true);
-  const [subtitles, setSubtitles] = useState(true);
-  const [captionTemplate, setCaptionTemplate] = useState("pop_in");
-  const [broll, setBroll] = useState(true);
-  const [overlays, setOverlays] = useState(true);
-  const [denoiseAudio, setDenoiseAudio] = useState(true);
-  const [audioDucking, setAudioDucking] = useState(true);
-  const [sceneDetection, setSceneDetection] = useState(true);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!url.trim()) { setError("Please enter a YouTube URL"); return; }
-    setLoading(true);
-    setError("");
-    try {
-      const res = await fetch("/api/tasks/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source: { url: url.trim() },
-          processing_mode: mode,
-          num_clips: numClips,
-          target_platform: platform,
-          // Video effects
-          jump_cut: jumpCut,
-          zoom_on_cuts: zoomOnCuts,
-          auto_center_face: autoFace,
-          use_scene_detection: sceneDetection,
-          // Captions
-          add_subtitles: subtitles,
-          caption_template: captionTemplate,
-          // B-roll & overlays
-          include_broll: broll,
-          contextual_overlays: overlays,
-          // Audio
-          denoise_audio: denoiseAudio,
-          audio_ducking: audioDucking,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data?.detail || data?.error || `Error ${res.status}`);
-      }
-      onCreated();
-      onClose();
-    } catch (err: any) {
-      setError(err.message || "Failed to create task");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const inputCls = "w-full px-3 py-2.5 bg-white/5 border border-white/10 rounded-xl text-white text-sm focus:outline-none focus:border-cyan-500/50";
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <div className="w-full max-w-2xl bg-[#0e0e16] border border-white/10 rounded-2xl relative flex flex-col max-h-[90vh]">
-        {/* Header */}
-        <div className="flex items-center justify-between p-6 border-b border-white/5 flex-shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 flex items-center justify-center">
-              <Sparkles className="w-4 h-4 text-cyan-400" />
-            </div>
-            <div>
-              <h2 className="text-lg font-bold text-white">New Clip Project</h2>
-              <p className="text-xs text-gray-500">Configure features before generating</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-white p-1">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Scrollable body */}
-        <div className="overflow-y-auto flex-1 p-6 space-y-6">
-          <form id="clip-form" onSubmit={handleSubmit}>
-            {/* URL */}
-            <div className="mb-5">
-              <label className="block text-sm font-medium text-gray-300 mb-2">YouTube URL</label>
-              <div className="relative">
-                <Link2 className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-                <input type="url" value={url} onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://www.youtube.com/watch?v=..."
-                  className="w-full pl-10 pr-4 py-3 bg-white/5 border border-white/10 rounded-xl text-white placeholder-gray-600 focus:outline-none focus:border-cyan-500/50" />
-              </div>
-            </div>
-
-            {/* Basic settings */}
-            <div className="grid grid-cols-3 gap-3 mb-6">
-              <div>
-                <label className="block text-xs font-medium text-gray-400 mb-1.5">Mode</label>
-                <select value={mode} onChange={(e) => setMode(e.target.value)} className={inputCls}>
-                  <option value="fast">Fast ⚡</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="quality">Quality ✨</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-400 mb-1.5">Clips</label>
-                <input type="number" min={1} max={10} value={numClips}
-                  onChange={(e) => setNumClips(Number(e.target.value))} className={inputCls} />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-400 mb-1.5">Platform</label>
-                <select value={platform} onChange={(e) => setPlatform(e.target.value)} className={inputCls}>
-                  <option value="all">All Platforms</option>
-                  <option value="tiktok">TikTok</option>
-                  <option value="reels">Reels</option>
-                  <option value="shorts">Shorts</option>
-                </select>
-              </div>
-            </div>
-
-            {/* Video Effects */}
-            <div className="mb-5">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Video Effects</p>
-              <div className="grid grid-cols-2 gap-2">
-                <Toggle label="Jump Cuts" desc="Remove silences automatically" checked={jumpCut} onChange={setJumpCut} />
-                <Toggle label="Zoom on Cuts" desc="Dynamic zoom at each cut point" checked={zoomOnCuts} onChange={setZoomOnCuts} />
-                <Toggle label="Auto Face Center" desc="Keep speaker centered in frame" checked={autoFace} onChange={setAutoFace} />
-                <Toggle label="Scene Detection" desc="Detect scene changes for better cuts" checked={sceneDetection} onChange={setSceneDetection} />
-              </div>
-            </div>
-
-            {/* Captions */}
-            <div className="mb-5">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Captions</p>
-              <Toggle label="Animated Captions" desc="Word-by-word animated subtitles" checked={subtitles} onChange={setSubtitles} />
-              {subtitles && (
-                <div className="mt-2">
-                  <label className="block text-xs font-medium text-gray-400 mb-1.5">Caption Style</label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {[["pop_in","Pop In 🔥"],["highlight","Highlight"],["fade","Fade"],["bounce","Bounce"],["karaoke","Karaoke"],["default","Default"]].map(([val, label]) => (
-                      <button key={val} type="button" onClick={() => setCaptionTemplate(val)}
-                        className={`py-2 px-3 rounded-lg text-xs font-medium border transition-all ${captionTemplate === val ? "bg-purple-500/20 border-purple-500/40 text-purple-300" : "bg-white/5 border-white/10 text-gray-400 hover:border-white/20"}`}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* B-roll & Overlays */}
-            <div className="mb-5">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">B-Roll & Overlays</p>
-              <div className="grid grid-cols-2 gap-2">
-                <Toggle label="B-Roll Insertion" desc="Auto-insert relevant stock footage" checked={broll} onChange={setBroll} />
-                <Toggle label="Contextual Overlays" desc="Topic-related image overlays" checked={overlays} onChange={setOverlays} />
-              </div>
-            </div>
-
-            {/* Audio */}
-            <div className="mb-5">
-              <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Audio</p>
-              <div className="grid grid-cols-2 gap-2">
-                <Toggle label="Denoise Audio" desc="Remove background noise" checked={denoiseAudio} onChange={setDenoiseAudio} />
-                <Toggle label="Audio Ducking" desc="Lower music under speech" checked={audioDucking} onChange={setAudioDucking} />
-              </div>
-            </div>
-
-            {error && <p className="text-sm text-red-400 mb-3">{error}</p>}
-          </form>
-        </div>
-
-        {/* Footer */}
-        <div className="p-6 border-t border-white/5 flex-shrink-0">
-          <button form="clip-form" type="submit" disabled={loading}
-            className="w-full py-3 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-black font-bold rounded-xl transition-all flex items-center justify-center gap-2">
-            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            {loading ? "Submitting..." : "Generate Viral Clips"}
-          </button>
-        </div>
-      </div>
+    <div className={cn("inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-xs font-medium", config.color)}>
+      <Icon className={cn("w-3.5 h-3.5", status === "processing" && "animate-spin")} />
+      <span>{config.label}</span>
+      {status === "processing" && progress !== undefined && (
+        <span className="ml-1">{progress}%</span>
+      )}
     </div>
   );
+});
+
+// Progress Bar Component
+const ProgressBar = memo(function ProgressBar({ progress, status }: { progress: number; status: Task["status"] }) {
+  const getColor = () => {
+    if (status === "failed") return "bg-red-500";
+    if (status === "completed") return "bg-green-500";
+    return "bg-gradient-to-r from-violet-500 to-fuchsia-500";
+  };
+  
+  return (
+    <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden mt-3">
+      <motion.div
+        className={cn("h-full rounded-full", getColor())}
+        initial={{ width: 0 }}
+        animate={{ width: `${progress}%` }}
+        transition={{ duration: 0.5, ease: "easeOut" }}
+      />
+    </div>
+  );
+});
+
+// Task Card Component
+const TaskCard = memo(function TaskCard({ task, onDelete }: { task: Task; onDelete?: (id: string) => void }) {
+  const [showActions, setShowActions] = useState(false);
+  
+  return (
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      className="group relative p-5 rounded-2xl bg-white/[0.02] border border-white/10 hover:border-violet-500/30 transition-all"
+    >
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-2">
+            <StatusBadge status={task.status} progress={task.progress} />
+            <span className="text-xs text-white/30">{formatRelativeTime(task.created_at)}</span>
+          </div>
+          
+          <h3 className="font-medium text-white truncate mb-1">
+            {task.source_title || task.title || "Untitled Video"}
+          </h3>
+          
+          <p className="text-sm text-white/40 truncate">
+            {task.progress_message || `${task.clips_count || 0} clips will be generated`}
+          </p>
+          
+          {(task.status === "processing" || task.status === "queued") && task.progress !== undefined && (
+            <ProgressBar progress={task.progress} status={task.status} />
+          )}
+        </div>
+        
+        <div className="flex items-center gap-2">
+          {task.status === "completed" && (
+            <Link href={`/dashboard/clips/${task.id}`}>
+              <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/20 text-violet-300 text-xs font-medium hover:bg-violet-500/30 transition-colors">
+                <Play className="w-3.5 h-3.5" />
+                View
+              </button>
+            </Link>
+          )}
+          
+          <div className="relative">
+            <button
+              onClick={() => setShowActions(!showActions)}
+              className="p-2 rounded-lg text-white/40 hover:text-white hover:bg-white/5 transition-colors"
+            >
+              <MoreVertical className="w-4 h-4" />
+            </button>
+            
+            <AnimatePresence>
+              {showActions && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                  className="absolute right-0 top-full mt-2 w-36 py-1 rounded-xl bg-[#13131a] border border-white/10 shadow-xl z-10"
+                >
+                  {onDelete && (
+                    <button
+                      onClick={() => { onDelete(task.id); setShowActions(false); }}
+                      className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-400 hover:bg-red-500/10 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                      Delete
+                    </button>
+                  )}
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+});
+
+// Create Task Modal
+interface TaskOptions {
+  processing_mode: "fast" | "balanced" | "quality" | "elite";
+  num_clips: number;
+  output_format: "vertical" | "original";
+  add_subtitles: boolean;
+  jump_cut: boolean;
+  use_scene_detection: boolean;
 }
 
-export default function DashboardPage() {
-  const { data: session } = useSession();
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showModal, setShowModal] = useState(false);
-
-  const loadTasks = useCallback(async () => {
-    try {
-      const res = await fetch("/api/tasks/");
-      if (res.ok) {
-        const data = await res.json();
-        setTasks((data.tasks || []).slice(0, 6));
-      }
-    } catch (_) {}
-    finally { setLoading(false); }
-  }, []);
-
-  const tasksRef = useRef<Task[]>([]);
-  useEffect(() => { tasksRef.current = tasks; }, [tasks]);
-
+function CreateTaskModal({ isOpen, onClose, onSubmit }: { 
+  isOpen: boolean; 
+  onClose: () => void;
+  onSubmit: (url: string, options: TaskOptions) => void;
+}) {
+  const [url, setUrl] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [options, setOptions] = useState<TaskOptions>({
+    processing_mode: "balanced",
+    num_clips: 6,
+    output_format: "vertical",
+    add_subtitles: true,
+    jump_cut: true,
+    use_scene_detection: true,
+  });
+  const inputRef = useRef<HTMLInputElement>(null);
+  
   useEffect(() => {
-    loadTasks();
-    const interval = setInterval(() => {
-      const active = tasksRef.current.some((t) => t.status === "queued" || t.status === "processing");
-      if (active) loadTasks();
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [loadTasks]);
-
-  const completedCount = tasks.filter((t) => t.status === "completed").length;
-  const totalClips = tasks.reduce((acc, t) => acc + (t.clips_count ?? 0), 0);
-
+    if (isOpen && inputRef.current) {
+      setTimeout(() => inputRef.current?.focus(), 100);
+    }
+  }, [isOpen]);
+  
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!url.trim()) return;
+    
+    setIsLoading(true);
+    await onSubmit(url, options);
+    setIsLoading(false);
+    setUrl("");
+  };
+  
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white flex">
-      {showModal && <NewClipModal onClose={() => setShowModal(false)} onCreated={loadTasks} />}
-      <Sidebar />
-      <main className="flex-1 overflow-auto">
-        <header className="sticky top-0 z-40 bg-[#0a0a0f]/80 backdrop-blur-xl border-b border-white/5 px-8 py-4">
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-bold">Dashboard</h1>
-              <p className="text-sm text-gray-500">Welcome back{session?.user?.name ? `, ${session.user.name}` : ""}</p>
-            </div>
-            <button
-              onClick={() => setShowModal(true)}
-              className="flex items-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all hover:shadow-[0_0_30px_-5px_rgba(34,211,238,0.5)]">
-              <Plus className="w-5 h-5" />
-              New Clip Project
-            </button>
-          </div>
-        </header>
-
-        <div className="p-8">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
-              <div className="w-10 h-10 rounded-lg bg-cyan-500/10 flex items-center justify-center mb-4">
-                <Film className="w-5 h-5 text-cyan-400" />
-              </div>
-              <div className="text-2xl font-bold mb-1">{tasks.length}</div>
-              <div className="text-sm text-gray-500">Total Projects</div>
-            </div>
-            <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
-              <div className="w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center mb-4">
-                <CheckCircle className="w-5 h-5 text-green-400" />
-              </div>
-              <div className="text-2xl font-bold mb-1">{completedCount}</div>
-              <div className="text-sm text-gray-500">Completed</div>
-            </div>
-            <div className="p-6 rounded-2xl bg-white/5 border border-white/10">
-              <div className="w-10 h-10 rounded-lg bg-purple-500/10 flex items-center justify-center mb-4">
-                <Sparkles className="w-5 h-5 text-purple-400" />
-              </div>
-              <div className="text-2xl font-bold mb-1">{totalClips}</div>
-              <div className="text-sm text-gray-500">Clips Generated</div>
-            </div>
-          </div>
-
-          <div className="mb-8">
-            <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl font-bold">Recent Projects</h2>
-              <Link href="/list" className="text-sm text-cyan-400 hover:text-cyan-300 flex items-center gap-1">
-                View All <ArrowRight className="w-4 h-4" />
-              </Link>
-            </div>
-            {loading ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {[1,2,3,4].map((i) => (
-                  <div key={i} className="p-5 rounded-2xl bg-white/5 border border-white/10 animate-pulse h-32" />
-                ))}
-              </div>
-            ) : tasks.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-20 text-center">
-                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-purple-500/10 border border-white/10 flex items-center justify-center mb-6">
-                  <Film className="w-10 h-10 text-gray-600" />
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50"
+            onClick={onClose}
+          />
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 20 }}
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-full max-w-lg z-50"
+          >
+            <div className="p-6 rounded-3xl bg-[#13131a] border border-white/10 shadow-2xl">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                    <Sparkles className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">Create New Clips</h2>
+                    <p className="text-sm text-white/40">Paste a YouTube URL to get started</p>
+                  </div>
                 </div>
-                <h3 className="text-lg font-semibold text-gray-400 mb-2">No projects yet</h3>
-                <p className="text-gray-600 mb-6">Click &quot;New Clip Project&quot; to generate your first viral clips</p>
                 <button
-                  onClick={() => setShowModal(true)}
-                  className="flex items-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all">
-                  <Plus className="w-4 h-4" />
-                  Create First Project
+                  onClick={onClose}
+                  className="p-2 rounded-lg text-white/40 hover:text-white hover:bg-white/5 transition-colors"
+                >
+                  <X className="w-5 h-5" />
                 </button>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {tasks.map((task) => <TaskCard key={task.id} task={task} />)}
-              </div>
-            )}
-          </div>
+              
+              <form onSubmit={handleSubmit}>
+                <div className="relative mb-4">
+                  <Link2 className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/30" />
+                  <input
+                    ref={inputRef}
+                    type="url"
+                    value={url}
+                    onChange={(e) => setUrl(e.target.value)}
+                    placeholder="https://youtube.com/watch?v=..."
+                    className="w-full pl-12 pr-4 py-4 rounded-xl bg-white/5 border border-white/10 text-white placeholder:text-white/30 focus:outline-none focus:border-violet-500/50 transition-colors"
+                  />
+                </div>
+                
+                {/* Options Grid */}
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  {/* Processing Mode */}
+                  <div className="col-span-2">
+                    <label className="text-xs text-white/50 mb-1.5 block">Processing Mode</label>
+                    <div className="grid grid-cols-4 gap-2">
+                      {(["fast", "balanced", "quality", "elite"] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => setOptions({ ...options, processing_mode: mode })}
+                          className={cn(
+                            "px-3 py-2 rounded-lg text-xs font-medium transition-colors capitalize",
+                            options.processing_mode === mode
+                              ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                              : "bg-white/5 text-white/60 border border-white/10 hover:bg-white/10"
+                          )}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Number of Clips */}
+                  <div>
+                    <label className="text-xs text-white/50 mb-1.5 block">Clips to Generate</label>
+                    <select
+                      value={options.num_clips}
+                      onChange={(e) => setOptions({ ...options, num_clips: Number(e.target.value) })}
+                      className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-sm focus:outline-none focus:border-violet-500/50"
+                    >
+                      {[3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                        <option key={n} value={n} className="bg-[#1a1a25]">{n} clips</option>
+                      ))}
+                    </select>
+                  </div>
+                  
+                  {/* Output Format */}
+                  <div>
+                    <label className="text-xs text-white/50 mb-1.5 block">Format</label>
+                    <div className="flex gap-2">
+                      {([
+                        { value: "vertical", label: "9:16", icon: Smartphone },
+                        { value: "original", label: "Original", icon: Monitor },
+                      ] as const).map(({ value, label, icon: Icon }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => setOptions({ ...options, output_format: value })}
+                          className={cn(
+                            "flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-medium transition-colors",
+                            options.output_format === value
+                              ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                              : "bg-white/5 text-white/60 border border-white/10 hover:bg-white/10"
+                          )}
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  
+                  {/* Toggle Options */}
+                  <div className="col-span-2 grid grid-cols-3 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setOptions({ ...options, add_subtitles: !options.add_subtitles })}
+                      className={cn(
+                        "flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors",
+                        options.add_subtitles
+                          ? "bg-green-500/15 text-green-400 border border-green-500/30"
+                          : "bg-white/5 text-white/40 border border-white/10 hover:bg-white/10"
+                      )}
+                    >
+                      <Subtitles className="w-3.5 h-3.5" />
+                      Subtitles
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOptions({ ...options, jump_cut: !options.jump_cut })}
+                      className={cn(
+                        "flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors",
+                        options.jump_cut
+                          ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
+                          : "bg-white/5 text-white/40 border border-white/10 hover:bg-white/10"
+                      )}
+                    >
+                      <Scissors className="w-3.5 h-3.5" />
+                      Jump Cuts
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setOptions({ ...options, use_scene_detection: !options.use_scene_detection })}
+                      className={cn(
+                        "flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors",
+                        options.use_scene_detection
+                          ? "bg-amber-500/15 text-amber-400 border border-amber-500/30"
+                          : "bg-white/5 text-white/40 border border-white/10 hover:bg-white/10"
+                      )}
+                    >
+                      <ScanEye className="w-3.5 h-3.5" />
+                      Scene Detect
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-3 text-sm text-white/40 mb-6">
+                  <span className="flex items-center gap-1.5">
+                    <Clock className="w-4 h-4" />
+                    Processing takes ~5 minutes
+                  </span>
+                </div>
+                
+                <div className="flex gap-3">
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="flex-1 px-4 py-3 rounded-xl bg-white/5 text-white font-medium hover:bg-white/10 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={!url.trim() || isLoading}
+                    className="flex-1 px-4 py-3 rounded-xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-medium hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+                  >
+                    {isLoading ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <>
+                        <Sparkles className="w-5 h-5" />
+                        Generate Clips
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
+  );
+}
 
-          {tasks.length > 0 && (
-            <div className="p-6 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-purple-500/10 border border-cyan-500/20 flex items-center justify-between">
-              <div>
-                <h3 className="font-semibold text-white mb-1">Ready to create more clips?</h3>
-                <p className="text-sm text-gray-500">Paste any YouTube URL and let the AI do the work</p>
-              </div>
-              <button
-                onClick={() => setShowModal(true)}
-                className="flex items-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all whitespace-nowrap">
-                <Plus className="w-4 h-4" />
-                New Project
-              </button>
+// Empty State Component
+function EmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="flex flex-col items-center justify-center py-20 text-center"
+    >
+      <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-violet-500/20 to-fuchsia-500/20 flex items-center justify-center mb-6">
+        <Film className="w-10 h-10 text-violet-400" />
+      </div>
+      <h3 className="text-xl font-semibold text-white mb-2">No clips yet</h3>
+      <p className="text-white/40 max-w-sm mb-6">
+        Upload a video to get started. Our AI will automatically generate viral clips for you.
+      </p>
+      <ShimmerButton onClick={onCreate}>
+        <Plus className="w-5 h-5" />
+        Create Your First Clip
+      </ShimmerButton>
+    </motion.div>
+  );
+}
+
+// Stats Card Component
+function StatsCard({ title, value, trend, icon: Icon }: { 
+  title: string; 
+  value: string; 
+  trend?: string;
+  icon: React.ElementType;
+}) {
+  return (
+    <MagicCard className="p-5">
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-sm text-white/40 mb-1">{title}</p>
+          <p className="text-2xl font-semibold text-white">{value}</p>
+          {trend && (
+            <div className="flex items-center gap-1 mt-2 text-xs text-green-400">
+              <TrendingUp className="w-3.5 h-3.5" />
+              {trend}
             </div>
           )}
         </div>
-      </main>
-    </div>
+        <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center">
+          <Icon className="w-5 h-5 text-violet-400" />
+        </div>
+      </div>
+    </MagicCard>
+  );
+}
+
+// Main Dashboard Component
+export default function DashboardPage() {
+  const { data: session } = useSession();
+  const router = useRouter();
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [filter, setFilter] = useState<"all" | "processing" | "completed">("all");
+  
+  // Fetch tasks
+  const fetchTasks = useCallback(async () => {
+    try {
+      const res = await fetch("/api/tasks");
+      if (res.ok) {
+        const data = await res.json();
+        // Handle both array response and object with tasks property
+        const tasksArray = Array.isArray(data) ? data : data?.tasks || [];
+        setTasks(tasksArray);
+      }
+    } catch (error) {
+      console.error("Failed to fetch tasks:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
+  
+  useEffect(() => {
+    fetchTasks();
+    const interval = setInterval(fetchTasks, 10000);
+    return () => clearInterval(interval);
+  }, [fetchTasks]);
+  
+  // Create task
+  const handleCreateTask = async (url: string, options: TaskOptions) => {
+    try {
+      const res = await fetch("/api/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          url,
+          processing_mode: options.processing_mode,
+          num_clips: options.num_clips,
+          output_format: options.output_format,
+          add_subtitles: options.add_subtitles,
+          jump_cut: options.jump_cut,
+          use_scene_detection: options.use_scene_detection,
+        }),
+      });
+      
+      if (res.ok) {
+        setIsCreateModalOpen(false);
+        fetchTasks();
+      }
+    } catch (error) {
+      console.error("Failed to create task:", error);
+    }
+  };
+  
+  // Delete task
+  const handleDeleteTask = async (id: string) => {
+    try {
+      const res = await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        setTasks((prev) => prev.filter((t) => t.id !== id));
+      }
+    } catch (error) {
+      console.error("Failed to delete task:", error);
+    }
+  };
+  
+  // Calculate stats - memoized to prevent recalculation on every render
+  const safeTasks = useMemo(() => (Array.isArray(tasks) ? tasks : []), [tasks]);
+  const totalClips = useMemo(() => safeTasks.reduce((acc, t) => acc + (t.clips_count || 0), 0), [safeTasks]);
+  const completedTasks = useMemo(() => safeTasks.filter((t) => t.status === "completed").length, [safeTasks]);
+  const processingTasks = useMemo(() => safeTasks.filter((t) => t.status === "processing" || t.status === "queued").length, [safeTasks]);
+  const failedTasks = useMemo(() => safeTasks.filter((t) => t.status === "failed").length, [safeTasks]);
+
+  // Filter tasks - memoized
+  const filteredTasks = useMemo(() => safeTasks.filter((task) => {
+    if (filter === "all") return true;
+    if (filter === "processing") return task.status === "processing" || task.status === "queued" || task.status === "pending";
+    if (filter === "completed") return task.status === "completed";
+    return true;
+  }), [safeTasks, filter]);
+  
+  if (!session?.user) {
+    return (
+      <div className="min-h-screen bg-[#0A0A0F] flex items-center justify-center">
+        <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
+      </div>
+    );
+  }
+  
+  return (
+    <AppShell user={session.user} credits={50 - (Array.isArray(tasks) ? tasks.length : 0)}>
+      <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+          <div>
+            <h1 className="text-2xl lg:text-3xl font-semibold text-white mb-1">
+              Dashboard
+            </h1>
+            <p className="text-white/40">
+              Manage your video clips and track processing status
+            </p>
+          </div>
+          
+          <ShimmerButton onClick={() => setIsCreateModalOpen(true)}>
+            <Plus className="w-5 h-5" />
+            Create New Clip
+          </ShimmerButton>
+        </div>
+        
+        {/* Stats Grid */}
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <StatsCard
+            title="Total Clips"
+            value={totalClips.toString()}
+            trend="+12% this week"
+            icon={Film}
+          />
+          <StatsCard
+            title="Completed"
+            value={completedTasks.toString()}
+            icon={CheckCircle}
+          />
+          <StatsCard
+            title="Processing"
+            value={processingTasks.toString()}
+            icon={Loader2}
+          />
+          <StatsCard
+            title="Videos"
+            value={safeTasks.length.toString()}
+            icon={Video}
+          />
+          <StatsCard
+            title="Failed"
+            value={failedTasks.toString()}
+            icon={AlertCircle}
+          />
+        </div>
+        
+        {/* Filters */}
+        <div className="flex items-center gap-2 mb-6 overflow-x-auto pb-2">
+          {(["all", "processing", "completed"] as const).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFilter(f)}
+              className={cn(
+                "px-4 py-2 rounded-full text-sm font-medium transition-colors whitespace-nowrap",
+                filter === f
+                  ? "bg-violet-500/20 text-violet-300 border border-violet-500/30"
+                  : "bg-white/5 text-white/50 hover:bg-white/10 hover:text-white"
+              )}
+            >
+              {f.charAt(0).toUpperCase() + f.slice(1)}
+            </button>
+          ))}
+        </div>
+        
+        {/* Tasks List */}
+        <div className="space-y-3">
+          <AnimatePresence mode="popLayout">
+            {isLoading ? (
+              <div className="flex items-center justify-center py-20">
+                <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
+              </div>
+            ) : filteredTasks.length === 0 ? (
+              <EmptyState onCreate={() => setIsCreateModalOpen(true)} />
+            ) : (
+              filteredTasks.map((task) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  onDelete={handleDeleteTask}
+                />
+              ))
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+      
+      {/* Create Task Modal */}
+      <CreateTaskModal
+        isOpen={isCreateModalOpen}
+        onClose={() => setIsCreateModalOpen(false)}
+        onSubmit={handleCreateTask}
+      />
+    </AppShell>
   );
 }

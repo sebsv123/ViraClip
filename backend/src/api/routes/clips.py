@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
@@ -314,3 +315,39 @@ async def get_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
     return clip
+
+
+@router.get("/{clip_id}/stream", summary="Stream a clip video file")
+async def stream_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
+    clip = await ClipRepository.get_clip_by_id(db, clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_dict = clip if isinstance(clip, dict) else clip.__dict__
+    file_path = clip_dict.get("file_path") or ""
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(status_code=404, detail="Clip file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        media_type="video/mp4",
+    )
+
+
+@router.get("/{clip_id}/download", summary="Download a clip video file")
+async def download_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
+    clip = await ClipRepository.get_clip_by_id(db, clip_id)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip_dict = clip if isinstance(clip, dict) else clip.__dict__
+    file_path = clip_dict.get("file_path") or ""
+    filename = clip_dict.get("filename") or "clip.mp4"
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(status_code=404, detail="Clip file not found on disk")
+
+    return FileResponse(
+        path=file_path,
+        media_type="video/mp4",
+        filename=filename,
+    )

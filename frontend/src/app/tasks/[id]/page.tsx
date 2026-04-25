@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -56,7 +57,7 @@ import {
   Send,
   BrainCircuit,
   Target,
-  MousePointer2,
+  MousePointer,
   Wand2,
   Film,
   Volume2,
@@ -66,6 +67,7 @@ import {
   Loader2,
   Shuffle,
   Music,
+  Lightbulb,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
@@ -232,7 +234,26 @@ export default function TaskPage() {
   const [isApplyingMusic, setIsApplyingMusic] = useState(false);
   const [musicAppliedClipId, setMusicAppliedClipId] = useState<string | null>(null);
 
+  // Interactive waiting experience states
+  const [clickCount, setClickCount] = useState(0);
+  const [currentTipIndex, setCurrentTipIndex] = useState(0);
+  const [showConfetti, setShowConfetti] = useState(false);
+
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  // Viral tips that rotate during processing
+  const viralTips = [
+    { icon: Zap, text: "Videos with hooks in the first 3 seconds get 65% more retention" },
+    { icon: Target, text: "Ask a question in your first sentence to boost engagement" },
+    { icon: MessageSquare, text: "Reply to every comment in the first hour to boost reach" },
+    { icon: TrendingUp, text: "Post when your audience is most active (check analytics)" },
+    { icon: Sparkles, text: "Trending audio can increase discoverability by 40%" },
+    { icon: Clock, text: "15-45 second clips perform best for viral content" },
+    { icon: Subtitles, text: "85% of viewers watch videos without sound - add captions!" },
+    { icon: Wand2, text: "Your best hook: 'Here's why...' or 'The secret to...'" },
+    { icon: Star, text: "Post consistently: 3-5 videos per week is the sweet spot" },
+    { icon: BrainCircuit, text: "AI-optimized clips adapt to your audience preferences" },
+  ];
 
   // Load available music tracks once
   useEffect(() => {
@@ -241,6 +262,23 @@ export default function TaskPage() {
       .then(d => { if (d.tracks) setMusicTracks(d.tracks); })
       .catch(() => {});
   }, [apiUrl]);
+
+  // Rotate tips every 8 seconds during processing
+  useEffect(() => {
+    if (task?.status !== "processing" && task?.status !== "queued") return;
+    const interval = setInterval(() => {
+      setCurrentTipIndex((prev) => (prev + 1) % viralTips.length);
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [task?.status]);
+
+  // Confetti effect at milestones
+  useEffect(() => {
+    if (progress > 0 && progress % 25 === 0 && progress !== 100) {
+      setShowConfetti(true);
+      setTimeout(() => setShowConfetti(false), 2000);
+    }
+  }, [progress]);
 
   const handleApplyMusic = async (clipId: string) => {
     if (!selectedTrack) return;
@@ -961,36 +999,256 @@ export default function TaskPage() {
       <div className="max-w-6xl mx-auto px-4 py-8">
         {task?.status === "processing" || task?.status === "queued" ? (
           <div className="space-y-8">
-            {/* Progress indicator */}
-            <div className="flex flex-col items-center py-8">
-              {/* Minimal animated dots */}
-              <div className="relative group flex items-center gap-1.5 mb-8 cursor-default">
-                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_infinite]" />
-                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.2s_infinite]" />
-                <span className="w-2 h-2 bg-neutral-800 rounded-full animate-[pulse_1.4s_ease-in-out_0.4s_infinite]" />
-                <div className="absolute top-full mt-3 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md border bg-popover px-3 py-1.5 text-sm text-popover-foreground shadow-md opacity-0 scale-95 transition-all group-hover:opacity-100 group-hover:scale-100 pointer-events-none">
-                  ☕&nbsp;&nbsp;Grab a coffee, and come back to ready-to-post clips.
+            {/* Main Progress Experience */}
+            <div className="max-w-2xl mx-auto">
+              <motion.div 
+                className="rounded-3xl border border-white/10 bg-gradient-to-br from-violet-500/10 via-fuchsia-500/5 to-transparent p-8 relative overflow-hidden"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+              >
+                {/* Animated background orbs */}
+                <div className="absolute inset-0 overflow-hidden pointer-events-none">
+                  <motion.div
+                    className="absolute -top-20 -right-20 w-40 h-40 bg-violet-500/20 rounded-full blur-3xl"
+                    animate={{ scale: [1, 1.2, 1], opacity: [0.3, 0.5, 0.3] }}
+                    transition={{ duration: 4, repeat: Infinity }}
+                  />
+                  <motion.div
+                    className="absolute -bottom-20 -left-20 w-40 h-40 bg-fuchsia-500/20 rounded-full blur-3xl"
+                    animate={{ scale: [1.2, 1, 1.2], opacity: [0.3, 0.5, 0.3] }}
+                    transition={{ duration: 4, repeat: Infinity, delay: 2 }}
+                  />
+                </div>
+
+                {/* Confetti burst */}
+                {showConfetti && (
+                  <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                    <motion.div
+                      initial={{ scale: 0 }}
+                      animate={{ scale: [0, 1.5, 0] }}
+                      transition={{ duration: 0.8 }}
+                      className="text-4xl"
+                    >
+                      🎉
+                    </motion.div>
+                  </div>
+                )}
+
+                {/* Header with animated status */}
+                <div className="relative flex items-center justify-between mb-8">
+                  <div className="flex items-center gap-4">
+                    <motion.div 
+                      className="relative"
+                      animate={task.status === "processing" ? { rotate: 360 } : {}}
+                      transition={task.status === "processing" ? { duration: 8, repeat: Infinity, ease: "linear" } : {}}
+                    >
+                      <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-500/30 to-fuchsia-500/30 flex items-center justify-center border border-white/10">
+                        {task.status === "queued" ? (
+                          <Clock className="w-8 h-8 text-amber-400" />
+                        ) : (
+                          <Zap className="w-8 h-8 text-violet-400" />
+                        )}
+                      </div>
+                    </motion.div>
+                    <div>
+                      <motion.h3 
+                        className="text-xl font-bold text-white"
+                        key={progressMessage}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                      >
+                        {task.status === "queued" ? "In Queue" : progress >= 90 ? "Almost Done!" : "Creating Magic"}
+                      </motion.h3>
+                      <p className="text-sm text-white/50">
+                        {clips.length > 0 ? (
+                          <span className="text-green-400">{clips.length} clip{clips.length !== 1 ? "s" : ""} ready!</span>
+                        ) : (
+                          "This won't take long..."
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Big percentage with pulse */}
+                  <div className="text-right">
+                    <motion.span 
+                      className="text-4xl font-bold text-white tabular-nums"
+                      key={progress}
+                      initial={{ scale: 1.2 }}
+                      animate={{ scale: 1 }}
+                    >
+                      {progress}%
+                    </motion.span>
+                  </div>
+                </div>
+
+                {/* Enhanced progress bar with glow */}
+                <div className="relative mb-6">
+                  <div className="h-4 bg-white/5 rounded-full overflow-hidden border border-white/10">
+                    <motion.div
+                      className="h-full rounded-full bg-gradient-to-r from-violet-500 via-fuchsia-500 to-pink-500 relative"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${Math.max(progress, 3)}%` }}
+                      transition={{ duration: 0.8, ease: "easeOut" }}
+                    >
+                      <motion.div
+                        className="absolute inset-0 bg-gradient-to-r from-transparent via-white/30 to-transparent"
+                        animate={{ x: ["-100%", "100%"] }}
+                        transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+                      />
+                    </motion.div>
+                  </div>
+                </div>
+
+                {/* Progress message with typing effect feel */}
+                <div className="mb-8">
+                  <motion.p 
+                    className="text-white/80 flex items-center gap-3 text-sm"
+                    key={progressMessage}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    <span className="flex items-center justify-center w-6 h-6 rounded-full bg-violet-500/20">
+                      {progress < 25 ? <Download className="w-3 h-3 text-violet-400" /> :
+                       progress < 50 ? <Subtitles className="w-3 h-3 text-violet-400" /> :
+                       progress < 75 ? <BrainCircuit className="w-3 h-3 text-violet-400" /> :
+                       <Film className="w-3 h-3 text-violet-400" />}
+                    </span>
+                    {progressMessage || (task.status === "queued" ? "Waiting for available worker..." : "Starting up the AI engines...")}
+                  </motion.p>
+                </div>
+
+                {/* Processing stages with connecting line */}
+                <div className="relative">
+                  <div className="absolute top-6 left-0 right-0 h-0.5 bg-white/10 -z-10" />
+                  <div className="grid grid-cols-4 gap-3">
+                    {[
+                      { label: "Download", icon: Download, threshold: 10, emoji: "📥" },
+                      { label: "Analyze", icon: BrainCircuit, threshold: 40, emoji: "🧠" },
+                      { label: "Create", icon: Wand2, threshold: 60, emoji: "✨" },
+                      { label: "Polish", icon: Sparkles, threshold: 85, emoji: "💎" },
+                    ].map((stage) => {
+                      const isActive = progress >= stage.threshold;
+                      const isCurrent = progress >= stage.threshold && progress < (stage.threshold + 25);
+                      return (
+                        <motion.div
+                          key={stage.label}
+                          className={`flex flex-col items-center gap-2 p-3 rounded-xl transition-all duration-300 ${
+                            isActive
+                              ? "bg-white/10 text-white border border-white/20"
+                              : "bg-transparent text-white/30"
+                          }`}
+                          animate={isCurrent ? { scale: [1, 1.05, 1] } : {}}
+                          transition={{ duration: 2, repeat: Infinity }}
+                        >
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg ${
+                            isActive ? "bg-violet-500/20" : "bg-white/5"
+                          }`}>
+                            {isActive ? stage.emoji : <stage.icon className="w-4 h-4" />}
+                          </div>
+                          <span className="text-xs font-medium">{stage.label}</span>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </motion.div>
+            </div>
+
+            {/* Rotating Viral Tip Card */}
+            <motion.div 
+              className="max-w-2xl mx-auto"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+            >
+              <div className="rounded-2xl border border-amber-500/20 bg-gradient-to-r from-amber-500/10 to-orange-500/10 p-5">
+                <div className="flex items-start gap-4">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center flex-shrink-0">
+                    <Lightbulb className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-xs text-amber-400/70 uppercase tracking-wide font-medium mb-1">
+                      Pro Tip #{currentTipIndex + 1}/{viralTips.length}
+                    </p>
+                    <AnimatePresence mode="wait">
+                      <motion.p
+                        key={currentTipIndex}
+                        className="text-white/90 text-sm leading-relaxed"
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -20 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        {viralTips[currentTipIndex].text}
+                      </motion.p>
+                    </AnimatePresence>
+                  </div>
+                  <div className="flex gap-1">
+                    {viralTips.map((_, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => setCurrentTipIndex(idx)}
+                        className={`w-1.5 h-1.5 rounded-full transition-colors ${
+                          idx === currentTipIndex ? "bg-amber-400" : "bg-white/20"
+                        }`}
+                      />
+                    ))}
+                  </div>
                 </div>
               </div>
+            </motion.div>
 
-              {/* Status message */}
-              <p className="shimmer text-neutral-600/60 text-sm tracking-wide mb-8">
-                {progressMessage || (task.status === "queued" ? "Waiting in queue" : "Processing")}
-              </p>
-
-              {/* Minimal progress bar */}
-              {progress > 0 && (
-                <div className="w-48">
-                  <div className="h-px bg-neutral-200 w-full relative overflow-hidden">
-                    <div
-                      className="absolute inset-y-0 left-0 bg-neutral-800 transition-all duration-700 ease-out"
-                      style={{ width: `${progress}%` }}
-                    />
+            {/* Interactive Mini-Game Card */}
+            <motion.div 
+              className="max-w-2xl mx-auto"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 }}
+            >
+              <div className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/10 to-blue-500/10 p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
+                      <MousePointer className="w-5 h-5 text-cyan-400" />
+                    </div>
+                    <div>
+                      <p className="text-white font-medium text-sm">Click Challenge</p>
+                      <p className="text-white/50 text-xs">How many times can you click?</p>
+                    </div>
                   </div>
-                  <p className="text-[11px] text-neutral-400 text-center mt-3 tabular-nums">{progress}%</p>
+                  <div className="text-right">
+                    <p className="text-2xl font-bold text-cyan-400 tabular-nums">{clickCount}</p>
+                    <p className="text-xs text-white/40">clicks</p>
+                  </div>
                 </div>
-              )}
-            </div>
+                
+                <motion.button
+                  onClick={() => setClickCount(c => c + 1)}
+                  className="w-full py-4 rounded-xl bg-gradient-to-r from-cyan-500/20 to-blue-500/20 border border-cyan-500/30 text-cyan-400 font-medium hover:from-cyan-500/30 hover:to-blue-500/30 transition-all active:scale-95"
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <Sparkles className="w-4 h-4" />
+                    Tap here while you wait!
+                    <Sparkles className="w-4 h-4" />
+                  </span>
+                </motion.button>
+
+                {clickCount > 0 && (
+                  <motion.p 
+                    className="text-center text-xs text-white/40 mt-3"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                  >
+                    {clickCount < 20 ? "Good start! Keep going! 🔥" :
+                     clickCount < 50 ? "You're on fire! 🔥🔥" :
+                     clickCount < 100 ? "Incredible speed! ⚡" :
+                     "LEGENDARY! You're a clicking machine! 🏆"}
+                  </motion.p>
+                )}
+              </div>
+            </motion.div>
 
             {/* Content Analysis Section */}
             {task?.analysis && (
@@ -1683,7 +1941,7 @@ export default function TaskPage() {
                             {clip.conversion_tips && (
                               <div className="flex gap-3 pt-2 border-t border-blue-100/50">
                                 <div className="mt-1 p-1 bg-green-100 rounded-md">
-                                  <MousePointer2 className="w-3.5 h-3.5 text-green-700" />
+                                  <MousePointer className="w-3.5 h-3.5 text-green-700" />
                                 </div>
                                 <div>
                                   <span className="text-[10px] font-bold text-green-500 uppercase leading-none block mb-1">Conversion Tactic</span>
