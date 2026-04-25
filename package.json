@@ -1,5 +1,8 @@
 {
   "devDependencies": {
     "@types/node": "^25.5.0"
+  },
+  "dependencies": {
+    "framer-motion": "^12.38.0"
   }
 }

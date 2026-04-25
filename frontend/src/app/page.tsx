@@ -1,180 +1,44 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
-import { useSession } from "@/lib/auth-client";
-import { 
-  Zap, 
-  Sparkles, 
-  Scissors, 
-  Music, 
-  Subtitles, 
-  Play,
-  Github,
-  Twitter,
-  CheckCircle2,
-  ArrowRight,
-  Video,
-  Wand2,
-  Upload,
-  Shield,
-  Cpu,
-  Globe,
-  Layers,
-  Rocket,
-  Star
-} from "lucide-react";
+import { motion } from "framer-motion";
 import Link from "next/link";
-
-// Neon Button Component
-function NeonButton({ 
-  children, 
-  variant = "primary", 
-  size = "md",
-  className = "",
-  glowing = false,
-  ...props 
-}: React.ButtonHTMLAttributes<HTMLButtonElement> & { 
-  variant?: "primary" | "secondary" | "accent" | "ghost" | "outline",
-  size?: "sm" | "md" | "lg",
-  glowing?: boolean
-}) {
-  const variants = {
-    primary: "bg-[hsl(180,100%,50%)] text-[hsl(220,25%,4%)] hover:shadow-[0_0_30px_-5px_hsl(180,100%,50%,0.5)]",
-    secondary: "bg-[hsl(270,100%,65%)] text-white hover:shadow-[0_0_30px_-5px_hsl(270,100%,65%,0.5)]",
-    accent: "bg-[hsl(330,100%,60%)] text-white hover:shadow-[0_0_30px_-5px_hsl(330,100%,60%,0.5)]",
-    ghost: "bg-transparent border border-white/20 hover:bg-white/10 text-white",
-    outline: "bg-transparent border-2 border-[hsl(180,100%,50%)] text-[hsl(180,100%,50%)] hover:bg-[hsl(180,100%,50%)]/10",
-  };
-  const sizes = { sm: "px-4 py-2 text-sm", md: "px-6 py-3 text-base", lg: "px-8 py-4 text-lg" };
-  
-  return (
-    <button className={`relative inline-flex items-center justify-center gap-2 font-semibold rounded-xl transition-all duration-300 ${variants[variant]} ${sizes[size]} ${glowing ? "shadow-[0_0_40px_-10px_hsl(180,100%,50%,0.5)]" : ""} ${className}`} {...props}>
-      {children}
-    </button>
-  );
-}
-
-// Feature Card Component
-function FeatureCard({ icon: Icon, title, description, color, delay }: { icon: any, title: string, description: string, color: string, delay: number }) {
-  const colorMap: Record<string, string> = {
-    cyan: "from-cyan-400/20 to-cyan-600/20 border-cyan-500/30",
-    pink: "from-pink-400/20 to-pink-600/20 border-pink-500/30",
-    purple: "from-purple-400/20 to-purple-600/20 border-purple-500/30",
-    lime: "from-green-400/20 to-green-600/20 border-green-500/30",
-    amber: "from-amber-400/20 to-amber-600/20 border-amber-500/30",
-  };
-  
-  const iconColorMap: Record<string, string> = {
-    cyan: "text-cyan-400 bg-cyan-400/20",
-    pink: "text-pink-400 bg-pink-400/20",
-    purple: "text-purple-400 bg-purple-400/20",
-    lime: "text-green-400 bg-green-400/20",
-    amber: "text-amber-400 bg-amber-400/20",
-  };
-
-  return (
-    <div 
-      className={`group relative p-6 rounded-2xl bg-gradient-to-br ${colorMap[color]} border backdrop-blur-sm hover:scale-105 transition-all duration-500`}
-    >
-      <div className={`w-14 h-14 rounded-xl ${iconColorMap[color]} flex items-center justify-center mb-4 group-hover:scale-110 transition-transform`}>
-        <Icon className="w-7 h-7" />
-      </div>
-      <h3 className="text-xl font-bold mb-2 text-white">{title}</h3>
-      <p className="text-sm text-gray-400 leading-relaxed">{description}</p>
-    </div>
-  );
-}
-
-// Stats Card
-function StatCard({ value, label }: { value: string, label: string }) {
-  return (
-    <div className="text-center p-6 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm hover:border-[hsl(180,100%,50%)]/50 transition-colors">
-      <div className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent mb-1">{value}</div>
-      <div className="text-sm text-gray-500">{label}</div>
-    </div>
-  );
-}
+import { ArrowRight, Play, Video } from "lucide-react";
+import { StarField } from "@/components/ui/star-field";
+import { ShimmerButton } from "@/components/ui/shimmer-button";
 
 export default function LandingPage() {
-  const router = useRouter();
-  const { data: session, isPending } = useSession();
-  
-  // Redirect to dashboard if user is logged in
-  useEffect(() => {
-    if (!isPending && session) {
-      router.push("/dashboard");
-    }
-  }, [session, isPending, router]);
-  
-  const features = [
-    { icon: Scissors, title: "AI Clip Detection", description: "Advanced machine learning finds the most viral moments in your videos automatically", color: "cyan" },
-    { icon: Subtitles, title: "Smart Subtitles", description: "Animated, emoji-enhanced captions with perfect timing and viral styling", color: "pink" },
-    { icon: Music, title: "B-Roll & Music", description: "Auto-matched stock footage and trending audio from Pexels and more", color: "purple" },
-    { icon: Wand2, title: "One-Click Magic", description: "Upload once, get dozens of viral-ready clips instantly with zero editing", color: "lime" },
-    { icon: Shield, title: "Self-Hosted", description: "100% privacy-focused. Your videos never leave your infrastructure", color: "amber" },
-    { icon: Globe, title: "Multi-Platform", description: "Optimized exports for TikTok, Reels, Shorts, and more with one click", color: "cyan" },
-  ];
-
-  const stats = [
-    { value: "10x", label: "Faster Editing" },
-    { value: "50+", label: "Clips Per Video" },
-    { value: "100%", label: "Self-Hosted" },
-    { value: "0", label: "Watermarks" },
-  ];
-
-  // Show loading while checking session
-  if (isPending) {
-    return (
-      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center">
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 border-4 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin" />
-          <p className="text-gray-400">Loading...</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white overflow-x-hidden font-sans">
-      {/* Animated Background */}
-      <div className="fixed inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute top-0 left-1/4 w-[500px] h-[500px] bg-cyan-500/10 rounded-full blur-[120px]" />
-        <div className="absolute top-1/3 right-0 w-[600px] h-[600px] bg-purple-500/10 rounded-full blur-[150px]" />
-        <div className="absolute bottom-0 left-1/3 w-[400px] h-[400px] bg-pink-500/10 rounded-full blur-[100px]" />
+    <main className="relative min-h-screen bg-[#0A0A0F] overflow-x-hidden">
+      <StarField count={50} />
+      
+      {/* Background gradients */}
+      <div className="fixed inset-0 -z-10">
+        <div className="absolute top-0 left-1/4 w-[600px] h-[600px] bg-violet-600/10 rounded-full blur-[150px]" />
+        <div className="absolute top-1/3 right-0 w-[500px] h-[500px] bg-fuchsia-600/10 rounded-full blur-[150px]" />
       </div>
 
       {/* Navigation */}
-      <nav className="relative z-50 border-b border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl">
-        <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <Link href="/" className="flex items-center gap-3 group">
-              <div className="relative w-10 h-10">
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl blur-sm opacity-75 group-hover:opacity-100 transition-opacity" />
-                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
-                  <Zap className="w-5 h-5 text-cyan-400" />
-                </div>
+      <nav className="fixed top-0 left-0 right-0 z-50">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex items-center justify-between h-16 mt-4 px-6 rounded-full bg-white/5 backdrop-blur-xl border border-white/10">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                <Video className="w-4 h-4 text-white" />
               </div>
-              <span className="text-xl font-bold tracking-tight">
-                Vira<span className="bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">Clip</span>
-              </span>
+              <span className="text-lg font-semibold text-white">ViraClip</span>
             </Link>
-
+            
             <div className="hidden md:flex items-center gap-8">
-              <Link href="#features" className="text-sm text-gray-400 hover:text-white transition-colors">Features</Link>
-              <Link href="#how-it-works" className="text-sm text-gray-400 hover:text-white transition-colors">How it Works</Link>
-              <Link href="#pricing" className="text-sm text-gray-400 hover:text-white transition-colors">Pricing</Link>
-              <Link href="https://github.com" className="text-sm text-gray-400 hover:text-white transition-colors">
-                <Github className="w-5 h-5" />
-              </Link>
+              <Link href="#features" className="text-sm text-white/60 hover:text-white transition-colors">Features</Link>
+              <Link href="/dashboard" className="text-sm text-white/60 hover:text-white transition-colors">Dashboard</Link>
             </div>
-
-            <div className="flex items-center gap-3">
-              <Link href="/sign-in">
-                <NeonButton variant="ghost" size="sm">Sign In</NeonButton>
+            
+            <div className="flex items-center gap-4">
+              <Link href="/sign-in" className="text-sm text-white/60 hover:text-white transition-colors hidden sm:block">
+                Sign In
               </Link>
-              <Link href="/dashboard" className="hidden sm:block">
-                <NeonButton size="sm" glowing>🚀 Go to Dashboard</NeonButton>
+              <Link href="/dashboard">
+                <ShimmerButton>Get Started</ShimmerButton>
               </Link>
             </div>
           </div>
@@ -182,193 +46,180 @@ export default function LandingPage() {
       </nav>
 
       {/* Hero Section */}
-      <section className="relative z-10 pt-20 pb-32">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="text-center max-w-4xl mx-auto">
-            <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 mb-8">
-              <Rocket className="w-4 h-4 text-cyan-400" />
-              <span className="text-sm text-gray-400">Now with Quantum-Inspired Viral Detection</span>
-              <ArrowRight className="w-4 h-4 text-cyan-400" />
-            </div>
+      <section className="relative z-10 pt-32 pb-20 lg:pt-40 lg:pb-32">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="text-center"
+          >
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.1 }}
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 mb-8"
+            >
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-violet-500"></span>
+              </span>
+              <span className="text-sm text-white/70">Now with AI B-Roll Generation</span>
+            </motion.div>
 
-            <h1 className="text-5xl md:text-7xl font-bold leading-[1.1] mb-6">
+            <motion.h1 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-semibold text-white leading-[1.1] mb-6"
+            >
               Turn Long Videos into{" "}
-              <span className="bg-gradient-to-r from-cyan-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">Viral Shorts</span>
-              <br />
-              <span className="text-gray-500">in Seconds</span>
-            </h1>
+              <span className="bg-gradient-to-r from-violet-400 via-fuchsia-400 to-pink-400 bg-clip-text text-transparent">
+                Viral Shorts
+              </span>
+            </motion.h1>
 
-            <p className="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto mb-10">
-              AI-powered clip generator with quantum-inspired algorithms, swarm evolution engine, and advanced engagement prediction. Self-hosted with no watermarks.
-            </p>
+            <motion.p 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.3 }}
+              className="text-lg md:text-xl text-white/50 max-w-2xl mx-auto mb-10"
+            >
+              AI-powered clip generator that automatically finds viral moments, 
+              adds B-roll, captions, and music. No editing skills required.
+            </motion.p>
 
-            <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-16">
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.4 }}
+              className="flex flex-col sm:flex-row items-center justify-center gap-4"
+            >
               <Link href="/dashboard">
-                <NeonButton size="lg" glowing>
-                  <Play className="w-5 h-5" />
+                <ShimmerButton className="w-full sm:w-auto">
+                  <Play className="w-4 h-4" />
                   Start Creating Free
-                </NeonButton>
+                </ShimmerButton>
               </Link>
-              <NeonButton variant="outline" size="lg">
-                <Video className="w-5 h-5" />
+              <ShimmerButton variant="outline" className="w-full sm:w-auto">
                 Watch Demo
-              </NeonButton>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-3xl mx-auto">
-              {stats.map((stat, i) => (
-                <StatCard key={i} value={stat.value} label={stat.label} />
-              ))}
-            </div>
-          </div>
+              </ShimmerButton>
+            </motion.div>
+          </motion.div>
         </div>
       </section>
 
-      {/* Features Section */}
-      <section id="features" className="relative z-10 py-24 bg-gradient-to-b from-transparent via-white/[0.02] to-transparent">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-5xl font-bold mb-4">
-              Powered by <span className="bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">Advanced AI</span>
-            </h2>
-            <p className="text-gray-400 max-w-xl mx-auto">
-              State-of-the-art machine learning models for viral content creation
-            </p>
-          </div>
-
-          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {features.map((f, i) => (
-              <FeatureCard key={i} {...f} delay={i * 100} />
+      {/* Stats Section */}
+      <section className="relative z-10 py-12 border-y border-white/5">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+            {[
+              { value: "500K+", label: "Clips Generated" },
+              { value: "10K+", label: "Active Creators" },
+              { value: "99%", label: "Uptime" },
+              { value: "4.9/5", label: "User Rating" },
+            ].map((stat, i) => (
+              <motion.div
+                key={stat.label}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ delay: i * 0.1 }}
+                className="text-center"
+              >
+                <div className="text-2xl md:text-3xl font-bold text-white mb-1">{stat.value}</div>
+                <div className="text-sm text-white/40">{stat.label}</div>
+              </motion.div>
             ))}
           </div>
         </div>
       </section>
 
-      {/* How It Works */}
-      <section id="how-it-works" className="relative z-10 py-24">
-        <div className="max-w-6xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-5xl font-bold mb-4">
-              How It <span className="bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">Works</span>
+      {/* Features Section */}
+      <section id="features" className="relative z-10 py-24 lg:py-32">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            className="text-center mb-16"
+          >
+            <h2 className="text-3xl md:text-4xl lg:text-5xl font-semibold text-white mb-4">
+              Powered by{" "}
+              <span className="bg-gradient-to-r from-violet-400 to-fuchsia-400 bg-clip-text text-transparent">
+                Advanced AI
+              </span>
             </h2>
-          </div>
+            <p className="text-lg text-white/40 max-w-2xl mx-auto">
+              State-of-the-art machine learning models for viral content creation
+            </p>
+          </motion.div>
 
-          <div className="grid md:grid-cols-3 gap-8">
+          <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
             {[
-              { step: "01", title: "Upload", desc: "Drop in any video up to 4K. YouTube links or file uploads supported.", icon: Upload },
-              { step: "02", title: "AI Analysis", desc: "Our AI finds viral moments, transcribes audio, and scores engagement.", icon: Cpu },
-              { step: "03", title: "Get Clips", desc: "Download dozens of edited clips ready for all social platforms.", icon: Sparkles },
-            ].map((item, i) => {
-              const Icon = item.icon;
-              return (
-                <div key={i} className="relative text-center group">
-                  <div className="w-20 h-20 mx-auto mb-6 rounded-2xl bg-gradient-to-br from-cyan-500/20 to-purple-500/20 border border-cyan-500/30 flex items-center justify-center relative group-hover:scale-110 transition-transform">
-                    <span className="absolute -top-3 -right-3 w-8 h-8 rounded-full bg-gradient-to-br from-cyan-400 to-purple-500 text-xs font-bold flex items-center justify-center">
-                      {item.step}
-                    </span>
-                    <Icon className="w-8 h-8 text-cyan-400" />
-                  </div>
-                  <h3 className="text-xl font-bold mb-2">{item.title}</h3>
-                  <p className="text-gray-400">{item.desc}</p>
-                </div>
-              );
-            })}
+              { title: "AI Clip Extraction", desc: "Automatically detects and extracts the most viral moments from long videos." },
+              { title: "B-Roll Generation", desc: "Generate cinematic B-roll footage with AI to enhance your content." },
+              { title: "Auto-Captions", desc: "AI-powered captions with perfect timing and stylish fonts." },
+              { title: "Color Grading", desc: "Professional color grading LUTs applied automatically." },
+              { title: "Multi-Format Export", desc: "Export in 9:16 for TikTok/Reels, 16:9 for YouTube." },
+              { title: "Auto-Translation", desc: "Translate captions and generate voiceovers in 50+ languages." },
+            ].map((feature, i) => (
+              <motion.div
+                key={feature.title}
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true }}
+                transition={{ delay: i * 0.1 }}
+                className="p-6 rounded-2xl bg-white/[0.02] border border-white/10 hover:border-violet-500/30 transition-colors"
+              >
+                <h3 className="text-lg font-semibold text-white mb-2">{feature.title}</h3>
+                <p className="text-sm text-white/50">{feature.desc}</p>
+              </motion.div>
+            ))}
           </div>
         </div>
       </section>
 
-      {/* Pricing Section */}
-      <section id="pricing" className="relative z-10 py-24 bg-gradient-to-b from-transparent via-white/[0.02] to-transparent">
-        <div className="max-w-5xl mx-auto px-6">
-          <div className="text-center mb-16">
-            <h2 className="text-3xl md:text-5xl font-bold mb-4">
-              Simple, <span className="bg-gradient-to-r from-cyan-400 to-purple-400 bg-clip-text text-transparent">Transparent</span> Pricing
-            </h2>
-            <p className="text-gray-400">Self-hosted freedom with optional cloud convenience</p>
-          </div>
-
-          <div className="grid md:grid-cols-2 gap-8 max-w-4xl mx-auto">
-            <div className="p-8 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-sm">
-              <div className="flex items-center gap-3 mb-4">
-                <Github className="w-6 h-6 text-gray-400" />
-                <h3 className="text-xl font-bold">Open Source</h3>
-              </div>
-              <div className="text-4xl font-bold mb-2">Free</div>
-              <p className="text-gray-400 mb-6">Self-host on your own machine</p>
-              <ul className="space-y-3 mb-8">
-                {["Unlimited clips", "All AI features", "Self-hosted", "No watermarks", "Community support"].map((item, i) => (
-                  <li key={i} className="flex items-center gap-2 text-sm">
-                    <CheckCircle2 className="w-4 h-4 text-cyan-400" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-              <NeonButton variant="outline" className="w-full">
-                <Github className="w-4 h-4" />
-                View on GitHub
-              </NeonButton>
-            </div>
-
-            <div className="relative p-8 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-purple-500/10 border-2 border-cyan-500/50 backdrop-blur-sm">
-              <div className="absolute -top-4 left-1/2 -translate-x-1/2 px-4 py-1 rounded-full bg-gradient-to-r from-cyan-400 to-purple-500 text-sm font-semibold">
-                Recommended
-              </div>
-              <div className="flex items-center gap-3 mb-4">
-                <Layers className="w-6 h-6 text-cyan-400" />
-                <h3 className="text-xl font-bold">Cloud Hosted</h3>
-              </div>
-              <div className="text-4xl font-bold mb-2">$29<span className="text-lg text-gray-400">/mo</span></div>
-              <p className="text-gray-400 mb-6">Fully managed, GPU-accelerated</p>
-              <ul className="space-y-3 mb-8">
-                {["Everything in Open Source", "GPU acceleration", "Priority processing", "Email support", "99.9% uptime SLA"].map((item, i) => (
-                  <li key={i} className="flex items-center gap-2 text-sm">
-                    <CheckCircle2 className="w-4 h-4 text-cyan-400" />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-              <NeonButton className="w-full" glowing>
-                <Star className="w-4 h-4" />
-                Get Started
-              </NeonButton>
+      {/* CTA Section */}
+      <section className="relative z-10 py-24">
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="relative p-12 md:p-16 rounded-3xl bg-white/[0.02] border border-white/10 text-center overflow-hidden">
+            <div className="absolute inset-0 bg-gradient-to-r from-violet-600/20 to-fuchsia-600/20 blur-3xl" />
+            <div className="relative z-10">
+              <h2 className="text-3xl md:text-4xl lg:text-5xl font-semibold text-white mb-6">
+                Ready to go viral?
+              </h2>
+              <p className="text-lg text-white/50 mb-8 max-w-xl mx-auto">
+                Join thousands of creators who are already saving hours of editing time.
+              </p>
+              <Link href="/dashboard">
+                <ShimmerButton size="lg">
+                  Start Creating Free
+                  <ArrowRight className="w-5 h-5" />
+                </ShimmerButton>
+              </Link>
             </div>
           </div>
         </div>
       </section>
 
       {/* Footer */}
-      <footer className="relative z-10 py-12 border-t border-white/10">
-        <div className="max-w-7xl mx-auto px-6">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-            <div className="flex items-center gap-3">
-              <div className="relative w-8 h-8">
-                <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 to-purple-500 rounded-lg" />
-                <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-lg flex items-center justify-center">
-                  <Zap className="w-4 h-4 text-cyan-400" />
-                </div>
+      <footer className="relative z-10 py-12 border-t border-white/5">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-fuchsia-500 flex items-center justify-center">
+                <Video className="w-4 h-4 text-white" />
               </div>
-              <span className="font-bold">
-                Vira<span className="text-cyan-400">Clip</span>
-              </span>
-            </div>
-            
-            <div className="flex items-center gap-6 text-sm text-gray-400">
-              <Link href="/privacy" className="hover:text-white transition-colors">Privacy</Link>
-              <Link href="/terms" className="hover:text-white transition-colors">Terms</Link>
-              <Link href="https://github.com" className="hover:text-white transition-colors">
-                <Github className="w-5 h-5" />
-              </Link>
-              <Link href="https://twitter.com" className="hover:text-white transition-colors">
-                <Twitter className="w-5 h-5" />
-              </Link>
-            </div>
-            
-            <p className="text-sm text-gray-500">
-              © 2026 ViraClip. MIT License.
+              <span className="text-lg font-semibold text-white">ViraClip</span>
+            </Link>
+            <p className="text-sm text-white/30">
+              © {new Date().getFullYear()} ViraClip. All rights reserved.
             </p>
           </div>
         </div>
       </footer>
-    </div>
+    </main>
   );
 }
+

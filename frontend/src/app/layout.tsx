@@ -1,18 +1,18 @@
 import type { Metadata } from "next";
-import { Inter, Space_Grotesk } from "next/font/google";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { PerformanceDisplay, ReportWebVitals } from "@/lib/performance";
 
-const inter = Inter({ 
+const geistSans = Geist({ 
   subsets: ["latin"],
-  variable: "--font-inter",
-  display: "swap", // Optimize font loading
+  variable: "--font-geist-sans",
+  display: "swap",
 });
 
-const spaceGrotesk = Space_Grotesk({
+const geistMono = Geist_Mono({
   subsets: ["latin"],
-  variable: "--font-space-grotesk",
-  display: "swap", // Optimize font loading
+  variable: "--font-geist-mono",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -34,7 +34,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="dark">
-      <body className={`${inter.variable} ${spaceGrotesk.variable} font-sans antialiased`}>
+      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased`}>
         <ReportWebVitals />
         {children}
         <PerformanceDisplay />
