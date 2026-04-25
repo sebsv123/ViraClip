@@ -512,7 +512,7 @@ export default function DashboardPage() {
   // Create task
   const handleCreateTask = async (url: string, options: TaskOptions) => {
     try {
-      const res = await fetch("/api/tasks", {
+      const res = await fetch("/api/tasks/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
@@ -529,9 +529,14 @@ export default function DashboardPage() {
       if (res.ok) {
         setIsCreateModalOpen(false);
         fetchTasks();
+      } else {
+        const error = await res.json().catch(() => ({ error: "Unknown error" }));
+        console.error("Failed to create task:", error);
+        alert(error.error || "Failed to create task. Please try again.");
       }
     } catch (error) {
       console.error("Failed to create task:", error);
+      alert("Network error. Please check your connection and try again.");
     }
   };
   
