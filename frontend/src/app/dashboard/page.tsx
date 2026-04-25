@@ -143,11 +143,11 @@ const TaskCard = memo(function TaskCard({ task, onDelete }: { task: Task; onDele
         </div>
         
         <div className="flex items-center gap-2">
-          {task.status === "completed" && (
-            <Link href={`/dashboard/clips/${task.id}`}>
+          {(task.status === "completed" || task.status === "processing") && (
+            <Link href={`/tasks/${task.id}`}>
               <button className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/20 text-violet-300 text-xs font-medium hover:bg-violet-500/30 transition-colors">
                 <Play className="w-3.5 h-3.5" />
-                View
+                {task.status === "completed" ? "View Clips" : "View Progress"}
               </button>
             </Link>
           )}
