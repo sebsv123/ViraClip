@@ -527,8 +527,13 @@ export default function DashboardPage() {
       });
       
       if (res.ok) {
+        const data = await res.json();
         setIsCreateModalOpen(false);
         fetchTasks();
+        // Redirect to task progress page
+        if (data.task_id) {
+          router.push(`/tasks/${data.task_id}`);
+        }
       } else {
         const error = await res.json().catch(() => ({ error: "Unknown error" }));
         console.error("Failed to create task:", error);
