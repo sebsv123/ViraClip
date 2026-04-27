@@ -243,9 +243,11 @@ async def create_single_clip(
                         _llm_fallback = json.loads(_llm_fallback)
                     except (json.JSONDecodeError, ValueError):
                         _llm_fallback = {}
-                if _llm_fallback and _llm_fallback.get("analysis"):
-                    _item = _llm_fallback["analysis"][0]
-                    _vscore = _item.get("virality_score", 50)
+                _llm_segments = _llm_fallback.get("segments", _llm_fallback.get("analysis", []))
+                if _llm_fallback and _llm_segments:
+                    _item = _llm_segments[0]
+                    _raw_vs = float(_item.get("viral_score", _item.get("virality_score", 5)) or 5)
+                    _vscore = min(100, round(_raw_vs * 10)) if _raw_vs <= 10 else int(_raw_vs)
                     class _LLMFallbackScore:
                         def __init__(self, score, hook_type, scroll_stop, rec_dur):
                             self.total_score = score
@@ -418,7 +420,7 @@ async def create_single_clip(
                             data={
                                 "model": "whisper-large-v3-turbo",
                                 "response_format": "verbose_json",
-                                "timestamp_granularities": "word",
+                                "timestamp_granularities[]": "word",
                             },
                         )
                     if _gwr.status_code == 200:
@@ -1386,6 +1388,10 @@ async def create_single_clip(
     # LTXV Intro (opt-in via LTXV_INTRO_ENABLED=true)
     output_path = await _polish.maybe_prepend_intro(output_path, segment, final_virality)
 
+    # Cancel B-roll prefetch if still running (must be before return)
+    if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
+        _broll_prefetch_task.cancel()
+
     return {
         "clip_id": clip_index + 1,
         "filename": output_path.name,
@@ -1429,9 +1435,7 @@ async def create_single_clip(
         "audio_recommendations": _audio_recs,
         "ab_variants": _variants,
     }
-    # Cancel prefetch task if still running
-    if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
-        _broll_prefetch_task.cancel()
+    # (Prefetch cancellation moved before return above)
 
 
 
