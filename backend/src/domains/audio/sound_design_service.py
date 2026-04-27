@@ -63,34 +63,39 @@ def find_sounds_dir() -> Optional[Path]:
 
 def _find_best_sfx(keyword: str) -> Optional[Path]:
     """
-    Phase 2.5: Semantic SFX matching via CLAP, with filename fallback.
-    Searches the CLAP SFX library first; falls back to VIRAL_SOUND_MAP files.
+    Phase 3: Explicit VIRAL_SOUND_MAP takes priority for known SFX types.
+    CLAP semantic matching only fires for arbitrary keywords NOT in the map.
+
+    The planner produces well-defined types (whoosh_zoom, pop_broll, magic_reveal)
+    with intentional file pairings — CLAP could pick imperfect substring matches
+    that override the curated mapping.
 
     Args:
-        keyword: Transcript keyword or hook type (e.g. "curiosity_gap", "whoosh")
+        keyword: SFX type from VIRAL_SOUND_MAP (preferred) OR arbitrary keyword.
 
     Returns:
-        Path to best matching SFX, or None if nothing found.
+        Path to the matched SFX, or None if nothing found.
     """
+    # 1. Explicit mapping (planner output → curated file)
+    sounds_dir = find_sounds_dir()
+    if sounds_dir and keyword in VIRAL_SOUND_MAP:
+        mapped = sounds_dir / VIRAL_SOUND_MAP[keyword]
+        if mapped.exists():
+            return mapped
+
+    # 2. CLAP semantic matching (free-form keyword → closest SFX in library)
     try:
         from .clap_sfx_service import find_best_sfx as clap_find
         from pathlib import Path as _Path
-        import os
+        import os as _os
 
-        sfx_library = _Path(os.getenv("SFX_LIBRARY_PATH", "/app/assets/sfx_library"))
+        sfx_library = _Path(_os.getenv("SFX_LIBRARY_PATH", "/app/assets/sfx_library"))
         if sfx_library.exists() and any(sfx_library.iterdir()):
             result = clap_find(keyword, sfx_dir=sfx_library)
             if result:
                 return result
     except Exception as e:
         logger.debug(f"[sfx] CLAP lookup failed for '{keyword}': {e}")
-
-    # Fallback: VIRAL_SOUND_MAP file in legacy sounds dir
-    sounds_dir = find_sounds_dir()
-    if sounds_dir and keyword in VIRAL_SOUND_MAP:
-        legacy_path = sounds_dir / VIRAL_SOUND_MAP[keyword]
-        if legacy_path.exists():
-            return legacy_path
 
     return None
 
