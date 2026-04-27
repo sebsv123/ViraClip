@@ -651,6 +651,34 @@ async def create_single_clip(
     except Exception as _md_e:
         logger.debug("[Director] skipped: %s", _md_e)
 
+    # Step 4.0e: Hook reorder — physically move the strongest hook to t=0
+    # if HookEngine flagged it AND duration permits. Words are remapped.
+    if (_render_plan
+            and _render_plan.hook_reorder
+            and os.environ.get("HOOK_REORDER_ENABLED", "true").lower() != "false"
+            and output_path.exists()):
+        try:
+            from .hook_reorder import reorder_hook
+            _hr_out = output_path.with_name(f"hr_{output_path.name}")
+            _hr_words = await reorder_hook(
+                video_path=str(output_path),
+                output_path=str(_hr_out),
+                source_t=_render_plan.hook_source_t,
+                duration=duration,
+                words=words_with_confidence,
+            )
+            if _hr_words is not None and _hr_out.exists():
+                _hr_out.replace(output_path)
+                if _hr_words:
+                    words_with_confidence = _hr_words
+                logger.info(
+                    "  ✓ Hook reorder applied: t=%.1fs → t=0 (semantic plan & sections "
+                    "remain valid for new timeline)",
+                    _render_plan.hook_source_t,
+                )
+        except Exception as _hr_e:
+            logger.debug("[HookReorder] skipped: %s", _hr_e)
+
     # Hook-type opening treatment: inject strategic flash at t=0.15s.
     # scroll_stop / pattern_interrupt → immediate white flash punch.
     # cliffhanger / dramatic → silence is the tool, no flash.
