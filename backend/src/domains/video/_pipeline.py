@@ -535,35 +535,16 @@ async def process_video_complete(
             logger.info(f"[PIPELINE RETURN] Top segment virality: {top_virality}")
 
         # Step 5: RENDER CLIPS TO DISK
+        # NOTE: Rendering is intentionally skipped here. The _processor_mixin.py
+        # render loop handles all clip rendering with the correct task parameters
+        # (auto_center_face, jump_cut, GPU settings, etc.). Running it here too
+        # would cause every clip to be rendered TWICE, wasting ~50% of processing
+        # time and producing clips with wrong parameters that get silently discarded.
         clips_info = []
-        if len(segments_json) > 0 and video_path:
-            if should_cancel and await should_cancel():
-                raise Exception("Task cancelled")
-
-            if progress_callback:
-                await progress_callback(80, "Rendering clips to disk...", "processing")
-
-            logger.info(f"[CLIP RENDERING] Starting rendering of {len(segments_json[:num_clips])} clips...")
-            try:
-                clips_info = await _clips.create_video_clips_parallel(
-                    video_path=video_path,
-                    segments=segments_json[:num_clips],  # Render top N clips
-                    task_id=task_id or "full_test",
-                    font_family=font_family,
-                    font_size=font_size,
-                    font_color=font_color,
-                    caption_template=caption_template,
-                    output_format=output_format,
-                    add_subtitles=add_subtitles,
-                )
-                logger.info(f"[CLIP RENDERING] ✅ Successfully rendered {len([c for c in clips_info if c])} clips")
-            except Exception as render_error:
-                logger.error(f"[CLIP RENDERING] ❌ Failed to render clips: {render_error}", exc_info=True)
-                # Don't fail the entire pipeline if rendering fails
-                clips_info = []
-
-            if progress_callback:
-                await progress_callback(90, "Finalizing...", "processing")
+        if should_cancel and await should_cancel():
+            raise Exception("Task cancelled")
+        if progress_callback:
+            await progress_callback(80, "Preparing clip render...", "processing")
 
         # Record pipeline success metrics
         get_metrics_collector().finish_pipeline(task_id or "unknown", success=True)

@@ -195,6 +195,7 @@ interface TaskOptions {
   add_subtitles: boolean;
   jump_cut: boolean;
   use_scene_detection: boolean;
+  auto_center_face: boolean;
 }
 
 function CreateTaskModal({ isOpen, onClose, onSubmit }: { 
@@ -211,6 +212,7 @@ function CreateTaskModal({ isOpen, onClose, onSubmit }: {
     add_subtitles: true,
     jump_cut: true,
     use_scene_detection: true,
+    auto_center_face: true,
   });
   const inputRef = useRef<HTMLInputElement>(null);
   
@@ -523,6 +525,7 @@ export default function DashboardPage() {
           add_subtitles: options.add_subtitles,
           jump_cut: options.jump_cut,
           use_scene_detection: options.use_scene_detection,
+          auto_center_face: options.auto_center_face,
         }),
       });
       
