@@ -340,6 +340,7 @@ def _build_filter_complex(
     grain_override: int = 0,
     lut_vf: str = "",
     denoise_audio: bool = True,
+    sections: Optional[List[Any]] = None,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
@@ -379,6 +380,36 @@ def _build_filter_complex(
             f":enable='{'+'.join(enable_parts)}'[vpulse]"
         )
         prev_grade = "[vpulse]"
+
+    # ── 1.6. Section-aware grade overrides (Master Director) ──────────────────
+    # Each narrative section (hook/build/payoff/cta) can lift saturation and
+    # contrast above the base grade. We chain one `eq=...:enable='between(t,...)'`
+    # per section that has a non-trivial multiplier (>3% off neutral).
+    # Outside the section's time range the eq is identity (pass-through).
+    if sections:
+        _sec_idx = 0
+        for sec in sections:
+            try:
+                t0 = float(getattr(sec, "t_start", 0.0))
+                t1 = float(getattr(sec, "t_end",   0.0))
+                if t1 <= t0:
+                    continue
+                sm = float(getattr(sec, "saturation_mult", 1.0))
+                cm = float(getattr(sec, "contrast_mult",   1.0))
+                # Skip sections that are essentially no-ops to keep filter chain short
+                if abs(sm - 1.0) < 0.03 and abs(cm - 1.0) < 0.03:
+                    continue
+                _label = f"[vsec{_sec_idx}]"
+                filters.append(
+                    f"{prev_grade}eq=saturation={sm:.3f}:contrast={cm:.3f}"
+                    f":enable='between(t,{t0:.3f},{t1:.3f})'{_label}"
+                )
+                prev_grade  = _label
+                _sec_idx   += 1
+            except Exception:
+                continue
+        if _sec_idx > 0:
+            logger.debug("[EP] Section grade overrides: %d sections active", _sec_idx)
 
     # ── 2. Cinematic colour balance: theme-adaptive ───────────────────────────
     # warm: red midtones/highlights up, blue down (golden-hour feel)
@@ -716,6 +747,7 @@ class EditingPipeline:
         grain_override: int = 0,
         lut_vf: str = "",
         denoise_audio: bool = True,
+        sections: Optional[List[Any]] = None,
     ) -> Path:
         """
         Run the full editing pipeline.
@@ -764,6 +796,7 @@ class EditingPipeline:
             grain_override=grain_override,
             lut_vf=lut_vf,
             denoise_audio=denoise_audio,
+            sections=sections,
         )
 
         vcodec = ["libx264", "-preset", "ultrafast", "-crf", "22"]  # Speed priority - 3-5x faster than fast preset
