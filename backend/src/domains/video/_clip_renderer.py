@@ -1268,11 +1268,27 @@ async def create_single_clip(
             {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
             for w in (words_with_confidence or [])[::3]
         ]
+        # Director-driven BGM volume: average the bgm_volume_curve to get a
+        # clip-unique baseline. Clips with strong payoff sections get louder
+        # BGM; clips dominated by hook/CTA get quieter BGM.
+        _bgm_base = float(os.environ.get("BGM_VOLUME", "0.40"))
+        if _render_plan and _render_plan.bgm_volume_curve:
+            _curve = _render_plan.bgm_volume_curve
+            _curve_avg = sum(_curve) / len(_curve)
+            # 0.55 is the "neutral" reference (build section default)
+            _bgm_vol = round(_bgm_base * (_curve_avg / 0.55), 3)
+            _bgm_vol = max(0.15, min(0.65, _bgm_vol))  # safety clamp
+            logger.info(
+                "  [Director] BGM volume = %.2f (curve avg=%.2f, base=%.2f)",
+                _bgm_vol, _curve_avg, _bgm_base,
+            )
+        else:
+            _bgm_vol = _bgm_base
         _bs_result = await _get_bs().mix_bgm_beat_synced(
             video_path=output_path,
             output_path=_music_out,
             speech_segments=_speech_segs,
-            bgm_volume=float(os.environ.get("BGM_VOLUME", "0.40")),  # Aumentado para audibilidad
+            bgm_volume=_bgm_vol,
             preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
             word_timings=words_with_confidence or None,
         )
