@@ -343,12 +343,27 @@ class CreativePipeline:
 
                 # Priority 0: SemanticEditPlan — word-level precise B-roll cues
                 # (populated by _clip_renderer.py before calling creative_pipeline)
-                _sem_plan = segment.get("_semantic_plan") if segment else None
+                _sem_plan   = segment.get("_semantic_plan") if segment else None
+                _render_plan = segment.get("_render_plan")  if segment else None
                 broll_pairs = []
                 if _sem_plan and getattr(_sem_plan, "broll_cues", None):
                     try:
                         from ...domains.detection.multimodal_detector import TimelineEvent
-                        for cue in _sem_plan.broll_cues:
+                        # Director section filter: drop cues that fall in
+                        # sections where broll_allowed=False (hook + CTA)
+                        _filtered_cues = list(_sem_plan.broll_cues)
+                        if _render_plan:
+                            _filtered_cues = [
+                                c for c in _filtered_cues
+                                if _render_plan.is_broll_allowed_at(c.timestamp)
+                            ]
+                            if len(_filtered_cues) < len(_sem_plan.broll_cues):
+                                logger.info(
+                                    "  [Creative] Director dropped %d B-roll cues "
+                                    "(hook/CTA sections)",
+                                    len(_sem_plan.broll_cues) - len(_filtered_cues),
+                                )
+                        for cue in _filtered_cues:
                             asset = await get_contextual_broll().get_for_keyword(
                                 cue.keyword, duration=cue.duration
                             )

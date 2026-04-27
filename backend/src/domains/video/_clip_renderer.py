@@ -621,6 +621,36 @@ async def create_single_clip(
     except Exception as _spe:
         logger.debug("[SemanticPlanner] skipped: %s", _spe)
 
+    # Step 4.0d: Master Director — section-aware decisions for THIS clip.
+    # Slices clip into hook/build/payoff/cta and assigns per-section overrides
+    # for SFX volume, zoom intensity, B-roll allowance, flash, captions.
+    _render_plan = None
+    try:
+        from ...agents.master_director import MasterDirector
+        _render_plan = await MasterDirector().direct(
+            segment       = segment,
+            words         = words_with_confidence,
+            duration      = duration,
+            category      = getattr(_clip_profile, "content_category", "motivation_mindset"),
+            narrative     = getattr(_clip_profile, "narrative", None),
+            profile       = _clip_profile,
+            semantic_plan = _sem_plan,
+            platform      = (target_platform or "universal").lower(),
+        )
+        segment["_render_plan"] = _render_plan
+        logger.info(
+            "  [Director] %d sections | %s",
+            len(_render_plan.sections),
+            " | ".join(
+                f"{s.name}@[{s.t_start:.1f}-{s.t_end:.1f}s "
+                f"sfx={s.sfx_volume_mult:.2f}× zoom≤{s.zoom_factor_max:.2f}× "
+                f"broll={'Y' if s.broll_allowed else 'N'}]"
+                for s in _render_plan.sections
+            ),
+        )
+    except Exception as _md_e:
+        logger.debug("[Director] skipped: %s", _md_e)
+
     # Hook-type opening treatment: inject strategic flash at t=0.15s.
     # scroll_stop / pattern_interrupt → immediate white flash punch.
     # cliffhanger / dramatic → silence is the tool, no flash.
@@ -759,17 +789,40 @@ async def create_single_clip(
                     t for t in _cut_points
                     if all(abs(t - vt) > 1.5 for vt in _vision_zoom_ts)
                 ]
+
+            # Section-aware filter: drop zoom points in sections with
+            # zoom_factor_max <= 1.0 (CTA) and pick zoom intensity from
+            # the strongest section that still has zoom enabled.
+            _section_zoom_max = 1.08  # default
+            if _render_plan:
+                _filtered = [
+                    t for t in _cut_points
+                    if (_sec := _render_plan.section_at(t)) and _sec.zoom_factor_max > 1.0
+                ]
+                if len(_filtered) < len(_cut_points):
+                    logger.info(
+                        "  [Zoom] Director dropped %d cut points (CTA / zoom-off sections)",
+                        len(_cut_points) - len(_filtered),
+                    )
+                _cut_points = _filtered
+                # Use the max zoom across allowed sections (typically payoff)
+                _section_zoom_max = max(
+                    (s.zoom_factor_max for s in _render_plan.sections if s.zoom_factor_max > 1.0),
+                    default=1.08,
+                )
+
             if _cut_points:
                 _cz_out = output_path.with_name(f"cz_{output_path.name}")
                 _cz_ok = await apply_cut_zooms(
                     video_path=str(output_path),
                     output_path=str(_cz_out),
                     cut_points=_cut_points[:8],  # max 8 zoom points
+                    zoom_factor=_section_zoom_max,
                 )
                 if _cz_ok and _cz_out.exists():
                     _cz_out.replace(output_path)
                     logger.info(f"  ✓ Cut zooms applied ({len(_cut_points[:8])} points, "
-                                f"{len(_vision_zoom_ts)} from vision)")
+                                f"{len(_vision_zoom_ts)} from vision, factor={_section_zoom_max:.2f}×)")
         except Exception as _cz_e:
             logger.debug(f"  Cut zoom skipped: {_cz_e}")
 
@@ -935,6 +988,20 @@ async def create_single_clip(
             break
     _flash_ts = _flash_ts_capped
 
+    # Director section-aware flash filter: drop flashes in sections where
+    # flash_allowed=False (CTA always, calm categories outside payoff).
+    if _render_plan and _flash_ts:
+        _before = len(_flash_ts)
+        _flash_ts = [
+            t for t in _flash_ts
+            if (_sec := _render_plan.section_at(t)) and _sec.flash_allowed
+        ]
+        if len(_flash_ts) < _before:
+            logger.info(
+                "  [Flash] Director dropped %d flashes (section flash_allowed=False)",
+                _before - len(_flash_ts),
+            )
+
     # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
     # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
     # progress bar, loudness normalization (single FFmpeg pass).
@@ -1083,23 +1150,31 @@ async def create_single_clip(
 
     # Step 4.8: Sound Design — use SemanticEditPlan sfx_cues when available,
     # otherwise fall back to the whole-clip hook_type heuristic.
+    # Section-aware: each cue's intensity is scaled by section.sfx_volume_mult
+    # and cues whose type is forbidden in their section are dropped.
     try:
         sound_service = SoundDesignService()
         sound_cues = []
         if _sem_plan and _sem_plan.sfx_cues:
-            sound_cues = [
-                {
+            _dropped = 0
+            for c in _sem_plan.sfx_cues:
+                if not (0 < c.timestamp < duration):
+                    continue
+                # Section-aware filter + volume scaling
+                if _render_plan and not _render_plan.is_sfx_allowed_at(c.sfx_type, c.timestamp):
+                    _dropped += 1
+                    continue
+                vol_mult = _render_plan.sfx_volume_at(c.timestamp) if _render_plan else 1.0
+                sound_cues.append({
                     "timestamp": c.timestamp,
                     "type":      c.sfx_type,
-                    "intensity": c.intensity,
-                }
-                for c in _sem_plan.sfx_cues
-                if 0 < c.timestamp < duration
-            ]
+                    "intensity": min(1.5, c.intensity * vol_mult),
+                })
             logger.info(
-                "  [SFX] Using SemanticEditPlan: %d cues (%s)",
-                len(sound_cues),
-                ", ".join(f"{c['timestamp']:.1f}s:{c['type']}" for c in sound_cues),
+                "  [SFX] Director-filtered %d cues (%d dropped by section rules): %s",
+                len(sound_cues), _dropped,
+                ", ".join(f"{c['timestamp']:.1f}s:{c['type']}@{c['intensity']:.2f}"
+                          for c in sound_cues[:6]),
             )
         if not sound_cues:
             _emphasis_words = [
