@@ -615,6 +615,7 @@ async def create_single_clip(
             duration=duration,
             hook_type=(segment.get("hook_type") or "insight_reveal"),
             category=getattr(_clip_profile, "content_category", "unknown"),
+            clip_path=str(output_path) if output_path.exists() else None,
         )
         segment["_semantic_plan"] = _sem_plan
     except Exception as _spe:
@@ -736,14 +737,28 @@ async def create_single_clip(
             logger.debug(f"  Silence handling skipped: {_jc_e}")
 
     # Step 4.2d: Cut Zoom — dynamic zoom punches at jump-cut points (Hormozi/MrBeast)
+    # Priority: vision zoom_cues (precise) > word-boundary cuts (structural)
     if os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true":
         try:
             from .cut_zoom_service import apply_cut_zooms
-            # Extract cut points from word boundaries (end of each word = potential cut)
+            # Seed with word boundaries (structural rhythm)
             _cut_points = [
                 w["end"] for w in (words_with_confidence or [])
                 if w.get("end") and w.get("probability", 1.0) > 0.85
             ][::4]  # every 4th word boundary to avoid over-zooming
+            # Inject vision zoom_cues at the FRONT — they get priority in the [:8] cap
+            _vision_zoom_ts = [
+                z.timestamp for z in (getattr(_sem_plan, "zoom_cues", None) or [])
+            ]
+            if _vision_zoom_ts:
+                logger.info(
+                    "  [Zoom] Vision zoom cues: %s",
+                    [f"{t:.1f}s" for t in _vision_zoom_ts],
+                )
+                _cut_points = _vision_zoom_ts + [
+                    t for t in _cut_points
+                    if all(abs(t - vt) > 1.5 for vt in _vision_zoom_ts)
+                ]
             if _cut_points:
                 _cz_out = output_path.with_name(f"cz_{output_path.name}")
                 _cz_ok = await apply_cut_zooms(
@@ -753,7 +768,8 @@ async def create_single_clip(
                 )
                 if _cz_ok and _cz_out.exists():
                     _cz_out.replace(output_path)
-                    logger.info(f"  ✓ Cut zooms applied ({len(_cut_points[:8])} points)")
+                    logger.info(f"  ✓ Cut zooms applied ({len(_cut_points[:8])} points, "
+                                f"{len(_vision_zoom_ts)} from vision)")
         except Exception as _cz_e:
             logger.debug(f"  Cut zoom skipped: {_cz_e}")
 
