@@ -183,16 +183,41 @@ class LLMRouter:
         return await self._score_with_groq(transcript, language, num_clips)
     
     def _rule_based_fallback(self, transcript: str, language: str, num_clips: int) -> str:
-        # FIX: rule-based fallback when Groq is unavailable
-        import json
-        logger.warning("[LLMRouter] Rule-based fallback activated — 0 segments returned")
-        return json.dumps({
-            "segments": [],
-            "viral_potential": "low",
-            "summary": "Fallback mode - Groq unavailable. Please configure GROQ_API_KEY.",
-            "language": language,
-            "total_clips_recommended": 0
-        })
+        """Rule-based scoring when Groq is unavailable.
+        Segments arrive as joined text blocks (one per line). Each gets a
+        heuristic score based on simple text signals rather than returning 0 segments.
+        """
+        import json, re
+        logger.warning("[LLMRouter] Rule-based fallback activated — using heuristic scoring")
+        blocks = [b.strip() for b in transcript.split("\n") if b.strip()]
+        if not blocks:
+            blocks = [transcript[:500]] if transcript else []
+        segments = []
+        for i, block in enumerate(blocks[:num_clips]):
+            # Simple text-signal heuristics (0-10 scale each)
+            hook_strength = min(10.0, 4.0
+                + (2.0 if "?" in block else 0)
+                + (1.5 if "!" in block else 0)
+                + (1.0 if any(w in block.lower() for w in ["secreto", "nadie", "clave", "nunca", "siempre", "error", "truth", "secret", "nobody"]) else 0)
+                + (0.5 if re.search(r"\d+", block) else 0))
+            retention = min(10.0, 5.0 + min(2.5, len(block) / 200))
+            emotional_peak = min(10.0, 3.0
+                + (2.0 if "!" in block else 0)
+                + (1.5 if any(w in block.lower() for w in ["increíble", "sorprendente", "amazing", "shocking", "brutal"]) else 0)
+                + (1.0 if len(re.findall(r"[A-ZÁÉÍÓÚ]{3,}", block)) > 0 else 0))
+            shareability = min(10.0, 4.0
+                + (1.5 if re.search(r"\d+%|\d+ (segundos|minutos|pasos|razones|tips)", block.lower()) else 0)
+                + (1.0 if "?" in block else 0))
+            viral_score = round((hook_strength + retention + emotional_peak + shareability) / 4, 2)
+            segments.append({
+                "hook_strength": round(hook_strength, 1),
+                "emotional_peak": round(emotional_peak, 1),
+                "shareability": round(shareability, 1),
+                "retention": round(retention, 1),
+                "viral_score": viral_score,
+                "reason": f"[heuristic] {block[:80]}",
+            })
+        return json.dumps({"segments": segments, "viral_potential": "medium"})
 
     def _language_supported(self, language: str) -> bool:
         """Check if language is supported by local models."""
