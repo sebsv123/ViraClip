@@ -340,9 +340,45 @@ class CreativePipeline:
                 from ...domains.broll.contextual_broll import get_contextual_broll
                 from ...domains.video.video_effects import overlay_broll_clips
                 logger.debug("  [Creative] B-roll imports OK")
-                broll_pairs = await get_contextual_broll().get_for_timeline(
-                    timeline, max_assets=3
-                )
+
+                # Priority 0: SemanticEditPlan — word-level precise B-roll cues
+                # (populated by _clip_renderer.py before calling creative_pipeline)
+                _sem_plan = segment.get("_semantic_plan") if segment else None
+                broll_pairs = []
+                if _sem_plan and getattr(_sem_plan, "broll_cues", None):
+                    try:
+                        from ...domains.detection.multimodal_detector import TimelineEvent
+                        for cue in _sem_plan.broll_cues:
+                            asset = await get_contextual_broll().get_for_keyword(
+                                cue.keyword, duration=cue.duration
+                            )
+                            if asset:
+                                evt = TimelineEvent(
+                                    t=cue.timestamp,
+                                    type="keyword",
+                                    strength=cue.confidence,
+                                    duration=cue.duration,
+                                    payload={"word": cue.keyword, "category": "semantic_plan"},
+                                )
+                                broll_pairs.append((evt, asset))
+                        if broll_pairs:
+                            logger.info(
+                                "  [Creative] B-roll from SemanticEditPlan: %d cues [%s]",
+                                len(broll_pairs),
+                                ", ".join(
+                                    f"{c.timestamp:.1f}s:{c.keyword}"
+                                    for c in _sem_plan.broll_cues[:3]
+                                ),
+                            )
+                    except Exception as _sp_e:
+                        logger.debug("  [Creative] SemanticPlan B-roll failed: %s", _sp_e)
+                        broll_pairs = []
+
+                # Priority 1: timeline-based (multimodal detector hook/impact events)
+                if not broll_pairs:
+                    broll_pairs = await get_contextual_broll().get_for_timeline(
+                        timeline, max_assets=3
+                    )
 
                 # Fallback: if timeline had no hook/impact keyword hits, use LLM to extract
                 # visual keywords from the actual transcript ("what the speaker says")

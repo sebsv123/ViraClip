@@ -605,6 +605,21 @@ async def create_single_clip(
         except Exception as e:
             logger.warning(f"[CLIP] Re-alineacion fallo ({e}), manteniendo originales")
 
+    # Step 4.0c: Semantic Edit Planning — word-level B-roll and SFX cues.
+    # Runs after words_with_confidence is finalised (post-realignment).
+    _sem_plan = None
+    try:
+        from ...agents.semantic_edit_planner import SemanticEditPlanner
+        _sem_plan = await SemanticEditPlanner().plan(
+            words=words_with_confidence,
+            duration=duration,
+            hook_type=(segment.get("hook_type") or "insight_reveal"),
+            category=getattr(_clip_profile, "content_category", "unknown"),
+        )
+        segment["_semantic_plan"] = _sem_plan
+    except Exception as _spe:
+        logger.debug("[SemanticPlanner] skipped: %s", _spe)
+
     # Hook-type opening treatment: inject strategic flash at t=0.15s.
     # scroll_stop / pattern_interrupt → immediate white flash punch.
     # cliffhanger / dramatic → silence is the tool, no flash.
@@ -1050,22 +1065,40 @@ async def create_single_clip(
     #     3) Exponerlo por `comfyui_integration.process_with_comfyui("enhance")`.
     #   Mantenemos el bloque desactivado para no generar ruido en logs.
 
-    # Step 4.8: Sound Design (efectos de sonido virales)
+    # Step 4.8: Sound Design — use SemanticEditPlan sfx_cues when available,
+    # otherwise fall back to the whole-clip hook_type heuristic.
     try:
         sound_service = SoundDesignService()
-        _emphasis_words = [
-            {"start": w["start"]}
-            for w in words_with_confidence
-            if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
-        ] if words_with_confidence else []
-        virality_segments = [{
-            "start": 0,
-            "end": duration,
-            "hook_type": segment.get("hook_type", "insight_reveal"),
-            "text": segment.get("text", ""),
-            "emphasis_words": _emphasis_words,
-        }]
-        sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
+        sound_cues = []
+        if _sem_plan and _sem_plan.sfx_cues:
+            sound_cues = [
+                {
+                    "timestamp": c.timestamp,
+                    "type":      c.sfx_type,
+                    "intensity": c.intensity,
+                }
+                for c in _sem_plan.sfx_cues
+                if 0 < c.timestamp < duration
+            ]
+            logger.info(
+                "  [SFX] Using SemanticEditPlan: %d cues (%s)",
+                len(sound_cues),
+                ", ".join(f"{c['timestamp']:.1f}s:{c['type']}" for c in sound_cues),
+            )
+        if not sound_cues:
+            _emphasis_words = [
+                {"start": w["start"]}
+                for w in words_with_confidence
+                if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
+            ] if words_with_confidence else []
+            virality_segments = [{
+                "start": 0,
+                "end": duration,
+                "hook_type": segment.get("hook_type", "insight_reveal"),
+                "text": segment.get("text", ""),
+                "emphasis_words": _emphasis_words,
+            }]
+            sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
         if sound_cues:
             sound_path = output_path.with_name(f"sound_{output_path.name}")
             await sound_service.inject_sound_effects(
