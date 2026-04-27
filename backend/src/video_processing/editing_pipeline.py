@@ -549,12 +549,19 @@ def _build_filter_complex(
 
     # ── 8. Flash/whiteout at cut transitions ─────────────────────────────────
     if flash_timestamps:
+        # Intensity controlled by env (default 0.15 — subtle, not blinding).
+        # Earlier 0.35 caused viewer eye-strain on dark scenes.
+        try:
+            _flash_intensity = float(os.environ.get("EP_FLASH_INTENSITY", "0.15"))
+        except ValueError:
+            _flash_intensity = 0.15
+        _flash_intensity = max(0.05, min(0.5, _flash_intensity))
         enable_parts = [
             f"between(t,{ts:.3f},{ts + 0.07:.3f})" for ts in flash_timestamps
         ]
         enable_expr = "+".join(enable_parts)
         filters.append(
-            f"{prev_v}eq=brightness=0.35:enable='{enable_expr}'[vflash]"
+            f"{prev_v}eq=brightness={_flash_intensity:.2f}:enable='{enable_expr}'[vflash]"
         )
         prev_v = "[vflash]"
 
