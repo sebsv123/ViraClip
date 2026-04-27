@@ -270,7 +270,9 @@ async def process_video_complete(
         from ...domains.ai.llm_router import LLMRouter
         llm_router = LLMRouter()
         try:
-            virality_data = await llm_router.score_segments(segment_texts, language="es", num_clips=num_clips)
+            virality_data = await llm_router.score_segments(
+                "\n\n".join(t for t in segment_texts if t), language="es", num_clips=num_clips
+            )
         except Exception as _llm_err:
             # Degrade gracefully on 429/5xx/network: continue with rule-based fallback so pipeline isn't blocked
             logger.warning(
@@ -320,10 +322,10 @@ async def process_video_complete(
         # Log scoring method used
         if virality_map:
             first_reasoning = list(virality_map.values())[0].get("reasoning", "")
-            if "fallback" in first_reasoning.lower():
-                logger.info("📊 Using text-based virality scoring (Ollama unavailable)")
+            if "heuristic" in first_reasoning.lower() or "fallback" in first_reasoning.lower():
+                logger.info("📊 Using heuristic virality scoring (Groq/Ollama unavailable)")
             else:
-                logger.info("✨ Using AI virality scoring (Ollama active)")
+                logger.info("✨ Using AI virality scoring (Groq active)")
                 
             # Quality check: warn if scores look suspicious
             avg_score = sum(item.get("virality_score", 0) for item in virality_map.values()) / len(virality_map)
