@@ -1064,6 +1064,7 @@ async def create_single_clip(
             grain_override=_clip_profile.grain if _clip_profile else 0,
             lut_vf=_lut_vf_ep,
             denoise_audio=True,
+            sections=(_render_plan.sections if _render_plan else None),
         )
         if _ep_result == _ep_out and _ep_out.exists():
             output_path = _ep_out
