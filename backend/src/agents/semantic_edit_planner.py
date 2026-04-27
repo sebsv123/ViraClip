@@ -124,7 +124,16 @@ _OBJECT_MAP: Dict[str, str] = {
 _VISUAL_LOOKUPS = [_PLACE_MAP, _ACTION_MAP, _ROLE_MAP, _OBJECT_MAP]
 
 # SFX trigger sets: (fragment_set, sfx_type, intensity)
+# Order matters — first match wins. Magic reveal goes BEFORE generic
+# pattern_interrupt so superlatives produce a magical chime, not a glitch.
 _SFX_TRIGGERS: List[tuple] = [
+    (
+        # Magic reveal — superlatives / "never seen before" moments
+        {"increíble", "incredible", "asombroso", "impresionante",
+         "sorprendente", "unbelievable", "never seen", "jamás visto",
+         "por primera vez", "first time", "flipante", "alucinante"},
+        "magic_reveal", 0.92,
+    ),
     (
         {"secreto", "secret", "verdad", "truth", "real", "descubrí", "discovered",
          "nunca", "never", "jamás", "revelación", "reveal", "expuesto", "exposed",
@@ -137,9 +146,10 @@ _SFX_TRIGGERS: List[tuple] = [
         "curiosity_gap", 0.75,
     ),
     (
+        # Pattern interrupt — contradiction / surprise (without superlative)
         {"espera", "wait", "para", "stop", "mentira", "lie", "falso", "wrong",
-         "error", "mistake", "equivocado", "sorpresa", "surprise", "increíble",
-         "incredible", "imposible", "impossible"},
+         "error", "mistake", "equivocado", "sorpresa", "surprise",
+         "imposible", "impossible"},
         "pattern_interrupt", 0.80,
     ),
     (
@@ -156,8 +166,12 @@ _SFX_TRIGGERS: List[tuple] = [
 ]
 
 _VALID_SFX = {
+    # Original hook-types
     "insight_reveal", "curiosity_gap", "pattern_interrupt",
     "cliffhanger", "emphasis_word", "scroll_stop", "transition",
+    # Phase 3 contextual types
+    "magic_reveal", "whoosh_zoom", "pop_broll", "riser_pre_reveal",
+    "camera_shutter", "bass_drop", "notification", "glitch_burst",
 }
 
 # Timing constants
@@ -166,7 +180,7 @@ _BROLL_CTA_GUARD  = 2.0     # no B-roll in last 2s
 _BROLL_MIN_GAP    = 4.0     # minimum gap between B-rolls
 _BROLL_MAX        = 3       # max B-rolls per clip
 _SFX_MIN_GAP      = 1.5     # minimum gap between SFX
-_SFX_MAX          = 4       # max SFX per clip
+_SFX_MAX          = 8       # max SFX per clip (raised for contextual rules)
 _WINDOW_S         = 5.0     # Groq analysis window size
 
 
@@ -458,6 +472,113 @@ def _enhance_plan_with_vision(
     return plan
 
 
+# ── Contextual SFX rules ─────────────────────────────────────────────────────
+
+# Min gap between contextual SFX additions to avoid stacking
+_CONTEXTUAL_SFX_GAP = 0.5
+
+
+def _apply_contextual_sfx_rules(
+    plan: SemanticEditPlan,
+    words: List[Dict[str, Any]],
+    duration: float,
+) -> SemanticEditPlan:
+    """
+    Add contextual SFX cues based on the full edit plan + transcript.
+
+    Rules (intelligent timing tied to visual events):
+      R1  ZoomCue          → whoosh_zoom    @ zoom.t - 0.1s
+      R2  BrollCue         → pop_broll      @ broll.t
+      R3  insight/magic/cliff → riser_pre_reveal @ sfx.t - 2.2s
+      R4  word boundary >0.90 prob, every ≥8s → camera_shutter @ word.end
+      R5  cliffhanger      → bass_drop      @ sfx.t + 0.3s
+
+    All rules respect the existing _CONTEXTUAL_SFX_GAP buffer to avoid stacking.
+    """
+    new_cues: List[SfxCue] = []
+
+    def _can_place(t: float) -> bool:
+        if t <= 0.05 or t >= duration - 0.1:
+            return False
+        return all(abs(t - c.timestamp) >= _CONTEXTUAL_SFX_GAP
+                   for c in (plan.sfx_cues + new_cues))
+
+    # R1 — Zoom punches get a directional whoosh
+    for zoom in plan.zoom_cues:
+        ts = max(0.05, zoom.timestamp - 0.10)
+        if _can_place(ts):
+            new_cues.append(SfxCue(
+                timestamp=ts,
+                sfx_type="whoosh_zoom",
+                trigger_word="zoom_punch",
+                intensity=0.75,
+            ))
+
+    # R2 — B-roll appearance gets a soft pop
+    for broll in plan.broll_cues:
+        if _can_place(broll.timestamp):
+            new_cues.append(SfxCue(
+                timestamp=broll.timestamp,
+                sfx_type="pop_broll",
+                trigger_word="broll_appear",
+                intensity=0.50,
+            ))
+
+    # R3 — Tension riser 2.2s before any reveal/cliffhanger
+    _RISER_TRIGGERS = {"insight_reveal", "magic_reveal", "cliffhanger"}
+    for cue in list(plan.sfx_cues):
+        if cue.sfx_type in _RISER_TRIGGERS:
+            riser_t = cue.timestamp - 2.2
+            if riser_t > 1.0 and _can_place(riser_t):
+                new_cues.append(SfxCue(
+                    timestamp=riser_t,
+                    sfx_type="riser_pre_reveal",
+                    trigger_word="pre_reveal",
+                    intensity=0.60,
+                ))
+
+    # R4 — Camera shutter at narrative cuts (high-confidence word boundaries)
+    _SHUTTER_INTERVAL = 8.0
+    last_shutter = -_SHUTTER_INTERVAL
+    high_prob_cuts = [
+        float(w["end"]) for w in (words or [])
+        if w.get("end") is not None
+        and w.get("probability", 1.0) > 0.90
+        and 3.0 < float(w["end"]) < duration - 2.0
+    ]
+    for cut_t in high_prob_cuts:
+        if cut_t - last_shutter >= _SHUTTER_INTERVAL and _can_place(cut_t):
+            new_cues.append(SfxCue(
+                timestamp=cut_t,
+                sfx_type="camera_shutter",
+                trigger_word="jump_cut",
+                intensity=0.35,
+            ))
+            last_shutter = cut_t
+
+    # R5 — Bass drop 0.3s after cliffhanger word
+    for cue in list(plan.sfx_cues):
+        if cue.sfx_type == "cliffhanger":
+            drop_t = cue.timestamp + 0.30
+            if _can_place(drop_t):
+                new_cues.append(SfxCue(
+                    timestamp=drop_t,
+                    sfx_type="bass_drop",
+                    trigger_word="impact",
+                    intensity=0.80,
+                ))
+
+    if new_cues:
+        plan.sfx_cues.extend(new_cues)
+        plan.sfx_cues.sort(key=lambda c: c.timestamp)
+        logger.info(
+            "[SemanticPlanner] contextual rules → +%d SFX (%s)",
+            len(new_cues),
+            ", ".join(f"{c.timestamp:.1f}s:{c.sfx_type}" for c in new_cues),
+        )
+    return plan
+
+
 # ── Layer 2: Groq semantic batch pass ────────────────────────────────────────
 
 def _build_windows(words: List[Dict[str, Any]], duration: float) -> List[Dict[str, Any]]:
@@ -697,6 +818,14 @@ class SemanticEditPlanner:
                             )
                 except Exception as _ve:
                     logger.debug("[SemanticPlanner] vision layer skipped: %s", _ve)
+
+            # Layer 4: Contextual SFX rules — tie sound to visual events.
+            # Adds whoosh@zoom, pop@broll, riser before reveal, shutter@cut,
+            # bass_drop after cliffhanger. Pure logic, sub-millisecond.
+            try:
+                plan = _apply_contextual_sfx_rules(plan, words, duration)
+            except Exception as _re:
+                logger.debug("[SemanticPlanner] contextual SFX rules skipped: %s", _re)
 
             # Final caps + sort
             plan.broll_cues = sorted(plan.broll_cues, key=lambda c: c.timestamp)[:_BROLL_MAX]

@@ -20,14 +20,27 @@ def _get_ffmpeg_exe() -> str:
         return "ffmpeg"
 
 # Mapeo: tipo de momento viral → sound effect
+# Phase 3: expandido con 8 tipos contextuales nuevos para reglas inteligentes
+# (zoom→whoosh, broll→pop, pre-reveal→riser, jump-cut→shutter, ...)
 VIRAL_SOUND_MAP = {
-    "curiosity_gap": "tension_riser.mp3",      # Pitch ascendente 1.5s
-    "pattern_interrupt": "glitch_hit.mp3",     # Distorsión 0.4s
-    "cliffhanger": "bass_boom.mp3",            # Impacto grave 0.8s
-    "insight_reveal": "ding_chime.mp3",        # Campana suave 0.5s
-    "transition": "whoosh_fast.mp3",           # Swipe 0.3s
-    "emphasis_word": "punch_impact.mp3",       # Hit seco 0.2s
-    "scroll_stop": "whoosh_heavy.mp3",         # Whoosh intenso 0.5s
+    # ── Legacy hook-types (compatibilidad) ───────────────────────────────────
+    "curiosity_gap":     "tension_riser.mp3",      # Pitch ascendente 1.5s
+    "pattern_interrupt": "glitch_burst.mp3",       # Glitch agresivo (was: glitch_hit)
+    "cliffhanger":       "bass_boom.mp3",          # Impacto grave 0.8s
+    "insight_reveal":    "ding_chime.mp3",         # Campana suave 0.5s
+    "transition":        "whoosh_fast.mp3",        # Swipe 0.3s
+    "emphasis_word":     "punch_impact.mp3",       # Hit seco 0.2s
+    "scroll_stop":       "whoosh_zoom.mp3",        # Whoosh direccional (was: whoosh_heavy)
+
+    # ── Phase 3: Tipos contextuales nuevos ───────────────────────────────────
+    "whoosh_zoom":       "whoosh_zoom.mp3",        # Acompaña ZoomCue (R1)
+    "pop_broll":         "pop_appear.mp3",         # Aparición de B-roll (R2)
+    "riser_pre_reveal":  "riser_01.mp3",           # 2.2s antes de reveal (R3)
+    "camera_shutter":    "camera_shutter.mp3",     # Jump-cut narrativo (R4)
+    "magic_reveal":      "magic_reveal.mp3",       # Revelación superlativa
+    "bass_drop":         "cinematic_hit.mp3",      # Post-cliffhanger (R5)
+    "notification":      "notification_ding.mp3",  # Insight sutil / estadística
+    "glitch_burst":      "glitch_burst.mp3",       # Pattern interrupt agresivo
 }
 
 # Rutas posibles para los sonidos

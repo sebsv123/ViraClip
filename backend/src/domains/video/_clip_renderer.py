@@ -962,7 +962,7 @@ async def create_single_clip(
             words=words_with_confidence,
             output_path=_ep_out,
             segment_text=_ep_segment_text,
-            flash_timestamps=None,  # Desactivado - flashes cegadores eliminados
+            flash_timestamps=_flash_ts or None,  # Subtle flashes (intensidad reducida via EP_FLASH_INTENSITY)
             gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
             energy_level=_clip_profile.energy if _clip_profile else 0.5,
             zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",

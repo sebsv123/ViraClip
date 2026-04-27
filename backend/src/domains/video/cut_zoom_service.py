@@ -93,17 +93,18 @@ async def apply_cut_zooms(
         start = max(0, t - zoom_duration / 2)
         end = t + zoom_duration / 2
         zoom_intervals.append((start, end))
-    
-    # Create zoom expression: use first cut point only to avoid FFmpeg max() errors
+
     if not zoom_intervals:
         logger.debug("[cut_zoom] No valid zoom intervals")
         return False
-    
-    # Use only the first zoom interval to ensure compatibility
-    start, end = zoom_intervals[0]
-    
-    # Simple if/else expression: zoom during first interval, otherwise 1.0
-    zoom_expr = f"if(between(t,{start:.3f},{end:.3f}),{zoom_factor},1)"
+
+    # Multi-interval expression: sum of between() results for each cut.
+    # FFmpeg's between() returns 0 or 1 — summing them and checking >0 lets us
+    # evaluate ALL intervals in a single zoompan pass without nested if().
+    sum_expr = "+".join(
+        f"between(t\\,{s:.3f}\\,{e:.3f})" for s, e in zoom_intervals
+    )
+    zoom_expr = f"if(gt({sum_expr}\\,0)\\,{zoom_factor}\\,1)"
     
     zoompan_filter = (
         f"zoompan="
@@ -139,7 +140,9 @@ async def apply_cut_zooms(
             return False
         
         logger.info(
-            f"[cut_zoom] Applied zoom transition at {start:.1f}s-{end:.1f}s (first cut point)"
+            "[cut_zoom] Applied %d zoom transitions at %s",
+            len(zoom_intervals),
+            ", ".join(f"{s:.1f}-{e:.1f}s" for s, e in zoom_intervals),
         )
         return True
     

@@ -19,35 +19,54 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 # Maps keyword fragments to seed-bank category subdirectory names.
 # Longest-match wins — checked in insertion order (most-specific first).
 _CATEGORY_MAP: "list[tuple[str, str]]" = [
-    # tech / business
+    # tech / coding
     ("phone",       "tech"),       ("laptop",    "tech"),
     ("computer",    "tech"),       ("code",      "tech"),
     ("software",    "tech"),       ("data",      "tech"),
+    ("ai ",         "tech"),       ("artificial", "tech"),
+    ("coding",      "tech"),       ("developer", "tech"),
+    ("algorithm",   "tech"),       ("server",    "tech"),
+    # finance / money
     ("crypto",      "finance"),    ("bitcoin",   "finance"),
     ("money",       "finance"),    ("stock",     "finance"),
     ("invest",      "finance"),    ("bank",      "finance"),
+    ("euro",        "finance"),    ("dolar",     "finance"),
+    ("dollar",      "finance"),    ("salary",    "finance"),
+    ("income",      "finance"),    ("profit",    "finance"),
+    ("trading",     "finance"),
+    # business / work
     ("office",      "business"),   ("meeting",   "business"),
     ("startup",     "business"),   ("entrepreneur", "business"),
+    ("ceo",         "business"),   ("executive", "business"),
     # people / lifestyle
     ("person",      "people"),     ("people",    "people"),
     ("woman",       "people"),     ("man",       "people"),
     ("crowd",       "people"),     ("audience",  "people"),
     ("health",      "health"),     ("fitness",   "health"),
+    ("yoga",        "health"),     ("meditation","health"),
     ("workout",     "sport"),      ("gym",       "sport"),
     ("sport",       "sport"),      ("athlete",   "sport"),
+    ("running",     "sport"),      ("correr",    "sport"),
     # nature / travel
     ("nature",      "nature"),     ("forest",    "nature"),
     ("ocean",       "nature"),     ("mountain",  "nature"),
     ("sky",         "nature"),     ("sunset",    "nature"),
+    ("beach",       "nature"),     ("playa",     "nature"),
     ("city",        "city"),       ("urban",     "city"),
     ("street",      "city"),       ("building",  "city"),
+    ("apartment",   "city"),       ("skyline",   "city"),
     ("travel",      "travel"),     ("flight",    "travel"),
     ("airport",     "travel"),     ("hotel",     "travel"),
+    ("viaje",       "travel"),     ("trip",      "travel"),
+    # transportation
+    ("car",         "transport"),  ("coche",     "transport"),
+    ("luxury car",  "transport"),  ("driving",   "transport"),
     # food / abstract
     ("food",        "food"),       ("cook",      "food"),
     ("restaurant",  "food"),       ("coffee",    "food"),
     ("abstract",    "abstract"),   ("motivat",   "motivation"),
     ("success",     "motivation"), ("inspire",   "motivation"),
+    ("goal",        "motivation"),
 ]
 
 
@@ -85,6 +104,9 @@ class ContextualBroll:
         self._coverr_key = os.environ.get("COVERR_API_KEY", "")
         self._t2v_enabled = os.environ.get("T2V_ENABLED", "false").lower() == "true"
         self._replicate_token = os.environ.get("REPLICATE_API_TOKEN", "")
+        # Session-scoped dedup: paths already returned in this instance's lifetime.
+        # Singleton via get_contextual_broll() means "session" = task batch.
+        self._used_paths: "set[str]" = set()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -151,8 +173,28 @@ class ContextualBroll:
 
     # ── Lookup strategies ─────────────────────────────────────────────────────
 
+    def _pick_unused(self, candidates: "list[Path]") -> "Path | None":
+        """
+        From a list of candidate assets, return one that hasn't been used in this
+        session. Falls back to a deterministic pick if all are exhausted.
+        """
+        import random
+        unused = [p for p in candidates if str(p) not in self._used_paths]
+        if unused:
+            chosen = random.choice(unused)
+        elif candidates:
+            # All used — still rotate via random instead of always returning the same one
+            chosen = random.choice(candidates)
+        else:
+            return None
+        self._used_paths.add(str(chosen))
+        return chosen
+
     def _find_local(self, keyword: str) -> "Path | None":
-        """Search asset bank by keyword. Category-mapped lookup first, then filename glob."""
+        """Search asset bank by keyword. Category-mapped lookup first, then filename glob.
+
+        Honors per-session dedup so the same B-roll is not picked twice in a batch.
+        """
         if not self._bank.exists():
             return None
         kw = keyword.lower()
@@ -162,27 +204,30 @@ class ContextualBroll:
         if category:
             cat_dir = self._bank / category
             if cat_dir.is_dir():
+                all_candidates: "list[Path]" = []
                 for ext in _ASSET_EXTS:
-                    candidates = list(cat_dir.glob(f"*{ext}"))
-                    if candidates:
-                        import random
-                        return random.choice(candidates)
+                    all_candidates.extend(cat_dir.glob(f"*{ext}"))
+                picked = self._pick_unused(all_candidates)
+                if picked:
+                    return picked
 
         # 2. Exact keyword subdir match
         for subdir in (self._bank / kw, self._bank / kw[:4]):
             if subdir.is_dir():
+                all_candidates = []
                 for ext in _ASSET_EXTS:
-                    candidates = list(subdir.glob(f"*{ext}"))
-                    if candidates:
-                        return candidates[0]
+                    all_candidates.extend(subdir.glob(f"*{ext}"))
+                picked = self._pick_unused(all_candidates)
+                if picked:
+                    return picked
 
         # 3. Filename contains keyword (flat bank or uncategorized)
+        flat_matches: "list[Path]" = []
         for ext in _ASSET_EXTS:
             for p in self._bank.rglob(f"*{kw}*{ext}"):
                 if p.is_file():
-                    return p
-
-        return None
+                    flat_matches.append(p)
+        return self._pick_unused(flat_matches)
 
     @staticmethod
     def _is_image(path: str) -> bool:
