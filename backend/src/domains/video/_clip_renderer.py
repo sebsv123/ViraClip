@@ -122,6 +122,7 @@ async def create_single_clip(
     use_extracted_segment: bool = False,
     target_platform: str = "tiktok",
     preferred_music_category: Optional[str] = None,
+    jump_cut: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
     # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
@@ -676,7 +677,7 @@ async def create_single_clip(
 
     # Step 4.2-jc: Silence handling — jump-cut OR speed-ramp based on SILENCE_MODE.
     # Must happen BEFORE subtitle burn so ASS timestamps stay in sync.
-    if words_with_confidence:
+    if words_with_confidence and jump_cut:
         try:
             _silence_thresh = float(
                 os.environ.get("SILENCE_THRESHOLD_SECONDS", str(SILENCE_THRESHOLD))

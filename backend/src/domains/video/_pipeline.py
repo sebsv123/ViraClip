@@ -288,10 +288,34 @@ async def process_video_complete(
         # Ensure virality_data is a dict
         if not isinstance(virality_data, dict):
             virality_data = {}
-        analysis = virality_data.get("analysis", [])
+        # VIRAL_SCORER_SYSTEM_PROMPT returns {"segments": [...]} with fields:
+        #   viral_score (0-10), hook_strength (0-10), emotional_peak (0-10),
+        #   shareability (0-10), retention (0-10), reason, start, end
+        # Legacy code used "analysis" with "segment_index" — both are now handled.
+        analysis = virality_data.get("segments", virality_data.get("analysis", []))
         if not isinstance(analysis, list):
             analysis = []
-        virality_map = {item.get("segment_index"): item for item in analysis if isinstance(item, dict)}
+        # Map by position: input segment i → LLM output segment i
+        # Translate field names and scale (0-10 → 0-100) to match pipeline internals.
+        virality_map = {}
+        for _llm_idx, _item in enumerate(analysis):
+            if not isinstance(_item, dict):
+                continue
+            _raw_v = float(_item.get("viral_score", _item.get("virality_score", 0)) or 0)
+            # viral_score is avg of 4 sub-scores each 0-10 → multiply by 10 for 0-100 scale
+            _v100 = min(100, round(_raw_v * 10))
+            virality_map[_llm_idx] = {
+                "virality_score": _v100,
+                "hook_score": min(100, round(float(_item.get("hook_strength", _item.get("hook_score", 0)) or 0) * 10)),
+                "engagement_score": min(100, round(float(_item.get("emotional_peak", _item.get("engagement_score", 0)) or 0) * 10)),
+                "value_score": min(100, round(float(_item.get("retention", _item.get("value_score", 0)) or 0) * 10)),
+                "shareability_score": min(100, round(float(_item.get("shareability", _item.get("shareability_score", 0)) or 0) * 10)),
+                "reasoning": _item.get("reason", _item.get("reasoning", "")),
+                "hook_type": _item.get("hook_type"),
+                "suggested_title": _item.get("suggested_title", ""),
+                "suggested_hashtags": _item.get("suggested_hashtags", []),
+                "hook_strength": _item.get("hook_strength_label", _item.get("hook_strength_text", "Medium")),
+            }
         
         # Log scoring method used
         if virality_map:

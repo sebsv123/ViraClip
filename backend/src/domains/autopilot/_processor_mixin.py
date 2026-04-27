@@ -371,6 +371,7 @@ class _ProcessorMixin:
                             gpu_encoding_settings=gpu_settings,  # Pass GPU settings for fast encoding
                             use_extracted_segment=(extracted_segment_paths[i] is not None),
                             target_platform=target_platform,
+                            jump_cut=jump_cut,
                         )
                     except Exception as clip_error:
                         logger.error(
@@ -447,45 +448,8 @@ class _ProcessorMixin:
                         except Exception as _dn_e:
                             logger.debug("Audio denoiser skipped for clip %d: %s", i, _dn_e)
                     
-                    # ── Viral Editing: Jump Cuts + Zoom Transitions (opt-in) ─────────
-                    if info is not None and jump_cut:
-                        try:
-                            from ...domains.video.cut_zoom_service import apply_jump_cuts_with_zoom
-                            from pathlib import Path as _Path
-                            _jc_in = _Path(info["path"])
-                            _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
-                            _jc_words = info.get("words", []) or segment.get("words", [])
-                            
-                            _jc_result = await apply_jump_cuts_with_zoom(
-                                video_path=str(_jc_in),
-                                output_path=str(_jc_out),
-                                words=_jc_words,
-                                min_silence_sec=jump_cut_min_silence,
-                                zoom_on_cuts=zoom_on_cuts,
-                                zoom_factor=cut_zoom_factor,
-                            )
-                            
-                            if _jc_result.get("success") and _jc_out.exists() and _jc_out.stat().st_size > 0:
-                                _jc_in.unlink(missing_ok=True)
-                                _jc_out.rename(_jc_in)
-                                info["jump_cut_applied"] = True
-                                info["jump_cut_time_saved"] = _jc_result.get("time_saved", 0)
-                                info["jump_cut_fillers_removed"] = _jc_result.get("filler_words_removed", 0)
-                                info["jump_cut_silences_removed"] = _jc_result.get("silence_gaps_removed", 0)
-                                info["zoom_transitions_applied"] = _jc_result.get("zoom_count", 0)
-                                info["cut_zoom_enabled"] = _jc_result.get("zoom_applied", False)
-                                logger.info(
-                                    "  [Clip %d] JumpCut+Zoom: %.1fs saved, %d cuts, %d zooms",
-                                    i + 1,
-                                    _jc_result.get("time_saved", 0),
-                                    _jc_result.get("cut_count", 0),
-                                    _jc_result.get("zoom_count", 0),
-                                )
-                            else:
-                                _jc_out.unlink(missing_ok=True)
-                                logger.warning("  [Clip %d] JumpCut+Zoom failed: %s", i + 1, _jc_result.get("error"))
-                        except Exception as _jc_e:
-                            logger.error("Jump-cut+zoom failed for clip %d: %s", i, _jc_e, exc_info=True)
+                    # Jump cuts are applied inside create_single_clip (Step 4.2-jc),
+                    # controlled by the jump_cut parameter passed above.
                     # ─────────────────────────────────────────────────────────────────
 
                     # ── Phase 10: ComfyUI AI Enhancement (opt-in) ─────────────────────
