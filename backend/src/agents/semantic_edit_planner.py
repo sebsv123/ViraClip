@@ -10,10 +10,14 @@ and SFX placement tied to the exact word that triggered them.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import glob
 import json
 import logging
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -42,10 +46,20 @@ class SfxCue:
 
 
 @dataclass
+class ZoomCue:
+    timestamp: float    # seconds from clip start — when to apply zoom punch
+    factor: float       # zoom scale factor (1.05-1.15)
+    duration: float     # zoom animation duration in seconds (0.3-0.6)
+    reason: str         # "excited_expression" | "high_energy" | "surprise"
+    confidence: float   # 0-1
+
+
+@dataclass
 class SemanticEditPlan:
     broll_cues: List[BrollCue] = field(default_factory=list)  # max 3 per clip
     sfx_cues:   List[SfxCue]   = field(default_factory=list)  # max 4 per clip
-    source: str = "heuristic"                                  # "groq" | "heuristic"
+    zoom_cues:  List[ZoomCue]  = field(default_factory=list)  # max 4 per clip (vision)
+    source: str = "heuristic"                                  # "groq" | "vision_groq" | "vision_ollama"
 
 
 # ── Heuristic lookup tables (ES + EN) ────────────────────────────────────────
@@ -156,6 +170,15 @@ _SFX_MAX          = 4       # max SFX per clip
 _WINDOW_S         = 5.0     # Groq analysis window size
 
 
+# Vision constants
+_VISION_MODEL_GROQ  = "meta-llama/llama-4-scout-17b-16e-instruct"
+_VISION_INTERVAL_S  = 4.0   # 1 frame every N seconds
+_VISION_MAX_FRAMES  = 12    # hard cap to stay within token limits
+_VISION_TIMEOUT_S   = 15.0  # total timeout for Groq Vision call
+_ZOOM_MAX           = 4     # max zoom cues per clip
+_ZOOM_MIN_GAP       = 4.0   # min seconds between zoom cues
+
+
 # ── Layer 1: Heuristic scanner ────────────────────────────────────────────────
 
 def _scan_heuristic(words: List[Dict[str, Any]], duration: float) -> SemanticEditPlan:
@@ -225,6 +248,214 @@ def _scan_heuristic(words: List[Dict[str, Any]], duration: float) -> SemanticEdi
                     ))
 
     return SemanticEditPlan(broll_cues=broll_cues, sfx_cues=sfx_cues, source="heuristic")
+
+
+# ── Layer 2b: Frame extraction + Vision analysis ────────────────────────────
+
+async def _extract_frames(
+    clip_path: str,
+    interval_s: float = _VISION_INTERVAL_S,
+    max_frames: int = _VISION_MAX_FRAMES,
+) -> List[Dict[str, Any]]:
+    """
+    Extract JPEG frames at *interval_s* intervals using FFmpeg.
+    Returns [{t: float, b64: str}] list. Cleans up temp files automatically.
+    """
+    frames: List[Dict[str, Any]] = []
+    try:
+        with tempfile.TemporaryDirectory(prefix="vcframes_") as tmpdir:
+            out_pattern = os.path.join(tmpdir, "frame_%04d.jpg")
+            cmd = [
+                "ffmpeg", "-y", "-i", clip_path,
+                "-vf", f"fps=1/{interval_s:.1f},scale=-1:360",
+                "-q:v", "4",
+                "-frames:v", str(max_frames),
+                out_pattern,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=30.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.debug("[FrameSampler] FFmpeg timeout")
+                return frames
+
+            for i, fp in enumerate(sorted(glob.glob(os.path.join(tmpdir, "frame_*.jpg")))):
+                t = i * interval_s
+                try:
+                    with open(fp, "rb") as fh:
+                        frames.append({"t": round(t, 2), "b64": base64.b64encode(fh.read()).decode()})
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("[FrameSampler] failed: %s", exc)
+    return frames
+
+
+async def _analyze_frames_groq(
+    frames: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Send all frames in a single Groq Vision request.
+    Returns [{t, energy, expression, visual_interest, suggestion}] or None.
+    """
+    api_key = os.environ.get("GROQ_API_KEY", "")
+    if not api_key or not frames:
+        return None
+
+    frame_index = "\n".join(f"  Frame {i}: t={f['t']:.0f}s" for i, f in enumerate(frames))
+    text_prompt = (
+        f"These are {len(frames)} sequential frames from a talking-head video clip.\n"
+        f"Frame timestamps:\n{frame_index}\n\n"
+        "For EACH frame return a JSON object with:\n"
+        "- t: timestamp in seconds (match the frame index above)\n"
+        "- energy: 0.0-1.0 (speaker animation/enthusiasm)\n"
+        "- expression: 'neutral'|'excited'|'surprised'|'serious'|'smiling'\n"
+        "- visual_interest: 'high'|'medium'|'low' (frame visual richness vs plain bg)\n"
+        "- suggestion: 'zoom_punch'|'broll_needed'|'none'\n\n"
+        "Return ONLY valid JSON: {\"frames\": [...]}"
+    )
+
+    content: List[Dict[str, Any]] = [{"type": "text", "text": text_prompt}]
+    for frame in frames:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{frame['b64']}"},
+        })
+
+    try:
+        async with httpx.AsyncClient(timeout=_VISION_TIMEOUT_S) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": _VISION_MODEL_GROQ,
+                    "messages": [{"role": "user", "content": content}],
+                    "max_tokens": 900,
+                    "temperature": 0.10,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        if resp.status_code != 200:
+            logger.debug("[VisionAnalyzer/Groq] HTTP %d: %s", resp.status_code, resp.text[:200])
+            return None
+
+        raw    = resp.json()["choices"][0]["message"]["content"]
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, dict) and isinstance(parsed.get("frames"), list):
+            return parsed["frames"]
+        return None
+
+    except Exception as exc:
+        logger.debug("[VisionAnalyzer/Groq] failed: %s", exc)
+        return None
+
+
+async def _analyze_frames_ollama(
+    frames: List[Dict[str, Any]],
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    Fallback: Ollama local vision model (Qwen-VL / LLaVA / MiniCPM-V).
+    Processes frames one by one; returns None if Ollama unavailable.
+    """
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{base_url}/api/tags")
+            if r.status_code != 200:
+                return None
+            models = [m["name"] for m in r.json().get("models", [])]
+            model  = next(
+                (m for m in models
+                 if any(n in m for n in ("qwen2.5vl", "qwen-vl", "llava", "minicpm"))),
+                None,
+            )
+            if not model:
+                return None
+    except Exception:
+        return None
+
+    results: List[Dict[str, Any]] = []
+    for frame in frames[:6]:   # cap at 6 for Ollama (slower per-frame)
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.post(
+                    f"{base_url}/api/generate",
+                    json={
+                        "model":  model,
+                        "prompt": (
+                            f"Frame at t={frame['t']:.0f}s. Return JSON: "
+                            '{"t":<s>,"energy":<0-1>,"expression":"neutral|excited|surprised|serious|smiling"'
+                            ',"visual_interest":"high|medium|low","suggestion":"zoom_punch|broll_needed|none"}'
+                        ),
+                        "images": [frame["b64"]],
+                        "format": "json",
+                        "stream": False,
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json().get("response", "{}")
+                    parsed = json.loads(data) if isinstance(data, str) else data
+                    if isinstance(parsed, dict) and "energy" in parsed:
+                        parsed.setdefault("t", frame["t"])
+                        results.append(parsed)
+        except Exception as exc:
+            logger.debug("[VisionAnalyzer/Ollama] t=%s failed: %s", frame["t"], exc)
+    return results or None
+
+
+def _enhance_plan_with_vision(
+    plan: SemanticEditPlan,
+    vision_frames: List[Dict[str, Any]],
+    duration: float,
+    source_label: str = "vision_groq",
+) -> SemanticEditPlan:
+    """
+    Enhance the heuristic/Groq plan with frame-level vision insights.
+
+    - Adds ZoomCue for high-energy / expressive frames
+    - Boosts B-roll confidence when frame visual interest is low
+    - Reduces B-roll confidence when frame is already visually interesting
+    """
+    for frame in vision_frames:
+        t      = float(frame.get("t", -1))
+        energy = float(frame.get("energy", 0.0))
+        expr   = str(frame.get("expression", "neutral")).lower()
+        vis    = str(frame.get("visual_interest", "medium")).lower()
+        sug    = str(frame.get("suggestion", "none")).lower()
+
+        if t < 0 or t > duration:
+            continue
+
+        # ── Zoom cues from vision ─────────────────────────────────────────────
+        is_expressive = expr in ("excited", "surprised")
+        high_energy   = energy >= 0.72
+        if (is_expressive or high_energy) and 1.0 < t < duration - 1.0:
+            if all(abs(t - z.timestamp) >= _ZOOM_MIN_GAP for z in plan.zoom_cues):
+                if len(plan.zoom_cues) < _ZOOM_MAX:
+                    plan.zoom_cues.append(ZoomCue(
+                        timestamp=t,
+                        factor=round(min(1.15, 1.05 + energy * 0.11), 3),
+                        duration=0.4,
+                        reason=f"{expr}_expression" if is_expressive else "high_energy",
+                        confidence=round(energy, 3),
+                    ))
+
+        # ── B-roll confidence adjustment ──────────────────────────────────────
+        for cue in plan.broll_cues:
+            if abs(cue.timestamp - t) <= 3.0:
+                if vis == "low" or sug == "broll_needed":
+                    cue.confidence = min(0.98, cue.confidence + 0.15)
+                elif vis == "high":
+                    cue.confidence = max(0.10, cue.confidence - 0.25)
+
+    plan.zoom_cues = sorted(plan.zoom_cues, key=lambda z: z.timestamp)[:_ZOOM_MAX]
+    plan.source    = source_label
+    return plan
 
 
 # ── Layer 2: Groq semantic batch pass ────────────────────────────────────────
@@ -398,11 +629,16 @@ class SemanticEditPlanner:
         duration: float,
         hook_type: str = "insight_reveal",
         category:  str = "unknown",
+        clip_path: Optional[str] = None,
     ) -> SemanticEditPlan:
         """
         Build a SemanticEditPlan.
-        Layer 1 (heuristic) always runs; Layer 2 (Groq) runs when API key available.
-        Never raises — returns empty plan on any failure.
+
+        Layer 1: Instant keyword heuristic (always, <10ms)
+        Layer 2: Groq semantic text pass (~1.5s, when GROQ_API_KEY set)
+        Layer 3: Frame vision analysis (~3-8s, when clip_path provided + GROQ_API_KEY set)
+
+        Never raises — falls back gracefully at each layer.
         """
         if not words or duration <= 0:
             return SemanticEditPlan()
@@ -426,7 +662,7 @@ class SemanticEditPlanner:
                         intensity=0.90,
                     ))
 
-            # Layer 2: Groq semantic
+            # Layer 2: Groq semantic text pass
             if os.environ.get("GROQ_API_KEY"):
                 windows = _build_windows(words, duration)
                 if windows:
@@ -434,15 +670,45 @@ class SemanticEditPlanner:
                     if groq_out:
                         plan = _merge_groq(plan, groq_out, windows, duration)
 
+            # Layer 3: Frame-level vision analysis
+            # Runs when clip_path is available (post-render) and API key present.
+            # Adds ZoomCues and refines B-roll confidence based on visual content.
+            _vision_enabled = os.environ.get("VISION_ENABLED", "true").lower() != "false"
+            if clip_path and os.path.isfile(clip_path) and _vision_enabled:
+                try:
+                    frames = await _extract_frames(clip_path)
+                    if frames:
+                        vision_data: Optional[List[Dict[str, Any]]] = None
+                        source_lbl = "vision_groq"
+
+                        if os.environ.get("GROQ_API_KEY"):
+                            vision_data = await _analyze_frames_groq(frames)
+
+                        if vision_data is None:
+                            vision_data = await _analyze_frames_ollama(frames)
+                            source_lbl  = "vision_ollama"
+
+                        if vision_data:
+                            plan = _enhance_plan_with_vision(plan, vision_data, duration, source_lbl)
+                            logger.info(
+                                "[SemanticPlanner] vision (%s) → +%d zoom cues, "
+                                "B-roll confidence adjusted",
+                                source_lbl, len(plan.zoom_cues),
+                            )
+                except Exception as _ve:
+                    logger.debug("[SemanticPlanner] vision layer skipped: %s", _ve)
+
             # Final caps + sort
             plan.broll_cues = sorted(plan.broll_cues, key=lambda c: c.timestamp)[:_BROLL_MAX]
             plan.sfx_cues   = sorted(plan.sfx_cues,   key=lambda c: c.timestamp)[:_SFX_MAX]
+            plan.zoom_cues  = sorted(plan.zoom_cues,  key=lambda z: z.timestamp)[:_ZOOM_MAX]
 
             logger.info(
-                "[SemanticPlanner] final plan (source=%s): B-roll=[%s] SFX=[%s]",
+                "[SemanticPlanner] final (source=%s): B-roll=[%s] SFX=[%s] Zoom=[%s]",
                 plan.source,
                 ", ".join(f"{c.timestamp:.1f}s:{c.keyword}" for c in plan.broll_cues) or "—",
                 ", ".join(f"{c.timestamp:.1f}s:{c.sfx_type}" for c in plan.sfx_cues) or "—",
+                ", ".join(f"{z.timestamp:.1f}s:{z.factor}x" for z in plan.zoom_cues) or "—",
             )
             return plan
 
