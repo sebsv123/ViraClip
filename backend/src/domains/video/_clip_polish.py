@@ -35,11 +35,18 @@ async def apply_translation_dubbing(
     """Replace audio with target-language dub if `target_language` is non-eng."""
     if not target_language or target_language == "eng":
         return output_path
-    from ...domains.captions.translation_service import TranslationService
-    translator = TranslationService()
-    dubbed_path = output_path.with_name(f"dubbed_{output_path.name}")
-    await translator.dub_clip(output_path, dubbed_path, target_language)
-    return dubbed_path
+    try:
+        from ...domains.captions.translation_service import TranslationService
+        translator = TranslationService()
+        dubbed_path = output_path.with_name(f"dubbed_{output_path.name}")
+        await translator.dub_clip(output_path, dubbed_path, target_language)
+        if dubbed_path.exists() and dubbed_path.stat().st_size > 0:
+            logger.info(f"  ✓ Translation/dub applied ({target_language})")
+            return dubbed_path
+        logger.warning(f"  Translation dub produced no output for lang={target_language}, using original")
+    except Exception as e:
+        logger.warning(f"  apply_translation_dubbing failed (lang={target_language}): {e}")
+    return output_path
 
 
 # ─── 2. Audio ducking ────────────────────────────────────────────────────

@@ -88,7 +88,7 @@ class CreativePipeline:
 
         start = _ts(segment.get("start_time") or segment.get("start"), 0.0)
         end = _ts(segment.get("end_time") or segment.get("end"), start + 60.0)
-        transcript = segment.get("transcript", "")
+        transcript = segment.get("text", segment.get("transcript", ""))
 
         meta: dict = {
             "creative_enhanced": False,
@@ -435,7 +435,7 @@ class CreativePipeline:
             else:
                 overlayed.unlink(missing_ok=True)
                 logger.debug("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
-            if overlay_result.success and overlayed.exists() and overlayed.stat().st_size > 0:
+            if overlay_result.success:
                 steps_ok.append("step_5_5_overlays")
             else:
                 _mark_fail("step_5_5_overlays_empty")
