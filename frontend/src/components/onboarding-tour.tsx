@@ -131,7 +131,7 @@ export function OnboardingTour({ onComplete }: OnboardingTourProps) {
           {currentStep === steps.length - 1 && (
             <div className="bg-gradient-to-r from-purple-100 to-pink-100 border border-purple-200 rounded-lg p-4">
               <p className="text-sm text-purple-900 font-medium mb-2">
-                🎉 You're all set! Ready to create viral content?
+                🎉 You&apos;re all set! Ready to create viral content?
               </p>
               <p className="text-xs text-purple-700">
                 Upload your first video to get started. Our AI will handle the rest!

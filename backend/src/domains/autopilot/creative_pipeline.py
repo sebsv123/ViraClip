@@ -53,6 +53,8 @@ class CreativePipeline:
         task_id: str,
         clip_index: int,
         platform: str = "tiktok",
+        skip_stages: "set[str] | None" = None,
+        task_config: "dict | None" = None,
     ) -> dict:
         """
         Apply the creative enhancement chain to a rendered base clip.
@@ -112,6 +114,16 @@ class CreativePipeline:
         # Step tracking for granular visibility
         steps_ok: list[str] = []
         steps_failed: list[str] = []
+
+        # Suggestion Studio: caller may explicitly disable some stages.
+        skip = {s.lower() for s in (skip_stages or set())}
+
+        def _skip(stage: str) -> bool:
+            if stage in skip:
+                steps_failed.append(f"{stage}_skipped_by_user")
+                logger.info("  [Creative] Stage '%s' skipped (user override)", stage)
+                return True
+            return False
 
         def _mark_ok(name: str, result=None) -> bool:
             """Mark step as OK only if result is not empty/None."""
@@ -253,7 +265,10 @@ class CreativePipeline:
 
         # ── 4.5 Hook-flash reorder ────────────────────────────────────────────
         reordered = None
-        try:
+        if _skip("hook_reorder"):
+            _hook_reorder = False
+        else:
+          try:
             _hook_reorder = meta.get("hook_reorder_suggested", False)
             _hook_start   = meta.get("hook_text") and next(
                 (w["start"] for w in (words or [])
@@ -279,7 +294,7 @@ class CreativePipeline:
                     )
                 else:
                     reordered.unlink(missing_ok=True)
-        except Exception as exc:
+          except Exception as exc:
             logger.debug("  [Creative] Hook reorder failed: %s", exc)
 
         # ── Background Composite (SAM2 + LTX) ────────────────────────────
@@ -333,13 +348,44 @@ class CreativePipeline:
 
         # Solo ejecutar B-roll si no se aplicó composite Mode A o C
         _skip_broll = (_composite_result and _composite_result.get("mode_used") in ("A", "C"))
+        if _skip("broll"):
+            _skip_broll = True
 
         if not _skip_broll:
             try:
                 logger.debug("  [Creative] Importing contextual_broll & video_effects...")
                 from ...domains.broll.contextual_broll import get_contextual_broll
                 from ...domains.video.video_effects import overlay_broll_clips
+                from ...domains.broll.broll_compositor import compose_overlay_items
                 logger.debug("  [Creative] B-roll imports OK")
+
+                # SUGGESTION STUDIO: Use editable broll_items from task_config if provided
+                broll_items = task_config.get("broll_items") if task_config else None
+                # Fallback: try to get from segment metadata if task_config not provided
+                if not broll_items and segment.get("broll_items"):
+                    broll_items = segment.get("broll_items")
+                if broll_items and isinstance(broll_items, list) and len(broll_items) > 0:
+                    logger.info("  [Creative] Using %d editable B-roll items from Suggestion Studio", len(broll_items))
+                    try:
+                        _broll_success = await compose_overlay_items(
+                            main_path=clip_path,
+                            items=broll_items,
+                            output_path=Path(str(clip_path).replace(".mp4", "_broll.mp4")),
+                            fade=0.5,
+                        )
+                        if _broll_success:
+                            broll_count = len(broll_items)
+                            meta["broll_items_used"] = broll_items
+                            # Replace clip with broll version
+                            _broll_temp = Path(str(clip_path).replace(".mp4", "_broll.mp4"))
+                            if _broll_temp.exists():
+                                clip_path.unlink(missing_ok=True)
+                                _broll_temp.rename(clip_path)
+                                logger.info("  [Creative] ✓ Applied %d editable B-roll overlays", broll_count)
+                                steps_ok.append("step_5_broll_editable")
+                    except Exception as _editable_e:
+                        logger.warning("  [Creative] Editable B-roll failed, falling back to auto: %s", _editable_e)
+                        broll_items = None  # Fall through to auto generation
 
                 # Priority 0: SemanticEditPlan — word-level precise B-roll cues
                 # (populated by _clip_renderer.py before calling creative_pipeline)
@@ -457,7 +503,9 @@ class CreativePipeline:
         contextual_overlays = 0
         overlayed = None
         overlay_result = None
+        _do_overlays = not _skip("contextual_overlay")
         try:
+         if _do_overlays:
             logger.debug("  [Creative] Importing contextual_overlay_engine...")
             from ...domains.broll.contextual_overlay_engine import get_contextual_overlay_engine
             logger.debug("  [Creative] contextual_overlay_engine import OK")
@@ -490,6 +538,8 @@ class CreativePipeline:
                 steps_ok.append("step_5_5_overlays")
             else:
                 _mark_fail("step_5_5_overlays_empty")
+         else:
+            pass
         except ImportError as exc:
             _log_step_error("Step 5.5 (Contextual Overlays) - Import", exc)
             _mark_fail("step_5_5_overlays")
@@ -502,6 +552,7 @@ class CreativePipeline:
         # ── 6. Video effects (zoom punch + color grade from preset) ───────────
         logger.info("  [Creative] Step 6/8: Video effects (zoom + grade)...")
         effected = None
+        _skip_vfx = _skip("vfx")
         try:
             if preset is None:
                 logger.warning("  [Creative] No preset selected, using default fallback")
@@ -519,7 +570,7 @@ class CreativePipeline:
         except Exception as _fb:
             logger.warning("  [Creative] Fallback preset failed: %s", _fb)
         try:
-            if preset is not None:
+            if preset is not None and not _skip_vfx:
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
                 from ...domains.video.video_effects import apply_preset_effects
                 logger.debug("  [Creative] video_effects import OK")
@@ -532,10 +583,16 @@ class CreativePipeline:
                     clip_path.unlink(missing_ok=True)
                     effected.rename(clip_path)
                     meta["zoom_punch_applied"] = preset.zoom_punch_enabled and bool(peak_events)
+                    meta["zoom_punch_zoom"] = preset.zoom_punch_zoom if preset.zoom_punch_enabled else 1.0
+                    meta["zoom_punch_duration"] = preset.zoom_punch_duration if preset.zoom_punch_enabled else 0.0
                     meta["color_grade_applied"] = bool(preset.extra_vf_filters)
+                    meta["extra_vf_filters"] = preset.extra_vf_filters if preset.extra_vf_filters else []
+                    meta["preset_used"] = preset.name
                     logger.info(
-                        "  [Creative] ✓ Step 6/8: VFX: zoom_punch=%s grade=%s",
-                        meta["zoom_punch_applied"], meta["color_grade_applied"],
+                        "  [Creative] ✓ Step 6/8: VFX: zoom_punch=%s (%.2fx, %.2fs) grade=%s preset=%s",
+                        meta["zoom_punch_applied"], meta.get("zoom_punch_zoom", 1.0), 
+                        meta.get("zoom_punch_duration", 0.0),
+                        meta["color_grade_applied"], preset.name,
                     )
                 else:
                     effected.unlink(missing_ok=True)
@@ -554,9 +611,11 @@ class CreativePipeline:
         speed_applied = False
         speed_output = None
         try:
-            # Check if speed control is needed
-            playback_speed = segment.get("playback_speed", 1.0)
-            dramatic_slowmo = segment.get("dramatic_slowmo", False)
+            if _skip("speed_control"):
+                playback_speed, dramatic_slowmo = 1.0, False
+            else:
+                playback_speed = segment.get("playback_speed", 1.0)
+                dramatic_slowmo = segment.get("dramatic_slowmo", False)
             
             if playback_speed != 1.0 or dramatic_slowmo:
                 from ...domains.video.speed_control_service import get_speed_control_service
@@ -606,7 +665,14 @@ class CreativePipeline:
         ducking_applied = False
         mastered = None
         ducked = None
+        _skip_audio_master = _skip("audio_master")
+
+        class _AudioMasterSkipped(Exception):
+            pass
+
         try:
+            if _skip_audio_master:
+                raise _AudioMasterSkipped()
             logger.debug("  [Creative] Importing smart_audio...")
             from ...domains.audio.smart_audio import get_smart_audio, find_bgm_track
             logger.debug("  [Creative] smart_audio import OK")
@@ -654,6 +720,9 @@ class CreativePipeline:
                 steps_ok.append("step_7_audio")
             else:
                 _mark_fail("step_7_audio_empty")
+        except _AudioMasterSkipped:
+            logger.info("  [Creative] Step 7/8: Audio mastering skipped (user override)")
+            steps_ok.append("step_7_audio_skipped")
         except ImportError as exc:
             _log_step_error("Step 7 (Audio) - Import", exc, critical=True)
             _mark_fail("step_7_audio")

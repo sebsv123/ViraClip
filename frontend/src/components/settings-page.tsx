@@ -119,7 +119,7 @@ export function SettingsPage() {
   const updateSetting = <K extends keyof UserSettings>(
     section: K,
     key: keyof UserSettings[K],
-    value: any
+    value: unknown
   ) => {
     setSettings(prev => ({
       ...prev,

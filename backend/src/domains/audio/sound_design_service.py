@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -108,13 +111,84 @@ class SoundDesignService:
     
     def __init__(self):
         self.sounds_dir = find_sounds_dir()
-        self.volume = 0.35  # 35% del volumen original
+        self.volume = 0.55  # Más audible por defecto
+        self.max_sfx_per_minute = int(os.getenv("SFX_MAX_PER_MINUTE", "24"))
         
         if self.sounds_dir:
             logger.info(f"✓ Sound Design Service initialized: {self.sounds_dir}")
             self._verify_sounds()
         else:
             logger.warning("⚠ Sounds directory not found. Sound effects disabled.")
+
+    @staticmethod
+    def _preferred_sfx_types_for_event(sound_type: str) -> List[str]:
+        """Return preferred SFX alternatives for a cue/event type."""
+        event_map: Dict[str, List[str]] = {
+            "whoosh_zoom": ["whoosh_zoom", "scroll_stop"],
+            "scroll_stop": ["scroll_stop", "whoosh_zoom"],
+            "pop_broll": ["pop_broll", "camera_shutter"],
+            "camera_shutter": ["camera_shutter", "pop_broll"],
+            "magic_reveal": ["magic_reveal", "notification", "riser_pre_reveal"],
+            "riser_pre_reveal": ["riser_pre_reveal", "magic_reveal"],
+            "bass_drop": ["bass_drop", "emphasis_word"],
+            "notification": ["notification", "magic_reveal"],
+            "glitch_burst": ["glitch_burst", "pattern_interrupt"],
+            "pattern_interrupt": ["pattern_interrupt", "glitch_burst"],
+            "transition": ["camera_shutter", "whoosh_zoom"],
+            "emphasis_word": ["emphasis_word", "notification"],
+        }
+        if sound_type in event_map:
+            return event_map[sound_type]
+        return [sound_type]
+
+    def _choose_best_available_sfx(self, sound_type: str) -> Optional[Path]:
+        """Pick first available sound from prioritized alternatives."""
+        for candidate_type in self._preferred_sfx_types_for_event(sound_type):
+            path = _find_best_sfx(candidate_type)
+            if path and path.exists():
+                return path
+        return None
+
+    def _apply_sfx_guardrails(self, sound_cues: List[Dict]) -> List[Dict]:
+        """Enforce density and repetition constraints before rendering."""
+        if not sound_cues:
+            return []
+
+        cues_sorted = sorted(sound_cues, key=lambda c: float(c.get("timestamp", 0.0)))
+        min_gap = 1.5
+        filtered: List[Dict] = []
+        recent_types: List[str] = []
+
+        # Global ceiling by timeline span (min 1 minute to avoid too strict short clips)
+        last_ts = float(cues_sorted[-1].get("timestamp", 0.0))
+        effective_minutes = max(1.0, last_ts / 60.0)
+        max_allowed = max(1, int(self.max_sfx_per_minute * effective_minutes))
+
+        for cue in cues_sorted:
+            cue_ts = float(cue.get("timestamp", 0.0))
+            cue_type = str(cue.get("type", ""))
+
+            if filtered and (cue_ts - float(filtered[-1].get("timestamp", 0.0))) < min_gap:
+                continue
+
+            recent_types.append(cue_type)
+            if len(recent_types) > 3:
+                recent_types.pop(0)
+            if len(recent_types) >= 3 and recent_types[-1] == recent_types[-2] == recent_types[-3]:
+                continue
+
+            filtered.append(cue)
+            if len(filtered) >= max_allowed:
+                break
+
+        if len(filtered) != len(sound_cues):
+            logger.info(
+                "[sfx] Guardrails applied: %d -> %d cues (max_per_min=%d)",
+                len(sound_cues),
+                len(filtered),
+                self.max_sfx_per_minute,
+            )
+        return filtered
     
     def _verify_sounds(self):
         """Verifica qué sonidos están disponibles"""
@@ -253,6 +327,7 @@ class SoundDesignService:
         if not sound_cues:
             logger.info("No sound cues — applying loudnorm audio normalization as fallback")
             return await self._apply_audio_normalization(video_path, output_path)
+        sound_cues = self._apply_sfx_guardrails(sound_cues)
         
         try:
             # Filtrar solo cues con sonidos disponibles
@@ -260,7 +335,7 @@ class SoundDesignService:
             valid_cues = []
             for cue in sound_cues:
                 sound_type = cue.get("type", "")
-                sound_path = _find_best_sfx(sound_type)
+                sound_path = self._choose_best_available_sfx(sound_type)
                 if sound_path and sound_path.exists():
                     valid_cues.append((cue, sound_path))
             
@@ -279,12 +354,20 @@ class SoundDesignService:
                 
                 # Delay en milisegundos
                 delay_ms = int(cue["timestamp"] * 1000)
-                intensity = cue.get("intensity", 0.35)
-                volume = min(0.45, max(0.20, self.volume * intensity))
+                intensity = cue.get("intensity", 0.45)
+                volume = min(0.70, max(0.25, self.volume * intensity))
                 
                 # Filtro para este sonido
                 filter_parts.append(
                     f"[{i+1}:a]adelay={delay_ms}|{delay_ms},volume={volume}[sfx{i}]"
+                )
+                logger.info(
+                    "[sfx] cue=%s ts=%.2fs file=%s intensity=%.2f volume=%.2f",
+                    cue.get("type", "unknown"),
+                    cue.get("timestamp", 0.0),
+                    sound_path.name,
+                    float(intensity),
+                    float(volume),
                 )
             
             # Construir mezcla
@@ -292,7 +375,7 @@ class SoundDesignService:
             mix_parts = "[0:a]" + "".join(f"[sfx{i}]" for i in range(num_sounds))
             
             filter_complex = ";".join(filter_parts)
-            filter_complex += f";{mix_parts}amix=inputs={num_sounds+1}:normalize=0[aout]"
+            filter_complex += f";{mix_parts}amix=inputs={num_sounds+1}:normalize=1[aout]"
             
             cmd = [
                 _get_ffmpeg_exe(), "-y",
