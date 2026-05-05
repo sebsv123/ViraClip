@@ -449,3 +449,169 @@ except Exception as _cron_err:
         _cron_err
     )
     WorkerSettings.cron_jobs = []
+
+
+# ============================================================================
+# Suggestion Studio Worker Tasks (Phase 6)
+# ============================================================================
+
+async def preview_clip_with_suggestions_task(
+    ctx: Dict[str, Any],
+    clip_id: str,
+    task_id: str,
+) -> Dict[str, Any]:
+    """Generate a low-res preview applying only approved suggestions.
+
+    Called by the Suggestion Studio when user toggles suggestions and wants
+    to see the result without waiting for full render. Writes the preview to
+    a temp location and updates Redis so the SSE endpoint can notify client.
+    """
+    from ..database import AsyncSessionLocal
+    from ..domains.autopilot.suggestion_applicator import (
+        apply_suggestions,
+        ApplicatorError,
+    )
+    from ..workers.progress import ProgressTracker
+
+    set_trace_id(f"preview-{clip_id}")
+    logger.info(f"[Worker] Starting preview for clip {clip_id}")
+
+    progress = ProgressTracker(ctx["redis"], f"clip_preview:{clip_id}")
+    await progress.update(0, "Initializing preview render...", "processing")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await progress.update(10, "Loading suggestions...", "processing")
+            result = await apply_suggestions(
+                db,
+                clip_id=clip_id,
+                preview=True,
+            )
+
+            if result["success"]:
+                await progress.update(100, "Preview ready", "completed")
+                # Store preview path in Redis for the API to pick up
+                await ctx["redis"].setex(
+                    f"clip_preview:{clip_id}:path",
+                    3600,  # 1 hour TTL
+                    result["new_path"],
+                )
+                await ctx["redis"].setex(
+                    f"clip_preview:{clip_id}:meta",
+                    3600,
+                    json.dumps({
+                        "skipped_stages": result["skipped_stages"],
+                        "is_preview": True,
+                    }),
+                )
+                logger.info(f"[Worker] Preview complete: {result['new_path']}")
+            else:
+                await progress.update(100, f"Preview failed: {result['error']}", "failed")
+                await ctx["redis"].setex(
+                    f"clip_preview:{clip_id}:error",
+                    3600,
+                    result["error"],
+                )
+
+            return result
+
+        except ApplicatorError as e:
+            logger.error(f"[Worker] Preview applicator error: {e}")
+            await progress.update(100, str(e), "failed")
+            return {"success": False, "error": str(e), "clip_id": clip_id}
+        except Exception as e:
+            logger.exception(f"[Worker] Preview failed for clip {clip_id}")
+            await progress.update(100, f"Internal error: {e}", "failed")
+            return {"success": False, "error": str(e), "clip_id": clip_id}
+
+
+async def finalize_clip_with_suggestions_task(
+    ctx: Dict[str, Any],
+    clip_id: str,
+    task_id: str,
+) -> Dict[str, Any]:
+    """Generate final quality clip applying only approved suggestions.
+
+    Called by the Suggestion Studio when user clicks "Finalize". Replaces
+    the original clip file and updates the clip status to 'final'.
+    """
+    from ..database import AsyncSessionLocal
+    from ..domains.autopilot.suggestion_applicator import (
+        apply_suggestions,
+        ApplicatorError,
+    )
+    from ..repositories.clip_repository import ClipRepository
+    from ..workers.progress import ProgressTracker
+    from pathlib import Path
+    import shutil
+
+    set_trace_id(f"finalize-{clip_id}")
+    logger.info(f"[Worker] Starting finalize for clip {clip_id}")
+
+    progress = ProgressTracker(ctx["redis"], f"clip_finalize:{clip_id}")
+    await progress.update(0, "Initializing final render...", "processing")
+
+    async with AsyncSessionLocal() as db:
+        try:
+            await progress.update(10, "Loading suggestions...", "processing")
+
+            # Get original clip info
+            clip = await ClipRepository.get_clip_by_id(db, clip_id)
+            if not clip:
+                raise ApplicatorError(f"Clip {clip_id} not found")
+
+            original_path = Path(clip.get("file_path", ""))
+            output_dir = original_path.parent if original_path.exists() else Path("/tmp")
+
+            result = await apply_suggestions(
+                db,
+                clip_id=clip_id,
+                preview=False,
+                output_dir=output_dir,
+            )
+
+            if result["success"]:
+                new_path = Path(result["new_path"])
+
+                # Backup original (optional - keep for recovery)
+                backup_path = original_path.with_suffix(".original" + original_path.suffix)
+                if original_path.exists():
+                    shutil.copy2(str(original_path), str(backup_path))
+
+                # Replace original with new render
+                if new_path.exists():
+                    shutil.move(str(new_path), str(original_path))
+
+                # Update clip status to 'final'
+                await ClipRepository.set_status(db, clip_id, "final")
+                await db.commit()
+
+                await progress.update(100, "Final render complete", "completed")
+                await ctx["redis"].setex(
+                    f"clip_finalize:{clip_id}:meta",
+                    3600,
+                    json.dumps({
+                        "skipped_stages": result["skipped_stages"],
+                        "is_final": True,
+                        "backup_path": str(backup_path) if backup_path.exists() else None,
+                    }),
+                )
+                logger.info(f"[Worker] Finalize complete for clip {clip_id}")
+            else:
+                await progress.update(100, f"Finalize failed: {result['error']}", "failed")
+                await ctx["redis"].setex(
+                    f"clip_finalize:{clip_id}:error",
+                    3600,
+                    result["error"],
+                )
+
+            return result
+
+        except ApplicatorError as e:
+            logger.error(f"[Worker] Finalize applicator error: {e}")
+            await progress.update(100, str(e), "failed")
+            return {"success": False, "error": str(e), "clip_id": clip_id}
+        except Exception as e:
+            logger.exception(f"[Worker] Finalize failed for clip {clip_id}")
+            await progress.update(100, f"Internal error: {e}", "failed")
+            return {"success": False, "error": str(e), "clip_id": clip_id}

@@ -200,7 +200,7 @@ async def create_single_clip(
                     duration=duration,
                     audio_features=None,
                 ),
-                timeout=5.0,
+                timeout=20.0,  # Increased from 5s to 20s — Phi-3 model may not be in cache
             )
             # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
             try:
@@ -271,28 +271,28 @@ async def create_single_clip(
                 logger.warning(f"  LLMRouter fallback also failed: {_llm_fb_e}")
                 virality_result = None
     
-    # PASO 2: Audio spectral analysis — skipped when segment text exists (saves 1-3 min)
-    # The Groq AI brain already infers energy/mood from transcript text semantically.
+    # PASO 2: Audio spectral analysis — run in parallel with transcription
+    # when transcript exists, so narrative cut engine gets silence/energy data.
     audio_features = {}
     _has_transcript = bool(segment.get("text", "").strip())
-    if not _has_transcript:
-        logger.info(f"[Clip {clip_index+1}] Step 2: Audio spectral analysis (no transcript)...")
-        try:
-            from tempfile import NamedTemporaryFile
-            audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
-            audio_temp.close()
-            audio_ss = 0.0 if use_extracted_segment else start_seconds
-            cmd = [get_ffmpeg_exe(), "-y", "-ss", str(audio_ss), "-i", str(video_path),
-                   "-t", str(duration), "-vn", "-acodec", "pcm_s16le",
-                   "-ar", "16000", "-ac", "1", audio_temp.name]
-            subprocess.run(cmd, capture_output=True, timeout=60)
-            if Path(audio_temp.name).exists():
-                audio_features = analyze_audio_virality(audio_temp.name)
-                Path(audio_temp.name).unlink()
-        except Exception as audio_e:
-            logger.warning(f"  Audio analysis failed: {audio_e}")
+    if _has_transcript:
+        logger.info(f"[Clip {clip_index+1}] Step 2: Audio spectral analysis (parallel with transcript)...")
     else:
-        logger.info(f"[Clip {clip_index+1}] Step 2: Audio analysis skipped (transcript available)")
+        logger.info(f"[Clip {clip_index+1}] Step 2: Audio spectral analysis (no transcript)...")
+    try:
+        from tempfile import NamedTemporaryFile
+        audio_temp = NamedTemporaryFile(suffix='.wav', delete=False)
+        audio_temp.close()
+        audio_ss = 0.0 if use_extracted_segment else start_seconds
+        cmd = [get_ffmpeg_exe(), "-y", "-ss", str(audio_ss), "-i", str(video_path),
+               "-t", str(duration), "-vn", "-acodec", "pcm_s16le",
+               "-ar", "16000", "-ac", "1", audio_temp.name]
+        subprocess.run(cmd, capture_output=True, timeout=60)
+        if Path(audio_temp.name).exists():
+            audio_features = analyze_audio_virality(audio_temp.name)
+            Path(audio_temp.name).unlink()
+    except Exception as audio_e:
+        logger.warning(f"  Audio analysis failed: {audio_e}")
     
     # PASO 3: Detectar cortes narrativos inteligentes (Capa A)
     logger.info(f"[Clip {clip_index+1}] Step 3: Narrative cut detection...")
@@ -1177,60 +1177,59 @@ async def create_single_clip(
     #     3) Exponerlo por `comfyui_integration.process_with_comfyui("enhance")`.
     #   Mantenemos el bloque desactivado para no generar ruido en logs.
 
-    # Step 4.8: Sound Design — use SemanticEditPlan sfx_cues when available,
-    # otherwise fall back to the whole-clip hook_type heuristic.
-    # Section-aware: each cue's intensity is scaled by section.sfx_volume_mult
-    # and cues whose type is forbidden in their section are dropped.
-    try:
-        sound_service = SoundDesignService()
-        sound_cues = []
-        if _sem_plan and _sem_plan.sfx_cues:
-            _dropped = 0
-            for c in _sem_plan.sfx_cues:
-                if not (0 < c.timestamp < duration):
-                    continue
-                # Section-aware filter + volume scaling
-                if _render_plan and not _render_plan.is_sfx_allowed_at(c.sfx_type, c.timestamp):
-                    _dropped += 1
-                    continue
-                vol_mult = _render_plan.sfx_volume_at(c.timestamp) if _render_plan else 1.0
-                sound_cues.append({
-                    "timestamp": c.timestamp,
-                    "type":      c.sfx_type,
-                    "intensity": min(1.5, c.intensity * vol_mult),
-                })
-            logger.info(
-                "  [SFX] Director-filtered %d cues (%d dropped by section rules): %s",
-                len(sound_cues), _dropped,
-                ", ".join(f"{c['timestamp']:.1f}s:{c['type']}@{c['intensity']:.2f}"
-                          for c in sound_cues[:6]),
-            )
-        if not sound_cues:
-            _emphasis_words = [
-                {"start": w["start"]}
-                for w in words_with_confidence
-                if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
-            ] if words_with_confidence else []
-            virality_segments = [{
-                "start": 0,
-                "end": duration,
-                "hook_type": segment.get("hook_type", "insight_reveal"),
-                "text": segment.get("text", ""),
-                "emphasis_words": _emphasis_words,
-            }]
-            sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
-        if sound_cues:
-            sound_path = output_path.with_name(f"sound_{output_path.name}")
-            await sound_service.inject_sound_effects(
-                str(output_path),
-                str(sound_path),
-                sound_cues
-            )
-            if Path(sound_path).exists():
-                output_path = sound_path
-                logger.info(f"  ✓ {len(sound_cues)} sound effects added")
-    except Exception as sound_e:
-        logger.warning(f"  Sound design failed: {sound_e}")
+    # DISABLED: duplicate SFX pipeline — see Fix 5.
+    # SmartAudio (in creative_pipeline.py Step 7) handles all SFX injection
+    # with loudnorm + BGM mixing. Running SoundDesignService here too causes
+    # double SFX injection (audio artifacts, muddied mix).
+    # try:
+    #     sound_service = SoundDesignService()
+    #     sound_cues = []
+    #     if _sem_plan and _sem_plan.sfx_cues:
+    #         _dropped = 0
+    #         for c in _sem_plan.sfx_cues:
+    #             if not (0 < c.timestamp < duration):
+    #                 continue
+    #             if _render_plan and not _render_plan.is_sfx_allowed_at(c.sfx_type, c.timestamp):
+    #                 _dropped += 1
+    #                 continue
+    #             vol_mult = _render_plan.sfx_volume_at(c.timestamp) if _render_plan else 1.0
+    #             sound_cues.append({
+    #                 "timestamp": c.timestamp,
+    #                 "type":      c.sfx_type,
+    #                 "intensity": min(1.5, c.intensity * vol_mult),
+    #             })
+    #         logger.info(
+    #             "  [SFX] Director-filtered %d cues (%d dropped by section rules): %s",
+    #             len(sound_cues), _dropped,
+    #             ", ".join(f"{c['timestamp']:.1f}s:{c['type']}@{c['intensity']:.2f}"
+    #                       for c in sound_cues[:6]),
+    #         )
+    #     if not sound_cues:
+    #         _emphasis_words = [
+    #             {"start": w["start"]}
+    #             for w in words_with_confidence
+    #             if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
+    #         ] if words_with_confidence else []
+    #         virality_segments = [{
+    #             "start": 0,
+    #             "end": duration,
+    #             "hook_type": segment.get("hook_type", "insight_reveal"),
+    #             "text": segment.get("text", ""),
+    #             "emphasis_words": _emphasis_words,
+    #         }]
+    #         sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
+    #     if sound_cues:
+    #         sound_path = output_path.with_name(f"sound_{output_path.name}")
+    #         await sound_service.inject_sound_effects(
+    #             str(output_path),
+    #             str(sound_path),
+    #             sound_cues
+    #         )
+    #         if Path(sound_path).exists():
+    #             output_path = sound_path
+    #             logger.info(f"  ✓ {len(sound_cues)} sound effects added")
+    # except Exception as sound_e:
+    #     logger.warning(f"  Sound design failed: {sound_e}")
 
     # Step 4.10: Platform export — only re-encode when burning hardsubs.
     # When no subtitle file exists use stream copy (near-instant, no quality loss).

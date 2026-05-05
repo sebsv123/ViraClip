@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
+    """
+    Prefer the system-installed ffmpeg (typically has drawtext/freetype/etc.)
+    over the imageio-ffmpeg bundled binary which is a minimal build that
+    lacks libfreetype and therefore does not include the drawtext filter.
+    Falls back to imageio_ffmpeg only when no system ffmpeg is found.
+    """
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -857,7 +866,8 @@ class EditingPipeline:
                 logger.info(f"[EP] ✅ {video_path.name} → [{', '.join(effects)}]")
                 return output_path
             else:
-                logger.error(f"[EP] ❌ exit {proc.returncode}: {stderr.decode()[-500:]}")
+                logger.error(f"[EP] ❌ exit {proc.returncode}: {stderr.decode()[-2000:]}")
+                logger.error(f"[EP] filter_complex was: {fc}")
                 return video_path
         except asyncio.TimeoutError:
             logger.error(f"[EP] timeout on {video_path.name}")

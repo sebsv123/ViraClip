@@ -562,14 +562,15 @@ def _download_youtube_video_with_ytdlp(
             # (Python API does not expose these options, but they are required since 2025)
             output_template = str(downloader.temp_dir / f"{video_id}.%(ext)s")
 
-            # Locate ffmpeg for yt-dlp merge step (not in system PATH; use imageio_ffmpeg).
-            # Pass full binary path since the executable is named ffmpeg-win-x86_64-vX.Y.exe.
-            _ffmpeg_location = None
-            try:
-                import imageio_ffmpeg as _iio_ff
-                _ffmpeg_location = _iio_ff.get_ffmpeg_exe()
-            except Exception:
-                pass
+            # Locate ffmpeg for yt-dlp merge step. Prefer system ffmpeg (full build).
+            import shutil as _shutil
+            _ffmpeg_location = _shutil.which("ffmpeg")
+            if not _ffmpeg_location:
+                try:
+                    import imageio_ffmpeg as _iio_ff
+                    _ffmpeg_location = _iio_ff.get_ffmpeg_exe()
+                except Exception:
+                    pass
 
             cmd = [
                 YT_DLP_BIN,

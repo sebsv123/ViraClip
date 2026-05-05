@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()

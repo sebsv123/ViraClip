@@ -171,6 +171,22 @@ class SmartAudio:
         if not sfx_dir.exists():
             return []
 
+        # Defensive: convert raw dicts to TimelineEvent objects if needed
+        from ...domains.detection.multimodal_detector import TimelineEvent
+        _normalized: list = []
+        for ev in timeline_events:
+            if isinstance(ev, dict):
+                _normalized.append(TimelineEvent(
+                    t=ev.get("t", 0.0),
+                    type=ev.get("type", ""),
+                    strength=ev.get("strength", 0.0),
+                    duration=ev.get("duration", 0.0),
+                    payload=ev.get("payload", {}),
+                ))
+            else:
+                _normalized.append(ev)
+        timeline_events = _normalized
+
         result: list[_SfxEvent] = []
         # Limit SFX to prevent audio drowning (max 20 per clip)
         MAX_SFX = 20

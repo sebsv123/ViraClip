@@ -68,11 +68,13 @@ import {
   Shuffle,
   Music,
   Lightbulb,
+  SlidersHorizontal,
 } from "lucide-react";
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
 import Link from "next/link";
 import DynamicVideoPlayer from "@/components/dynamic-video-player";
+import { SuggestionStudio } from "@/components/suggestion-studio";
 
 interface Clip {
   id: string;
@@ -233,6 +235,10 @@ export default function TaskPage() {
   const [selectedTrack, setSelectedTrack] = useState<string>("");
   const [isApplyingMusic, setIsApplyingMusic] = useState(false);
   const [musicAppliedClipId, setMusicAppliedClipId] = useState<string | null>(null);
+
+  // Suggestion Studio state
+  const [suggestionStudioOpen, setSuggestionStudioOpen] = useState(false);
+  const [suggestionStudioClipId, setSuggestionStudioClipId] = useState<string | null>(null);
 
   // Interactive waiting experience states
   const [clickCount, setClickCount] = useState(0);
@@ -2092,6 +2098,18 @@ export default function TaskPage() {
                           <Music className="w-4 h-4" />
                           {musicAppliedClipId === clip.id ? "Applied!" : "Music"}
                         </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            setSuggestionStudioClipId(clip.id);
+                            setSuggestionStudioOpen(true);
+                          }}
+                          className="border-rose-500/30 text-rose-400 hover:bg-rose-500/10"
+                        >
+                          <SlidersHorizontal className="w-4 h-4" />
+                          Studio
+                        </Button>
                       </div>
 
                       {musicPickerClipId === clip.id && (
@@ -2261,6 +2279,16 @@ export default function TaskPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Suggestion Studio */}
+      <SuggestionStudio
+        isOpen={suggestionStudioOpen}
+        onClose={() => setSuggestionStudioOpen(false)}
+        clipId={suggestionStudioClipId}
+        taskId={task?.id || ""}
+        apiUrl={apiUrl}
+        sessionToken={session?.accessToken}
+      />
     </div>
   );
 }
