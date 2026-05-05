@@ -46,15 +46,44 @@ def cuda_available() -> bool:
 
 @lru_cache(maxsize=1)
 def nvenc_available() -> bool:
-    """True if FFmpeg in PATH supports h264_nvenc encoder."""
+    """True if h264_nvenc is listed AND actually works (runtime encode test)."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=10,
         )
-        return "h264_nvenc" in result.stdout
+        if "h264_nvenc" not in result.stdout:
+            return False
     except Exception:
         return False
+    # Runtime test: actually encode 3 frames to /dev/null
+    try:
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            test_out = f.name
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "color=black:size=64x64:duration=0.1:rate=30",
+                "-c:v", "h264_nvenc", "-frames:v", "3", test_out,
+            ],
+            capture_output=True, timeout=15,
+        )
+        ok = r.returncode == 0
+        try:
+            os.unlink(test_out)
+        except Exception:
+            pass
+        if not ok:
+            logger.warning("[GPU] h264_nvenc runtime test FAILED — falling back to libx264")
+        return ok
+    except Exception:
+        return False
+
+
+def clear_nvenc_cache() -> None:
+    """Invalidate nvenc_available() cache so next call re-probes the GPU."""
+    nvenc_available.cache_clear()
 
 
 @lru_cache(maxsize=1)

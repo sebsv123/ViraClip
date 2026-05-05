@@ -243,15 +243,60 @@ async def process_video_complete(
                 await cache_manager.set("ai_analysis", cache_key_mode, cache_payload)
                 logger.info(f"[CACHE] Saved AI analysis to smart cache ({processing_mode})")
 
-        # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
+        # Step 3.1: Elite Creative Direction — try Groq first, fall back to configured LLM
         if progress_callback:
             await progress_callback(55, "Preparing creative plan...", "processing")
-        from ...domains.ai.elite_ai_service import EliteCreativePlan as _EliteCreativePlan
-        elite_plan = _EliteCreativePlan(
+        from ...domains.ai.elite_ai_service import EliteAIService, EliteCreativePlan as _EliteCreativePlan
+        _fallback_plan = _EliteCreativePlan(
             clips=[], global_vibe="Standard", brand_consistency_plan="Default brand voice",
             custom_hashtags=[]
         )
-        logger.info("EliteAI: bypassed — using minimal plan (0 clips)")
+        elite_plan = _fallback_plan
+        try:
+            _elite_svc = EliteAIService()
+            elite_plan = await _elite_svc.generate_creative_plan(
+                transcript=transcript,
+                video_path=video_path,
+                duration=file_duration or 0.0,
+            )
+            if elite_plan and elite_plan.clips:
+                logger.info(f"EliteAI: Groq plan generated with {len(elite_plan.clips)} clips")
+            else:
+                raise RuntimeError("Groq returned empty plan")
+        except Exception as _elite_groq_e:
+            logger.warning(f"EliteAI: Groq failed ({_elite_groq_e}), trying configured LLM fallback")
+            try:
+                from ...domains.ai.llm_router import LLMRouter
+                from ...config import get_config as _get_cfg_elite
+                _cfg_elite = _get_cfg_elite()
+                _router = LLMRouter()
+                _llm_provider = _cfg_elite.llm or "openai"
+                _prompt = (
+                    "You are an elite creative director. Analyze this transcript and produce "
+                    "a creative plan with the best viral clips. Return JSON with 'clips' array "
+                    "where each clip has: start_time, end_time, text, hook, virality_score, theme."
+                )
+                _llm_result = await _router.route_and_generate(
+                    system_prompt=_prompt,
+                    user_message=transcript[:3000],
+                )
+                if _llm_result and isinstance(_llm_result, dict):
+                    _clips_data = _llm_result.get("clips", [])
+                    if _clips_data:
+                        elite_plan = _EliteCreativePlan(
+                            clips=[_EliteCreativePlan.Clip(**c) for c in _clips_data],
+                            global_vibe=_llm_result.get("global_vibe", "Standard"),
+                            brand_consistency_plan=_llm_result.get("brand_plan", "Default brand voice"),
+                            custom_hashtags=_llm_result.get("hashtags", ["viral", "trending"]),
+                        )
+                        logger.info(f"EliteAI: {_llm_provider} fallback generated {len(elite_plan.clips)} clips")
+                    else:
+                        raise RuntimeError("LLM returned no clips")
+                else:
+                    raise RuntimeError(f"LLM returned unexpected type: {type(_llm_result)}")
+            except Exception as _elite_fb_e:
+                logger.warning(f"EliteAI: all providers failed — using empty plan ({_elite_fb_e})")
+                elite_plan = _fallback_plan
         
         # Map Elite plans to the segments for metadata propagation
         elite_map = {
@@ -580,7 +625,6 @@ async def process_video_complete(
             raise Exception("video_path is None at return - download or resolution failed silently")
         
         return {
-            "segments": segments_json,
             "segments_to_render": segments_json,
             "video_path": str(video_path),
             "clips": clips_info,

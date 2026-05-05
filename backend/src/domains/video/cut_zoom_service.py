@@ -15,6 +15,9 @@ from typing import List, Dict, Any, Optional, Tuple
 
 
 def _get_ffmpeg_exe() -> str:
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -75,13 +78,21 @@ async def apply_cut_zooms(
         _, stderr = await proc.communicate()
         stderr_text = stderr.decode('utf-8', errors='replace')
         
-        # Look for pattern like "1920x1080" or "1080x1920"
         import re
+        # Parse dimensions: "1920x1080" or "1080x1920"
         match = re.search(r'(\d{3,4})x(\d{3,4})', stderr_text)
         if match:
             width, height = int(match.group(1)), int(match.group(2))
         else:
             raise ValueError("Could not parse dimensions from ffmpeg output")
+        # Parse actual fps to avoid zoompan stretching the video duration.
+        # zoompan's fps= sets OUTPUT frame rate; mismatching input fps duplicates/drops
+        # frames and changes clip duration, desyncing all downstream audio/subtitles.
+        fps_match = re.search(r'(\d+(?:\.\d+)?)\s+fps', stderr_text)
+        if fps_match:
+            fps = float(fps_match.group(1))
+        else:
+            fps = float(fps)  # keep caller default if probe fails
     except Exception as e:
         logger.warning(f"[cut_zoom] Could not get dimensions: {e}")
         width, height = 1080, 1920
@@ -98,14 +109,15 @@ async def apply_cut_zooms(
         logger.debug("[cut_zoom] No valid zoom intervals")
         return False
 
-    # Multi-interval expression: sum of between() results for each cut.
-    # FFmpeg's between() returns 0 or 1 — summing them and checking >0 lets us
-    # evaluate ALL intervals in a single zoompan pass without nested if().
+    # Multi-interval expression using frame counter 'in' (zoompan does not expose 't').
+    # Convert timestamps to frame numbers using the ACTUAL probed fps.
     sum_expr = "+".join(
-        f"between(t\\,{s:.3f}\\,{e:.3f})" for s, e in zoom_intervals
+        f"between(in,{int(s*fps)},{int(e*fps)})" for s, e in zoom_intervals
     )
-    zoom_expr = f"if(gt({sum_expr}\\,0)\\,{zoom_factor}\\,1)"
+    zoom_expr = f"if(gt({sum_expr},0),{zoom_factor},1)"
     
+    # fps= in zoompan sets the output frame rate.  It MUST match the input video fps
+    # exactly or zoompan will duplicate/drop frames changing the clip duration.
     zoompan_filter = (
         f"zoompan="
         f"zoom='{zoom_expr}':"
@@ -113,7 +125,7 @@ async def apply_cut_zooms(
         f"y='ih/2-(ih/zoom/2)':"
         f"d=1:"
         f"s={width}x{height}:"
-        f"fps={fps}"
+        f"fps={fps:.6f}"
     )
     
     # Apply zoom filter

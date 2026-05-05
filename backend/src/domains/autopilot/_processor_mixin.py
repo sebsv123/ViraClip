@@ -6,6 +6,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -330,6 +332,77 @@ class _ProcessorMixin:
                         return "hormozi"
                     return "tiktok"
 
+            # ── P2.1 PRE-EXTRACTION: Extract all segments at once (CRITICAL OPTIMIZATION) ──
+            # This is 50-100x faster than re-decoding video for each clip
+            # Uses ffmpeg -c copy (stream copy, no re-encoding)
+            # Typical time: 0.5-2s per segment vs 30-180s with MoviePy
+            await update_progress(68, f"Pre-extracting {total_clips} segments (fast)...", "processing")
+            
+            segments_temp_dir = Path(self.config.temp_dir) / "segments" / task_id
+            segments_temp_dir.mkdir(parents=True, exist_ok=True)
+
+            # Bug B fix: update each segment's end_time to match virality-based
+            # dynamic duration BEFORE extraction so the pre-extracted file has
+            # the correct length (45-120s, not the original LLM 30s).
+            # Also inject _source_video_path so subtitle generation can look up
+            # the AssemblyAI transcript cache keyed on the original video.
+
+            # Fix 3: probe actual video duration so Bug B never overshoots the file end
+            import subprocess as _sp_dur, json as _json_dur
+            _video_dur: Optional[float] = None
+            try:
+                _probe = _sp_dur.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_format", str(video_path)],
+                    capture_output=True, timeout=10
+                )
+                _video_dur = float(
+                    _json_dur.loads(_probe.stdout).get("format", {}).get("duration", 0) or 0
+                )
+                logger.debug(f"[pre-extract] Video duration: {_video_dur:.1f}s")
+            except Exception as _probe_e:
+                logger.warning(f"[pre-extract] Could not probe video duration: {_probe_e}")
+
+            for _seg in segments_to_render:
+                _seg["_source_video_path"] = str(video_path)
+                _vscore = _seg.get("virality_score", 50)
+                if _vscore >= 70:
+                    _tdur = 90.0
+                elif _vscore >= 50:
+                    _tdur = 60.0
+                else:
+                    _tdur = 45.0
+                _tdur = max(45.0, min(120.0, _tdur))
+                _s0 = parse_timestamp_to_seconds(_seg["start_time"])
+                _e0 = parse_timestamp_to_seconds(_seg["end_time"])
+                if (_e0 - _s0) < _tdur:
+                    _new_end = _s0 + _tdur
+                    # Cap at video end to prevent FFmpeg silent truncation
+                    if _video_dur and _new_end > _video_dur - 1.0:
+                        _new_end = max(_s0 + 10.0, _video_dur - 1.0)
+                        logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
+                    _seg["end_time"] = f"{int(_new_end) // 60:02d}:{int(_new_end) % 60:02d}"
+                    logger.debug(
+                        f"  [pre-extract] Segment updated to {_tdur:.0f}s "
+                        f"({_seg['start_time']} → {_seg['end_time']})"
+                    )
+
+            extracted_segment_paths = await extract_segments_fast(
+                video_path=video_path,
+                segments=segments_to_render,
+                output_dir=segments_temp_dir,
+                task_id=task_id
+            )
+            
+            # Log extraction success rate
+            successful_extractions = sum(1 for p in extracted_segment_paths if p is not None)
+            logger.info(
+                f"Pre-extraction complete: {successful_extractions}/{total_clips} segments "
+                f"extracted in {segments_temp_dir}"
+            )
+            
+            await update_progress(71, f"Rendering {total_clips} clips in parallel...", "processing")
+
             completed_renders = 0
             render_lock = asyncio.Lock()
 
@@ -511,77 +584,6 @@ class _ProcessorMixin:
             if should_cancel and await should_cancel():
                 raise Exception("Task cancelled")
 
-            # ── P2.1 PRE-EXTRACTION: Extract all segments at once (CRITICAL OPTIMIZATION) ──
-            # This is 50-100x faster than re-decoding video for each clip
-            # Uses ffmpeg -c copy (stream copy, no re-encoding)
-            # Typical time: 0.5-2s per segment vs 30-180s with MoviePy
-            await update_progress(68, f"Pre-extracting {total_clips} segments (fast)...", "processing")
-            
-            segments_temp_dir = Path(self.config.temp_dir) / "segments" / task_id
-            segments_temp_dir.mkdir(parents=True, exist_ok=True)
-
-            # Bug B fix: update each segment's end_time to match virality-based
-            # dynamic duration BEFORE extraction so the pre-extracted file has
-            # the correct length (45-120s, not the original LLM 30s).
-            # Also inject _source_video_path so subtitle generation can look up
-            # the AssemblyAI transcript cache keyed on the original video.
-
-            # Fix 3: probe actual video duration so Bug B never overshoots the file end
-            import subprocess as _sp_dur, json as _json_dur
-            _video_dur: Optional[float] = None
-            try:
-                _probe = _sp_dur.run(
-                    ["ffprobe", "-v", "quiet", "-print_format", "json",
-                     "-show_format", str(video_path)],
-                    capture_output=True, timeout=10
-                )
-                _video_dur = float(
-                    _json_dur.loads(_probe.stdout).get("format", {}).get("duration", 0) or 0
-                )
-                logger.debug(f"[pre-extract] Video duration: {_video_dur:.1f}s")
-            except Exception as _probe_e:
-                logger.warning(f"[pre-extract] Could not probe video duration: {_probe_e}")
-
-            for _seg in segments_to_render:
-                _seg["_source_video_path"] = str(video_path)
-                _vscore = _seg.get("virality_score", 50)
-                if _vscore >= 70:
-                    _tdur = 90.0
-                elif _vscore >= 50:
-                    _tdur = 60.0
-                else:
-                    _tdur = 45.0
-                _tdur = max(45.0, min(120.0, _tdur))
-                _s0 = parse_timestamp_to_seconds(_seg["start_time"])
-                _e0 = parse_timestamp_to_seconds(_seg["end_time"])
-                if (_e0 - _s0) < _tdur:
-                    _new_end = _s0 + _tdur
-                    # Cap at video end to prevent FFmpeg silent truncation
-                    if _video_dur and _new_end > _video_dur - 1.0:
-                        _new_end = max(_s0 + 10.0, _video_dur - 1.0)
-                        logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
-                    _seg["end_time"] = f"{int(_new_end) // 60:02d}:{int(_new_end) % 60:02d}"
-                    logger.debug(
-                        f"  [pre-extract] Segment updated to {_tdur:.0f}s "
-                        f"({_seg['start_time']} → {_seg['end_time']})"
-                    )
-
-            extracted_segment_paths = await extract_segments_fast(
-                video_path=video_path,
-                segments=segments_to_render,
-                output_dir=segments_temp_dir,
-                task_id=task_id
-            )
-            
-            # Log extraction success rate
-            successful_extractions = sum(1 for p in extracted_segment_paths if p is not None)
-            logger.info(
-                f"Pre-extraction complete: {successful_extractions}/{total_clips} segments "
-                f"extracted in {segments_temp_dir}"
-            )
-            
-            await update_progress(71, f"Rendering {total_clips} clips in parallel...", "processing")
-
             # Launch all renders concurrently (they run in thread pool workers)
             render_tasks = [_render_one(i, seg) for i, seg in enumerate(segments_to_render)]
             _raw_results = await asyncio.gather(*render_tasks, return_exceptions=True)
@@ -703,6 +705,55 @@ class _ProcessorMixin:
                 except Exception as _cp_e:
                     logger.warning(f"  exports copy failed: {_cp_e}")
 
+                # Suggestion Studio: persist render context + seed suggestions.
+                # Safe-by-design: failures here never break clip delivery.
+                try:
+                    from .render_context import build_clip_render_context
+                    _ctx = build_clip_render_context(
+                        clip_index=i,
+                        segment=segment,
+                        clip_info=clip_info,
+                        source_video_path=str(video_path),
+                        task_config={
+                            "font_family": font_family,
+                            "font_size": font_size,
+                            "font_color": font_color,
+                            "caption_template": caption_template,
+                            "output_format": output_format,
+                            "add_subtitles": add_subtitles,
+                            "include_broll": include_broll,
+                            "split_screen": split_screen,
+                            "target_platform": target_platform,
+                            "target_language": target_language,
+                            "auto_center_face": auto_center_face,
+                            "eye_contact_correction": eye_contact_correction,
+                            "jump_cut": jump_cut,
+                            "denoise_audio": denoise_audio,
+                            "contextual_overlays": contextual_overlays,
+                            "audio_ducking": audio_ducking,
+                            "task_id": task_id,
+                        },
+                    )
+                    await self.clip_repo.set_render_context(self.db, clip_id, _ctx)
+                except Exception as _ctx_e:
+                    logger.warning(
+                        "[render_context] failed for clip %s: %s", clip_id, _ctx_e
+                    )
+
+                try:
+                    from .suggestion_seeder import seed_suggestions_for_clip
+                    await seed_suggestions_for_clip(
+                        self.db,
+                        clip_id=clip_id,
+                        segment=segment,
+                        clip_info=clip_info,
+                    )
+                except Exception as _seed_e:
+                    logger.warning(
+                        "[suggestion_seeder] skipped for clip %s: %s",
+                        clip_id, _seed_e,
+                    )
+
                 # Notify frontend via SSE immediately
                 if clip_ready_callback:
                     clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
@@ -773,17 +824,16 @@ class _ProcessorMixin:
             # Cleanup temporary extracted segments to free disk space
             cleanup_extracted_segments(extracted_segment_paths)
 
-            # INTERMEDIATE FILE CLEANUP: Remove temp files but preserve final delivered clips
+            # IMMEDIATE CLEANUP: Remove ALL files after processing (user request)
+            # Don't keep videos for days - delete immediately after task completes
             if len(clip_ids) > 0:
                 try:
                     # Collect filenames of clips saved to DB so we never delete them
-                    # NOTE: use 'path' (final file) not 'filename' (original name before
-                    # pipeline prefixes like sub_, broll_, ep_, jc_ are added)
                     _saved_filenames = set()
-                    for _, _ci, _ in render_results:
-                        if _ci is not None and _ci.get("path"):
-                            _saved_filenames.add(Path(_ci["path"]).name)
-                        if _ci is not None and _ci.get("thumbnail_filename"):
+                    for _ci in render_results:
+                        if _ci and _ci.get("filename"):
+                            _saved_filenames.add(_ci["filename"])
+                        if _ci and _ci.get("thumbnail_filename"):
                             _saved_filenames.add(_ci["thumbnail_filename"])
 
                     kept, removed = 0, 0
@@ -797,19 +847,30 @@ class _ProcessorMixin:
                 except Exception as _ic_e:
                     logger.warning(f"[CLEANUP] Intermediate file cleanup failed: {_ic_e}")
 
-            # SAFE CLEANUP: Only delete source video when clips were successfully generated
-            clips_generated = len(clip_ids)
-            if clips_generated > 0 and video_path.exists():
-                try:
+            # AGGRESSIVE CLEANUP: Delete source video and ALL temp files immediately
+            # User requested: "no quiero que el sistema guarde videos"
+            try:
+                # Delete source video
+                if video_path.exists():
                     video_path.unlink(missing_ok=True)
-                    logger.info(f"[CLEANUP] Source video deleted after generating {clips_generated} clips: {video_path}")
-                except Exception as cleanup_e:
-                    logger.warning(f"[CLEANUP] Failed to delete source video: {cleanup_e}")
-            elif clips_generated == 0:
-                logger.warning(
-                    f"[CLEANUP] Source video PRESERVED — 0 clips generated. "
-                    f"Video remains at: {video_path} for retry."
-                )
+                    logger.info(f"[CLEANUP] Source video deleted: {video_path}")
+
+                # Delete the entire task temp directory to prevent accumulation
+                task_temp_dir = Path(self.config.temp_dir) / "clips" / task_id
+                if task_temp_dir.exists() and task_temp_dir != clips_output_dir:
+                    shutil.rmtree(task_temp_dir, ignore_errors=True)
+                    logger.info(f"[CLEANUP] Deleted task temp dir: {task_temp_dir}")
+
+                # Also clean up exports folder to prevent duplicates appearing
+                exports_dir = Path("/app/exports/clips")
+                if exports_dir.exists():
+                    for f in exports_dir.iterdir():
+                        if f.is_file() and f.stat().st_mtime < (time.time() - 3600):  # Older than 1 hour
+                            f.unlink(missing_ok=True)
+                            logger.debug(f"[CLEANUP] Deleted old export: {f.name}")
+
+            except Exception as _aggressive_cleanup_e:
+                logger.warning(f"[CLEANUP] Aggressive cleanup failed: {_aggressive_cleanup_e}")
 
             # Mark as completed
             await self.task_repo.update_task_status(
@@ -842,7 +903,7 @@ class _ProcessorMixin:
             return {
                 "task_id": task_id,
                 "clips_count": len(clip_ids),
-                "segments": result["segments"],
+                "segments_to_render": result["segments_to_render"],
                 "summary": result.get("summary"),
                 "key_topics": result.get("key_topics"),
             }

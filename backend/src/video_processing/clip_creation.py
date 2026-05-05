@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
-    """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
+    """Return ffmpeg binary path, preferring system ffmpeg (has drawtext/freetype)."""
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()

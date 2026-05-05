@@ -36,6 +36,23 @@ _FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))            
 _CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))               # cache stale days
 _BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "3"))             # max overlays per clip
 
+# Enriquecimiento de keywords para nicho seguros (ES->EN stock-friendly)
+INSURANCE_KEYWORD_MAP: Dict[str, List[str]] = {
+    "seguro de vida": ["life insurance family", "family protection"],
+    "seguro de coche": ["car insurance", "car accident road"],
+    "seguro del hogar": ["home insurance", "modern family home"],
+    "ahorro": ["financial planning", "saving money"],
+    "protección": ["family protection", "safety concept"],
+    "precio": ["budget planning", "insurance quote"],
+    "accidente": ["car accident", "medical support"],
+    "tranquilidad": ["peaceful family", "stress free home"],
+    "contrato": ["signing contract", "agreement handshake"],
+    "mutua": ["health insurance", "doctor consultation"],
+    "fallecimiento": ["family support", "life coverage"],
+    "cobertura": ["insurance coverage", "policy details"],
+    "indemnización": ["insurance claim", "compensation process"],
+}
+
 
 class BrollService:
     """AI-powered B-roll injection service."""
@@ -48,6 +65,29 @@ class BrollService:
     # ──────────────────────────────────────────────────────────────────────────
     # 1. KEYWORD EXTRACTION
     # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _insurance_enriched_keywords(text: str) -> List[str]:
+        """Return extra stock-friendly keywords when insurance concepts are present."""
+        text_lower = text.lower()
+        enriched: List[str] = []
+        for trigger, mapped in INSURANCE_KEYWORD_MAP.items():
+            if trigger in text_lower:
+                for kw in mapped:
+                    if kw not in enriched:
+                        enriched.append(kw)
+        return enriched
+
+    @staticmethod
+    def _merge_keywords(primary: List[str], fallback: List[str], limit: int = 6) -> List[str]:
+        merged: List[str] = []
+        for kw in primary + fallback:
+            kw = str(kw).strip()
+            if kw and kw not in merged:
+                merged.append(kw)
+            if len(merged) >= limit:
+                break
+        return merged
 
     async def extract_keywords(
         self,
@@ -63,10 +103,12 @@ class BrollService:
         needed for what the viewer can already see.
         """
         groq_key = os.getenv("GROQ_API_KEY", "")
+        insurance_enriched = self._insurance_enriched_keywords(text)
         if not groq_key:
             logger.warning("[BRoll] GROQ_API_KEY not set — falling back to first 3 nouns")
             keywords = self._simple_keyword_fallback(text)
-            return await self._apply_yolo_filter(keywords, video_path, clip_duration)
+            merged = self._merge_keywords(insurance_enriched, keywords)
+            return await self._apply_yolo_filter(merged, video_path, clip_duration)
 
         prompt = (
             "You are a video editor choosing B-roll footage. "
@@ -97,12 +139,14 @@ class BrollService:
                 keywords = json.loads(content)
                 if isinstance(keywords, list):
                     result = [str(k).strip() for k in keywords[:3] if k]
-                    logger.info(f"[BRoll] Keywords extracted: {result}")
-                    return await self._apply_yolo_filter(result, video_path, clip_duration)
+                    merged = self._merge_keywords(insurance_enriched, result)
+                    logger.info(f"[BRoll] Keywords extracted: {merged}")
+                    return await self._apply_yolo_filter(merged, video_path, clip_duration)
         except Exception as e:
             logger.warning(f"[BRoll] Keyword extraction failed: {e}")
         fallback = self._simple_keyword_fallback(text)
-        return await self._apply_yolo_filter(fallback, video_path, clip_duration)
+        merged = self._merge_keywords(insurance_enriched, fallback)
+        return await self._apply_yolo_filter(merged, video_path, clip_duration)
 
     async def _apply_yolo_filter(
         self,

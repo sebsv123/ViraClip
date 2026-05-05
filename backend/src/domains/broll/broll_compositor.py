@@ -34,6 +34,9 @@ from typing import Optional, Tuple
 
 
 def _get_ffmpeg_exe() -> str:
+    import shutil
+    if shutil.which("ffmpeg"):
+        return "ffmpeg"
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -102,6 +105,29 @@ def probe_duration(video_path: Path | str) -> float:
         return float(result.stdout.strip())
     except Exception:
         return 30.0
+
+
+def _build_overlay_alpha_expr(ts: float, end_ts: float, fade: float) -> str:
+    """
+    Build FFmpeg alpha expression for dissolve in/out around [ts, end_ts].
+    Uses escaped commas for filter-complex safety.
+    """
+    safe_fade = max(0.05, float(fade))
+    if (end_ts - ts) < (safe_fade * 2):
+        safe_fade = max(0.05, (end_ts - ts) / 2.0)
+
+    return (
+        "if(lt(t\\,{ts:.3f})\\,0\\,"
+        "if(lt(t\\,{in_end:.3f})\\,(t-{ts:.3f})/{fade:.3f}\\,"
+        "if(lt(t\\,{out_start:.3f})\\,1\\,"
+        "if(lt(t\\,{end:.3f})\\,({end:.3f}-t)/{fade:.3f}\\,0))))"
+    ).format(
+        ts=ts,
+        in_end=ts + safe_fade,
+        out_start=end_ts - safe_fade,
+        end=end_ts,
+        fade=safe_fade,
+    )
 
 
 # ── B-roll normalisation ──────────────────────────────────────────────────────
@@ -199,10 +225,34 @@ def normalize_broll(
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
         if result.returncode != 0:
-            logger.error("[BrollCompositor] normalize_broll failed: %s",
-                         result.stderr.decode()[-400:])
-            output_path.unlink(missing_ok=True)
-            return None
+            stderr_text = result.stderr.decode()
+            # If nvenc failed at runtime (CUDA_ERROR_UNKNOWN etc.), retry with libx264
+            if any(k in stderr_text for k in ("nvenc", "CUDA_ERROR", "cuInit")):
+                try:
+                    from gpu_utils import clear_nvenc_cache
+                    clear_nvenc_cache()
+                except Exception:
+                    pass
+                logger.warning("[BrollCompositor] nvenc failed, retrying with libx264 (%s…)",
+                               stderr_text[:80])
+                cpu_cmd: list = []
+                i = 0
+                while i < len(cmd):
+                    if cmd[i] == "-c:v" and i + 1 < len(cmd) and "nvenc" in cmd[i + 1]:
+                        cpu_cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+                        i += 2
+                        # Skip nvenc-specific flags (-preset, -rc, -cq, -qp, -b:v)
+                        while i < len(cmd) and cmd[i] in ("-preset", "-rc", "-cq", "-qp", "-b:v"):
+                            i += 2
+                    else:
+                        cpu_cmd.append(cmd[i])
+                        i += 1
+                result = subprocess.run(cpu_cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
+            if result.returncode != 0:
+                logger.error("[BrollCompositor] normalize_broll failed: %s",
+                             result.stderr.decode()[-400:])
+                output_path.unlink(missing_ok=True)
+                return None
         if not output_path.exists() or output_path.stat().st_size < 1000:
             output_path.unlink(missing_ok=True)
             return None
@@ -226,6 +276,7 @@ def compose_overlay(
     timestamp: float,
     duration: float = 4.5,
     fade: float = 0.6,
+    transition_type: str = "dissolve",
 ) -> bool:
     """
     Overlay *broll_path* on *main_path* starting at *timestamp* for *duration* seconds.
@@ -250,11 +301,18 @@ def compose_overlay(
         return False
 
     end_ts = timestamp + duration
-    # Overlay limpio: el B-roll tapa el video en el rango dado, audio del main continúa.
-    # Sin fade negro — imagen del B-roll tal cual, sin filtros de oscurecimiento.
+    alpha_expr = _build_overlay_alpha_expr(timestamp, end_ts, fade)
+    use_dissolve = transition_type == "dissolve"
+    overlay_args = (
+        f"enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':"
+        f"x=0:y=0"
+    )
+    if use_dissolve:
+        overlay_args += f":alpha='{alpha_expr}'"
+
     filter_complex = (
         f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
-        f"[0:v][bv]overlay=enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':x=0:y=0[out]"
+        f"[0:v][bv]overlay={overlay_args}[out]"
     )
 
     cmd = [
@@ -289,6 +347,62 @@ def compose_overlay(
         return False
 
 
+# ── Editable items overlay composition ─────────────────────────────────────────
+
+async def compose_overlay_items(
+    main_path: Path | str,
+    items: list,  # [{id, video_url/path, start_time, duration, position, opacity, scale}, ...]
+    output_path: Path | str,
+    fade: float = 0.6,
+    transition_type: str = "dissolve",
+) -> bool:
+    """Apply multiple B-roll overlays from editable items.
+
+    *items* is a list of dicts with:
+      - video_url/path: path or URL to B-roll video
+      - start_time: timestamp in seconds to place overlay
+      - duration: how long to show
+      - position: "fullscreen" | "corner" | "split"
+      - opacity: 0.0-1.0
+      - scale: 0.0-2.0
+
+    Returns True on success.
+    """
+    if not items:
+        return False
+
+    main_path = Path(main_path)
+    output_path = Path(output_path)
+
+    w, h, _fps = probe_dimensions(main_path)
+
+    # Build broll_pairs with position info
+    broll_pairs = []
+    for item in items:
+        path = item.get("video_url") or item.get("path") or item.get("broll_path")
+        if not path:
+            continue
+        broll_pairs.append({
+            "timestamp": item.get("start_time", 0),
+            "path": path,
+            "duration": item.get("duration", 3.0),
+            "position": item.get("position", "fullscreen"),
+            "opacity": item.get("opacity", 1.0),
+            "scale": item.get("scale", 1.0),
+            "x": item.get("x", 0),
+            "y": item.get("y", 0),
+        })
+
+    if not broll_pairs:
+        return False
+
+    # Import here to avoid circular imports
+    from .multi_compositor import compose_multi_with_positions
+    return await compose_multi_with_positions(
+        main_path, broll_pairs, output_path, fade, transition_type, w, h
+    )
+
+
 # ── Async multi-overlay (used by video_effects.py) ────────────────────────────
 
 async def compose_overlay_multi(
@@ -296,6 +410,7 @@ async def compose_overlay_multi(
     broll_pairs: list,          # [(timestamp, broll_path, duration), ...]
     output_path: Path | str,
     fade: float = 0.6,
+    transition_type: str = "dissolve",
 ) -> bool:
     """
     Apply multiple B-roll overlays in a single FFmpeg pass.
@@ -336,12 +451,20 @@ async def compose_overlay_multi(
 
     filter_parts: list[str] = []
     prev = "0:v"
+    use_dissolve = transition_type == "dissolve"
     for idx, (ts, _, dur) in enumerate(valid_pairs):
         end_ts = ts + dur
         out_tag = f"vout{idx}"
+        overlay_args = (
+            f"enable='between(t\\,{ts:.3f}\\,{end_ts:.3f})':"
+            f"x=0:y=0"
+        )
+        if use_dissolve:
+            alpha_expr = _build_overlay_alpha_expr(ts, end_ts, fade)
+            overlay_args += f":alpha='{alpha_expr}'"
         filter_parts.append(
             f"[{prev}][{idx + 1}:v]"
-            f"overlay=enable='between(t\\,{ts:.3f}\\,{end_ts:.3f})':x=0:y=0"
+            f"overlay={overlay_args}"
             f"[{out_tag}]"
         )
         prev = out_tag
@@ -361,16 +484,41 @@ async def compose_overlay_multi(
         str(output_path),
     ]
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
+    async def _run_cmd(run_cmd: list) -> tuple:
+        p = await asyncio.create_subprocess_exec(
+            *run_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, _err = await asyncio.wait_for(proc.communicate(), timeout=_FFMPEG_TIMEOUT)
+        out, err = await asyncio.wait_for(p.communicate(), timeout=_FFMPEG_TIMEOUT)
+        return p.returncode, err
+
+    try:
+        rc, _err = await _run_cmd(cmd)
+        if rc != 0:
+            err_text = _err.decode()
+            if any(k in err_text for k in ("nvenc", "CUDA_ERROR", "cuInit")):
+                try:
+                    from gpu_utils import clear_nvenc_cache
+                    clear_nvenc_cache()
+                except Exception:
+                    pass
+                logger.warning("[BrollCompositor] nvenc failed in multi-overlay, retrying with libx264")
+                cpu_cmd: list = []
+                j = 0
+                while j < len(cmd):
+                    if cmd[j] == "-c:v" and j + 1 < len(cmd) and "nvenc" in cmd[j + 1]:
+                        cpu_cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+                        j += 2
+                        while j < len(cmd) and cmd[j] in ("-preset", "-rc", "-cq", "-qp", "-b:v"):
+                            j += 2
+                    else:
+                        cpu_cmd.append(cmd[j])
+                        j += 1
+                rc, _err = await _run_cmd(cpu_cmd)
         for np_ in norm_paths:
             np_.unlink(missing_ok=True)
-        if proc.returncode != 0:
+        if rc != 0:
             logger.error("[BrollCompositor] compose_overlay_multi failed: %s",
                          _err.decode()[-400:])
             return False

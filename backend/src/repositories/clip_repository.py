@@ -14,6 +14,73 @@ logger = logging.getLogger(__name__)
 class ClipRepository:
     """Repository for clip-related database operations."""
 
+    # ------------------------------------------------------------------ render context
+    @staticmethod
+    async def set_render_context(
+        db: AsyncSession, clip_id: str, context: Dict[str, Any]
+    ) -> bool:
+        """Persist the JSON-serialisable render context for ``clip_id``.
+
+        Used by the Suggestion Studio applicator to reconstruct the original
+        render call (segment dict, source video path, task config) when
+        re-rendering with a subset of approved suggestions.
+        """
+        try:
+            payload = json.dumps(context, default=str)
+        except Exception as exc:
+            logger.warning(
+                "Failed to serialize render_context for clip %s: %s",
+                clip_id, exc,
+            )
+            return False
+
+        result = await db.execute(
+            sa_text(
+                """
+                UPDATE generated_clips
+                SET render_context = CAST(:ctx AS JSONB)
+                WHERE id = :id
+                """
+            ),
+            {"id": clip_id, "ctx": payload},
+        )
+        return (result.rowcount or 0) > 0
+
+    @staticmethod
+    async def get_render_context(
+        db: AsyncSession, clip_id: str
+    ) -> Optional[Dict[str, Any]]:
+        result = await db.execute(
+            sa_text(
+                "SELECT render_context FROM generated_clips WHERE id = :id"
+            ),
+            {"id": clip_id},
+        )
+        row = result.first()
+        if not row or row[0] is None:
+            return None
+        ctx = row[0]
+        # Handle both dict (asyncpg) and string (needs parsing)
+        if isinstance(ctx, dict):
+            return ctx
+        if isinstance(ctx, str):
+            try:
+                return json.loads(ctx)
+            except json.JSONDecodeError:
+                return None
+        return None
+
+    # ------------------------------------------------------------------ status
+    @staticmethod
+    async def set_status(db: AsyncSession, clip_id: str, status: str) -> bool:
+        result = await db.execute(
+            sa_text(
+                "UPDATE generated_clips SET status = :status WHERE id = :id"
+            ),
+            {"id": clip_id, "status": status},
+        )
+        return (result.rowcount or 0) > 0
+
     @staticmethod
     async def create_clip(
         db: AsyncSession,
