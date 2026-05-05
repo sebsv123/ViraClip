@@ -172,9 +172,13 @@ class SmartAudio:
             return []
 
         result: list[_SfxEvent] = []
+        # Limit SFX to prevent audio drowning (max 20 per clip)
+        MAX_SFX = 20
         for ev in timeline_events:
             if ev.strength < 0.6:
                 continue
+            if len(result) >= MAX_SFX:
+                break
             sfx_name = (
                 SFX_TRIGGER_MAP.get(ev.payload.get("category", ""))
                 or SFX_TRIGGER_MAP.get(ev.type, "")
@@ -212,7 +216,7 @@ class SmartAudio:
             sfx_labels = "".join(f"[sfx{i}]" for i in range(n))
             parts.append(
                 f"[0:a]{sfx_labels}amix=inputs={n + 1}:"
-                "duration=first:normalize=0[aout]"
+                "duration=first:normalize=1[aout]"
             )
 
             proc = await asyncio.create_subprocess_exec(
@@ -245,7 +249,7 @@ class SmartAudio:
                 "-stream_loop", "-1", "-i", str(bgm),
                 "-filter_complex",
                 f"[1:a]volume={BGM_VOLUME}[bgm];"
-                "[0:a][bgm]amix=inputs=2:duration=first:normalize=0[aout]",
+                "[0:a][bgm]amix=inputs=2:duration=first:normalize=1[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac",
                 str(tmp),

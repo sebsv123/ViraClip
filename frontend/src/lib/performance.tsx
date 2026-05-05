@@ -57,9 +57,10 @@ export function usePerformanceMonitor() {
     let clsValue = 0;
     const clsObserver = new PerformanceObserver((list) => {
       const entries = list.getEntries();
-      entries.forEach((entry: any) => {
-        if (!entry.hadRecentInput) {
-          clsValue += entry.value;
+      entries.forEach((entry) => {
+        const ls = entry as unknown as { hadRecentInput?: boolean; value: number };
+        if (!ls.hadRecentInput) {
+          clsValue += ls.value;
         }
       });
       setMetrics((prev) => ({ ...prev, cls: clsValue }));

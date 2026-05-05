@@ -37,7 +37,7 @@ interface Operation {
   userId: string;
   userName: string;
   operationType: string;
-  data: any;
+  data: Record<string, unknown>;
   timestamp: string;
 }
 
@@ -90,7 +90,7 @@ export function RealtimeCollaboration({
   }, [projectId, userId, userName, userColor]);
 
   // Handle incoming messages
-  const handleMessage = useCallback((message: any) => {
+  const handleMessage = useCallback((message: Record<string, unknown>) => {
     switch (message.type) {
       case "initial_state":
         // Set initial collaborators
@@ -201,7 +201,7 @@ export function RealtimeCollaboration({
 
   // Send operation to server
   const sendOperation = useCallback(
-    (operationType: string, data: any) => {
+    (operationType: string, data: Record<string, unknown>) => {
       if (ws && isConnected) {
         ws.send(
           JSON.stringify({

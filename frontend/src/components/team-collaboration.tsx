@@ -90,7 +90,7 @@ export function TeamCollaborationUI() {
     return () => ws.close();
   };
 
-  const handleRealtimeUpdate = (data: any) => {
+  const handleRealtimeUpdate = (data: Record<string, unknown>) => {
     if (data.type === "member_joined" || data.type === "member_left") {
       fetchProjects();
     }
