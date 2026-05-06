@@ -312,22 +312,21 @@ def compose_overlay(
     fade_out_d = min(fade, (end_ts - timestamp) / 2)
     fade_out_st = end_ts - fade_out_d
 
-    # GPU overlay pipeline: fade on CPU → hwupload_cuda → overlay_cuda → hwdownload
-    # overlay_cuda does NOT support alpha= expression, so fade is done via
-    # fade=alpha=1 on the CPU before uploading to GPU.
+    # CPU overlay pipeline: fade on CPU → overlay → yuv420p
+    # Avoids hwupload_cuda/overlay_cuda/hwdownload which can fail with
+    # incompatible hwframe formats from ComfyUI LTX outputs.
     _broll_prep = (
-        f"[1:v]"
-        f"setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+        f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
         f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
         f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
-        f"format=yuva420p,hwupload_cuda[bv_gpu]"
+        f"format=yuva420p[bv_faded]"
     )
     filter_complex = (
-        f"[0:v]hwupload_cuda[main_gpu];"
         f"{_broll_prep};"
-        f"[main_gpu][bv_gpu]overlay_cuda="
-        f"enable='between(t,{timestamp:.3f},{end_ts:.3f})':x=0:y=0[out_gpu];"
-        f"[out_gpu]hwdownload,format=yuv420p[out]"
+        f"[0:v][bv_faded]overlay="
+        f"enable='between(t,{timestamp:.3f},{end_ts:.3f})':"
+        f"x=0:y=0:format=auto,"
+        f"format=yuv420p[out]"
     )
 
     cmd = [
