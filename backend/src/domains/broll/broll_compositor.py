@@ -210,11 +210,14 @@ def normalize_broll(
             str(output_path),
         ]
     else:
+        # GPU decode + scale for video inputs (falls back to CPU if nvenc fails)
         cmd = [
             _get_ffmpeg_exe(), "-y",
+            "-hwaccel", "cuda",
+            "-hwaccel_output_format", "cuda",
             "-i", str(broll_path),
             "-t", str(duration),
-            "-vf", vf,
+            "-vf", f"scale_cuda={target_w}:{target_h},hwdownload,format=yuv420p,crop={target_w}:{target_h},setsar=1",
             "-an",
             *_gpu_codec("medium"),
             "-pix_fmt", "yuv420p",
