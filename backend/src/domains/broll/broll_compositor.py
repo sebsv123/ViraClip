@@ -476,20 +476,24 @@ async def compose_overlay_multi(
 
     filter_parts: list[str] = []
     prev = "0:v"
-    use_dissolve = transition_type == "dissolve"
     for idx, (ts, _, dur) in enumerate(valid_pairs):
         end_ts = ts + dur
         out_tag = f"vout{idx}"
-        overlay_args = (
-            f"enable='between(t,{ts:.3f},{end_ts:.3f})':"
-            f"x=0:y=0"
-        )
-        if use_dissolve:
-            alpha_expr = _build_overlay_alpha_expr(ts, end_ts, fade)
-            overlay_args += f":alpha='{alpha_expr}'"
+        fade_in_d  = min(fade, dur / 2)
+        fade_out_d = min(fade, dur / 2)
+        fade_out_st = end_ts - fade_out_d
+        # CPU fade on B-roll stream before overlay (avoids broken alpha= expression)
         filter_parts.append(
-            f"[{prev}][{idx + 1}:v]"
-            f"overlay={overlay_args}"
+            f"[{idx + 1}:v]setpts=PTS-STARTPTS+{ts:.3f}/TB,"
+            f"fade=t=in:st={ts:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"format=yuva420p[bv{idx}_faded]"
+        )
+        filter_parts.append(
+            f"[{prev}][bv{idx}_faded]"
+            f"overlay="
+            f"enable='between(t,{ts:.3f},{end_ts:.3f})':"
+            f"x=0:y=0:format=auto"
             f"[{out_tag}]"
         )
         prev = out_tag
