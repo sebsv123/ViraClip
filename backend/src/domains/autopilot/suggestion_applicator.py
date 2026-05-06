@@ -201,9 +201,15 @@ class SuggestionApplicator:
         _position = payload.get("position", "fullscreen")
         inputs.append(_broll_path)
         _broll_idx = len(inputs) - 1
+        # Scale B-roll to main video dimensions before overlay to prevent
+        # small picture-in-picture rendering in the corner
+        _w = clip_info.get("width", 1080)
+        _h = clip_info.get("height", 1920)
         if _position == "fullscreen":
             _overlay = (
-                f"[{input_labels[0]}][{_broll_idx}:v]overlay="
+                f"[{_broll_idx}:v]scale={_w}:{_h}:force_original_aspect_ratio=increase,"
+                f"crop={_w}:{_h}[broll_scaled];"
+                f"[{input_labels[0]}][broll_scaled]overlay="
                 f"enable='between(t,{_start},{_start+_duration})':"
                 f"x=0:y=0"
             )
@@ -212,7 +218,8 @@ class SuggestionApplicator:
             _x = 20 if "left" in _position else "main_w-overlay_w-20"
             _y = 20 if "top" in _position else "main_h-overlay_h-20"
             _overlay = (
-                f"[{input_labels[0]}][{_broll_idx}:v]overlay="
+                f"[{_broll_idx}:v]scale={_w//3}:{_h//3}[broll_scaled];"
+                f"[{input_labels[0]}][broll_scaled]overlay="
                 f"x={_x}:y={_y}:enable='between(t,{_start},{_start+_duration})'"
             )
             input_labels = ["[v]"]
