@@ -210,7 +210,7 @@ class BrollService:
         # Antes se pedía "broll_transition" que devolvía main+xfade+broll;
         # ahora se pide "broll_generate" (orchestrator.generate_broll_with_ltx)
         # y guardamos el resultado en el cache local por keyword.
-        if os.getenv("BROLL_USE_LTX", "true").lower() == "true" and task_id:
+        if os.getenv("BROLL_USE_LTX", "false").lower() == "true" and task_id:
             try:
                 prompt = f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical"
                 logger.info(f"🎬 Generating B-roll with LTX-Video: '{keyword}'")
