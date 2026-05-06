@@ -56,7 +56,7 @@ except ImportError:
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 _FFPROBE_TIMEOUT = 15   # seconds
-_FFMPEG_TIMEOUT  = 180  # seconds per overlay
+_FFMPEG_TIMEOUT  = 300  # seconds per overlay
 
 
 # ── Dimension probing ─────────────────────────────────────────────────────────
@@ -439,17 +439,28 @@ async def compose_overlay_multi(
 
     w, h, _fps = probe_dimensions(main_path)
 
-    # Normalise each B-roll clip
+    # Normalise all B-rolls in parallel with semaphore (max 3 concurrent FFmpeg processes)
+    _NORMALIZE_SEM = asyncio.Semaphore(3)
+    async def _normalize_with_sem(bp, dur):
+        async with _NORMALIZE_SEM:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, lambda: normalize_broll(Path(bp), w, h, duration=dur, fade=fade)
+            )
+
+    norm_tasks = [
+        _normalize_with_sem(bp, dur) for ts, bp, dur in broll_pairs
+    ]
+    norm_results = await asyncio.gather(*norm_tasks, return_exceptions=True)
     norm_paths: list[Path] = []
     valid_pairs: list[tuple] = []
-    for ts, bp, dur in broll_pairs:
-        np_ = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda bp=bp, dur=dur: normalize_broll(Path(bp), w, h, duration=dur, fade=fade),
-        )
-        if np_:
-            norm_paths.append(np_)
-            valid_pairs.append((ts, np_, dur))
+    for i, (ts, bp, dur) in enumerate(broll_pairs):
+        result = norm_results[i]
+        if isinstance(result, Exception) or result is None:
+            logger.warning(f"[BrollCompositor] normalize failed for {bp}: {result}")
+            continue
+        norm_paths.append(result)
+        valid_pairs.append((ts, result, dur))
 
     if not valid_pairs:
         logger.warning("[BrollCompositor] compose_overlay_multi: no valid B-rolls after normalise")
