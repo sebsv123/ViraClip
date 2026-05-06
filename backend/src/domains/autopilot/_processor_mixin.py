@@ -828,7 +828,7 @@ class _ProcessorMixin:
                         clip_id, _aa_e,
                     )
 
-                # Notify frontend via SSE immediately
+                # Notify frontend via SSE after enhance
                 if clip_ready_callback:
                     clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
                     if clip_record:
@@ -902,13 +902,19 @@ class _ProcessorMixin:
             # Don't keep videos for days - delete immediately after task completes
             if len(clip_ids) > 0:
                 try:
-                    # Collect filenames of clips saved to DB so we never delete them
+                    # Collect filenames of clips saved to DB so we never delete them.
+                    # render_results is List[Tuple[int, Optional[Dict], float]],
+                    # so each element is (index, info_dict, elapsed).
                     _saved_filenames = set()
-                    for _ci in render_results:
-                        if _ci and _ci.get("filename"):
-                            _saved_filenames.add(_ci["filename"])
-                        if _ci and _ci.get("thumbnail_filename"):
-                            _saved_filenames.add(_ci["thumbnail_filename"])
+                    for _idx, _ci, _elapsed in render_results:
+                        if _ci and isinstance(_ci, dict):
+                            if _ci.get("filename"):
+                                _saved_filenames.add(_ci["filename"])
+                            if _ci.get("thumbnail_filename"):
+                                _saved_filenames.add(_ci["thumbnail_filename"])
+                            if _ci.get("path"):
+                                _saved_filenames.add(Path(_ci["path"]).name)
+                                _saved_filenames.add(f"enhanced_{Path(_ci['path']).name}")
 
                     kept, removed = 0, 0
                     for f in clips_output_dir.iterdir():
