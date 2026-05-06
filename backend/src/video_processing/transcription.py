@@ -55,6 +55,28 @@ _TRANSCRIPT_REDIS_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
 _whisper_model = None
 _whisper_model_config = None
 
+# AssemblyAI transcriber singleton
+_assemblyai_transcriber = None
+
+def get_assemblyai_transcriber():
+    """Get or create singleton AssemblyAI transcriber."""
+    global _assemblyai_transcriber
+    if _assemblyai_transcriber is None:
+        api_key = os.environ.get("ASSEMBLY_AI_API_KEY", "")
+        if api_key:
+            try:
+                import assemblyai as aai
+                aai.settings.api_key = api_key
+                _assemblyai_transcriber = aai.Transcriber()
+                logger.info("[Transcription] AssemblyAI transcriber initialized (primary)")
+            except Exception as e:
+                logger.warning("[Transcription] Failed to init AssemblyAI: %s — will use Whisper fallback", e)
+                _assemblyai_transcriber = False  # Sentinel: don't retry
+        else:
+            _assemblyai_transcriber = False
+            logger.info("[Transcription] No ASSEMBLY_AI_API_KEY — using Whisper GPU (fallback)")
+    return _assemblyai_transcriber if _assemblyai_transcriber else None
+
 
 async def get_redis_transcript_cache(video_hash: str) -> Optional[Dict[str, Any]]:
     """Get transcript from Redis cache by video hash."""
@@ -306,8 +328,57 @@ async def get_video_transcript(
                 logger.info(f"[TRANSCRIPTION] File cache HIT - skipping Whisper for {video_path.name}")
                 return text, file_cached
     
-    logger.info(f"[TRANSCRIPTION] Cache MISS - transcribing with faster-whisper: {video_path}")
+    # Try AssemblyAI first (primary), fall back to Whisper GPU
+    _aai = get_assemblyai_transcriber()
+    if _aai:
+        logger.info(f"[TRANSCRIPTION] Transcribing with AssemblyAI (primary): {video_path.name}")
+        try:
+            import assemblyai as aai
+            _config = aai.TranscriptionConfig(
+                speaker_labels=True,
+                language_code="es",
+                punctuate=True,
+                format_text=True,
+            )
+            _transcript = _aai.transcribe(str(video_path), config=_config)
+            if _transcript.status == aai.TranscriptStatus.error:
+                logger.error(f"[TRANSCRIPTION] AssemblyAI error: {_transcript.error} — falling back to Whisper")
+            else:
+                text = _transcript.text or ""
+                words_data = []
+                for word in _transcript.words:
+                    words_data.append({
+                        "text": word.text,
+                        "start": word.start,
+                        "end": word.end,
+                        "confidence": word.confidence,
+                        "speaker": getattr(word, "speaker", None),
+                    })
+                utterances_data = []
+                for utt in (_transcript.utterances or []):
+                    utterances_data.append({
+                        "text": utt.text,
+                        "start": utt.start,
+                        "end": utt.end,
+                        "speaker": getattr(utt, "speaker", None),
+                        "words": [{"text": w.text, "start": w.start, "end": w.end, "confidence": w.confidence, "speaker": getattr(w, "speaker", None)} for w in (utt.words or [])],
+                    })
+                transcript_data = {
+                    "version": _TRANSCRIPT_CACHE_SCHEMA_VERSION,
+                    "words": words_data,
+                    "utterances": utterances_data,
+                    "text": text,
+                }
+                logger.info(f"[TRANSCRIPTION] AssemblyAI complete: {len(text)} chars, {len(words_data)} words")
+                # Cache to Redis
+                if use_cache and video_hash:
+                    await set_redis_transcript_cache(video_hash, transcript_data)
+                return text, transcript_data
+        except Exception as _aai_e:
+            logger.warning(f"[TRANSCRIPTION] AssemblyAI failed ({_aai_e}) — falling back to Whisper")
     
+    # Fallback: faster-whisper GPU
+    logger.info(f"[TRANSCRIPTION] Transcribing with faster-whisper (fallback): {video_path.name}")
     model = get_whisper_model()
     
     try:
