@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 import subprocess
 import tempfile
 
-from ...video_processing.utils import get_ffmpeg_exe
+from ...domains.broll.broll_compositor import _get_ffmpeg_exe as get_ffmpeg_exe
 from ...config import get_config
 from ... import gpu_utils
 
