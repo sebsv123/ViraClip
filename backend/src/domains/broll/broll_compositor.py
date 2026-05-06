@@ -210,17 +210,19 @@ def normalize_broll(
             str(output_path),
         ]
     else:
-        # GPU decode + scale for video inputs (falls back to CPU if nvenc fails)
+        # CPU decode for video inputs (ComfyUI LTX outputs use nv12/cuda hwframes
+        # that break hwdownload→yuv420p. Force software decode with -hwaccel none.)
         cmd = [
             _get_ffmpeg_exe(), "-y",
-            "-hwaccel", "cuda",
-            "-hwaccel_output_format", "cuda",
+            "-hwaccel", "none",
             "-i", str(broll_path),
             "-t", str(duration),
-            "-vf", f"scale_cuda={target_w}:{target_h},hwdownload,format=yuv420p,crop={target_w}:{target_h},setsar=1",
-            "-an",
-            *_gpu_codec("medium"),
+            "-vf", f"scale=trunc(iw/2)*2:trunc(ih/2)*2",
             "-pix_fmt", "yuv420p",
+            "-c:v", "libx264",
+            "-crf", "18",
+            "-preset", "fast",
+            "-an",
             "-movflags", "+faststart",
             str(output_path),
         ]
