@@ -27,22 +27,54 @@ def _get_ffmpeg_exe() -> str:
 
 
 def _test_nvenc() -> bool:
-    """Test if h264_nvenc encoder is actually usable by FFmpeg."""
+    """Test if nvenc_h264 encoder is actually usable by FFmpeg.
+    Uses 256x256 minimum dimensions (NVENC requires >= 256x256)."""
+    import tempfile, os
+    test_out = ""
     try:
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            test_out = f.name
         r = subprocess.run(
-            [_get_ffmpeg_exe(), "-f", "lavfi", "-i", "nullsrc=s=1x1:d=0.1",
-             "-c:v", "h264_nvenc", "-f", "null", "-"],
-            capture_output=True, timeout=5
+            [_get_ffmpeg_exe(), "-y", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=black:s=256x256:r=1",
+             "-t", "1", "-c:v", "nvenc_h264", "-pix_fmt", "yuv420p", test_out],
+            capture_output=True, timeout=10
         )
-        return r.returncode == 0
-    except Exception:
+        if r.returncode == 0:
+            logger.info("[GPU] nvenc_h264 runtime test PASSED in clip_creation")
+            return True
+        else:
+            stderr = r.stderr.decode(errors="replace") if r.stderr else ""
+            logger.warning(f"[GPU] nvenc_h264 test FAILED: {stderr[:150]}")
+            return False
+    except Exception as e:
+        logger.warning(f"[GPU] nvenc_h264 test error: {e}")
         return False
+    finally:
+        if test_out and os.path.exists(test_out):
+            try:
+                os.unlink(test_out)
+            except Exception:
+                pass
 
 _PLATFORM_VF: dict = {
     "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
     "reels":    "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
     "shorts":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
     "all":      "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
+    "original": None,
+}
+
+# Safe-zone crop variants: shift crop Y upward so face sits in upper 40%
+# instead of geometric center, leaving room for subtitles in the lower third.
+# The ASS style uses MarginV=400 (bottom margin), so the lower ~20% of the
+# frame is reserved for text. Shifting the crop Y by -0.10*ih (10% of height)
+# moves the face up by ~192px in a 1920px frame.
+_PLATFORM_VF_SAFE: dict = {
+    "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:ih*0.10,scale=1080:1920",
+    "reels":    "crop=ih*9/16:ih:(iw-ih*9/16)/2:ih*0.10,scale=1080:1920",
+    "shorts":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:ih*0.10,scale=1080:1920",
+    "all":      "crop=ih*9/16:ih:(iw-ih*9/16)/2:ih*0.10,scale=1080:1920",
     "original": None,
 }
 
@@ -196,6 +228,7 @@ def create_optimized_clip(
     elite_metadata: Optional[Dict[str, Any]] = None,
     gpu_encoding_settings: Optional[Dict[str, Any]] = None,
     target_platform: str = "tiktok",
+    subtitle_safe_zone: bool = True,
 ) -> bool:
     """
     Create a high-quality clip with resource management and effects.
@@ -266,7 +299,10 @@ def create_optimized_clip(
             temp_segment_path = video_path.parent / f"temp_segment_{uuid.uuid4().hex}.mp4"
 
             logger.info(f"🔧 FFmpeg pre-extraction: {duration:.1f}s segment from {video_path.name}")
-            _vf = _PLATFORM_VF.get(target_platform, _PLATFORM_VF["tiktok"])
+            # Use safe-zone crop when subtitles are enabled, shifting face upward
+            # so ASS subtitles (MarginV=400) don't overlap with the speaker.
+            _vf_dict = _PLATFORM_VF_SAFE if (subtitle_safe_zone and add_subtitles) else _PLATFORM_VF
+            _vf = _vf_dict.get(target_platform, _vf_dict["tiktok"])
             _ffmpeg_base = [
                 _get_ffmpeg_exe(), "-y",
                 "-ss", str(start_time),
@@ -277,10 +313,10 @@ def create_optimized_clip(
             ]
             if _vf:
                 _ffmpeg_base += ["-vf", _vf]
-            ffmpeg_cmd = _ffmpeg_base + [
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
+            # Auto-detect encoder: NVENC (GPU) → libx264 (CPU fallback)
+            from ..gpu_utils import ffmpeg_codec_flags as _gpu_flags
+            _enc_flags = _gpu_flags("high")
+            ffmpeg_cmd = _ffmpeg_base + _enc_flags + [
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-movflags", "+faststart",
@@ -479,15 +515,15 @@ def create_optimized_clip(
                 from ..gpu_utils import get_ffmpeg_video_codec_args as _get_enc
                 _enc = _get_enc("high")
                 # Proactive NVENC test: if nvenc fails, fall back to libx264
-                USE_NVENC = _enc["codec"] == "h264_nvenc" and _test_nvenc()
+                USE_NVENC = _enc["codec"] == "nvenc_h264" and _test_nvenc()
                 if USE_NVENC:
                     # Use NVENC-compatible params for MoviePy (no -rc constqp)
                     encoding_settings = {
-                        "codec": "h264_nvenc",
+                        "codec": "nvenc_h264",
                         "preset": _enc.get("preset", "p4"),
                         "ffmpeg_params": ["-rc", "vbr", "-cq", "20", "-pix_fmt", "yuv420p"],
                     }
-                    logger.info(f"Using GPU encoding: h264_nvenc (tested OK)")
+                    logger.info(f"Using GPU encoding: nvenc_h264 (tested OK)")
                 else:
                     # Safe fallback to libx264
                     encoding_settings = {

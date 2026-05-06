@@ -104,6 +104,7 @@ async def list_tasks(
         raise HTTPException(status_code=500, detail=f"Error retrieving tasks: {str(e)}")
 
 
+@router.post("", dependencies=[Depends(task_rate_limit_dependency)])
 @router.post("/", dependencies=[Depends(task_rate_limit_dependency)])
 async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -1910,6 +1911,76 @@ async def stream_task_progress(task_id: str, request: Request):
             await redis_client.aclose()
 
     return EventSourceResponse(event_generator())
+
+
+@router.post("/{task_id}/retry")
+async def retry_task(
+    task_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retry a failed task by re-enqueuing it in ARQ.
+    
+    Only tasks with status 'error' can be retried.
+    Resets the task status to 'pending' and pushes it back to the queue.
+    """
+    from ...repositories.task_repository import TaskRepository
+    from ...config import get_config
+    import arq.connections
+    import arq.jobs
+    
+    task_repo = TaskRepository()
+    
+    # Verify task exists and is in error state
+    task = await task_repo.get_task(db, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Ownership check
+    user_id = _get_user_id_from_headers(request)
+    if task.user_id != user_id:
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    if task.status != "error":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task status is '{task.status}', only 'error' tasks can be retried"
+        )
+    
+    # Reset task to pending
+    await task_repo.update_task_status(
+        db, task_id, "pending",
+        progress=0,
+        progress_message="Retrying...",
+    )
+    
+    # Re-enqueue in ARQ
+    config = get_config()
+    try:
+        pool = await arq.connections.create_pool(
+            arq.connections.RedisSettings(
+                host=config.redis_host,
+                port=config.redis_port,
+                password=config.redis_password or None,
+            )
+        )
+        job = await arq.jobs.Job.enqueue(
+            pool,
+            "process_task",
+            _job_id=task_id,
+            _queue="arq:queue",
+            task_id=task_id,
+            url=task.url,
+            source_type=task.source_type,
+        )
+        await pool.aclose()
+        logger.info(f"Task {task_id} re-enqueued for retry (job={job.job_id})")
+    except Exception as e:
+        logger.error(f"Failed to re-enqueue task {task_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to enqueue retry: {e}")
+    
+    return {"status": "ok", "message": f"Task {task_id} re-enqueued for retry"}
 
 
 @router.get("/debug/queue-status")

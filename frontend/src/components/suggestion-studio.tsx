@@ -62,6 +62,19 @@ interface SuggestionStudioProps {
   sessionToken?: string;
 }
 
+interface EditingItem {
+  id: string;
+  start_time: number;
+  duration: number;
+  position?: string;
+  video_url?: string;
+  opacity?: number;
+  scale?: number;
+  keywords?: string[];
+  source?: string;
+  [key: string]: unknown;
+}
+
 const KIND_ICONS: Record<string, React.ReactNode> = {
   hook_reorder: <Zap className="w-4 h-4" />,
   trim_offsets: <Clock className="w-4 h-4" />,
@@ -139,7 +152,7 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
   const [previewReady, setPreviewReady] = useState(false);
   const [jobStatus, setJobStatus] = useState<{ preview?: string; finalize?: string }>({});
   const [expandedId, setExpandedId] = useState<string | null>(null);  // Granular editing mode
-  const [editingItems, setEditingItems] = useState<Record<string, any[]>>({});  // Local edits
+  const [editingItems, setEditingItems] = useState<Record<string, EditingItem[]>>({});  // Local edits
   
   // Stock video search state
   const [stockQuery, setStockQuery] = useState("");
@@ -267,7 +280,7 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
     }));
   };
 
-  const addItem = (suggestionId: string, template: Record<string, unknown>) => {
+  const addItem = (suggestionId: string, template: Partial<EditingItem>) => {
     const newItem = {
       id: `manual_${Date.now()}`,
       ...template,
@@ -311,7 +324,7 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
       });
       if (!res.ok) throw new Error("Search failed");
       const data = await res.json();
-      setStockResults(data.videos?.map((v: Record<string, unknown>) => (
+      setStockResults(data.videos?.map((v: {id: string | number; video_files?: {link?: string}[]; url?: string; duration: number; width: number; height: number; user?: unknown; image?: string}) => ({
         id: v.id,
         video_url: v.video_files?.[0]?.link || v.url,
         duration: v.duration,
@@ -328,7 +341,7 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
     }
   };
 
-  const addStockVideoAsBroll = (suggestionId: string, video: Record<string, unknown>, startTime: number) => {
+  const addStockVideoAsBroll = (suggestionId: string, video: {id: string | number; video_url?: string; duration?: number}, startTime: number) => {
     const newItem = {
       id: `stock_${video.id}_${Date.now()}`,
       video_url: video.video_url,
@@ -656,7 +669,7 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
                                     <div className="flex items-center gap-1 mb-2 text-[10px] text-gray-500">
                                       <span>0s</span>
                                       <div className="flex-1 h-1 bg-gray-700 rounded-full overflow-hidden">
-                                        {editingItems[suggestion.id]?.map((item: Record<string, unknown>) => (
+                                        {editingItems[suggestion.id]?.map((item: EditingItem) => (
                                           <div
                                             key={item.id}
                                             className="h-full bg-purple-500/60 absolute"
@@ -674,9 +687,9 @@ export function SuggestionStudio({ isOpen, onClose, clipId, taskId, apiUrl, sess
 
                                     {/* Editable items list */}
                                     <div className="space-y-2 max-h-48 overflow-y-auto">
-                                      {editingItems[suggestion.id]?.map((item: Record<string, unknown>) => (
-                                        <div key={item.id as string} className="flex items-center gap-2 text-xs bg-gray-800/50 rounded p-2">
-                                          <span className="text-gray-500 w-16 truncate">{item.id as string}</span>
+                                      {editingItems[suggestion.id]?.map((item: EditingItem) => (
+                                        <div key={item.id} className="flex items-center gap-2 text-xs bg-gray-800/50 rounded p-2">
+                                          <span className="text-gray-500 w-16 truncate">{item.id}</span>
                                           <div className="flex items-center gap-1">
                                             <span className="text-gray-500">@</span>
                                             <input

@@ -277,6 +277,7 @@ def compose_overlay(
     duration: float = 4.5,
     fade: float = 0.6,
     transition_type: str = "dissolve",
+    lut_vf: str = "",
 ) -> bool:
     """
     Overlay *broll_path* on *main_path* starting at *timestamp* for *duration* seconds.
@@ -284,7 +285,8 @@ def compose_overlay(
     Steps:
       1. Probe main clip dimensions
       2. Normalise B-roll to those exact dimensions
-      3. Composite with FFmpeg overlay filter
+      3. Apply same LUT grade to B-roll (if provided) for visual consistency
+      4. Composite with FFmpeg overlay filter
 
     Returns True on success.
     """
@@ -304,14 +306,23 @@ def compose_overlay(
     alpha_expr = _build_overlay_alpha_expr(timestamp, end_ts, fade)
     use_dissolve = transition_type == "dissolve"
     overlay_args = (
-        f"enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':"
+        f"enable='between(t,{timestamp:.3f},{end_ts:.3f})':"
         f"x=0:y=0"
     )
     if use_dissolve:
         overlay_args += f":alpha='{alpha_expr}'"
 
+    # Apply LUT to B-roll stream before overlay for visual consistency
+    if lut_vf:
+        _broll_filter = f"[1:v]{lut_vf}[broll_graded];"
+        _overlay_input = "[broll_graded]"
+    else:
+        _broll_filter = ""
+        _overlay_input = "[1:v]"
+
     filter_complex = (
-        f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
+        f"{_broll_filter}"
+        f"{_overlay_input}setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
         f"[0:v][bv]overlay={overlay_args}[out]"
     )
 
@@ -456,7 +467,7 @@ async def compose_overlay_multi(
         end_ts = ts + dur
         out_tag = f"vout{idx}"
         overlay_args = (
-            f"enable='between(t\\,{ts:.3f}\\,{end_ts:.3f})':"
+            f"enable='between(t,{ts:.3f},{end_ts:.3f})':"
             f"x=0:y=0"
         )
         if use_dissolve:

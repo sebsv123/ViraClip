@@ -751,9 +751,30 @@ async def create_single_clip(
         except Exception as _tts_e:
             logger.debug(f"  Voice synthesis skipped: {_tts_e}")
 
+    # ── Content Profiler: classify clip type → conditional service activation ──
+    _content_profile: Dict[str, Any] = {"type": "unknown", "recommended_zoom": True, "recommended_jump_cuts": True}
+    try:
+        from ...domains.autopilot.content_profiler import profile_content
+        _content_profile = profile_content(
+            video_path=str(output_path),
+            words=words_with_confidence or [],
+            duration=duration,
+        )
+        logger.info(
+            "  [Profiler] type=%s speech=%.2f scenes=%d zoom=%s jump=%s",
+            _content_profile["type"], _content_profile["speech_ratio"],
+            _content_profile["scene_changes"],
+            _content_profile["recommended_zoom"],
+            _content_profile["recommended_jump_cuts"],
+        )
+    except Exception as _prof_e:
+        logger.debug("  [Profiler] skipped: %s", _prof_e)
+
     # Step 4.2-jc: Silence handling — jump-cut OR speed-ramp based on SILENCE_MODE.
     # Must happen BEFORE subtitle burn so ASS timestamps stay in sync.
-    if words_with_confidence and jump_cut:
+    # Only activate for talking_head (high speech ratio, few scene changes).
+    _jump_cut_active = jump_cut and _content_profile.get("recommended_jump_cuts", True)
+    if words_with_confidence and _jump_cut_active:
         try:
             _silence_thresh = float(
                 os.environ.get("SILENCE_THRESHOLD_SECONDS", str(SILENCE_THRESHOLD))
@@ -964,15 +985,31 @@ async def create_single_clip(
 
     # Step 4.5b: Beat-sync BPM detection — derive beat timestamps for
     # edit-point alignment BEFORE EditingPipeline so zoom punches land on beats.
+    # Try to detect BPM from the BGM track (if available) so zooms align with
+    # music beats rather than voice pauses/silence gaps.
     _beat_times: List[float] = []
     _beat_bpm: float = 0.0
     try:
         from ...domains.audio.beat_sync_service import analyse_bpm as _analyse_bpm
-        _bpm_result = await _analyse_bpm(audio_path=output_path)
+        # Try to find BGM path early for beat detection on music, not voice
+        _bgm_for_bpm: Optional[Path] = None
+        try:
+            from ...domains.audio.beat_sync_service import select_bgm, _scan_bgm_library, BGM_LIBRARY_DIR
+            _tracks = _scan_bgm_library(BGM_LIBRARY_DIR)
+            if _tracks:
+                _bgm_track = select_bgm(120.0, _tracks, prefer_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None))
+                if _bgm_track:
+                    _bgm_for_bpm = _bgm_track.path
+                    logger.info(f"  [BPM] Using BGM for beat detection: {_bgm_track.name}")
+        except Exception as _bgm_sel_e:
+            logger.debug(f"  [BPM] BGM selection for beat detection skipped: {_bgm_sel_e}")
+
+        _bpm_result = await _analyse_bpm(audio_path=output_path, bgm_path=_bgm_for_bpm)
         _beat_bpm   = _bpm_result.get("bpm", 0.0)
         _beat_times = _bpm_result.get("beat_times", [])
         if _beat_times:
-            logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
+            _source_label = "BGM" if _bgm_for_bpm else "voice"
+            logger.info(f"  ✓ BPM detected from {_source_label}: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
     except Exception as _bpm_e:
         logger.debug(f"  BPM detection skipped: {_bpm_e}")
 
@@ -1096,6 +1133,7 @@ async def create_single_clip(
                 words_with_timestamps=words_with_confidence or None,
                 precomputed_keywords=_broll_kw_override,
                 broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.6,
+                lut_vf=_lut_vf_ep,  # Apply same LUT grade to B-roll for visual consistency
             )
             if Path(_broll_result).exists() and _broll_result != str(output_path):
                 output_path = Path(_broll_result)
@@ -1138,12 +1176,13 @@ async def create_single_clip(
             logger.debug(f"  Viral effects skipped: {_vfx_e}")
 
     # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
+    _caption_system_used: str = "none"
     if add_subtitles and words_with_confidence:
         try:
             from ...domains.captions.caption_service import CaptionService as _CS, burn_captions as _burn_caps
             logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
             _cap_style_raw = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
-            _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw  # Nunca usar minimal - texto invisible
+            _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw
             subtitled_path = output_path.with_name(f"sub_{output_path.name}")
             _cap_ok = await _burn_caps(
                 output_path, subtitled_path,
@@ -1153,20 +1192,30 @@ async def create_single_clip(
             )
             if _cap_ok and subtitled_path.exists():
                 output_path = subtitled_path
+                _caption_system_used = "captionservice"
                 logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
             else:
                 raise RuntimeError("caption_service returned False")
         except Exception as burn_e:
-            logger.warning(f"  CaptionService failed ({burn_e}), falling back to legacy subtitles")
+            logger.error(
+                "[CAPTION] CaptionService failed: %s — falling back to legacy subtitles",
+                burn_e, exc_info=True,
+            )
             try:
                 subtitled_path = output_path.with_name(f"sub_{output_path.name}")
                 await _subtitles.burn_subtitles_word_level(
-                    str(output_path), words_with_confidence, str(subtitled_path)
+                    str(output_path), words_with_confidence, str(subtitled_path),
+                    style=_cap_style if _cap_style in ("hormozi", "mrbeast") else "hormozi",
                 )
                 if subtitled_path.exists():
                     output_path = subtitled_path
+                    _caption_system_used = "legacy_subtitles"
+                    logger.info("  ✓ Legacy subtitles burned (fallback)")
             except Exception as _fb_e:
-                logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
+                logger.error(
+                    "[CAPTION] Legacy subtitle fallback also failed: %s",
+                    _fb_e, exc_info=True,
+                )
 
     # Step 4.7: [Reservado] Real-ESRGAN upscale vía ComfyUI.
     #   Implementación anterior llamaba `ComfyUIBridge.enhance_video()`,
@@ -1602,6 +1651,7 @@ async def create_single_clip(
         "clip_health": _clip_health,
         "audio_recommendations": _audio_recs,
         "ab_variants": _variants,
+        "caption_system_used": _caption_system_used,
     }
     # (Prefetch cancellation moved before return above)
 

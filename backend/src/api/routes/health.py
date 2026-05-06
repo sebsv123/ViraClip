@@ -275,6 +275,87 @@ async def concurrency_metrics():
         }
 
 
+@router.get("/system")
+async def system_health():
+    """
+    Comprehensive system health with GPU, pipeline, and queue metrics.
+    
+    Returns:
+    - GPU: availability, encoder, utilization, VRAM
+    - Pipeline: tasks completed/failed/processing, success rate, avg clip time
+    - Queue: depth, active workers
+    """
+    import subprocess as _sp
+    import os as _os
+    from ...gpu_utils import nvenc_available, cuda_available, gpu_name
+    
+    result = {
+        "gpu": {
+            "available": cuda_available(),
+            "encoder": "nvenc_h264" if nvenc_available() else "libx264",
+            "name": gpu_name(),
+            "utilization_pct": 0.0,
+            "vram_used_mb": 0,
+            "vram_total_mb": 0,
+        },
+        "pipeline": {
+            "tasks_completed": 0,
+            "tasks_failed": 0,
+            "tasks_processing": 0,
+            "success_rate_pct": 100.0,
+            "avg_clip_time_s": 0.0,
+        },
+        "queue": {
+            "depth": 0,
+            "workers_active": 0,
+        },
+    }
+    
+    # GPU metrics via nvidia-smi
+    try:
+        _r = _sp.run(
+            ["nvidia-smi", "--query-gpu=utilization.gpu,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if _r.returncode == 0 and _r.stdout.strip():
+            parts = _r.stdout.strip().split(", ")
+            if len(parts) >= 3:
+                result["gpu"]["utilization_pct"] = float(parts[0])
+                result["gpu"]["vram_used_mb"] = int(float(parts[1]))
+                result["gpu"]["vram_total_mb"] = int(float(parts[2]))
+    except Exception:
+        pass
+    
+    # Pipeline metrics from metrics_collector
+    try:
+        from ...core.metrics_service import get_metrics_collector
+        _mc = get_metrics_collector()
+        _summary = _mc.get_summary(days=7)
+        result["pipeline"]["tasks_completed"] = _summary.get("total_pipelines", 0)
+        result["pipeline"]["tasks_failed"] = _summary.get("failed_pipelines", 0)
+        result["pipeline"]["tasks_processing"] = _summary.get("processing_pipelines", 0)
+        _total = result["pipeline"]["tasks_completed"] + result["pipeline"]["tasks_failed"]
+        if _total > 0:
+            result["pipeline"]["success_rate_pct"] = round(
+                result["pipeline"]["tasks_completed"] / _total * 100, 1
+            )
+        result["pipeline"]["avg_clip_time_s"] = _summary.get("avg_clip_time_s", 0.0)
+    except Exception:
+        pass
+    
+    # Queue depth via Redis
+    try:
+        from ...workers.job_queue import JobQueue
+        _pool = await JobQueue.get_pool()
+        _queue_len = await _pool.llen("arq:queue")
+        result["queue"]["depth"] = _queue_len or 0
+    except Exception:
+        pass
+    
+    return result
+
+
 @router.get("/system/resources")
 async def system_resources():
     """

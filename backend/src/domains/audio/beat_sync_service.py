@@ -99,13 +99,16 @@ def _estimate_bpm_from_filename(name: str) -> float:
 
 # ── BPM Analysis ──────────────────────────────────────────────────────────────
 
-def analyse_bpm(audio_path: Path, duration: float = 60.0) -> Dict[str, Any]:
+def analyse_bpm(audio_path: Path, duration: float = 60.0, bgm_path: Optional[Path] = None) -> Dict[str, Any]:
     """
     Detect BPM and beat timestamps from an audio file using librosa.
 
     Args:
-        audio_path: Path to audio or video file.
+        audio_path: Path to audio or video file (used as fallback if bgm_path is None).
         duration:   Max seconds to analyse (first N seconds for speed).
+        bgm_path:   Optional path to BGM file. If provided, BPM is detected from
+                    the BGM (music beats) instead of the clip audio (voice pauses),
+                    so zoom punches align with music beats rather than silence gaps.
 
     Returns:
         {
@@ -118,7 +121,9 @@ def analyse_bpm(audio_path: Path, duration: float = 60.0) -> Dict[str, Any]:
     try:
         import librosa
 
-        y, sr = librosa.load(str(audio_path), sr=22050, mono=True,
+        # Prefer BGM audio for beat detection so zooms align with music, not voice pauses
+        _source = bgm_path if bgm_path else audio_path
+        y, sr = librosa.load(str(_source), sr=22050, mono=True,
                              duration=duration, res_type="kaiser_fast")
 
         # Onset-strength envelope for more robust tempo

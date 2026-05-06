@@ -456,10 +456,12 @@ class BrollService:
         timestamp: float,
         overlay_duration: float = _BROLL_DURATION,
         fade: float = _FADE_DURATION,
+        lut_vf: str = "",
     ) -> bool:
         """
         Overlay *broll_path* on *video_path* at *timestamp* for *overlay_duration* seconds.
         Delegates to broll_compositor.compose_overlay for format-adaptive scaling.
+        If *lut_vf* is provided, applies the same LUT grade to the B-roll before overlay.
         Returns True on success.
         """
         try:
@@ -470,6 +472,7 @@ class BrollService:
                 timestamp=timestamp,
                 duration=overlay_duration,
                 fade=fade,
+                lut_vf=lut_vf,
             )
             if ok:
                 logger.info(f"[BRoll] ✓ Overlay inserted at t={timestamp:.1f}s → {output_path}")
@@ -496,6 +499,7 @@ class BrollService:
         words_with_timestamps: Optional[List[Dict]] = None,
         precomputed_keywords: Optional[List[str]] = None,
         broll_fade_s: float = 0.25,
+        lut_vf: str = "",
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
