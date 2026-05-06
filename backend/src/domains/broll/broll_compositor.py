@@ -303,27 +303,26 @@ def compose_overlay(
         return False
 
     end_ts = timestamp + duration
-    alpha_expr = _build_overlay_alpha_expr(timestamp, end_ts, fade)
-    use_dissolve = transition_type == "dissolve"
-    overlay_args = (
-        f"enable='between(t,{timestamp:.3f},{end_ts:.3f})':"
-        f"x=0:y=0"
+    fade_in_d  = min(fade, (end_ts - timestamp) / 2)
+    fade_out_d = min(fade, (end_ts - timestamp) / 2)
+    fade_out_st = end_ts - fade_out_d
+
+    # GPU overlay pipeline: fade on CPU → hwupload_cuda → overlay_cuda → hwdownload
+    # overlay_cuda does NOT support alpha= expression, so fade is done via
+    # fade=alpha=1 on the CPU before uploading to GPU.
+    _broll_prep = (
+        f"[1:v]"
+        f"setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+        f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+        f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+        f"format=yuva420p,hwupload_cuda[bv_gpu]"
     )
-    if use_dissolve:
-        overlay_args += f":alpha='{alpha_expr}'"
-
-    # Apply LUT to B-roll stream before overlay for visual consistency
-    if lut_vf:
-        _broll_filter = f"[1:v]{lut_vf}[broll_graded];"
-        _overlay_input = "[broll_graded]"
-    else:
-        _broll_filter = ""
-        _overlay_input = "[1:v]"
-
     filter_complex = (
-        f"{_broll_filter}"
-        f"{_overlay_input}setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
-        f"[0:v][bv]overlay={overlay_args}[out]"
+        f"[0:v]hwupload_cuda[main_gpu];"
+        f"{_broll_prep};"
+        f"[main_gpu][bv_gpu]overlay_cuda="
+        f"enable='between(t,{timestamp:.3f},{end_ts:.3f})':x=0:y=0[out_gpu];"
+        f"[out_gpu]hwdownload,format=yuv420p[out]"
     )
 
     cmd = [

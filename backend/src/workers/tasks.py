@@ -363,7 +363,7 @@ class WorkerSettings:
 
     # Retry settings
     max_tries = 3  # Retry failed jobs up to 3 times
-    job_timeout = 3600  # 1 hour timeout for video processing
+    job_timeout = 14400  # 4 hour timeout for video processing (ComfyUI B-roll generation)
 
     # Worker pool settings
     # 1 job per worker process keeps max concurrent renders at 3 workers × 1 job × semaphore(2) = 6

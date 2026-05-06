@@ -80,7 +80,7 @@ class ComfyUIBridge:
             workflow = {
                 "1": {
                     "class_type": "CheckpointLoaderSimple",
-                    "inputs": {"ckpt_name": "ltx-video-2b-v0.9.5.safetensors"},
+                    "inputs": {"ckpt_name": "ltxv-2b-0.9.8-distilled-fp8.safetensors"},
                 },
                 "2": {
                     "class_type": "CLIPTextEncode",
