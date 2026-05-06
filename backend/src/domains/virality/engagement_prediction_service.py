@@ -365,21 +365,39 @@ class EngagementPredictionService:
             pred = self._model(x)[0]  # (T,)
         return pred.numpy() * 100.0
 
+    def _heuristic_retention(self, duration_s: float, has_hook: bool, niche: str) -> float:
+        """Retention estimate based on content characteristics."""
+        base = 0.72 if has_hook else 0.55
+        # Longer clips lose retention
+        if duration_s > 45:
+            base -= 0.10
+        elif duration_s > 30:
+            base -= 0.05
+        # Insurance/finance niche has higher intent retention
+        if niche in ("insurance", "finance", "mortgage", "legal", "seguros", "hipoteca"):
+            base += 0.08
+        return min(0.95, max(0.30, base))
+
     def _heuristic_curve(
         self,
         features: np.ndarray,
         duration: float,
         resolution: float,
+        has_hook: bool = False,
+        niche: str = "",
     ) -> np.ndarray:
         """
         Heuristic sigmoid retention curve based on audio energy and keyword density.
         No model required. Generally accurate for well-structured content.
+        Uses dynamic retention base from _heuristic_retention().
         """
         T = features.shape[0]
         t = np.linspace(0, 1, T)
 
-        # Base retention: starts at 100%, decays exponentially
-        base = 100.0 * np.exp(-1.5 * t)
+        # Dynamic base retention from content characteristics
+        _retention_pct = self._heuristic_retention(duration, has_hook, niche) * 100.0
+        # Base retention: starts at 100%, decays to _retention_pct at end
+        base = 100.0 - (100.0 - _retention_pct) * t
 
         # Boost from hook quality in first 3s
         hook_boost = features[:, 9] * 20.0
