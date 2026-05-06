@@ -834,7 +834,8 @@ class EditingPipeline:
                 effects = [f"color+cine({theme})"]
                 if EP_SAT_PULSE_ON and emphasis_items:
                     effects.append("sat-pulse")
-                effects.append("vignette")
+                if _vignette_enabled:
+                    effects.append("vignette")
                 if FILM_GRAIN > 0:
                     effects.append(f"grain({FILM_GRAIN})")
                 if EP_HOOK_ZOOM_ON:
