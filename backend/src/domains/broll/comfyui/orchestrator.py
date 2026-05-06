@@ -184,7 +184,9 @@ class ComfyUIOrchestrator:
 
         negative_prompt = (
             "worst quality, inconsistent motion, blurry, jittery, distorted, "
-            "watermark, text, logo, deformed, low resolution"
+            "watermark, text, logo, deformed, low resolution, "
+            "cartoon, anime, animated, drawing, illustration, "
+            "painting, sketch, 3D render, CGI, artificial"
         )
         ltx_model = os.getenv("COMFYUI_LTX_MODEL", "ltxv-2b-0.9.8-distilled-fp8.safetensors")
         t5_model = os.getenv("LTX_T5_ENCODER", "t5xxl_fp8_e4m3fn.safetensors")
@@ -218,9 +220,9 @@ class ComfyUIOrchestrator:
             "5": {
                 "inputs": {
                     "seed": random.randint(1, 1_000_000),
-                    "steps": 20,
-                    "cfg": 3.0,
-                    "sampler_name": "euler",
+                    "steps": 40,
+                    "cfg": 3.5,
+                    "sampler_name": "euler_ancestral",
                     "scheduler": "normal",
                     "denoise": 1.0,
                     "model": ["1", 0],
