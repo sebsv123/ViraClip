@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 class LLMBackend(str, Enum):
     """Available LLM backends."""
     GROQ = "groq"
+    DEEPSEEK = "deepseek"
     OLLAMA_DSPY = "ollama_dspy"
     OLLAMA_FINETUNED = "ollama_finetuned"
 
@@ -105,6 +106,9 @@ class LLMRouter:
         if backend == LLMBackend.GROQ:
             return await self._score_with_groq(transcript, language, num_clips)
         
+        elif backend == LLMBackend.DEEPSEEK:
+            return await self._score_with_deepseek(transcript, language, num_clips)
+        
         elif backend == LLMBackend.OLLAMA_DSPY:
             return await self._score_with_ollama_dspy(transcript, language, num_clips)
         
@@ -114,6 +118,65 @@ class LLMRouter:
         else:
             raise ValueError(f"Unknown backend: {backend}")
     
+    async def _score_with_deepseek(
+        self,
+        transcript: str,
+        language: str,
+        num_clips: int
+    ) -> Dict[str, Any]:
+        """Score using DeepSeek V3 (superior analytical reasoning for viral scoring)."""
+        import httpx
+        import os
+        
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            logger.warning("[LLMRouter] DEEPSEEK_API_KEY not set — falling back to Groq")
+            return await self._score_with_groq(transcript, language, num_clips)
+        
+        system_prompt = (
+            "You are a viral content analyst. Analyze the transcript and score each segment "
+            "for viral potential. Return a JSON object with:\n"
+            "- segments: array of {start, end, text, hook_strength (0-10), "
+            "emotional_peak (0-10), shareability (0-10), retention (0-10), "
+            "viral_score (0-10), reason}\n"
+            "- viral_potential: 'low' | 'medium' | 'high'\n\n"
+            "Scoring criteria:\n"
+            "1. First 3 seconds: strong hook? (question, shocking statement, number)\n"
+            "2. Information density per second\n"
+            "3. Tension/resolution moments\n"
+            "4. Natural vs forced CTA\n"
+            "5. Emotional triggers (fear, surprise, curiosity, aspiration)"
+        )
+        
+        user_prompt = (
+            f"Transcript ({language}):\n{transcript[:3000]}\n\n"
+            f"Generate {num_clips} viral clip segments. "
+            "Focus on moments with highest retention potential."
+        )
+        
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.3,
+                    "max_tokens": 2000,
+                }
+            )
+            response.raise_for_status()
+            result = response.json()
+            logger.info("[LLMRouter] DeepSeek V3 scoring complete")
+            return result["choices"][0]["message"]["content"]
+
     async def _score_with_groq(
         self,
         transcript: str,
