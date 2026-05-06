@@ -110,23 +110,19 @@ def probe_duration(video_path: Path | str) -> float:
 def _build_overlay_alpha_expr(ts: float, end_ts: float, fade: float) -> str:
     """
     Build FFmpeg alpha expression for dissolve in/out around [ts, end_ts].
-    Uses escaped commas for filter-complex safety.
+    Uses plain commas (no backslashes) — FFmpeg accepts them inside if().
     """
     safe_fade = max(0.05, float(fade))
     if (end_ts - ts) < (safe_fade * 2):
         safe_fade = max(0.05, (end_ts - ts) / 2.0)
-
     return (
-        "if(lt(t\\,{ts:.3f})\\,0\\,"
-        "if(lt(t\\,{in_end:.3f})\\,(t-{ts:.3f})/{fade:.3f}\\,"
-        "if(lt(t\\,{out_start:.3f})\\,1\\,"
-        "if(lt(t\\,{end:.3f})\\,({end:.3f}-t)/{fade:.3f}\\,0))))"
-    ).format(
-        ts=ts,
-        in_end=ts + safe_fade,
-        out_start=end_ts - safe_fade,
-        end=end_ts,
-        fade=safe_fade,
+        f"if(lt(t,{ts + safe_fade:.3f})"
+        f",(t-{ts:.3f})/{safe_fade:.3f}"
+        f",if(lt(t,{end_ts - safe_fade:.3f})"
+        f",1"
+        f",if(lt(t,{end_ts:.3f})"
+        f",({end_ts:.3f}-t)/{safe_fade:.3f}"
+        f",0)))"
     )
 
 
