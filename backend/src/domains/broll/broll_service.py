@@ -212,7 +212,12 @@ class BrollService:
         # y guardamos el resultado en el cache local por keyword.
         if os.getenv("BROLL_USE_LTX", "false").lower() == "true" and task_id:
             try:
-                prompt = f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical"
+                prompt = (
+                    f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical, "
+                    "photorealistic, 4K, cinematic footage, real video, "
+                    "sharp focus, professional camera, natural lighting, "
+                    "documentary style, high detail"
+                )
                 logger.info(f"🎬 Generating B-roll with LTX-Video: '{keyword}'")
                 _ltx_result = await comfyui_integration.process_with_comfyui(
                     task_id=f"{task_id}_broll_{safe}",
