@@ -754,6 +754,80 @@ class _ProcessorMixin:
                         clip_id, _seed_e,
                     )
 
+                # P0: REAL Suggestion Application - Render suggestions into video
+                try:
+                    from .suggestion_applicator import SuggestionApplicator
+                    from ...repositories.clip_suggestion_repository import ClipSuggestionRepository
+
+                    _suggestions = await ClipSuggestionRepository.list_by_clip(self.db, clip_id)
+
+                    if _suggestions:
+                        _auto_apply_kinds = {
+                            "caption_template", "caption_style", "caption_animation",
+                            "loudnorm", "sfx_cues", "background_music",
+                            "zoom_punch", "vignette", "color_grading",
+                            "broll_stock", "broll_ai", "contextual_overlay",
+                            "emoji_overlay", "cta_overlay",
+                        }
+
+                        _suggestions_to_apply = [
+                            s for s in _suggestions
+                            if s.get("kind") in _auto_apply_kinds and s.get("status") == "pending"
+                        ]
+
+                        if _suggestions_to_apply:
+                            logger.info(
+                                "[suggestion_applicator] Applying %d suggestions to clip %s",
+                                len(_suggestions_to_apply), clip_id,
+                            )
+
+                            _clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)
+                            _input_path = Path(_clip_record["file_path"])
+                            _output_path = _input_path.parent / f"enhanced_{_input_path.name}"
+
+                            applicator = SuggestionApplicator()
+                            _result = await applicator.apply_suggestions(
+                                input_path=_input_path,
+                                output_path=_output_path,
+                                suggestions=_suggestions_to_apply,
+                                clip_info=clip_info,
+                            )
+
+                            if _result.get("success"):
+                                await self.clip_repo.update_clip_path(
+                                    self.db, clip_id, str(_output_path)
+                                )
+                                for s in _suggestions_to_apply:
+                                    await ClipSuggestionRepository.update_status(
+                                        self.db, s["id"], "applied"
+                                    )
+                                logger.info(
+                                    "[suggestion_applicator] Successfully enhanced clip %s",
+                                    clip_id,
+                                )
+                            else:
+                                logger.error(
+                                    "[suggestion_applicator] Failed to enhance clip %s: %s",
+                                    clip_id, _result.get("error"),
+                                )
+
+                        _manual_suggestions = [
+                            s for s in _suggestions
+                            if s.get("kind") not in _auto_apply_kinds and s.get("status") == "pending"
+                        ]
+                        for s in _manual_suggestions:
+                            await ClipSuggestionRepository.update_status(
+                                self.db, s["id"], "ready_for_review"
+                            )
+
+                        await self.db.commit()
+
+                except Exception as _aa_e:
+                    logger.exception(
+                        "[suggestion_applicator] Error applying suggestions to clip %s: %s",
+                        clip_id, _aa_e,
+                    )
+
                 # Notify frontend via SSE immediately
                 if clip_ready_callback:
                     clip_record = await self.clip_repo.get_clip_by_id(self.db, clip_id)

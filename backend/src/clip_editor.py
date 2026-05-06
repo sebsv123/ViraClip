@@ -16,7 +16,7 @@ try:
     from gpu_utils import get_ffmpeg_video_codec_args
 except ImportError:
     def get_ffmpeg_video_codec_args(q="high"):
-        return {"codec": "h264_nvenc", "preset": "slow", "extra_args": ["-crf", "18"]}
+        return {"codec": "nvenc_h264", "preset": "slow", "extra_args": ["-crf", "18"]}
 
 
 @dataclass

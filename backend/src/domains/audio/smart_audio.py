@@ -9,6 +9,7 @@ No extra Python audio deps required — all through FFmpeg filters.
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -256,16 +257,20 @@ class SmartAudio:
     # ── BGM mix ───────────────────────────────────────────────────────────────
 
     async def _mix_bgm(self, src: Path, bgm: Path) -> "Path | None":
-        """Mix looped background music at BGM_VOLUME under speech."""
+        """Mix looped background music at BGM_VOLUME under speech with ducking."""
         tmp = Path(tempfile.mktemp(suffix=src.suffix, dir=src.parent))
         try:
+            # Voice at 0dB, BGM at BGM_VOLUME with sidechain compression ducking
+            # sidechaincompress: when voice is present (>-30dB threshold), BGM drops
+            # to 10% of its volume (ratio=10:1), with fast attack (5ms) and slow release (500ms)
             proc = await asyncio.create_subprocess_exec(
                 "ffmpeg", "-hide_banner", "-loglevel", "quiet", "-y",
                 "-i", str(src),
                 "-stream_loop", "-1", "-i", str(bgm),
                 "-filter_complex",
                 f"[1:a]volume={BGM_VOLUME}[bgm];"
-                "[0:a][bgm]amix=inputs=2:duration=first:normalize=1[aout]",
+                f"[0:a][bgm]sidechaincompress=threshold=-30:ratio=10:attack=5:release=500:level_sc=0.10,"
+                f"volume=0dB[aout]",
                 "-map", "0:v", "-map", "[aout]",
                 "-c:v", "copy", "-c:a", "aac",
                 str(tmp),
@@ -273,6 +278,8 @@ class SmartAudio:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(proc.wait(), timeout=120.0)
+            _bgm_db = round(20 * math.log10(BGM_VOLUME), 1) if BGM_VOLUME > 0 else -float('inf')
+            logger.info(f"Audio final mix: voice=0dB bgm={_bgm_db}dB sfx=0 tracks (smart_audio)")
             return tmp if tmp.exists() else None
 
         except (asyncio.TimeoutError, Exception) as exc:

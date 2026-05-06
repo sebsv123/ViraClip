@@ -560,6 +560,24 @@ export default function DashboardPage() {
     }
   };
   
+  // System health polling
+  const [systemHealth, setSystemHealth] = useState<{
+    gpu: { available: boolean; encoder: string; utilization_pct: number; vram_used_mb: number; vram_total_mb: number };
+    queue: { depth: number };
+  } | null>(null);
+
+  useEffect(() => {
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch("/api/health/system");
+        if (res.ok) setSystemHealth(await res.json());
+      } catch {}
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   // Calculate stats - memoized to prevent recalculation on every render
   const safeTasks = useMemo(() => (Array.isArray(tasks) ? tasks : []), [tasks]);
   const totalClips = useMemo(() => safeTasks.reduce((acc, t) => acc + (t.clips_count || 0), 0), [safeTasks]);
@@ -603,6 +621,49 @@ export default function DashboardPage() {
           </ShimmerButton>
         </div>
         
+        {/* System Health Bar */}
+        {systemHealth && (
+          <div className="flex flex-wrap items-center gap-3 mb-6 p-3 rounded-xl bg-white/[0.02] border border-white/10">
+            {/* GPU Status */}
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5">
+              <span className={cn(
+                "w-2 h-2 rounded-full",
+                systemHealth.gpu.available ? "bg-green-500" : "bg-red-500"
+              )} />
+              <span className="text-xs font-medium text-white/70">
+                {systemHealth.gpu.available ? "GPU" : "CPU"}
+              </span>
+              <span className="text-xs text-white/50">{systemHealth.gpu.encoder}</span>
+            </div>
+            {/* VRAM */}
+            {systemHealth.gpu.vram_total_mb > 0 && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/5">
+                <div className="w-20 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-gradient-to-r from-violet-500 to-fuchsia-500"
+                    style={{ width: `${(systemHealth.gpu.vram_used_mb / systemHealth.gpu.vram_total_mb) * 100}%` }}
+                  />
+                </div>
+                <span className="text-xs text-white/50">
+                  {Math.round(systemHealth.gpu.vram_used_mb / 1024)}/{Math.round(systemHealth.gpu.vram_total_mb / 1024)}GB
+                </span>
+              </div>
+            )}
+            {/* GPU Utilization */}
+            {systemHealth.gpu.utilization_pct > 0 && (
+              <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5">
+                <Zap className="w-3 h-3 text-amber-400" />
+                <span className="text-xs text-white/50">{systemHealth.gpu.utilization_pct}%</span>
+              </div>
+            )}
+            {/* Queue Depth */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5">
+              <Clock className="w-3 h-3 text-blue-400" />
+              <span className="text-xs text-white/50">Queue: {systemHealth.queue.depth}</span>
+            </div>
+          </div>
+        )}
+
         {/* Stats Grid */}
         <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
           <StatsCard

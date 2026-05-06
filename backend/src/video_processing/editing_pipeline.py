@@ -808,17 +808,18 @@ class EditingPipeline:
             sections=sections,
         )
 
-        vcodec = ["libx264", "-preset", "ultrafast", "-crf", "22"]  # Speed priority - 3-5x faster than fast preset
-        if gpu_settings:
-            enc = gpu_settings.get("codec")  # gpu_detection.py uses "codec" key
-            if enc in ("h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"):
-                vcodec = [enc, "-preset", gpu_settings.get("preset", "p4")]
+        # Auto-detect encoder: NVENC (GPU) → libx264 (CPU fallback)
+        from ..gpu_utils import ffmpeg_codec_flags as _ep_gpu_flags
+        _ep_enc_flags = _ep_gpu_flags("high")
+        # ffmpeg_codec_flags returns ["-c:v", codec, "-preset", preset, ...extra_args]
+        # We need to extract just the video codec part and append audio/map flags
+        vcodec = _ep_enc_flags  # Already includes -c:v, -preset, and all NVENC/libx264 params
 
         cmd = [_get_ffmpeg_exe(), "-y", "-i", str(video_path),
                "-filter_complex", fc, "-map", v_label]
         if a_label:
             cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
-        cmd += ["-c:v", *vcodec, "-pix_fmt", "yuv420p",
+        cmd += vcodec + ["-pix_fmt", "yuv420p",
                 "-movflags", "+faststart", str(output_path)]
 
         try:

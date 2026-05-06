@@ -9,6 +9,7 @@ import json
 import base64
 import asyncio
 import logging
+import shutil
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 COMFYUI_ENABLED: bool = os.environ.get("COMFYUI_ENABLED", "true").lower() == "true"
+COMFYUI_TIMEOUT: float = float(os.environ.get("COMFYUI_TIMEOUT", "90.0"))
+COMFYUI_OUTPUT_DIR: str = os.environ.get("COMFYUI_LOCAL_OUTPUT_DIR", "/app/temp/uploads/comfy_out")
 
 
 class ComfyUIBridge:
@@ -37,7 +40,7 @@ class ComfyUIBridge:
         logger.debug("[ComfyUIBridge] Initialized with base_url=%s", self.base_url)
 
     async def is_available(self) -> bool:
-        """Check if ComfyUI is reachable via /system_stats endpoint."""
+        """Check if ComfyUI is reachable via /system_stats endpoint with 3s timeout."""
         try:
             resp = await self.client.get(
                 f"{self.base_url}/system_stats",
@@ -53,7 +56,7 @@ class ComfyUIBridge:
         first_frame_path: Path,
         theme: str,
         output_path: Path,
-        timeout: float = 90.0,
+        timeout: Optional[float] = None,
     ) -> bool:
         """
         Generate LTX-Video intro from a single frame using ComfyUI workflow.
@@ -62,19 +65,18 @@ class ComfyUIBridge:
             first_frame_path: Path to the first frame image (PNG/JPG)
             theme: Theme description for the prompt
             output_path: Where to save the generated video
-            timeout: Max time to wait for generation
+            timeout: Max time to wait for generation (default: COMFYUI_TIMEOUT env var or 90s)
 
         Returns:
             True if video was generated and saved successfully
         """
+        _timeout = timeout or COMFYUI_TIMEOUT
+        _temp_files: list[Path] = []
         try:
             # Read and encode image to base64
             image_data = first_frame_path.read_bytes()
             image_b64 = base64.b64encode(image_data).decode("utf-8")
 
-            # Build LTX-Video I2V workflow using correct nodes
-            # Nodes: CheckpointLoaderSimple -> CLIPTextEncode (x2) -> LoadImage
-            #        -> LTXVBaseSampler (with cond_images) -> VAEDecode -> VHS_VideoCombine
             workflow = {
                 "1": {
                     "class_type": "CheckpointLoaderSimple",
@@ -174,12 +176,15 @@ class ComfyUIBridge:
                 },
             }
 
-            # Queue the workflow
+            # Queue the workflow with timeout
             payload = {"prompt": workflow, "client_id": self._generate_client_id()}
-            resp = await self.client.post(
-                f"{self.base_url}/prompt",
-                json=payload,
-                timeout=10.0,
+            resp = await asyncio.wait_for(
+                self.client.post(
+                    f"{self.base_url}/prompt",
+                    json=payload,
+                    timeout=10.0,
+                ),
+                timeout=_timeout,
             )
             if resp.status_code != 200:
                 logger.error("[ComfyUIBridge] Failed to queue prompt: %s", resp.text)
@@ -193,8 +198,11 @@ class ComfyUIBridge:
 
             logger.info("[ComfyUIBridge] Queued LTXV intro generation: %s", prompt_id)
 
-            # Poll for completion
-            video_filename = await self._poll_for_video(prompt_id, timeout)
+            # Poll for completion with asyncio.wait_for
+            video_filename = await asyncio.wait_for(
+                self._poll_for_video(prompt_id, _timeout),
+                timeout=_timeout,
+            )
             if not video_filename:
                 logger.error("[ComfyUIBridge] No video output after polling")
                 return False
@@ -202,9 +210,15 @@ class ComfyUIBridge:
             # Download the video
             return await self._download_video(video_filename, output_path)
 
+        except asyncio.TimeoutError:
+            logger.error("[ComfyUIBridge] Generation timed out after %.0fs", _timeout)
+            return False
         except Exception as exc:
             logger.error("[ComfyUIBridge] generate_ltxv_intro failed: %s", exc)
             return False
+        finally:
+            # Clean up ComfyUI temp output files to prevent disk accumulation
+            self._cleanup_temp_files()
 
     async def close(self) -> None:
         """Close the httpx client."""
@@ -239,13 +253,11 @@ class ComfyUIBridge:
                     await asyncio.sleep(poll_interval)
                     continue
 
-                # Check for error status
                 status = entry.get("status", {})
                 if status.get("status_str") == "error":
                     logger.error("[ComfyUIBridge] Workflow execution error")
                     return ""
 
-                # Look for video output in node 13 (VHS_VideoCombine)
                 outputs = entry.get("outputs", {})
                 node_13_output = outputs.get("13", {})
                 if node_13_output:
@@ -256,7 +268,6 @@ class ComfyUIBridge:
                             logger.info("[ComfyUIBridge] Video ready: %s", filename)
                             return filename
 
-                # Check other nodes for video output
                 for node_id, node_output in outputs.items():
                     if not isinstance(node_output, dict):
                         continue
@@ -300,6 +311,23 @@ class ComfyUIBridge:
             logger.error("[ComfyUIBridge] Download error: %s", exc)
             return False
 
+    def _cleanup_temp_files(self) -> None:
+        """Clean up ComfyUI output files older than 1 hour to prevent disk accumulation."""
+        try:
+            _output_dir = Path(COMFYUI_OUTPUT_DIR)
+            if not _output_dir.exists():
+                return
+            _cutoff = asyncio.get_event_loop().time() - 3600
+            _removed = 0
+            for f in _output_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < _cutoff:
+                    f.unlink(missing_ok=True)
+                    _removed += 1
+            if _removed > 0:
+                logger.debug("[ComfyUIBridge] Cleaned up %d old temp files from %s", _removed, _output_dir)
+        except Exception as _cln_e:
+            logger.debug("[ComfyUIBridge] Temp cleanup skipped: %s", _cln_e)
+
 
 # Module-level helper functions for backward compatibility
 _bridge_instance: Optional[ComfyUIBridge] = None
@@ -320,4 +348,3 @@ async def generate_broll(prompt: str, duration: float = 3.0, output_path: Option
     """
     logger.warning("[comfyui_bridge] generate_broll() is deprecated, use ComfyUIBridge.generate_ltxv_intro()")
     return None
-

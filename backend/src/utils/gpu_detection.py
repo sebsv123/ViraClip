@@ -81,7 +81,7 @@ def _nvenc_functional() -> bool:
             [
                 "ffmpeg", "-y",
                 "-f", "lavfi", "-i", "color=black:s=64x64:d=1",
-                "-c:v", "h264_nvenc",
+                "-c:v", "nvenc_h264",
                 "-f", "null", "-"
             ],
             capture_output=True,
@@ -199,7 +199,7 @@ def _get_nvenc_settings() -> Dict[str, Any]:
     Quality: preset p4-p7 (p4=fastest, p7=best quality)
     """
     return {
-        "codec": "h264_nvenc",
+        "codec": "nvenc_h264",
         "preset": "p4",  # Fast preset, good quality
         "audio_codec": "aac",
         "audio_bitrate": "192k",

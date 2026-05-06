@@ -17,29 +17,101 @@ from ._helpers import get_ffmpeg_exe, seconds_to_ass_time
 
 logger = logging.getLogger(__name__)
 
+# ── Caption style presets ─────────────────────────────────────────────────────
+# ASS colour codes (BBGGRR inline format, no alpha byte)
+_YELLOW = "&H00FFFF&"   # active word — yellow
+_ORANGE = "&H0066FF&"   # impact word — orange
+_RED = "&H0000FF&"      # emphasis word — red
+_WHITE = "&HFFFFFF&"    # inactive words — white
+_OUTLINE = "&H00000000"  # black outline (AABBGGRR)
+_SHADOW = "&HA0000000"   # semi-transparent black back box
+_NO_BACK = "&H00000000"  # fully transparent back (alpha=00)
+
+CAPTION_STYLES: Dict[str, Dict[str, Any]] = {
+    "hormozi": {
+        "fontsize": 95,
+        "primary": "&H0000FFFF",      # yellow for active word (overridden per-word)
+        "secondary": "&H00FFFFFF",    # white for inactive
+        "outline": _OUTLINE,
+        "back": _SHADOW,              # semi-transparent black back box
+        "bold": 1,
+        "outline_w": 6,
+        "shadow": 4,
+        "borderstyle": 1,             # box + outline
+        "alignment": 2,               # bottom-center
+        "margin_v": 400,
+        "popin": r"{\fscx60\fscy60\t(0,100,\fscx115\fscy115)\t(100,200,\fscx100\fscy100)}",
+        "hormozi_coloring": True,     # only last word highlighted, rest white
+    },
+    "mrbeast": {
+        "fontsize": 120,
+        "primary": "&H0000FFFF",      # yellow default
+        "secondary": "&H00FFFFFF",
+        "outline": _OUTLINE,
+        "back": _NO_BACK,             # no back box (transparent)
+        "bold": 1,
+        "outline_w": 10,              # thicker outline
+        "shadow": 0,                  # no shadow
+        "borderstyle": 1,
+        "alignment": 2,
+        "margin_v": 400,
+        "popin": r"{\fscx70\fscy70\t(0,80,\fscx120\fscy120)\t(80,160,\fscx100\fscy100)}",
+        "hormozi_coloring": False,    # all words yellow, impact words red
+    },
+}
+
+# Impact keywords → orange highlight (ES + EN)
+_IMPACT_WORDS = {
+    "dinero", "money", "gratis", "free", "peligroso", "dangerous",
+    "nuevo", "new", "secreto", "secret", "viral", "increible",
+    "incredible", "importante", "important", "urgente", "urgent",
+    "millones", "millions", "euros", "dolares", "dollars", "error",
+    "hack", "truco", "trick", "boom", "clave", "key", "ahora", "now",
+    "unico", "unique", "gratis", "lanzar", "launch", "exclusivo",
+}
+
 
 async def burn_subtitles_word_level(
     video_path: str,
     words: List[Dict[str, Any]],
     output_path: str,
-    style: str = "viral",
+    style: str = "hormozi",
+    font_size: int = 95,
 ) -> str:
     """
-    Quema subtítulos estilo CapCut/TikTok con animación profesional:
-    - 85px bold, shadow + outline grueso
-    - Palabra activa en amarillo (o rojo si is_emphasis=True)
-    - Animación pop-in: escala 80%→100% en 150ms via ASS \\t()
-    - Máx 4 palabras por línea
-    - Sin \\r resets (evita el bug libass con \\fscx + \\r)
+    Quema subtítulos estilo CapCut/TikTok con animación profesional.
+
+    Args:
+        video_path: Path to input video.
+        words: List of word dicts with 'word', 'start', 'end', 'is_emphasis'.
+        output_path: Path for output video.
+        style: "hormozi" (white text, last word yellow, back box) or
+               "mrbeast" (all yellow, thick outline, no back box, bigger text).
+        font_size: Base font size (overridden by style preset if not provided).
     """
     if not words:
         logger.warning("[ASS] No words provided — skipping subtitle burn")
         return output_path
 
+    # Resolve style preset
+    _preset = CAPTION_STYLES.get(style, CAPTION_STYLES["hormozi"])
+    _fs = _preset["fontsize"]
+    _primary = _preset["primary"]
+    _secondary = _preset["secondary"]
+    _outline_colour = _preset["outline"]
+    _back_colour = _preset["back"]
+    _bold = _preset["bold"]
+    _outline_w = _preset["outline_w"]
+    _shadow = _preset["shadow"]
+    _borderstyle = _preset["borderstyle"]
+    _alignment = _preset["alignment"]
+    _margin_v = _preset["margin_v"]
+    _POPIN = _preset["popin"]
+    _hormozi_coloring = _preset["hormozi_coloring"]
+
     ass_path = str(Path(video_path).with_suffix("")) + "_subtitles.ass"
 
     _fonts_dir = Path(__file__).parent.parent.parent / "fonts"
-    # Prefer THEBOLDFONT (viral/Hormozi style), fall back in order
     _font_candidates = [
         ("THEBOLDFONT", "THEBOLDFONT.ttf"),
         ("BarlowCondensed-Bold", "BarlowCondensed-Bold.ttf"),
@@ -50,27 +122,6 @@ async def burn_subtitles_word_level(
         if (_fonts_dir / _ff).exists():
             _fontname = _fn
             break
-
-    # ASS colour codes (BBGGRR inline format, no alpha byte)
-    _YELLOW = "&H00FFFF&"   # active word — yellow
-    _ORANGE = "&H0066FF&"   # impact word — orange
-    _RED = "&H0000FF&"      # emphasis word — red
-    _WHITE = "&HFFFFFF&"    # inactive words — white
-    _OUTLINE = "&H00000000"  # black outline (AABBGGRR)
-    _SHADOW = "&HA0000000"   # semi-transparent black back box
-
-    # Impact keywords → orange highlight (ES + EN)
-    _IMPACT_WORDS = {
-        "dinero", "money", "gratis", "free", "peligroso", "dangerous",
-        "nuevo", "new", "secreto", "secret", "viral", "increible",
-        "incredible", "importante", "important", "urgente", "urgent",
-        "millones", "millions", "euros", "dolares", "dollars", "error",
-        "hack", "truco", "trick", "boom", "clave", "key", "ahora", "now",
-        "unico", "unique", "gratis", "lanzar", "launch", "exclusivo",
-    }
-
-    # pop-in bounce: 60%→115% in 100ms then settle to 100% by 200ms (MrBeast style)
-    _POPIN = r"{\fscx60\fscy60\t(0,100,\fscx115\fscy115)\t(100,200,\fscx100\fscy100)}"
 
     ass_header = (
         "[Script Info]\n"
@@ -84,21 +135,19 @@ async def burn_subtitles_word_level(
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        # Fontsize=105, Bold=1, Outline=8, Shadow=4, Alignment=2 (bottom-center)
-        f"Style: Viral,{_fontname},105,&H0000FFFF,&H00FFFFFF,{_OUTLINE},"
-        f"{_SHADOW},1,0,0,0,100,100,0,0,1,8,4,2,30,30,400,1\n"
+        f"Style: Viral,{_fontname},{_fs},{_primary},{_secondary},"
+        f"{_outline_colour},{_back_colour},{_bold},0,0,0,100,100,0,0,"
+        f"{_borderstyle},{_outline_w},{_shadow},{_alignment},30,30,{_margin_v},1\n"
         "\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
 
-    WORDS_PER_LINE = 3      # max words per group
-    MAX_GAP_S = 0.35        # break group on short pauses
-    MAX_SPAN_S = 1.8        # shorter groups = better sync
+    WORDS_PER_LINE = 3
+    MAX_GAP_S = 0.35
+    MAX_SPAN_S = 1.8
     events: List[str] = []
 
-    # Build groups by TIME PROXIMITY, not word count.
-    # This prevents a group from spanning a long pause, which causes perceived desync.
     all_valid = [w for w in words if (w.get("word") or "").strip()]
     groups: List[List[Dict]] = []
     current: List[Dict] = []
@@ -109,10 +158,9 @@ async def burn_subtitles_word_level(
             continue
         gap = float(w.get("start", 0)) - float(current[-1].get("end", 0))
         span = float(w.get("end", 0)) - float(current[0].get("start", 0))
-        # Detectar inicio de oración: próxima palabra empieza con mayúscula y hay pausa
         _word_text = (w.get("word") or "").strip()
         _is_sentence_start = bool(_word_text) and _word_text[0].isupper()
-        _has_natural_pause = gap > 0.2  # 200ms = pausa natural de oración
+        _has_natural_pause = gap > 0.2
         if (len(current) >= WORDS_PER_LINE
                 or gap > MAX_GAP_S
                 or span > MAX_SPAN_S
@@ -125,33 +173,42 @@ async def burn_subtitles_word_level(
         groups.append(current)
 
     for group in groups:
-        # Filter out empty word entries
         valid = [w for w in group if (w.get("word") or "").strip()]
         if not valid:
             continue
 
-        # ONE event per group — spans from first word start to last word end.
         g_start = float(valid[0].get("start", 0.0))
         g_end = float(valid[-1].get("end", g_start + 0.4 * len(valid)))
         if g_end <= g_start:
-            g_end = g_start + 0.4 * len(valid)
-        # Compensación de latencia de renderizado ASS (-33ms)
+            g_end = g_start + min(0.40, 0.4) * len(valid)
         _ASS_RENDER_OFFSET = -0.033
         g_start = max(0.0, g_start + _ASS_RENDER_OFFSET)
         g_end = max(g_start + 0.1, g_end + _ASS_RENDER_OFFSET)
 
-        # Color: emphasis → red, impact keyword → orange, else → yellow
         parts: List[str] = []
-        for w in valid:
+        for _wi, w in enumerate(valid):
             t = (w.get("word") or "").strip().upper()
             if not t:
                 continue
-            if bool(w.get("is_emphasis", False)):
-                parts.append(f"{{\\c{_RED}}}{t}")
-            elif t.lower() in _IMPACT_WORDS:
-                parts.append(f"{{\\c{_ORANGE}}}{t}")
+            is_last = (_wi == len(valid) - 1)
+
+            if _hormozi_coloring:
+                # Hormozi: only last word gets color, rest are white
+                if is_last:
+                    if bool(w.get("is_emphasis", False)):
+                        parts.append(f"{{\\c{_RED}}}{t}")
+                    elif t.lower() in _IMPACT_WORDS:
+                        parts.append(f"{{\\c{_ORANGE}}}{t}")
+                    else:
+                        parts.append(f"{{\\c{_YELLOW}}}{t}")
+                else:
+                    parts.append(f"{{\\c{_WHITE}}}{t}")
             else:
-                parts.append(f"{{\\c{_YELLOW}}}{t}")
+                # MrBeast: all words yellow, impact/emphasis in red
+                if bool(w.get("is_emphasis", False)) or t.lower() in _IMPACT_WORDS:
+                    parts.append(f"{{\\c{_RED}}}{t}")
+                else:
+                    parts.append(f"{{\\c{_YELLOW}}}{t}")
 
         if parts:
             line_text = _POPIN + " ".join(parts) + "{\\r}"
@@ -172,10 +229,9 @@ async def burn_subtitles_word_level(
 
     logger.info(
         f"[ASS] {len(events)} group events written ({len(all_valid)} words, "
-        f"max {WORDS_PER_LINE}/group, gap<{MAX_GAP_S}s, span<{MAX_SPAN_S}s)"
+        f"style={style}, fontsize={_fs})"
     )
 
-    # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
     codec_flags = gpu_utils.ffmpeg_codec_flags()
     cmd = [
         get_ffmpeg_exe(), "-y", "-i", video_path,
@@ -205,7 +261,6 @@ async def burn_subtitles_word_level(
 
 async def crop_to_vertical_9_16(video_path: str, output_path: str) -> str:
     """Convierte video a 9:16 centrando horizontalmente (crop + pad)."""
-    # Codec con aceleración hardware automática (NVENC/VAAPI/CPU)
     codec_flags = gpu_utils.ffmpeg_codec_flags()
     cmd = [
         get_ffmpeg_exe(), "-y", "-i", video_path,

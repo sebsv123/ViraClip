@@ -1,343 +1,282 @@
-"""Suggestion applicator — re-render a clip applying only approved suggestions.
-
-This module provides the core re-rendering logic for the Suggestion Studio:
-- Reads the persisted ``render_context`` JSON
-- Queries ``clip_suggestions`` for approved rows
-- Maps suggestion kinds to ``skip_stages`` for ``creative_pipeline.enhance()``
-- Produces a low-res preview (480p) or final quality render (1080p)
-- Never mutates the original clip until ``finalize`` is explicitly called
-
-Architecture:
-- ``apply_suggestions()`` is the public entry point (called by worker or endpoint)
-- Stage mapping is explicit and versioned so the UI/UX can evolve independently
-- All I/O is async; CPU-heavy FFmpeg work runs in thread pool via ``run_in_thread``
+"""
+SuggestionApplicator - Renders suggestions onto video clips.
+This is the core service that materializes AI suggestions into actual video pixels.
 """
 
-from __future__ import annotations
-
+import asyncio
 import logging
-import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Dict, Any, List, Optional
+import subprocess
+import tempfile
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from ...repositories.clip_repository import ClipRepository
-from ...repositories.clip_suggestion_repository import ClipSuggestionRepository
-from ...utils.async_helpers import run_in_thread
+from ...video_processing.utils import get_ffmpeg_exe
+from ...config import get_config
 
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------
-# Stage mapping: which creative_pipeline stages to skip when a suggestion
-# is NOT approved (or is rejected). The default is to run all stages.
-# --------------------------------------------------------------------------
-_STAGE_BY_KIND: Dict[str, str] = {
-    # timing
-    "hook_reorder": "hook_reorder",
-    # media
-    "broll_overlays": "broll",
-    "contextual_overlay": "contextual_overlay",
-    "music_track": "audio_master",  # music is part of audio master
-    "sfx_cues": "audio_master",  # sfx is part of audio master
-    # polish
-    "zoom_punch": "vfx",
-    "color_grade": "vfx",
-    "speed_control": "speed_control",
-    "loudnorm": "audio_master",
-    "audio_ducking": "audio_master",
-    "denoise": "audio_master",
-    "background_composite": "broll",  # composite is an alternative to broll
-}
+class SuggestionApplicator:
+    """Applies clip suggestions to render enhanced video output."""
 
-_PREVIEW_SCALE = "480:-2"  # 480p width, keep aspect
-_FINAL_SCALE = "1080:-2"  # 1080p width, keep aspect
+    async def apply_suggestions(
+        self,
+        input_path: Path,
+        output_path: Path,
+        suggestions: List[Dict[str, Any]],
+        clip_info: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Apply multiple suggestions to a video clip.
 
+        Returns:
+            {"success": True, "output_path": str} on success
+            {"success": False, "error": str} on failure
+        """
+        try:
+            _video_filters = []
+            _audio_filters = []
+            _inputs = [str(input_path)]
+            _input_labels = ["0:v"]
+            _input_audio = ["0:a"]
 
-class ApplicatorError(Exception):
-    pass
+            _sorted = self._sort_suggestions(suggestions)
 
+            for suggestion in _sorted:
+                _kind = suggestion.get("kind")
+                _payload = suggestion.get("payload", {})
 
-class RenderContextMissing(ApplicatorError):
-    pass
+                if _kind in ("caption_template", "caption_style", "caption_animation"):
+                    _vf = self._build_caption_filter(_payload, clip_info)
+                    if _vf:
+                        _video_filters.append(_vf)
 
+                elif _kind == "zoom_punch":
+                    _vf = self._build_zoom_filter(_payload, clip_info)
+                    if _vf:
+                        _video_filters.append(_vf)
 
-class SourceVideoMissing(ApplicatorError):
-    pass
+                elif _kind == "vignette":
+                    _vf = self._build_vignette_filter(_payload)
+                    if _vf:
+                        _video_filters.append(_vf)
 
+                elif _kind == "color_grading":
+                    _vf = self._build_color_filter(_payload)
+                    if _vf:
+                        _video_filters.append(_vf)
 
-# --------------------------------------------------------------------------
-# Public API
-# --------------------------------------------------------------------------
-async def apply_suggestions(
-    db: AsyncSession,
-    *,
-    clip_id: str,
-    preview: bool = False,
-    output_dir: Optional[Path] = None,
-) -> Dict[str, Any]:
-    """Re-render ``clip_id`` honoring approved suggestions only.
+                elif _kind in ("broll_stock", "broll_ai", "contextual_overlay"):
+                    _broll_result = await self._composite_broll(
+                        _inputs, _input_labels, _payload, clip_info
+                    )
+                    if _broll_result:
+                        _inputs, _input_labels = _broll_result
 
-    Args:
-        db: Database session (async)
-        clip_id: UUID of the clip to re-render
-        preview: If True, render 480p low-res fast; if False, render 1080p final
-        output_dir: Where to write the new clip; defaults to same dir as original
+                elif _kind == "emoji_overlay":
+                    _vf = self._build_emoji_overlay(_payload)
+                    if _vf:
+                        _video_filters.append(_vf)
 
-    Returns:
-        Dict with keys:
-        - ``success``: bool
-        - ``new_path``: Path | None
-        - ``skipped_stages``: list[str] (which stages were disabled)
-        - ``error``: str | None
-    """
-    # 1. Load render context
-    ctx = await ClipRepository.get_render_context(db, clip_id)
-    if not ctx:
-        raise RenderContextMissing(f"Clip {clip_id} has no render_context")
+                elif _kind == "cta_overlay":
+                    _vf = self._build_cta_overlay(_payload)
+                    if _vf:
+                        _video_filters.append(_vf)
 
-    source_video = Path(ctx.get("source_video_path", ""))
-    if not source_video.exists():
-        raise SourceVideoMissing(f"Source video missing: {source_video}")
+                elif _kind == "loudnorm":
+                    _audio_filters.append("loudnorm=I=-16:LRA=11:TP=-1.5")
 
-    segment = ctx.get("segment") or {}
-    clip_info = ctx.get("clip_info") or {}
-    task_config = ctx.get("task_config") or {}
+                elif _kind == "sfx_cues":
+                    _sfx_result = await self._mix_sfx(
+                        _inputs, _input_audio, _payload, clip_info
+                    )
+                    if _sfx_result:
+                        _inputs, _input_audio = _sfx_result
 
-    # 2. Load approved suggestions
-    approved = await ClipSuggestionRepository.list_approved(db, clip_id)
+            _cmd = self._build_ffmpeg_command(
+                inputs=_inputs,
+                video_filters=_video_filters,
+                audio_filters=_audio_filters,
+                output=str(output_path),
+                clip_info=clip_info,
+            )
 
-    # 3. Determine skip set based on missing approved suggestions
-    # Logic: if user rejected a suggestion, we skip that stage.
-    # If a suggestion kind is not present at all in approved, we also skip it
-    # (user didn't want it in the first place).
-    skip_stages: Set[str] = set()
+            logger.info("[SuggestionApplicator] Executing: %s", " ".join(_cmd[:10]) + "...")
+            _result = await self._run_ffmpeg(_cmd)
 
-    # Start with all stages that CAN be skipped
-    all_stages = set(_STAGE_BY_KIND.values())
+            if _result.returncode == 0:
+                return {"success": True, "output_path": str(output_path)}
+            else:
+                _stderr = _result.stderr.decode() if _result.stderr else "Unknown error"
+                logger.error("[SuggestionApplicator] FFmpeg failed: %s", _stderr[:500])
+                return {"success": False, "error": f"FFmpeg failed: {_stderr[:200]}"}
 
-    # Approved kinds
-    approved_kinds = {s["kind"] for s in approved}
+        except Exception as e:
+            logger.exception("[SuggestionApplicator] Error applying suggestions")
+            return {"success": False, "error": str(e)}
 
-    # For each stage, if NO suggestion of that kind is approved, skip it
-    for kind, stage in _STAGE_BY_KIND.items():
-        if kind not in approved_kinds:
-            skip_stages.add(stage)
-
-    # 3b. SUGGESTION STUDIO: Extract editable items from approved suggestions
-    # Build enriched task_config with user-edited items for granular control
-    broll_suggestion = next((s for s in approved if s["kind"] == "broll_overlays"), None)
-    if broll_suggestion and broll_suggestion.get("payload", {}).get("items"):
-        items = broll_suggestion["payload"]["items"]
-        if items and isinstance(items, list) and len(items) > 0:
-            # Ensure items have full paths (resolve relative URLs)
-            enriched_items = []
-            for item in items:
-                enriched = dict(item)
-                # Resolve video_url if relative
-                url = item.get("video_url") or item.get("path")
-                if url and not url.startswith(("http", "/")):
-                    # Assume it's a relative path, construct full path
-                    enriched["video_url"] = str(Path(clip_info.get("path", "")).parent / url)
-                enriched_items.append(enriched)
-            task_config["broll_items"] = enriched_items
-            logger.info("[suggestion_applicator] Passing %d editable B-roll items to pipeline", len(enriched_items))
-
-    overlay_suggestion = next((s for s in approved if s["kind"] == "contextual_overlay"), None)
-    if overlay_suggestion and overlay_suggestion.get("payload", {}).get("items"):
-        task_config["overlay_items"] = overlay_suggestion["payload"]["items"]
-        logger.info("[suggestion_applicator] Passing %d editable overlay items to pipeline", len(task_config["overlay_items"]))
-
-    sfx_suggestion = next((s for s in approved if s["kind"] == "sfx_cues"), None)
-    if sfx_suggestion and sfx_suggestion.get("payload", {}).get("items"):
-        task_config["sfx_items"] = sfx_suggestion["payload"]["items"]
-        logger.info("[suggestion_applicator] Passing %d editable SFX items to pipeline", len(task_config["sfx_items"]))
-
-    # Special case: if user approved "trim_offsets", we need to handle it
-    # (trim is applied BEFORE the creative pipeline, in the base render)
-    trim_offsets = next(
-        (s for s in approved if s["kind"] == "trim_offsets"), None
-    )
-
-    # 4. Prepare output path
-    original_path = Path(clip_info.get("path", ""))
-    if output_dir is None:
-        output_dir = original_path.parent if original_path.exists() else Path("/tmp")
-
-    suffix = "_preview" if preview else "_final"
-    new_filename = f"{original_path.stem}{suffix}{original_path.suffix}"
-    new_path = output_dir / new_filename
-
-    # 5. Re-render
-    try:
-        result = await _do_render(
-            source_video=source_video,
-            segment=segment,
-            clip_info=clip_info,
-            task_config=task_config,
-            skip_stages=skip_stages,
-            trim_offsets=trim_offsets["payload"] if trim_offsets else None,
-            preview=preview,
-            output_path=new_path,
-        )
-        return {
-            "success": True,
-            "new_path": str(result),
-            "skipped_stages": sorted(skip_stages),
-            "error": None,
+    def _sort_suggestions(self, suggestions: List[Dict]) -> List[Dict]:
+        _priority = {
+            "color_grading": 1,
+            "broll_stock": 2,
+            "broll_ai": 2,
+            "contextual_overlay": 2,
+            "caption_template": 3,
+            "caption_style": 3,
+            "caption_animation": 3,
+            "emoji_overlay": 4,
+            "cta_overlay": 4,
+            "zoom_punch": 5,
+            "vignette": 5,
+            "loudnorm": 10,
+            "sfx_cues": 10,
         }
-    except Exception as exc:
-        logger.exception("[suggestion_applicator] render failed for %s", clip_id)
-        return {
-            "success": False,
-            "new_path": None,
-            "skipped_stages": sorted(skip_stages),
-            "error": str(exc),
-        }
+        return sorted(suggestions, key=lambda s: _priority.get(s.get("kind"), 99))
 
-
-# --------------------------------------------------------------------------
-# Internal render logic
-# --------------------------------------------------------------------------
-async def _do_render(
-    *,
-    source_video: Path,
-    segment: Dict[str, Any],
-    clip_info: Dict[str, Any],
-    task_config: Dict[str, Any],
-    skip_stages: Set[str],
-    trim_offsets: Optional[Dict[str, Any]],
-    preview: bool,
-    output_path: Path,
-) -> Path:
-    """Execute the actual re-render.
-
-    Steps:
-    1. Extract base segment from source (respecting trim_offsets if any)
-    2. Run creative_pipeline.enhance() with skip_stages
-    3. Return new clip path
-    """
-    # Import here to avoid circular imports at module load time
-    from ...domains.video.clip_creation import ClipCreationService
-    from .creative_pipeline import CreativePipeline
-
-    # 1. Determine actual start/end with trim offsets
-    start_sec = _to_seconds(segment.get("start_time", 0))
-    end_sec = _to_seconds(segment.get("end_time", start_sec + 60))
-
-    if trim_offsets:
-        start_sec += float(trim_offsets.get("start_offset", 0))
-        end_sec -= float(trim_offsets.get("end_offset", 0))
-        # Sanity bounds
-        if end_sec <= start_sec:
-            end_sec = start_sec + 1.0
-
-    # 2. Extract base clip (low-res for preview)
-    scale = _PREVIEW_SCALE if preview else _FINAL_SCALE
-
-    # Use ClipCreationService to extract the segment
-    service = ClipCreationService()
-
-    # Build a temp path for base extraction
-    base_temp = output_path.with_name(f"_base_{output_path.name}")
-
-    # Extract segment using FFmpeg (fast, no analysis)
-    await _extract_segment(
-        source=source_video,
-        start=start_sec,
-        end=end_sec,
-        output=base_temp,
-        scale=scale,
-    )
-
-    # 3. Run creative pipeline with skip_stages
-    pipeline = CreativePipeline()
-
-    # Get transcript words for the segment (needed by pipeline)
-    words = segment.get("words", [])
-    audio_features = {}  # We could re-analyze but skip for speed
-
-    meta = await pipeline.enhance(
-        clip_path=base_temp,
-        source_video=source_video,
-        segment=segment,
-        words=words,
-        audio_features=audio_features,
-        task_id=task_config.get("task_id", "unknown"),
-        clip_index=clip_info.get("clip_order", 0),
-        platform=task_config.get("target_platform", "tiktok"),
-        skip_stages=skip_stages,
-    )
-
-    logger.info(
-        "[suggestion_applicator] enhance complete; stages skipped: %s",
-        skip_stages,
-    )
-
-    # The pipeline modifies base_temp in place; rename to final output
-    if base_temp.exists():
-        shutil.move(str(base_temp), str(output_path))
-
-    return output_path
-
-
-async def _extract_segment(
-    *,
-    source: Path,
-    start: float,
-    end: float,
-    output: Path,
-    scale: str,
-) -> None:
-    """Fast FFmpeg extract + scale (no re-encode if possible)."""
-    import subprocess
-
-    duration = end - start
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-ss", str(start),
-        "-i", str(source),
-        "-t", str(duration),
-        "-vf", f"scale={scale}",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23" if "1080" in scale else "28",  # higher CRF for preview
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        str(output),
-    ]
-
-    def _run():
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=False,
+    def _build_caption_filter(self, payload: Dict, clip_info: Dict) -> Optional[str]:
+        _text = payload.get("text", "")
+        if not _text:
+            return None
+        _fontfile = "/app/fonts/TikTokSans-Regular.ttf"
+        _fontsize = payload.get("font_size", 48)
+        _color = payload.get("color", "white")
+        _box = 1 if payload.get("background", True) else 0
+        _boxcolor = "black@0.5" if _box else "black@0"
+        _start = payload.get("start", 0)
+        _end = payload.get("end", clip_info.get("duration", 30))
+        return (
+            f"drawtext=fontfile={_fontfile}:"
+            f"text='{_text}':"
+            f"fontsize={_fontsize}:"
+            f"fontcolor={_color}:"
+            f"box={_box}:boxcolor={_boxcolor}:"
+            f"x=(w-text_w)/2:y=h-text_h-100:"
+            f"enable='between(t,{_start},{_end})'"
         )
-        if result.returncode != 0:
-            raise RuntimeError(f"FFmpeg extract failed: {result.stderr}")
-        return output
 
-    await run_in_thread(_run)
+    def _build_zoom_filter(self, payload: Dict, clip_info: Dict) -> Optional[str]:
+        _zoom_type = payload.get("type", "punch_in")
+        _start = payload.get("start_time", 0)
+        _duration = payload.get("duration", 1.0)
+        _end = _start + _duration
+        if _zoom_type == "punch_in":
+            return (
+                f"zoompan=z='if(lte(t,{_start}),1,"
+                f"if(lte(t,{_end}),1+0.3*sin((t-{_start})/{_duration}*PI),1))':"
+                f"d={int(_duration * 30)}:s=1080x1920"
+            )
+        elif _zoom_type == "slow_push":
+            return (
+                f"zoompan=z='1+0.1*(t-{_start})/{_duration}':"
+                f"d={int(_duration * 30)}:s=1080x1920"
+            )
+        return None
 
+    def _build_vignette_filter(self, payload: Dict) -> Optional[str]:
+        _strength = payload.get("strength", 0.3)
+        return f"vignette=PI*{_strength}"
 
-def _to_seconds(val: Any) -> float:
-    """Convert timestamp string or float to seconds."""
-    if val is None:
-        return 0.0
-    if isinstance(val, (int, float)):
-        return float(val)
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        # Handle "HH:MM:SS" or "MM:SS"
-        parts = str(val).split(":")
-        if len(parts) == 2:
-            return int(parts[0]) * 60 + float(parts[1])
-        if len(parts) == 3:
-            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
-        return 0.0
+    def _build_color_filter(self, payload: Dict) -> Optional[str]:
+        _preset = payload.get("preset", "viral")
+        if _preset == "viral":
+            return "eq=contrast=1.1:saturation=1.2:brightness=0.05"
+        elif _preset == "cinematic":
+            return "eq=contrast=1.05:saturation=0.9:brightness=-0.02,curves=preset=film"
+        return None
+
+    async def _composite_broll(
+        self, inputs: List[str], input_labels: List[str],
+        payload: Dict, clip_info: Dict,
+    ) -> Optional[tuple]:
+        _broll_path = payload.get("broll_path") or payload.get("video_url")
+        if not _broll_path:
+            return None
+        _start = payload.get("start_time", 0)
+        _duration = payload.get("duration", 5.0)
+        _position = payload.get("position", "fullscreen")
+        inputs.append(_broll_path)
+        _broll_idx = len(inputs) - 1
+        if _position == "fullscreen":
+            _overlay = (
+                f"[{input_labels[0]}][{_broll_idx}:v]xfade="
+                f"transition=fade:duration=0.5:offset={_start}[v]"
+            )
+            input_labels = ["[v]"]
+        else:
+            _x = 20 if "left" in _position else "main_w-overlay_w-20"
+            _y = 20 if "top" in _position else "main_h-overlay_h-20"
+            _overlay = (
+                f"[{input_labels[0]}][{_broll_idx}:v]overlay="
+                f"x={_x}:y={_y}:enable='between(t,{_start},{_start+_duration})'[v]"
+            )
+            input_labels = ["[v]"]
+        return inputs, input_labels
+
+    def _build_emoji_overlay(self, payload: Dict) -> Optional[str]:
+        _emoji = payload.get("emoji", "🔥")
+        _x = payload.get("x", "w-100")
+        _y = payload.get("y", "50")
+        _start = payload.get("start", 0)
+        _end = payload.get("end", 3)
+        return (
+            f"drawtext=fontfile=/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf:"
+            f"text='{_emoji}':fontsize=60:x={_x}:y={_y}:"
+            f"enable='between(t,{_start},{_end})'"
+        )
+
+    def _build_cta_overlay(self, payload: Dict) -> Optional[str]:
+        _text = payload.get("text", "Subscribe!")
+        _start = payload.get("start", 0)
+        _end = payload.get("end", 5)
+        return (
+            f"drawtext=fontfile=/app/fonts/TikTokSans-Regular.ttf:"
+            f"text='{_text}':fontsize=36:fontcolor=white:"
+            f"box=1:boxcolor=red@0.8:boxborderw=20:"
+            f"x=(w-text_w)/2:y=h-text_h-200:"
+            f"enable='between(t,{_start},{_end})'"
+        )
+
+    async def _mix_sfx(
+        self, inputs: List[str], input_audio: List[str],
+        payload: Dict, clip_info: Dict,
+    ) -> Optional[tuple]:
+        _sfx_path = payload.get("sfx_path")
+        if not _sfx_path:
+            return None
+        _start = payload.get("start_time", 0)
+        _volume = payload.get("volume", 0.3)
+        inputs.append(_sfx_path)
+        _sfx_idx = len(inputs) - 1
+        _mixed = (
+            f"[{input_audio[0]}][{_sfx_idx}:a]amix=inputs=2:duration=longest:"
+            f"weights='1 {_volume * 10}'[a]"
+        )
+        input_audio = ["[a]"]
+        return inputs, input_audio
+
+    def _build_ffmpeg_command(
+        self, inputs: List[str], video_filters: List[str],
+        audio_filters: List[str], output: str, clip_info: Dict,
+    ) -> List[str]:
+        _cmd = [get_ffmpeg_exe(), "-y"]
+        for inp in inputs:
+            _cmd.extend(["-i", inp])
+        _filters = []
+        if video_filters:
+            _vf = ",".join(f for f in video_filters if f)
+            _filters.extend(["-vf", _vf])
+        if audio_filters:
+            _af = ",".join(f for f in audio_filters if f)
+            _filters.extend(["-af", _af])
+        _cmd.extend(["-c:v", "nvenc_h264", "-preset", "p4", "-cq", "23", "-pix_fmt", "yuv420p"])
+        _cmd.extend(["-c:a", "aac", "-b:a", "192k"])
+        _cmd.extend(_filters)
+        _cmd.append(output)
+        return _cmd
+
+    async def _run_ffmpeg(self, cmd: List[str]) -> subprocess.CompletedProcess:
+        _proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, _stderr = await _proc.communicate()
+        return subprocess.CompletedProcess(cmd, _proc.returncode, _stdout, _stderr)
