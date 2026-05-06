@@ -12,6 +12,7 @@ import tempfile
 
 from ...video_processing.utils import get_ffmpeg_exe
 from ...config import get_config
+from ... import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,9 @@ class SuggestionApplicator:
                         _inputs, _input_labels, _payload, clip_info
                     )
                     if _broll_result:
-                        _inputs, _input_labels = _broll_result
+                        _inputs, _input_labels, _broll_vf = _broll_result
+                        if _broll_vf:
+                            _video_filters.append(_broll_vf)
 
                 elif _kind == "emoji_overlay":
                     _vf = self._build_emoji_overlay(_payload)
@@ -137,6 +140,8 @@ class SuggestionApplicator:
         _text = payload.get("text", "")
         if not _text:
             return None
+        # Escape special chars for FFmpeg drawtext: backslash, single quote, colon
+        _safe_text = _text.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:")
         _fontfile = "/app/fonts/TikTokSans-Regular.ttf"
         _fontsize = payload.get("font_size", 48)
         _color = payload.get("color", "white")
@@ -146,7 +151,7 @@ class SuggestionApplicator:
         _end = payload.get("end", clip_info.get("duration", 30))
         return (
             f"drawtext=fontfile={_fontfile}:"
-            f"text='{_text}':"
+            f"text='{_safe_text}':"
             f"fontsize={_fontsize}:"
             f"fontcolor={_color}:"
             f"box={_box}:boxcolor={_boxcolor}:"
@@ -198,8 +203,9 @@ class SuggestionApplicator:
         _broll_idx = len(inputs) - 1
         if _position == "fullscreen":
             _overlay = (
-                f"[{input_labels[0]}][{_broll_idx}:v]xfade="
-                f"transition=fade:duration=0.5:offset={_start}[v]"
+                f"[{input_labels[0]}][{_broll_idx}:v]overlay="
+                f"enable='between(t,{_start},{_start+_duration})':"
+                f"x=0:y=0"
             )
             input_labels = ["[v]"]
         else:
@@ -207,30 +213,32 @@ class SuggestionApplicator:
             _y = 20 if "top" in _position else "main_h-overlay_h-20"
             _overlay = (
                 f"[{input_labels[0]}][{_broll_idx}:v]overlay="
-                f"x={_x}:y={_y}:enable='between(t,{_start},{_start+_duration})'[v]"
+                f"x={_x}:y={_y}:enable='between(t,{_start},{_start+_duration})'"
             )
             input_labels = ["[v]"]
-        return inputs, input_labels
+        return inputs, input_labels, _overlay
 
     def _build_emoji_overlay(self, payload: Dict) -> Optional[str]:
         _emoji = payload.get("emoji", "🔥")
+        _safe_emoji = _emoji.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:")
         _x = payload.get("x", "w-100")
         _y = payload.get("y", "50")
         _start = payload.get("start", 0)
         _end = payload.get("end", 3)
         return (
             f"drawtext=fontfile=/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf:"
-            f"text='{_emoji}':fontsize=60:x={_x}:y={_y}:"
+            f"text='{_safe_emoji}':fontsize=60:x={_x}:y={_y}:"
             f"enable='between(t,{_start},{_end})'"
         )
 
     def _build_cta_overlay(self, payload: Dict) -> Optional[str]:
         _text = payload.get("text", "Subscribe!")
+        _safe_text = _text.replace("\\", "\\\\").replace("'", "\u2019").replace(":", "\\:")
         _start = payload.get("start", 0)
         _end = payload.get("end", 5)
         return (
             f"drawtext=fontfile=/app/fonts/TikTokSans-Regular.ttf:"
-            f"text='{_text}':fontsize=36:fontcolor=white:"
+            f"text='{_safe_text}':fontsize=36:fontcolor=white:"
             f"box=1:boxcolor=red@0.8:boxborderw=20:"
             f"x=(w-text_w)/2:y=h-text_h-200:"
             f"enable='between(t,{_start},{_end})'"
@@ -249,7 +257,7 @@ class SuggestionApplicator:
         _sfx_idx = len(inputs) - 1
         _mixed = (
             f"[{input_audio[0]}][{_sfx_idx}:a]amix=inputs=2:duration=longest:"
-            f"weights='1 {_volume * 10}'[a]"
+            f"weights='1 {_volume}'[a]"
         )
         input_audio = ["[a]"]
         return inputs, input_audio
@@ -268,7 +276,9 @@ class SuggestionApplicator:
         if audio_filters:
             _af = ",".join(f for f in audio_filters if f)
             _filters.extend(["-af", _af])
-        _cmd.extend(["-c:v", "nvenc_h264", "-preset", "p4", "-cq", "23", "-pix_fmt", "yuv420p"])
+        # Dynamic encoder detection: NVENC (GPU) → libx264 (CPU fallback)
+        _cmd.extend(gpu_utils.ffmpeg_codec_flags("high"))
+        _cmd.extend(["-pix_fmt", "yuv420p"])
         _cmd.extend(["-c:a", "aac", "-b:a", "192k"])
         _cmd.extend(_filters)
         _cmd.append(output)
