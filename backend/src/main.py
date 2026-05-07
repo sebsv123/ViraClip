@@ -42,6 +42,7 @@ from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
 from .api.routes.clips import router as clips_router
 from .api.routes.jobs import router as jobs_router
+from .api.routes.whatsapp import router as whatsapp_router
 from .domains.video.video_service import UPLOAD_URL_PREFIX
 
 config = Config()
@@ -126,6 +127,7 @@ app.include_router(billing_router)
 #app.include_router(social_router)
 app.include_router(clips_router)
 app.include_router(jobs_router)
+app.include_router(whatsapp_router)
 
 # Include admin routers
 from .api.routes.admin import router as admin_router

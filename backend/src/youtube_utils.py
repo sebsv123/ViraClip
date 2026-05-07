@@ -111,10 +111,9 @@ class YouTubeDownloader:
             # Prefer a pre-exported cookies file; fall back to browser cookies
             "cookiesfrombrowser": _get_browser_cookies_config(),
             "cookiefile": os.environ.get("YOUTUBE_COOKIES_FILE") or None,
-            # Node.js runtime + EJS challenge solver (required since 2025)
-            # Equivalent to: yt-dlp --js-runtimes node --remote-components ejs:github
-            "js_runtimes": "node",
-            "ejs_path": None,  # auto-download from GitHub
+            # Deno runtime + EJS challenge solver (required since 2025)
+            # yt-dlp >= 2025.7 auto-detects JS runtimes in PATH (Deno is at /root/.deno/bin)
+            # Note: --js-runtimes flag was removed in yt-dlp 2025.07.21
             "legacyserverconnect": True,
             # Metadata extraction
             "extract_flat": False,
@@ -129,8 +128,12 @@ class YouTubeDownloader:
 
 
 def _build_ejs_postprocessor_args() -> list:
-    """Return extra command line args list for yt-dlp subprocess calls."""
-    return ["--js-runtimes", "node", "--remote-components", "ejs:github"]
+    """Return extra command line args list for yt-dlp subprocess calls.
+    
+    Note: --js-runtimes flag was removed in yt-dlp 2025.07.21.
+    yt-dlp auto-detects JS runtimes (Deno, Node) from PATH.
+    """
+    return ["--remote-components", "ejs:github"]
 
 
 def _build_info_options() -> Dict[str, Any]:
@@ -574,7 +577,7 @@ def _download_youtube_video_with_ytdlp(
 
             cmd = [
                 YT_DLP_BIN,
-                "--js-runtimes", "node",
+                # --js-runtimes removed — yt-dlp 2025.07.21 doesn't support it, auto-detects from PATH
                 "--remote-components", "ejs:github",
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
                 "-S", "ext:mp4,vcodec:h264,res:1920,fps",

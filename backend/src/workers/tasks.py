@@ -373,13 +373,7 @@ class WorkerSettings:
     # Startup/shutdown hooks
     on_startup = worker_startup
     
-    # Periodic tasks (Phase 5.3: Model retraining — Sundays at 2 AM)
-    @staticmethod
-    def _build_cron_jobs():
-        from arq import cron
-        from ..domains.feedback.feedback_loop_service import periodic_model_retraining
-        return [cron(periodic_model_retraining, hour=2, minute=0, day_of_week=0)]
-
+    # Periodic tasks — built dynamically below via _safe_cron()
     cron_jobs = []
 
 
@@ -406,10 +400,11 @@ try:
     _cron_jobs = []
     
     # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
+    # NOTE: arq's cron() does NOT support day_of_week — use weekday parameter instead
     _job = _safe_cron(
         periodic_model_retraining, 
         "periodic_model_retraining",
-        hour=2, minute=0, day_of_week=0
+        hour=2, minute=0, weekday=6  # 6 = Sunday in arq's cron weekday (0=Mon, 6=Sun)
     )
     if _job:
         _cron_jobs.append(_job)

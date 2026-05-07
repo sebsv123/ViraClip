@@ -74,8 +74,8 @@ services:
       - RENDER_CONCURRENCY=6
       - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_DEVICE=cuda
-      - WHISPER_COMPUTE_TYPE=float16
+      - WHISPER_DEVICE=cpu
+      - WHISPER_COMPUTE_TYPE=float32
       - SAM2_ENABLED=true
       - T2V_ENABLED=true
 

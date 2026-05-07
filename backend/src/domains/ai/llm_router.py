@@ -1,4 +1,28 @@
-"""
+## MEJORA — Motor de scoring viral con DeepSeek + datos reales
+
+### 1. Hook Score en los primeros 3 segundos
+El sistema debe analizar específicamente el segmento 0-3s de cada
+clip candidato y puntuarlo con estos criterios:
+
+  HOOK_CRITERIA = {
+    "pregunta_directa": +25,      # "¿Sabías que...?"
+    "afirmacion_shock": +20,      # "Esto destruyó mi negocio"
+    "numero_especifico": +15,     # "3 errores que..."
+    "palabra_tu_directo": +10,    # "Tú estás..."
+    "silencio_inicial": -20,      # Primeros 0.5s sin audio
+    "intro_nombre": -15,          # "Hola soy X"
+    "musica_sin_voz": -10,        # Música pero sin voz en hook
+  }
+
+### 2. Retention curve predictor
+Analizar la densidad de información por segmento de 5 segundos:
+palabras/segundo + cambios de escena + volumen peaks.
+Segmentos con densidad < umbral → candidatos a cortar.
+
+### 3. Trending keywords en prompts LTX
+Antes de generar cada B-roll, consultar Google Trends API
+o usar DeepSeek para sugerir keywords visuales que estén
+en tendencia para el nicho del vídeo (finanzas, salud, etc.)"""
 Progressive LLM routing with fallback logic.
 
 Routes requests based on dataset size and model availability:
@@ -183,12 +207,13 @@ class LLMRouter:
         language: str,
         num_clips: int
     ) -> Dict[str, Any]:
-        """Score using Groq (teacher model)."""
+        """Score using Groq (teacher model) with retry on 429 rate limiting."""
         from ...domains.ai.ai_prompts import VIRAL_SCORER_SYSTEM_PROMPT, build_dynamic_user_prompt
         import httpx
         import os
+        import asyncio
         
-        # FIX Problema 3: Check groq_available flag before calling API
+        # Check groq_available flag before calling API
         if not getattr(self, 'groq_available', True):
             logger.warning("[LLMRouter] Groq unavailable — using rule-based fallback")
             return self._rule_based_fallback(transcript, language, num_clips)
@@ -203,23 +228,77 @@ class LLMRouter:
             num_clips=num_clips
         )
         
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": "llama-3.3-70b-versatile",
-                    "messages": [
-                        {"role": "system", "content": VIRAL_SCORER_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.3
-                }
-            )
-            response.raise_for_status()
-            result = response.json()
-            return result["choices"][0]["message"]["content"]
+        # Retry configuration for Groq 429 rate limiting
+        max_retries = int(os.environ.get("LLM_MAX_RETRIES", "3"))
+        base_delay = float(os.environ.get("LLM_RETRY_DELAY", "5"))
+        
+        last_exception: Optional[Exception] = None
+        for attempt in range(max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=60) as client:
+                    response = await client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={
+                            "model": "llama-3.3-70b-versatile",
+                            "messages": [
+                                {"role": "system", "content": VIRAL_SCORER_SYSTEM_PROMPT},
+                                {"role": "user", "content": user_prompt}
+                            ],
+                            "response_format": {"type": "json_object"},
+                            "temperature": 0.3
+                        }
+                    )
+                    
+                    if response.status_code == 429:
+                        retry_after = int(response.headers.get("Retry-After", str(base_delay * (2 ** attempt))))
+                        logger.warning(
+                            "[LLMRouter] Groq 429 rate limited (attempt %d/%d). "
+                            "Retrying in %ds...",
+                            attempt + 1, max_retries + 1, retry_after
+                        )
+                        await asyncio.sleep(retry_after)
+                        continue
+                    
+                    response.raise_for_status()
+                    result = response.json()
+                    return result["choices"][0]["message"]["content"]
+                    
+            except (httpx.HTTPStatusError, httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_exception = exc
+                status_code = getattr(exc, 'response', None) and exc.response.status_code
+                
+                if status_code == 429:
+                    # Already handled above, but catch if it came via raise_for_status
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "[LLMRouter] Groq 429 (attempt %d/%d). Retrying in %ds...",
+                        attempt + 1, max_retries + 1, delay
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                
+                if attempt < max_retries:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        "[LLMRouter] Groq API error (attempt %d/%d): %s. "
+                        "Retrying in %ds...",
+                        attempt + 1, max_retries + 1, exc, delay
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(
+                        "[LLMRouter] Groq API failed after %d attempts: %s",
+                        max_retries + 1, exc
+                    )
+        
+        # All retries exhausted — fall back to rule-based scoring
+        logger.warning(
+            "[LLMRouter] Groq API unavailable after %d attempts — "
+            "falling back to rule-based scoring",
+            max_retries + 1
+        )
+        return self._rule_based_fallback(transcript, language, num_clips)
     
     async def _score_with_ollama_dspy(
         self,

@@ -26,8 +26,8 @@ x-core-env: &core-env
   OLLAMA_API_KEY: ${OLLAMA_API_KEY}
   OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
   VISION_ANALYSIS_ENABLED: ${VISION_ANALYSIS_ENABLED:-false}
-  WHISPER_DEVICE: ${WHISPER_DEVICE:-cuda}
-  WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float16}
+  WHISPER_DEVICE: cpu
+  WHISPER_COMPUTE_TYPE: ${WHISPER_COMPUTE_TYPE:-float32}
   SFX_LIBRARY_PATH: /app/assets/sounds
   QUEUED_TASK_TIMEOUT_SECONDS: ${QUEUED_TASK_TIMEOUT_SECONDS:-600}
   DEFAULT_PROCESSING_MODE: ${DEFAULT_PROCESSING_MODE:-fast}
@@ -172,8 +172,6 @@ x-worker-deps: &worker-deps
     condition: service_healthy
   redis:
     condition: service_healthy
-  comfyui:
-    condition: service_started
 
 x-worker-base: &worker-base
   build: ./backend
