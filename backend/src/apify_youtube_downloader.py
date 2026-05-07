@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Working Apify actors (free, active 2025-2026)
 # Fallback chain: streamers/youtube-downloader → apify/youtube-scraper
+# NOTE: Both actors may return "Actor with this name was not found" if they've
+# been removed or renamed. The download flow gracefully falls through to yt-dlp.
 APIFY_YOUTUBE_DOWNLOADER_ACTOR = "streamers/youtube-downloader"
-APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "apify/youtube-scraper"
+APIFY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "apify/youtube-scraper"
 ALLOWED_APIFY_QUALITIES = {"360", "480", "720", "1080"}
 
 
@@ -154,7 +156,7 @@ def download_video_via_apify(
             "quality": resolved_quality,
             "proxy": {"useApifyProxy": True},
         }),
-        (APICY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK, {
+        (APIFY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK, {
             "startUrls": [url],
             "quality": resolved_quality,
             "proxy": {"useApifyProxy": True},

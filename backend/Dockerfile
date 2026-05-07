@@ -1,29 +1,30 @@
-# === ViraClip Backend: NVIDIA CUDA + Python 3.11 ===
-FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
+# === ViraClip Backend: TRUE Multi-Stage Build ===
+# CUDA 12.8 base + cu130 PyTorch for RTX 5070 (Blackwell sm_120) support
+# cu130 REQUIRED — cu128 crashes on RTX 5070 with "CUDA unknown error"
+# Strategy:
+#   Stage 1 (builder): Install ALL Python deps in one shot, clean caches
+#   Stage 2 (runtime): Minimal image — copy only .venv + app code from builder
+#   Result: ~6-8GB final image instead of 42GB
+
+# ── Stage 1: Builder ──────────────────────────────────────────────────
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_DEFAULT_TIMEOUT=600
 
-# System dependencies — todo de una vez para minimizar capas
-# Remove CUDA apt repo to avoid mirror-sync failures (CUDA libs already in base image)
-RUN rm -f /etc/apt/sources.list.d/cuda*.list /etc/apt/sources.list.d/nvidia*.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    && add-apt-repository ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
+# System dependencies (single layer)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev \
     ffmpeg curl unzip \
     libsndfile1 \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender-dev \
+    libgl1 libglib2.0-0 \
+    libsm6 libxext6 libxrender-dev \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 \
     && rm -rf /var/lib/apt/lists/*
 
-# Deno para yt-dlp
+# Deno for yt-dlp
 RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_DIR=/root/.deno
 ENV PATH="/root/.deno/bin:${PATH}"
@@ -33,115 +34,102 @@ RUN pip install uv
 
 WORKDIR /app
 
+# Create venv with pip included
+RUN uv venv --seed .venv
+
+# ── Install ALL Python dependencies in ONE shot ───────────────────────
+# This is the key optimization: one RUN instruction instead of 28
+# cu130 PyTorch for RTX 5070 (Blackwell sm_120) support
+# cu128 crashes on RTX 5070 — cu130 is REQUIRED
+# Optional packages (diffusers, TTS, realesrgan, onnx, msclap) are EXCLUDED
+# from the base image — they can be pip-installed at runtime if needed
 COPY pyproject.toml uv.lock* ./
+RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+    torch==2.10.0+cu130 \
+    torchvision==0.25.0+cu130 \
+    torchaudio==2.10.0+cu130 \
+    --index-url https://download.pytorch.org/whl/cu130 \
+    && uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu130 \
+    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+        torch==2.10.0+cu130 \
+        torchvision==0.25.0+cu130 \
+        torchaudio==2.10.0+cu130 \
+        --index-url https://download.pytorch.org/whl/cu130 \
+    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+        "faster-whisper==1.1.1" \
+        "whisperx" \
+        "sentence-transformers" \
+        "mediapipe" \
+        "opencv-python-headless" \
+        "moviepy>=2.0.0" \
+        "Pillow" "pydub" "psutil" \
+        "ultralytics>=8.3.0" \
+        "scenedetect[opencv]>=0.6.5" \
+        "httpx>=0.27.0" \
+        "edge-tts>=6.1.9" \
+        "datasets>=2.14.0" \
+        "huggingface-hub>=0.17.0" \
+        "pandas>=2.0.0" \
+        "scikit-learn>=1.3.0" \
+        "xgboost>=2.0.0" \
+        "prometheus-client>=0.19.0" \
+        "deap>=1.4.0" \
+        "matplotlib" \
+        "pymilvus>=2.3.0" \
+        "redis[asyncio]>=4.5.0" \
+        "google-api-python-client>=2.100.0" \
+        "kaggle>=1.5.16" \
+    && rm -rf /root/.cache/pip /root/.cache/uv /tmp/*
 
-RUN uv venv .venv && uv sync
+# ── Stage 2: Runtime (minimal) ────────────────────────────────────────
+FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 
-# yt-dlp actualizado
-RUN uv pip install --no-cache --upgrade "yt-dlp[default]"
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
-# === Core AI: faster-whisper + transformers + librosa + PyTorch CUDA ===
-RUN uv pip install --no-cache \
-    faster-whisper==1.1.1 \
-    transformers \
-    sentencepiece \
-    librosa \
-    scipy \
-    numpy
+# Only essential runtime system deps
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-venv \
+    ffmpeg curl \
+    libsndfile1 \
+    libgl1 libglib2.0-0 \
+    libsm6 libxext6 libxrender-dev \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
 
-# cu128 requerido para Blackwell (compute capability 12.0)
-# --index-url (no --extra-index-url) para evitar resolver cu124
-RUN uv pip install --no-cache \
-    torch==2.8.0+cu128 \
-    torchaudio==2.8.0+cu128 \
-    --index-url https://download.pytorch.org/whl/cu128
+WORKDIR /app
 
-RUN uv pip install --no-cache whisperx
+# Copy .venv from builder (preserves all installed packages)
+COPY --from=builder /app/.venv ./.venv
 
-# === Scene detection + HTTP ===
-RUN uv pip install --no-cache \
-    "scenedetect[opencv]>=0.6.5" \
-    "httpx>=0.27.0"
+# Copy Deno from builder (required by yt-dlp for JS challenge solving)
+COPY --from=builder /root/.deno /root/.deno
+ENV PATH="/root/.deno/bin:/app/.venv/bin:${PATH}"
 
-# === Audio: edge-tts (free TTS, zero cost, no API key) ===
-RUN uv pip install --no-cache "edge-tts>=6.1.9" || true
-
-# === Nuevos módulos para pipeline viral ===
-RUN uv pip install --no-cache \
-    sentence-transformers \
-    mediapipe \
-    opencv-python-headless \
-    "moviepy>=2.0.0" \
-    Pillow \
-    pydub \
-    psutil \
-    "ultralytics>=8.3.0" \
-    "deap>=1.4.0" \
-    matplotlib \
-    "pymilvus>=2.3.0" \
-    "redis[asyncio]>=4.5.0"
-
-# === Phase 7: Dataset Integration ===
-RUN uv pip install --no-cache \
-    "datasets>=2.14.0" \
-    "huggingface-hub>=0.17.0" \
-    "kaggle>=1.5.16" \
-    "google-api-python-client>=2.100.0" \
-    "pandas>=2.0.0" \
-    "scikit-learn>=1.3.0" \
-    "xgboost>=2.0.0"
-
-# === Phase 2.5: CLAP SFX semantic matching ===
-RUN uv pip install --no-cache \
-    "msclap>=1.3.3" || true
-
-# === Phase 8.4: ONNX export + fast CPU inference ===
-RUN uv pip install --no-cache \
-    "onnxruntime>=1.17.0" \
-    "skl2onnx>=1.16.0" \
-    "onnx>=1.15.0" || true
-
-# === Phase 3: GPU Generative AI ===
-RUN uv pip install --no-cache \
-    "diffusers>=0.30.0" \
-    "accelerate>=0.30.0" \
-    "peft>=0.11.0" \
-    "safetensors>=0.4.0" \
-    "imageio[ffmpeg]>=2.34.0" \
-    "imageio-ffmpeg>=0.5.0" || true
-RUN uv pip install --no-cache "TTS>=0.22.0" || true
-RUN uv pip install --no-cache \
-    "basicsr>=1.4.2" \
-    "realesrgan>=0.3.0" || true
-
-# === Phase 10: Automation & Monitoring ===
-RUN uv pip install --no-cache \
-    "prometheus-client>=0.19.0" \
-    "google-api-python-client>=2.120.0" \
-    "google-auth-httplib2>=0.2.0" \
-    "google-auth-oauthlib>=1.2.0" || true
-
+# Copy application code + assets
 COPY src/ ./src/
 COPY fonts/ ./fonts/
 COPY transitions/ ./transitions/
 COPY scripts/ ./scripts/
 
-RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \
-    /app/storage/ingested \
-    /app/data \
-    /app/data/creator_profiles
+# Create required directories
+RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx \
+    /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \
+    /app/storage/ingested /app/data /app/data/creator_profiles /app/luts
 
-# Pre-generate synthetic SFX so SoundDesignService has assets at startup
-RUN .venv/bin/python /app/scripts/generate_sfx.py || echo "⚠ SFX generation failed — will fall back to loudnorm-only"
+# Generate SFX assets at build time (fast, pure Python + ffmpeg)
+RUN .venv/bin/python /app/scripts/generate_sfx_assets.py || echo "SFX generation skipped"
 
-# Bootstrap sample LUT files so lut_service has presets available at startup
-RUN mkdir -p /app/luts && .venv/bin/python /app/scripts/bootstrap_luts.py || echo "⚠ LUT bootstrap failed — LUT step will be skipped per-clip"
+# Bootstrap LUT files
+RUN .venv/bin/python /app/scripts/bootstrap_luts.py || echo "LUT bootstrap skipped"
 
-# TikTok-style subtitle font — Oswald Bold (Google Fonts, OFL license).
+# Download subtitle font (Oswald v57 — verified working URL)
 RUN curl -fsSL \
-    "https://fonts.gstatic.com/s/oswald/v53/TK3_WkUHHAIjg75cFRf3bXL8LICs13NvgUFoZAaRliE.ttf" \
+    "https://fonts.gstatic.com/s/oswald/v57/TK3_WkUHHAIjg75cFRf3bXL8LICs1xZogUE.ttf" \
     -o /app/fonts/TikTokSans-Regular.ttf \
-    || echo "⚠ Font download skipped — Arial fallback will be used"
+    || echo "Font download skipped — Arial fallback"
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
