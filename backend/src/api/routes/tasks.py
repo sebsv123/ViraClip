@@ -596,8 +596,10 @@ async def get_task_progress_sse(task_id: str, request: Request):
     """
     SSE endpoint for real-time progress updates.
     Streams progress updates as Server-Sent Events.
+    In SELF_HOST mode, skips user_id ownership check.
     """
 
+    config = get_config()
     user_id = _get_user_id_from_headers(request)
 
     async with AsyncSessionLocal() as local_db:
@@ -607,7 +609,7 @@ async def get_task_progress_sse(task_id: str, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    if task.get("user_id") != user_id:
+    if not config.self_host and task.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Not authorized for this task")
 
     async def event_generator():
