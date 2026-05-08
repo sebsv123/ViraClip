@@ -338,7 +338,7 @@ class BrollService:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
                     "https://api.coverr.co/videos",
-                    params={"keywords": query, "token": key, "per_page": 5},
+                    params={"keywords": query, "api_key": key, "per_page": 5},
                 )
                 if resp.status_code == 401:
                     logger.warning("[BRoll] Coverr API key invalid (401) — disabling Coverr for this session")
