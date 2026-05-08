@@ -38,8 +38,8 @@ CAPTION_STYLES: Dict[str, Dict[str, Any]] = {
         "outline_w": 6,
         "shadow": 4,
         "borderstyle": 1,             # box + outline
-        "alignment": 2,               # bottom-center
-        "margin_v": 400,
+        "alignment": 8,               # top-center (evita UI de TikTok/Reels)
+        "margin_v": 120,
         "popin": r"{\fscx60\fscy60\t(0,100,\fscx115\fscy115)\t(100,200,\fscx100\fscy100)}",
         "hormozi_coloring": True,     # only last word highlighted, rest white
     },
@@ -53,8 +53,8 @@ CAPTION_STYLES: Dict[str, Dict[str, Any]] = {
         "outline_w": 10,              # thicker outline
         "shadow": 0,                  # no shadow
         "borderstyle": 1,
-        "alignment": 2,
-        "margin_v": 400,
+        "alignment": 8,               # top-center (evita UI de TikTok/Reels)
+        "margin_v": 120,
         "popin": r"{\fscx70\fscy70\t(0,80,\fscx120\fscy120)\t(80,160,\fscx100\fscy100)}",
         "hormozi_coloring": False,    # all words yellow, impact words red
     },
