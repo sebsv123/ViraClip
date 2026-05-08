@@ -722,11 +722,13 @@ def _build_filter_complex(
             filters.append(
                 f"[0:a]{_dn}highpass=f=80,{theme_eq}"
                 f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
-                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
+                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
+                f"aresample=async=1000[aout]"
             )
         else:
             filters.append(
-                f"[0:a]{_dn}{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11[aout]"
+                f"[0:a]{_dn}{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
+                f"aresample=async=1000[aout]"
             )
         return ";".join(filters), "[vout]", "[aout]"
     else:
