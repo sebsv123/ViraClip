@@ -1,6 +1,6 @@
 """
 Utility functions for YouTube-related operations.
-Optimized for Apify-first downloads with direct yt-dlp fallback.
+Downloads via yt-dlp directly (Apify removed — was defunct).
 """
 
 import asyncio
@@ -22,7 +22,6 @@ YT_DLP_BIN = shutil.which("yt-dlp") or os.path.join(os.path.dirname(sys.executab
 import requests
 import yt_dlp
 
-from .apify_youtube_downloader import ApifyDownloadError, download_video_via_apify
 from .config import get_config
 
 logger = logging.getLogger(__name__)
