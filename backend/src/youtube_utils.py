@@ -577,8 +577,7 @@ def _download_youtube_video_with_ytdlp(
 
             cmd = [
                 YT_DLP_BIN,
-                # --js-runtimes removed — yt-dlp 2025.07.21 doesn't support it, auto-detects from PATH
-                "--remote-components", "ejs:github",
+                # --js-runtimes and --remote-components removed — yt-dlp 2025.07.21+ doesn't support them
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
                 "-S", "ext:mp4,vcodec:h264,res:1920,fps",
                 "--merge-output-format", "mp4",

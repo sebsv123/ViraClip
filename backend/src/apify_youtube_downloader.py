@@ -23,11 +23,10 @@ from .config import get_config
 logger = logging.getLogger(__name__)
 
 # Working Apify actors (free, active 2025-2026)
-# Fallback chain: streamers/youtube-downloader → apify/youtube-scraper
-# NOTE: Both actors may return "Actor with this name was not found" if they've
-# been removed or renamed. The download flow gracefully falls through to yt-dlp.
-APIFY_YOUTUBE_DOWNLOADER_ACTOR = "streamers/youtube-downloader"
-APIFY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "apify/youtube-scraper"
+# Fallback chain: nH4KQK8jT3cCb5Y6/youtube-downloader → jc9y5b5c7e/yt-dlp
+# NOTE: If both actors fail, the download flow gracefully falls through to yt-dlp.
+APIFY_YOUTUBE_DOWNLOADER_ACTOR = "nH4KQK8jT3cCb5Y6/youtube-downloader"
+APIFY_YOUTUBE_DOWNLOADER_ACTOR_FALLBACK = "jc9y5b5c7e/yt-dlp"
 ALLOWED_APIFY_QUALITIES = {"360", "480", "720", "1080"}
 
 

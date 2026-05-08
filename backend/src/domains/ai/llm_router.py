@@ -1,28 +1,17 @@
-## MEJORA — Motor de scoring viral con DeepSeek + datos reales
+"""
+MEJORA — Motor de scoring viral con DeepSeek + datos reales
 
-### 1. Hook Score en los primeros 3 segundos
-El sistema debe analizar específicamente el segmento 0-3s de cada
-clip candidato y puntuarlo con estos criterios:
+1. Hook Score en los primeros 3 segundos:
+   El sistema debe analizar específicamente el segmento 0-3s de cada
+   clip candidato y puntuarlo con criterios como pregunta directa,
+   afirmacion shock, numero especifico, etc.
 
-  HOOK_CRITERIA = {
-    "pregunta_directa": +25,      # "¿Sabías que...?"
-    "afirmacion_shock": +20,      # "Esto destruyó mi negocio"
-    "numero_especifico": +15,     # "3 errores que..."
-    "palabra_tu_directo": +10,    # "Tú estás..."
-    "silencio_inicial": -20,      # Primeros 0.5s sin audio
-    "intro_nombre": -15,          # "Hola soy X"
-    "musica_sin_voz": -10,        # Música pero sin voz en hook
-  }
+2. Retention curve predictor:
+   Analizar la densidad de informacion por segmento de 5 segundos.
 
-### 2. Retention curve predictor
-Analizar la densidad de información por segmento de 5 segundos:
-palabras/segundo + cambios de escena + volumen peaks.
-Segmentos con densidad < umbral → candidatos a cortar.
+3. Trending keywords en prompts LTX:
+   Consultar tendencias para sugerir keywords visuales.
 
-### 3. Trending keywords en prompts LTX
-Antes de generar cada B-roll, consultar Google Trends API
-o usar DeepSeek para sugerir keywords visuales que estén
-en tendencia para el nicho del vídeo (finanzas, salud, etc.)"""
 Progressive LLM routing with fallback logic.
 
 Routes requests based on dataset size and model availability:
