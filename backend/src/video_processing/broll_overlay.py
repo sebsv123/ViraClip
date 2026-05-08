@@ -171,9 +171,9 @@ class BRollOverlayEngine:
         # Scale B-roll to match output resolution (cover mode)
         # This ensures B-roll fills the frame regardless of source aspect ratio
         filter_chain = (
-            # Scale main video to target resolution
-            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[main];"
+            # Scale main video to target resolution (cover/crop to fill)
+            f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1[main];"
             
             # Scale B-roll to target resolution (zoom/crop to fill)
             f"[1:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
