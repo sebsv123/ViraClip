@@ -385,21 +385,34 @@ class TaskRepository:
 
     @staticmethod
     async def get_user_tasks(
-        db: AsyncSession, user_id: str, limit: int = 50
+        db: AsyncSession, user_id: str, limit: int = 50, self_host: bool = False
     ) -> List[Dict[str, Any]]:
-        """Get all tasks for a user."""
-        result = await db.execute(
-            text("""
-                SELECT t.*, s.title as source_title, s.type as source_type,
-                       (SELECT COUNT(*) FROM generated_clips WHERE task_id = t.id) as clips_count
-                FROM tasks t
-                LEFT JOIN sources s ON t.source_id = s.id
-                WHERE t.user_id = :user_id
-                ORDER BY t.created_at DESC
-                LIMIT :limit
-            """),
-            {"user_id": user_id, "limit": limit},
-        )
+        """Get all tasks for a user. In SELF_HOST mode, returns ALL tasks."""
+        if self_host:
+            result = await db.execute(
+                text("""
+                    SELECT t.*, s.title as source_title, s.type as source_type,
+                           (SELECT COUNT(*) FROM generated_clips WHERE task_id = t.id) as clips_count
+                    FROM tasks t
+                    LEFT JOIN sources s ON t.source_id = s.id
+                    ORDER BY t.created_at DESC
+                    LIMIT :limit
+                """),
+                {"limit": limit},
+            )
+        else:
+            result = await db.execute(
+                text("""
+                    SELECT t.*, s.title as source_title, s.type as source_type,
+                           (SELECT COUNT(*) FROM generated_clips WHERE task_id = t.id) as clips_count
+                    FROM tasks t
+                    LEFT JOIN sources s ON t.source_id = s.id
+                    WHERE t.user_id = :user_id
+                    ORDER BY t.created_at DESC
+                    LIMIT :limit
+                """),
+                {"user_id": user_id, "limit": limit},
+            )
 
         tasks = []
         for row in result.fetchall():

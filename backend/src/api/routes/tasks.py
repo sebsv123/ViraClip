@@ -90,12 +90,16 @@ async def list_tasks(
 ):
     """
     Get all tasks for the authenticated user.
+    In SELF_HOST mode, returns ALL tasks regardless of user_id.
     """
+    config = get_config()
     user_id = _get_user_id_from_headers(request)
 
     try:
         task_service = TaskService(db)
-        tasks = await task_service.get_user_tasks(user_id, limit)
+        tasks = await task_service.get_user_tasks(
+            user_id, limit, self_host=config.self_host
+        )
 
         return {"tasks": tasks, "total": len(tasks)}
 

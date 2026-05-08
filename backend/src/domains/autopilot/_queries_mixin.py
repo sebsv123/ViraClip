@@ -64,10 +64,10 @@ class _QueriesMixin:
 
 
     async def get_user_tasks(
-        self, user_id: str, limit: int = 50
+        self, user_id: str, limit: int = 50, self_host: bool = False
     ) -> list[Dict[str, Any]]:
-        """Get all tasks for a user."""
-        return await self.task_repo.get_user_tasks(self.db, user_id, limit)
+        """Get all tasks for a user. In SELF_HOST mode, returns ALL tasks."""
+        return await self.task_repo.get_user_tasks(self.db, user_id, limit, self_host=self_host)
 
 
     async def delete_task(self, task_id: str) -> None:
