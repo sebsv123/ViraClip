@@ -85,6 +85,8 @@ EP_WATERMARK_TEXT     = os.environ.get("EP_WATERMARK_TEXT",     "")
 EP_THEME_GRADE_ON     = os.environ.get("EP_THEME_GRADE_ON",     "true").lower() != "false"
 EP_THEME_EQ_ON        = os.environ.get("EP_THEME_EQ_ON",        "true").lower() != "false"
 EP_PROGRESS_STYLE     = os.environ.get("EP_PROGRESS_STYLE",     "solid")  # solid | gradient | dots
+VIGNETTE_ENABLED      = os.environ.get("VIGNETTE_ENABLED",     "false").lower() == "true"
+SUBJECT_ENHANCE       = os.environ.get("SUBJECT_ENHANCE",      "true").lower() == "true"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -438,13 +440,11 @@ def _build_filter_complex(
     #   - unsharp: añade nitidez suave (cara más definida, texto más nítido)
     #   - hqdn3d: reduce ruido/granos de piel sin emborronar
     # Se puede restaurar el vignette con VIGNETTE_ENABLED=true si se desea.
-    _vignette_enabled = os.environ.get("VIGNETTE_ENABLED", "false").lower() == "true"
-    _enhance_enabled  = os.environ.get("SUBJECT_ENHANCE", "true").lower() == "true"
-    if _vignette_enabled:
+    if VIGNETTE_ENABLED:
         _vignette_angle = os.environ.get("VIGNETTE_ANGLE", "PI/15")
         filters.append(f"[vcine]vignette=angle={_vignette_angle}[vvig]")
         prev_v = "[vvig]"
-    elif _enhance_enabled:
+    elif SUBJECT_ENHANCE:
         # unsharp luma 3x3 suave + chroma sin tocar + denoise leve para piel
         # hqdn3d=luma_spatial:chroma_spatial:luma_temporal:chroma_temporal
         filters.append(
@@ -834,7 +834,7 @@ class EditingPipeline:
                 effects = [f"color+cine({theme})"]
                 if EP_SAT_PULSE_ON and emphasis_items:
                     effects.append("sat-pulse")
-                if _vignette_enabled:
+                if VIGNETTE_ENABLED:
                     effects.append("vignette")
                 if FILM_GRAIN > 0:
                     effects.append(f"grain({FILM_GRAIN})")
