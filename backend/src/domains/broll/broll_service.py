@@ -190,7 +190,7 @@ class BrollService:
         age_days = (_time.time() - path.stat().st_mtime) / 86400
         return age_days <= _CACHE_TTL_DAYS
 
-    async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None) -> Optional[Path]:
+    async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None, used_urls: Optional[set] = None) -> Optional[Path]:
         """Fetch the most relevant B-roll asset for *keyword*.
 
         Strategy: API-first for maximum relevance (unless BROLL_USE_LTX is enabled).
@@ -199,7 +199,13 @@ class BrollService:
         2. If all APIs fail → fall back to Pexels Photos (static image via API)
         3. If all APIs are unavailable (no keys / network error) → use local cache
         Cache is a safety net, not the primary source.
+
+        Anti-repetition: if *used_urls* is provided, skip any asset whose URL
+        is already in the set. This prevents the same B-roll appearing in
+        multiple clips of the same task.
         """
+        if used_urls is None:
+            used_urls = set()
         _ltx_enabled = os.getenv("BROLL_USE_LTX", "false").lower() == "true"
         _comfy_enabled = os.getenv("COMFYUI_ENABLED", "false").lower() == "true"
         logger.info(

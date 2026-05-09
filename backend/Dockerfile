@@ -130,10 +130,23 @@ RUN .venv/bin/python /app/scripts/generate_sfx_assets.py || echo "SFX generation
 # Bootstrap LUT files
 RUN .venv/bin/python /app/scripts/bootstrap_luts.py || echo "LUT bootstrap skipped"
 
-# Download subtitle font (Oswald v57 — verified working URL)
+# Download subtitle fonts (Google Fonts CDN — stable URLs)
 RUN curl -fsSL \
     "https://fonts.gstatic.com/s/oswald/v57/TK3_WkUHHAIjg75cFRf3bXL8LICs1xZogUE.ttf" \
     -o /app/fonts/TikTokSans-Regular.ttf \
+    && curl -fsSL \
+    "https://fonts.gstatic.com/s/montserrat/v30/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
+    -o /app/fonts/Montserrat-Regular.ttf \
+    && curl -fsSL \
+    "https://fonts.gstatic.com/s/montserrat/v30/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
+    -o /app/fonts/Montserrat-Bold.ttf \
+    && curl -fsSL \
+    "https://fonts.gstatic.com/s/bebasneue/v15/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
+    -o /app/fonts/BebasNeue-Regular.ttf \
+    && curl -fsSL \
+    "https://fonts.gstatic.com/s/inter/v19/UcC73FwrK3iLTeHuS_fctQtRMpLv3Y1k.ttf" \
+    -o /app/fonts/Inter-Regular.ttf \
+    && fc-cache -fv \
     || echo "Font download skipped — Arial fallback"
 
 # Health check
