@@ -73,6 +73,8 @@ async def process_video_task(
     from ..domains.autopilot.task_service import TaskService
     from ..workers.progress import ProgressTracker
 
+    from src.core.log_context import set_task_id, clear_task_id
+    set_task_id(str(task_id))
     set_trace_id(f"task-{task_id}")
     logger.info(f"Worker processing task {task_id}")
 
