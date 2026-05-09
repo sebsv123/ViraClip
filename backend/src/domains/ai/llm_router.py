@@ -69,6 +69,36 @@ async def _cb_record_success(redis=None) -> None:
     _cb_failures_mem = 0
     _cb_bypassed_until_mem = 0.0
 
+
+async def _call_with_retry(
+    coro_factory,
+    max_attempts: int = 3,
+    base_delay: float = 0.5,
+    provider_name: str = "LLM",
+):
+    """
+    Reintenta coro_factory() con backoff 0.5s -> 1s -> 2s.
+    Solo cuenta como fallo real si todos los intentos fallan.
+    """
+    import asyncio
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            return await coro_factory()
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                delay = base_delay * (2 ** attempt)
+                logger.warning(
+                    "[%s] Attempt %d/%d failed: %s. Retrying in %.1fs",
+                    provider_name, attempt + 1, max_attempts,
+                    type(exc).__name__, delay
+                )
+                await asyncio.sleep(delay)
+    raise last_exc
+
+
+async def call_vision(
 async def call_vision(
     prompt: str,
     images_b64: list[str],
