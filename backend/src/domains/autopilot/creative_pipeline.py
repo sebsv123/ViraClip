@@ -658,6 +658,38 @@ class CreativePipeline:
         
         meta["speed_control_applied"] = speed_applied
 
+        # ── 6.5. SFX Orchestrator (Freesound + LLM) — before audio mastering ──
+        if os.getenv("SFX_ENABLED", "false").lower() == "true":
+            try:
+                from ...domains.sfx.sfx_orchestrator import SFXOrchestrator
+                sfx = SFXOrchestrator()
+                sfx_output = clip_path.with_name(f"sfx_{clip_path.name}")
+                jump_cut_times = [
+                    float(e.get("time", e.get("timestamp", 0)))
+                    for e in (timeline or [])
+                    if isinstance(e, dict) and e.get("type") in ("jump_cut", "cut")
+                ]
+                result = await sfx.process_clip(
+                    input_path=str(clip_path),
+                    output_path=str(sfx_output),
+                    transcript_segments=[{"text": transcript or ""}],
+                    jump_cuts=jump_cut_times,
+                    clip_metadata={
+                        "topic": meta.get("niche", meta.get("topic", "")),
+                        "mood": meta.get("mood", "neutral"),
+                        "energy": meta.get("energy_level", 0.5),
+                        "duration": meta.get("duration", end - start or 60),
+                    },
+                )
+                if result and sfx_output.exists() and sfx_output.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    sfx_output.rename(clip_path)
+                    logger.info("  [Creative] ✓ Step 6.5/8: SFX applied via Freesound+LLM")
+                else:
+                    logger.info("  [Creative] Step 6.5/8: SFX skipped (no assets found)")
+            except Exception as e:
+                logger.warning(f"  [Creative] Step 6.5/8: SFX failed — continuing without: {e}")
+
         # ── 7. Audio mastering (loudnorm + SFX + ducking) ─────────────────────
         logger.info("  [Creative] Step 7/8: Audio mastering (loudnorm + SFX + ducking)...")
         sfx_count = 0
