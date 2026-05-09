@@ -3,10 +3,11 @@ Clip management routes — including user rating endpoint (B.6).
 """
 import logging
 import asyncio
+import re
 import subprocess
 from pathlib import Path
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
@@ -317,8 +318,8 @@ async def get_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
     return clip
 
 
-@router.get("/{clip_id}/stream", summary="Stream a clip video file")
-async def stream_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
+@router.get("/{clip_id}/stream", summary="Stream a clip video file with Range support")
+async def stream_clip(clip_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     clip = await ClipRepository.get_clip_by_id(db, clip_id)
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
@@ -328,9 +329,52 @@ async def stream_clip(clip_id: str, db: AsyncSession = Depends(get_db)):
     if not file_path or not Path(file_path).exists():
         raise HTTPException(status_code=404, detail="Clip file not found on disk")
 
+    file_stat = Path(file_path).stat()
+    file_size = file_stat.st_size
+    range_header = request.headers.get("range")
+
+    if range_header:
+        # Parse Range header: bytes=start-end
+        start, end = 0, file_size - 1
+        range_match = re.search(r"bytes=(\d+)-(\d*)", range_header)
+        if range_match:
+            start = int(range_match.group(1))
+            if range_match.group(2):
+                end = int(range_match.group(2))
+        if start >= file_size or start > end:
+            raise HTTPException(status_code=416, detail="Range not satisfiable")
+
+        content_length = end - start + 1
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(content_length),
+            "Content-Type": "video/mp4",
+        }
+
+        async def ranged_stream():
+            with open(file_path, "rb") as f:
+                f.seek(start)
+                remaining = content_length
+                while remaining > 0:
+                    chunk_size = min(8192, remaining)
+                    data = f.read(chunk_size)
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            ranged_stream(),
+            status_code=206,
+            headers=headers,
+            media_type="video/mp4",
+        )
+
     return FileResponse(
         path=file_path,
         media_type="video/mp4",
+        headers={"Accept-Ranges": "bytes"},
     )
 
 

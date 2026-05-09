@@ -581,12 +581,15 @@ class BrollService:
                 return video_path
 
             # Step 2 — fetch one asset per keyword (up to max_overlays distinct clips)
+            # Anti-repetition: track used URLs across all keywords in this clip
             broll_assets: List[Path] = []
+            _used_urls: set = set()
             _task_id = Path(video_path).stem if video_path else f"broll_{int(asyncio.get_event_loop().time())}"
             for kw in keywords[:max(3, max_overlays)]:
-                asset = await self.fetch_broll_asset(kw, video_path=video_path, task_id=_task_id)
+                asset = await self.fetch_broll_asset(kw, video_path=video_path, task_id=_task_id, used_urls=_used_urls)
                 if asset and asset not in broll_assets:
                     broll_assets.append(asset)
+                    _used_urls.add(str(asset))
 
             # GPU T2V fallback if no stock assets found
             if not broll_assets:
