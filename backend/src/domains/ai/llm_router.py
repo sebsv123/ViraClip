@@ -85,11 +85,20 @@ class LLMRouter:
             logger.info(f"📚 Using DSPy-optimized Ollama ({dataset_size} examples)")
         
         else:
-            backend = LLMBackend.GROQ
-            logger.info(
-                f"☁️  Using Groq (fallback: {dataset_size} examples, "
-                f"need 50 for DSPy, 200 for fine-tuning)"
-            )
+            # DeepSeek is primary, Groq is fallback
+            _deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+            if _deepseek_key:
+                backend = LLMBackend.DEEPSEEK
+                logger.info(
+                    f"🔷 Using DeepSeek V3 (primary: {dataset_size} examples, "
+                    f"need 50 for DSPy, 200 for fine-tuning)"
+                )
+            else:
+                backend = LLMBackend.GROQ
+                logger.info(
+                    f"☁️  Using Groq (fallback: DEEPSEEK_API_KEY not set, "
+                    f"{dataset_size} examples)"
+                )
         
         self.current_backend = backend
         return backend
