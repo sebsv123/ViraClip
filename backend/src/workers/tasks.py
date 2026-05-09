@@ -260,7 +260,24 @@ async def process_scheduled_job(
         raise
 
 
+
+def _log_llm_routing_status():
+    """Log which LLM provider is active at worker startup."""
+    import os
+    deepseek_key = bool(os.getenv("DEEPSEEK_API_KEY"))
+    groq_key = bool(os.getenv("GROQ_API_KEY"))
+    if deepseek_key:
+        logger.info("🔷 LLM primario: DeepSeek V3 (DEEPSEEK_API_KEY configurada)")
+    elif groq_key:
+        logger.warning("☁️  LLM primario: Groq (DEEPSEEK_API_KEY no configurada — modo fallback)")
+    else:
+        logger.error("❌ Sin LLM configurado — GROQ_API_KEY y DEEPSEEK_API_KEY ausentes")
+
+
 async def worker_startup(ctx: Dict[str, Any]) -> None:
+
+    # Log LLM routing status at startup
+    _log_llm_routing_status()
     """
     Run cleanup on worker startup to remove old files.
     """
