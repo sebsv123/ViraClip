@@ -85,7 +85,7 @@ RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/
     && rm -rf /root/.cache/pip /root/.cache/uv /tmp/*
 
 # ── Stage 2: Runtime (minimal) ────────────────────────────────────────
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
