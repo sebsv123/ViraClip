@@ -1,3 +1,5 @@
+import asyncio
+_ELEVENLABS_SEMAPHORE = asyncio.Semaphore(int(os.getenv("ELEVENLABS_CONCURRENCY", "2")))
 """
 Narrator TTS — generates voice narration via ElevenLabs (primary) or gTTS (fallback).
 """
@@ -42,6 +44,8 @@ async def generate_narration(
         api_key = os.getenv("ELEVENLABS_API_KEY", "").strip()
         if api_key:
             try:
+                async with _ELEVENLABS_SEMAPHORE:
+                await asyncio.sleep(0.4)
                 async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
                     resp = await client.post(
                         f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
