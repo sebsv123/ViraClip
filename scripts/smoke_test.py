@@ -2,14 +2,14 @@
 """
 Smoke test — validates core infrastructure after cleanup operations.
 Usage: python scripts/smoke_test.py
-Exit code: 0 = all OK, 1 = any check failed
+Exit code: 0 = all OK, 1 = any FAILED check
 """
 import asyncio
+import os
 import sys
 
 
 async def check_postgres() -> bool:
-    """Check PostgreSQL connectivity."""
     try:
         import asyncpg
         from src.config import get_config
@@ -25,7 +25,6 @@ async def check_postgres() -> bool:
 
 
 async def check_redis() -> bool:
-    """Check Redis connectivity."""
     try:
         import redis.asyncio as aioredis
         from src.config import get_config
@@ -40,7 +39,6 @@ async def check_redis() -> bool:
 
 
 async def check_worker_health() -> bool:
-    """Check ARQ worker health via Redis."""
     try:
         import redis.asyncio as aioredis
         from src.config import get_config
@@ -57,10 +55,10 @@ async def check_worker_health() -> bool:
 
 
 def check_imports() -> bool:
-    """Check critical imports work without error."""
     ok = True
     checks = [
         ("src.domains.ai.llm_router", "LLMRouter"),
+        ("src.domains.ai.llm_router", "call_vision"),
         ("src.domains.broll.broll_service", "BrollService"),
         ("src.workers.tasks", "cleanup_stale_tasks"),
         ("src.domains.longform.longform_coordinator", "create_longform_video"),
@@ -78,9 +76,30 @@ def check_imports() -> bool:
     return ok
 
 
+def check_env_vars() -> bool:
+    """Check critical env vars. FAILED = blocks pipeline, WARNING = degrades."""
+    all_ok = True
+    env_checks = {
+        "DEEPSEEK_API_KEY":   ("FAILED",   bool(os.getenv("DEEPSEEK_API_KEY"))),
+        "GROQ_API_KEY":       ("FAILED",   bool(os.getenv("GROQ_API_KEY"))),
+        "ELEVENLABS_API_KEY": ("WARNING",  bool(os.getenv("ELEVENLABS_API_KEY"))),
+        "FREESOUND_API_KEY":  ("WARNING",  bool(os.getenv("FREESOUND_API_KEY"))),
+        "PEXELS_API_KEY":     ("WARNING",  bool(os.getenv("PEXELS_API_KEY"))),
+    }
+    for name, (severity, present) in env_checks.items():
+        if present:
+            print(f"  ✓ {name} — configurada")
+        elif severity == "FAILED":
+            print(f"  ✗ {name} — NOT SET (pipeline degradado)")
+            all_ok = False
+        else:
+            print(f"  ⚠ {name} — not set (funcionalidad opcional desactivada)")
+    return all_ok
+
+
 async def main():
     print("=" * 50)
-    print("  ViraClip Smoke Test")
+    print("  ViraClip Smoke Test v2")
     print("=" * 50)
     print()
 
@@ -97,6 +116,9 @@ async def main():
 
     print("[4/5] Critical imports...")
     results.append(("Imports", check_imports()))
+
+    print("[5/5] Environment variables...")
+    results.append(("Env vars", check_env_vars()))
 
     print()
     print("=" * 50)
