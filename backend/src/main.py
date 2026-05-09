@@ -29,8 +29,12 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
+import os as _os
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from sqlalchemy import text
@@ -104,6 +108,32 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Upload size limit middleware (rejects large files before body is read)
+class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method in ("POST", "PUT", "PATCH"):
+            content_length = request.headers.get("content-length")
+            if content_length:
+                try:
+                    size = int(content_length)
+                    max_bytes = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+                    if size > max_bytes:
+                        max_mb = int(os.getenv("MAX_UPLOAD_MB", "500"))
+                        return JSONResponse(
+                            status_code=413,
+                            content={
+                                "error": "File too large",
+                                "max_mb": max_mb,
+                                "received_mb": round(size / 1024 / 1024, 1),
+                                "message": f"Maximum upload size is {max_mb}MB",
+                            },
+                        )
+                except ValueError:
+                    pass
+        return await call_next(request)
+
+app.add_middleware(UploadSizeLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
