@@ -3,10 +3,12 @@ Long-form video creation API routes.
 """
 import json
 import logging
+import os
 import uuid
+from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -29,18 +31,63 @@ class LongformStatusResponse(BaseModel):
 _jobs: dict = {}
 
 
+async def check_longform_rate_limit(user_id: str, redis) -> tuple[bool, int]:
+    """
+    Max LONGFORM_DAILY_LIMIT longform videos por usuario por día.
+    Retorna (allowed: bool, remaining: int).
+    """
+    env = os.getenv("APP_ENV", "production")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    key = f"{env}:longform:ratelimit:{user_id}:{today}"
+
+    try:
+        current = await redis.incr(key)
+        if current == 1:
+            await redis.expire(key, 86400)
+        limit = int(os.getenv("LONGFORM_DAILY_LIMIT", "5"))
+        allowed = current <= limit
+        remaining = max(0, limit - current)
+        if not allowed:
+            await redis.decr(key)
+        return allowed, remaining
+    except Exception:
+        logger.warning("[Longform] Redis unavailable, rate limit disabled")
+        return True, 5
+
+
 @router.post("/create", summary="Create a long-form YouTube video")
-async def create_longform(body: LongformCreateRequest):
+async def create_longform(body: LongformCreateRequest, request: Request):
     """Enqueue a long-form video creation job."""
+    # Rate limiting
+    user_id = request.headers.get("X-User-Id", "anonymous")
+    try:
+        import redis.asyncio as aioredis
+        from ...config import get_config
+        cfg = get_config()
+        r = aioredis.Redis(host=cfg.redis_host, port=cfg.redis_port, password=cfg.redis_password or None, decode_responses=True)
+        allowed, remaining = await check_longform_rate_limit(user_id, r)
+        await r.aclose()
+    except Exception:
+        allowed, remaining = True, 5
+
+    if not allowed:
+        now = datetime.utcnow()
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        retry_seconds = int((midnight - now).total_seconds())
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "Daily limit reached",
+                "message": "Maximum 5 longform videos per day. Resets at midnight UTC.",
+                "retry_after_seconds": retry_seconds,
+            },
+        )
+
     job_id = str(uuid.uuid4())[:8]
     _jobs[job_id] = {"status": "queued", "progress": "Waiting to start...", "result": None}
 
-    # Enqueue as ARQ task
     try:
-        from ...workers.tasks import process_video_task
-        # For now, run inline (in production, enqueue to ARQ)
         from ...domains.longform.longform_coordinator import create_longform_video
-        from pathlib import Path
 
         _jobs[job_id]["status"] = "processing"
         _jobs[job_id]["progress"] = "Generating script..."

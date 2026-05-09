@@ -76,6 +76,39 @@ def check_imports() -> bool:
     return ok
 
 
+def check_ffmpeg() -> bool:
+    """Check FFmpeg binary and NVENC availability."""
+    import subprocess
+    ok = True
+
+    # FFmpeg binary
+    result = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+    if result.returncode == 0:
+        version_line = result.stdout.split("\n")[0]
+        print(f"  ✓ FFmpeg instalado — {version_line}")
+    else:
+        print(f"  ✗ FFmpeg instalado — FAILED")
+        ok = False
+
+    # NVENC
+    result_enc = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5)
+    nvenc = "h264_nvenc" in result_enc.stdout
+    if nvenc:
+        print(f"  ✓ FFmpeg NVENC (h264_nvenc) — disponible (GPU encoding activo)")
+    else:
+        print(f"  ⚠ FFmpeg NVENC (h264_nvenc) — no disponible (usando libx264)")
+
+    # libx264
+    libx264 = "libx264" in result_enc.stdout
+    if libx264:
+        print(f"  ✓ FFmpeg libx264 (CPU fallback) — disponible")
+    else:
+        print(f"  ✗ FFmpeg libx264 (CPU fallback) — FAILED")
+        ok = False
+
+    return ok
+
+
 def check_env_vars() -> bool:
     """Check critical env vars. FAILED = blocks pipeline, WARNING = degrades."""
     all_ok = True
@@ -114,10 +147,13 @@ async def main():
     print("[3/5] Worker ARQ health...")
     results.append(("Worker ARQ", await check_worker_health()))
 
-    print("[4/5] Critical imports...")
+    print("[4/6] FFmpeg + NVENC...")
+    results.append(("FFmpeg", check_ffmpeg()))
+
+    print("[5/6] Critical imports...")
     results.append(("Imports", check_imports()))
 
-    print("[5/5] Environment variables...")
+    print("[6/6] Environment variables...")
     results.append(("Env vars", check_env_vars()))
 
     print()
