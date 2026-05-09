@@ -12,28 +12,37 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Visual keyword categories
+# Visual keyword categories — expanded for viral content (ES + EN)
 VISUAL_KEYWORDS = {
     # Nature & Environment
-    "nature": ["ocean", "sea", "beach", "mountain", "forest", "sky", "sunset", "sunrise", "river", "lake", "waterfall", "clouds", "stars", "moon", "sun"],
+    "nature": ["ocean", "sea", "beach", "mountain", "forest", "sky", "sunset", "sunrise", "river", "lake", "waterfall", "clouds", "stars", "moon", "sun", "naturaleza", "playa", "montaña", "bosque", "río"],
     
     # Money & Business
-    "money": ["money", "cash", "dollars", "wealth", "rich", "profit", "revenue", "income", "investment", "business", "success", "growth"],
+    "money": ["money", "cash", "dollars", "wealth", "rich", "profit", "revenue", "income", "investment", "business", "success", "growth", "dinero", "rico", "millón", "million", "inversión", "invest", "negocio", "éxito", "ganar", "win"],
     
-    # Emotions & Abstract Concepts (visualizable)
-    "emotion": ["success", "failure", "happiness", "sadness", "anger", "fear", "love", "hate", "celebration", "victory"],
+    # Emotions & Abstract Concepts
+    "emotion": ["success", "failure", "happiness", "sadness", "anger", "fear", "love", "hate", "celebration", "victory", "increíble", "incredible", "brutal", "crazy", "secreto", "secret", "verdad", "truth", "error", "mistake", "importante", "important", "urgente", "urgent", "peligro", "danger"],
     
     # Technology
-    "tech": ["computer", "phone", "laptop", "screen", "technology", "ai", "robot", "code", "software", "internet"],
+    "tech": ["computer", "phone", "laptop", "screen", "technology", "ai", "robot", "code", "software", "internet", "computadora", "celular", "teléfono", "pantalla"],
     
     # People & Actions
-    "people": ["person", "people", "crowd", "team", "group", "family", "friends", "audience"],
+    "people": ["person", "people", "crowd", "team", "group", "family", "friends", "audience", "gente", "amigo", "friend", "familia", "family", "mundo", "world"],
     
     # Objects
-    "objects": ["car", "house", "building", "city", "food", "book", "camera", "microphone"],
+    "objects": ["car", "house", "building", "city", "food", "book", "camera", "microphone", "coche", "casa", "edificio", "ciudad", "comida"],
     
     # Sports & Action
-    "sports": ["running", "jumping", "swimming", "playing", "fighting", "racing", "climbing"],
+    "sports": ["running", "jumping", "swimming", "playing", "fighting", "racing", "climbing", "correr", "saltar", "entrenar", "gym", "fitness", "workout"],
+    
+    # Motivation & Viral Triggers
+    "motivation": ["gratis", "free", "fácil", "easy", "rápido", "fast", "mejor", "best", "nuevo", "new", "ahora", "now", "nunca", "never", "siempre", "always", "clave", "key", "único", "unique", "exclusivo", "exclusive"],
+    
+    # Social Media & Engagement
+    "social": ["mira", "watch", "escucha", "listen", "comparte", "share", "sigue", "follow", "like", "comenta", "comment", "suscríbete", "subscribe"],
+    
+    # Health & Body
+    "health": ["salud", "health", "cuerpo", "body", "mente", "mind", "ejercicio", "exercise", "dieta", "diet", "peso", "weight", "vida", "life"],
 }
 
 # Flatten all keywords for quick lookup
