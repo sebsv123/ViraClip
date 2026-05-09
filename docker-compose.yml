@@ -363,6 +363,8 @@ services:
       <<: [*core-env, *editing-env, *ai-env]
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+      NVIDIA_REQUIRE_CUDA: ""
+      NVIDIA_DISABLE_REQUIRE: "1"
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
