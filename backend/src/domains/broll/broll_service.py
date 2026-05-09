@@ -1,3 +1,4 @@
+from src.constants import BROLL_HTTP_TIMEOUT, COMFYUI_LOCK_TIMEOUT_SECONDS
 """
 BRoll Service - AI-powered B-roll injection for viral video enhancement.
 
@@ -228,7 +229,7 @@ class BrollService:
                 _cfg = get_config()
                 _r = aioredis.Redis(host=_cfg.redis_host, port=_cfg.redis_port, password=_cfg.redis_password or None, decode_responses=True)
                 for _attempt in range(3):
-                    _lock_acquired = await _r.set("lock:comfyui", "1", nx=True, ex=120)
+                    _lock_acquired = await _r.set("lock:comfyui", "1", nx=True, ex=COMFYUI_LOCK_TIMEOUT_SECONDS)
                     if _lock_acquired:
                         break
                     await asyncio.sleep(2)
@@ -322,7 +323,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=BROLL_HTTP_TIMEOUT) as client:
                 resp = await client.get(
                     "https://api.pexels.com/v1/search",
                     headers={"Authorization": key},
@@ -351,7 +352,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=BROLL_HTTP_TIMEOUT) as client:
                 resp = await client.get(
                     "https://api.pexels.com/videos/search",
                     headers={"Authorization": key},
@@ -380,7 +381,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=BROLL_HTTP_TIMEOUT) as client:
                 resp = await client.get(
                     "https://api.coverr.co/videos",
                     params={"keywords": query, "api_key": key, "per_page": 5},
@@ -415,7 +416,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=BROLL_HTTP_TIMEOUT) as client:
                 resp = await client.get(
                     "https://pixabay.com/api/videos/",
                     params={
