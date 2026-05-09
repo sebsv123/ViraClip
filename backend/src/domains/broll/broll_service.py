@@ -203,20 +203,15 @@ class BrollService:
         _ltx_enabled = os.getenv("BROLL_USE_LTX", "false").lower() == "true"
         _comfy_enabled = os.getenv("COMFYUI_ENABLED", "false").lower() == "true"
         logger.info(
-            "[BRoll] Provider chain for '%s': LTX=%s ComfyUI=%s → Pexels → Coverr → Cache",
-            keyword, _ltx_enabled, _comfy_enabled,
+            "[BRoll] Provider chain for '%s': ComfyUI/LTX → Pexels → Coverr → Pixabay → Cache",
+            keyword,
         )
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
 
-        # ── 0. LTX-Video generation (if enabled) ─────────────────────────────
-        # IMPORTANTE: aquí queremos un CLIP DE BROLL puro generado por LTX a
-        # partir del keyword, no una concatenación con el video original.
-        # Antes se pedía "broll_transition" que devolvía main+xfade+broll;
-        # ahora se pide "broll_generate" (orchestrator.generate_broll_with_ltx)
-        # y guardamos el resultado en el cache local por keyword.
-        if os.getenv("BROLL_USE_LTX", "false").lower() == "true" and task_id:
+        # ── 0. ComfyUI/LTX-Video generation (PRIMER proveedor) ───────────────
+        if _comfy_enabled and _ltx_enabled and task_id:
             try:
                 prompt = (
                     f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical, "
@@ -224,33 +219,32 @@ class BrollService:
                     "sharp focus, professional camera, natural lighting, "
                     "documentary style, high detail"
                 )
-                logger.info(f"🎬 Generating B-roll with LTX-Video: '{keyword}'")
+                logger.info(f"🎬 Generating B-roll with ComfyUI/LTX-Video: '{keyword}'")
                 _ltx_result = await comfyui_integration.process_with_comfyui(
                     task_id=f"{task_id}_broll_{safe}",
-                    video_path=None,  # not used for pure generation
+                    video_path=None,
                     operation="broll_generate",
                     prompt=prompt,
                     duration=3.0,
-                    width=608,   # 9:16-ish at LTX step=32 (608x1088)
+                    width=608,
                     height=1088,
                 )
                 if _ltx_result and Path(_ltx_result).exists():
-                    # Promote into keyword-cache for future reuse
                     try:
                         shutil.copy2(_ltx_result, cached_video)
                     except Exception as _copy_e:
                         logger.debug(f"[BRoll] No pude cachear LTX en {cached_video}: {_copy_e}")
-                    logger.info(f"[BRoll] ✓ LTX B-roll generated for '{keyword}': {_ltx_result}")
+                    logger.info(f"[BRoll] ✓ ComfyUI/LTX B-roll generated for '{keyword}': {_ltx_result}")
                     return Path(_ltx_result)
             except Exception as _ltx_e:
-                logger.warning(f"⚠️ LTX B-roll failed, falling back to stock footage: {_ltx_e}")
+                logger.warning(f"⚠️ ComfyUI/LTX B-roll failed, falling back to stock footage: {_ltx_e}")
 
-        # ── 1. API-first: query all video sources in parallel ─────────────────
+        # ── 1. Stock video APIs: Pexels + Coverr + Pixabay en paralelo ────────
         pexels_task  = asyncio.create_task(self._search_pexels(keyword))
-        pixabay_task = asyncio.create_task(self._search_pixabay(keyword))
         coverr_task  = asyncio.create_task(self._search_coverr(keyword))
+        pixabay_task = asyncio.create_task(self._search_pixabay(keyword))
 
-        results = await asyncio.gather(pexels_task, pixabay_task, coverr_task,
+        results = await asyncio.gather(pexels_task, coverr_task, pixabay_task,
                                        return_exceptions=True)
         video_urls = [r for r in results if isinstance(r, str) and r]
 
@@ -274,7 +268,7 @@ class BrollService:
             logger.info(f"[BRoll] Cache fallback (photo): {cached_photo}")
             return cached_photo
 
-        logger.warning(f"[BRoll] No asset found for keyword '{keyword}' (APIs + cache exhausted)")
+        logger.warning(f"[BRoll] No asset found for keyword '{keyword}' (all providers exhausted)")
         return None
 
     async def _search_pexels_photos_and_download(self, keyword: str, safe_name: str) -> Optional[Path]:
