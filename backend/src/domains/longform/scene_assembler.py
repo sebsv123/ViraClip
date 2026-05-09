@@ -100,6 +100,15 @@ async def assemble_video(
         except Exception:
             pass
 
+        # Compress final video
+        compressed = output_path.with_name(f"compressed_{output_path.name}")
+        compressed_path = await _compress_final_video(output_path, compressed)
+        if compressed_path != output_path:
+            output_path.unlink(missing_ok=True)
+            compressed_path.rename(output_path)
+            logger.info("[SceneAssembler] Final video compressed: %.0f MB",
+                        output_path.stat().st_size / (1024 * 1024))
+
         return AssembledVideo(
             output_path=output_path,
             total_duration=total_dur,
@@ -109,6 +118,46 @@ async def assemble_video(
     finally:
         shutil.rmtree(scenes_dir, ignore_errors=True)
         logger.info("[SceneAssembler] Cleaned up tmp dir: %s", scenes_dir)
+
+
+async def _compress_final_video(input_path: Path, output_path: Path) -> Path:
+    """
+    Comprime el video final con NVENC (GPU) o libx264 (CPU fallback).
+    Retorna output_path si éxito, input_path si falla.
+    """
+    import os
+    gpu_available = bool(os.getenv("CUDA_VISIBLE_DEVICES", "0"))
+    if gpu_available:
+        video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+    else:
+        video_codec = ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        *video_codec,
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600.0)
+        if proc.returncode == 0:
+            logger.info("[SceneAssembler] Compressed: %s → %s", input_path.name, output_path.name)
+            return output_path
+        logger.warning("[SceneAssembler] Compression failed: %s", stderr.decode()[-500:])
+    except asyncio.TimeoutError:
+        logger.error("[SceneAssembler] Compression timed out after 600s")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    return input_path
 
 
 async def _fetch_broll(keywords: List[str], target_duration: float) -> Path:

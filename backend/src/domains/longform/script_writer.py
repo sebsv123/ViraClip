@@ -39,8 +39,13 @@ async def write_script(topic: str, target_duration_seconds: int = 600) -> Option
         "Estructura: intro impactante → desarrollo por secciones → CTA final. "
         "Responde SIEMPRE en JSON válido con el schema indicado."
     )
+    sections_count = 6  # default, will be adjusted by LLM
+    min_words = int(target_seconds / sections_count * 1.8)
+    max_words = int(target_seconds / sections_count * 3.5)
     user_prompt = (
-        f"Escribe un guión de {target_duration_seconds}s sobre: {topic}\n\n"
+        f"Escribe un guión de {target_seconds}s sobre: {topic}\n\n"
+        "IMPORTANTE: El guión debe durar exactamente {target_seconds} segundos.\n"
+        f"Cada sección debe tener entre {min_words} y {max_words} palabras.\n\n"
         "Devuelve JSON con esta estructura exacta:\n"
         "{\n"
         "  'title': 'título del video',\n"
@@ -80,7 +85,8 @@ async def write_script(topic: str, target_duration_seconds: int = 600) -> Option
                 resp.raise_for_status()
                 data = resp.json()
                 content = json.loads(data["choices"][0]["message"]["content"])
-                return _parse_script_result(content)
+                result = _parse_script_result(content)
+                return _validate_and_adjust_script(result, target_duration_seconds)
         except Exception as e:
             logger.warning(f"[ScriptWriter] DeepSeek failed: {e}, falling back to Groq")
 
@@ -112,6 +118,47 @@ async def write_script(topic: str, target_duration_seconds: int = 600) -> Option
 
     logger.error("[ScriptWriter] All LLM providers failed")
     return None
+
+
+def _validate_and_adjust_script(
+    result: ScriptResult,
+    target_seconds: int,
+    tolerance: float = 0.20,
+) -> ScriptResult:
+    """
+    Verifica que la duración total está en [target*(1-tol), target*(1+tol)].
+    Si no → recorta secciones de desarrollo (no intro/outro).
+    """
+    total = sum(s.estimated_duration for s in result.sections)
+    min_ok = target_seconds * (1 - tolerance)
+    max_ok = target_seconds * (1 + tolerance)
+
+    if min_ok <= total <= max_ok:
+        return result
+
+    if total > max_ok:
+        # Script demasiado largo: elimina secciones de desarrollo
+        sections = result.sections
+        while sum(s.estimated_duration for s in sections) > max_ok:
+            dev = [s for s in sections if not s.is_intro and not s.is_outro]
+            if not dev:
+                break
+            shortest = min(dev, key=lambda s: s.estimated_duration)
+            sections = [s for s in sections if s.index != shortest.index]
+        result.sections = sections
+    else:
+        logger.warning(
+            "[ScriptWriter] Script too short: %.0fs vs target %ds. "
+            "Consider increasing section count in prompt.",
+            total, target_seconds,
+        )
+
+    result.total_estimated_duration = sum(s.estimated_duration for s in result.sections)
+    logger.info(
+        "[ScriptWriter] Duration adjusted: %.0fs → %.0fs (target: %ds)",
+        total, result.total_estimated_duration, target_seconds,
+    )
+    return result
 
 
 def _parse_script_result(content: dict) -> ScriptResult:
