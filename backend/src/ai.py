@@ -1,4 +1,11 @@
 """
+DEPRECATED: Este modulo esta en proceso de migracion a domains/ai/
+No anadir nuevas funciones aqui. Ver domains/ai/__init__.py
+Símbolos activos: get_most_relevant_parts_by_transcript
+Imports activos en: _transcript.py, _clips_batch.py,
+                    _clip_renderer.py, _clips_transitions.py, ai_metrics.py
+
+"""
 AI-related functions for transcript analysis with enhanced precision and virality scoring.
 """
 
