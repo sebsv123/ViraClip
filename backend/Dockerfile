@@ -75,6 +75,13 @@ RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/
         "redis[asyncio]>=4.5.0" \
         "google-api-python-client>=2.100.0" \
         "kaggle>=1.5.16" \
+    && .venv/bin/pip install --no-cache-dir --no-deps "TTS>=0.22.0" \
+    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+        torch==2.10.0+cu130 \
+        torchvision==0.25.0+cu130 \
+        torchaudio==2.10.0+cu130 \
+        --index-url https://download.pytorch.org/whl/cu130 \
+        --force-reinstall \
     && rm -rf /root/.cache/pip /root/.cache/uv /tmp/*
 
 # ── Stage 2: Runtime (minimal) ────────────────────────────────────────
