@@ -336,7 +336,6 @@ services:
       - ~/CascadeProjects/ViraClip/models:/comfyui/models
     environment:
       NVIDIA_VISIBLE_DEVICES: all
-      CUDA_VISIBLE_DEVICES: 0
       PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:512,garbage_collection_threshold:0.6
       CUDA_MODULE_LOADING: LAZY
       OMP_NUM_THREADS: 8

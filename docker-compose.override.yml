@@ -54,7 +54,6 @@ services:
       - RENDER_CONCURRENCY=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-      - CUDA_VISIBLE_DEVICES=0
 
   # Worker 1 - Primary GPU worker (RTX 5070)
   worker:
@@ -72,10 +71,9 @@ services:
               capabilities: [gpu]
     environment:
       - RENDER_CONCURRENCY=6
-      - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_DEVICE=cpu
-      - WHISPER_COMPUTE_TYPE=float32
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE_TYPE=float16
       - SAM2_ENABLED=true
       - T2V_ENABLED=true
 
@@ -91,7 +89,6 @@ services:
           memory: 4G
     environment:
       - RENDER_CONCURRENCY=3
-      - CUDA_VISIBLE_DEVICES=""
       - WHISPER_DEVICE=cpu
       - SAM2_ENABLED=false
       - T2V_ENABLED=false
@@ -108,7 +105,6 @@ services:
           memory: 3G
     environment:
       - RENDER_CONCURRENCY=2
-      - CUDA_VISIBLE_DEVICES=""
       - WHISPER_DEVICE=cpu
       - SAM2_ENABLED=false
       - T2V_ENABLED=false
@@ -164,7 +160,6 @@ services:
               capabilities: [gpu]
     environment:
       - RENDER_CONCURRENCY=4
-      - CUDA_VISIBLE_DEVICES=0
       - NVIDIA_VISIBLE_DEVICES=all
 
   # ComfyUI - Generative AI (GPU only)
