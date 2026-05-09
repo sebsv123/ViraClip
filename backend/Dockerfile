@@ -44,17 +44,13 @@ RUN uv venv --seed .venv
 # Optional packages (diffusers, TTS, realesrgan, onnx, msclap) are EXCLUDED
 # from the base image — they can be pip-installed at runtime if needed
 COPY pyproject.toml uv.lock* ./
-RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-    torch==2.10.0+cu130 \
-    torchvision==0.25.0+cu130 \
-    torchaudio==2.10.0+cu130 \
-    --index-url https://download.pytorch.org/whl/cu130 \
-    && uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu130 \
+RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu130 \
     && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
         torch==2.10.0+cu130 \
         torchvision==0.25.0+cu130 \
         torchaudio==2.10.0+cu130 \
         --index-url https://download.pytorch.org/whl/cu130 \
+        --force-reinstall \
     && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
         "faster-whisper==1.1.1" \
         "whisperx" \
@@ -87,6 +83,7 @@ FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
+ENV CUDA_MODULE_LOADING=LAZY
 
 # Only essential runtime system deps
 RUN apt-get update && apt-get install -y --no-install-recommends \
