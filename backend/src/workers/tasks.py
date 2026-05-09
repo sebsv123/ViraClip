@@ -342,6 +342,48 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     )
 
 
+async def cleanup_stale_tasks(ctx: dict) -> None:
+    """
+    Marca como FAILED las tasks que llevan más de
+    TASK_STALE_TIMEOUT_MINUTES en estado PROCESSING.
+    Previene tasks zombie cuando un worker crashea.
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    timeout_min = int(os.getenv("TASK_STALE_TIMEOUT_MINUTES", "45"))
+    cutoff = datetime.utcnow() - timedelta(minutes=timeout_min)
+
+    try:
+        from ..database import get_db
+        from sqlalchemy import text
+
+        async with get_db() as db:
+            result = await db.execute(
+                text("""
+                    UPDATE tasks
+                    SET status = 'failed',
+                        error_message = 'Task timed out — worker may have crashed',
+                        updated_at = NOW()
+                    WHERE status = 'processing'
+                      AND updated_at < :cutoff
+                    RETURNING id
+                """),
+                {"cutoff": cutoff},
+            )
+            stale = result.fetchall()
+            if stale:
+                logger.warning(
+                    "[Cleanup] %d stale task(s) marked as failed: %s",
+                    len(stale),
+                    [str(r[0]) for r in stale],
+                )
+            else:
+                logger.debug("[Cleanup] No stale tasks found")
+    except Exception as exc:
+        logger.error("[Cleanup] Failed to run stale task cleanup: %s", exc)
+
+
 # Worker configuration for arq
 class WorkerSettings:
     """Configuration for arq worker."""
@@ -398,6 +440,15 @@ try:
     from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
     
     _cron_jobs = []
+    
+    # Stale task cleanup every 10 minutes
+    _job = _safe_cron(
+        cleanup_stale_tasks,
+        "cleanup_stale_tasks",
+        minute={0, 10, 20, 30, 40, 50},
+    )
+    if _job:
+        _cron_jobs.append(_job)
     
     # Phase 5.3: weekly virality scorer retrain (Sunday 02:00 UTC)
     # NOTE: arq's cron() does NOT support day_of_week — use weekday parameter instead

@@ -100,6 +100,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsndfile1 \
     libgl1 libglib2.0-0 \
     libsm6 libxext6 libxrender-dev \
+    libavutil-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*

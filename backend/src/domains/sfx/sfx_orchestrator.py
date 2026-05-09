@@ -1,15 +1,24 @@
 """
-SFX Orchestrator — coordinates LLM query generation + Freesound download + mixing.
+SFX Orchestrator — coordinates LLM query generation + Freesound download + ElevenLabs + mixing.
 """
+import asyncio
+import hashlib
 import logging
 import os
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .sfx_llm_query import generate_sfx_plan
+import httpx
+
 from .freesound_client import FreesoundClient
+from .sfx_llm_query import generate_sfx_plan
 from .sfx_mixer import apply_sfx
 
 logger = logging.getLogger(__name__)
+
+# ElevenLabs SFX cache (module-level, persists across calls)
+_elevenlabs_cache: Dict[str, str] = {}
 
 
 class SFXOrchestrator:
@@ -18,6 +27,53 @@ class SFXOrchestrator:
     def __init__(self, freesound_client: Optional[FreesoundClient] = None):
         self.freesound = freesound_client or FreesoundClient()
         self.enabled = os.getenv("SFX_ENABLED", "false").lower() == "true"
+        self.elevenlabs_enabled = (
+            os.getenv("ELEVENLABS_SFX_ENABLED", "false").lower() == "true"
+            and bool(os.getenv("ELEVENLABS_API_KEY", "").strip())
+        )
+
+    async def _elevenlabs_generate(self, keyword: str, sfx_dir: Path) -> Optional[str]:
+        """Generate SFX via ElevenLabs Sound Generation API with Redis cache."""
+        if not self.elevenlabs_enabled:
+            return None
+
+        api_key = os.getenv("ELEVENLABS_API_KEY", "")
+        normalized = hashlib.md5(keyword.lower().encode()).hexdigest()
+        cache_path = sfx_dir / f"elevenlabs_{normalized}.mp3"
+
+        # Check module-level cache first
+        if normalized in _elevenlabs_cache:
+            cached = _elevenlabs_cache[normalized]
+            if Path(cached).exists():
+                logger.info(f"[SFX] ElevenLabs cache hit: '{keyword}'")
+                return cached
+
+        # Check disk cache
+        if cache_path.exists():
+            _elevenlabs_cache[normalized] = str(cache_path)
+            logger.info(f"[SFX] ElevenLabs disk cache: '{keyword}'")
+            return str(cache_path)
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+                resp = await client.post(
+                    "https://api.elevenlabs.io/v1/sound-generation",
+                    headers={"xi-api-key": api_key},
+                    json={
+                        "text": f"{keyword} sound effect",
+                        "duration_seconds": 2.0,
+                        "prompt_influence": 0.3,
+                    },
+                )
+                resp.raise_for_status()
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_bytes(resp.content)
+                _elevenlabs_cache[normalized] = str(cache_path)
+                logger.info(f"[SFX] ElevenLabs generated '{keyword}' → {cache_path}")
+                return str(cache_path)
+        except Exception as e:
+            logger.warning(f"[SFX] ElevenLabs generation failed for '{keyword}': {e}")
+            return None
 
     async def plan_and_fetch(
         self,
@@ -47,7 +103,9 @@ class SFXOrchestrator:
                 logger.info("[SFX] LLM returned empty plan")
                 return []
 
-            # Step 2: Download each SFX from Freesound
+            # Step 2: Download each SFX — Freesound → ElevenLabs fallback
+            sfx_dir = Path("/tmp/sfx_cache")
+            sfx_dir.mkdir(parents=True, exist_ok=True)
             for sfx in plan:
                 query = sfx.get("freesound_query", "")
                 category = sfx.get("category", "transitions")
