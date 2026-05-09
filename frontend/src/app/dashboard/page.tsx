@@ -196,6 +196,7 @@ interface TaskOptions {
   jump_cut: boolean;
   use_scene_detection: boolean;
   auto_center_face: boolean;
+  caption_template?: string;
 }
 
 function CreateTaskModal({ isOpen, onClose, onSubmit }: { 
@@ -345,6 +346,19 @@ function CreateTaskModal({ isOpen, onClose, onSubmit }: {
                     </div>
                   </div>
                   
+                  {/* Caption Template */}
+                  <div className="col-span-2">
+                    <label className="text-xs text-white/50 mb-1.5 block">Estilo de subtítulos</label>
+                    <select
+                      value={options.caption_template || "hormozi"}
+                      onChange={(e) => setOptions({ ...options, caption_template: e.target.value })}
+                      className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-white text-sm focus:outline-none focus:border-violet-500/50"
+                    >
+                      <option value="hormozi" className="bg-[#1a1a25]">Hormozi — Palabra a palabra, impacto</option>
+                      <option value="mrbeast" className="bg-[#1a1a25]">MrBeast — Frases cortas, energía alta</option>
+                    </select>
+                  </div>
+
                   {/* Toggle Options */}
                   <div className="col-span-2 grid grid-cols-3 gap-2">
                     <button
@@ -526,6 +540,7 @@ export default function DashboardPage() {
           jump_cut: options.jump_cut,
           use_scene_detection: options.use_scene_detection,
           auto_center_face: options.auto_center_face,
+          caption_template: options.caption_template || "hormozi",
         }),
       });
       

@@ -216,6 +216,8 @@ class BrollService:
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
 
+        _broll_timeout = int(os.getenv("BROLL_TIMEOUT_SECONDS", "30"))
+
         # ── 0. ComfyUI/LTX-Video generation (PRIMER proveedor) ───────────────
         if _comfy_enabled and _ltx_enabled and task_id:
             try:
@@ -226,14 +228,17 @@ class BrollService:
                     "documentary style, high detail"
                 )
                 logger.info(f"🎬 Generating B-roll with ComfyUI/LTX-Video: '{keyword}'")
-                _ltx_result = await comfyui_integration.process_with_comfyui(
-                    task_id=f"{task_id}_broll_{safe}",
-                    video_path=None,
-                    operation="broll_generate",
-                    prompt=prompt,
-                    duration=3.0,
-                    width=608,
-                    height=1088,
+                _ltx_result = await asyncio.wait_for(
+                    comfyui_integration.process_with_comfyui(
+                        task_id=f"{task_id}_broll_{safe}",
+                        video_path=None,
+                        operation="broll_generate",
+                        prompt=prompt,
+                        duration=3.0,
+                        width=608,
+                        height=1088,
+                    ),
+                    timeout=_broll_timeout,
                 )
                 if _ltx_result and Path(_ltx_result).exists():
                     try:
@@ -242,6 +247,8 @@ class BrollService:
                         logger.debug(f"[BRoll] No pude cachear LTX en {cached_video}: {_copy_e}")
                     logger.info(f"[BRoll] ✓ ComfyUI/LTX B-roll generated for '{keyword}': {_ltx_result}")
                     return Path(_ltx_result)
+            except asyncio.TimeoutError:
+                logger.warning(f"[BRoll] ComfyUI/LTX timeout after {_broll_timeout}s, trying next")
             except Exception as _ltx_e:
                 logger.warning(f"⚠️ ComfyUI/LTX B-roll failed, falling back to stock footage: {_ltx_e}")
 
@@ -255,8 +262,12 @@ class BrollService:
         video_urls = [r for r in results if isinstance(r, str) and r]
 
         for url in video_urls:
+            if url in used_urls:
+                logger.info(f"[BRoll] Skipping duplicate URL: {url[:60]}...")
+                continue
             result = await self._download(url, cached_video)
             if result:
+                used_urls.add(url)
                 logger.info(f"[BRoll] API → downloaded video for '{keyword}': {result.name}")
                 return result
 
@@ -283,7 +294,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
                 resp = await client.get(
                     "https://api.pexels.com/v1/search",
                     headers={"Authorization": key},
@@ -312,7 +323,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
                 resp = await client.get(
                     "https://api.pexels.com/videos/search",
                     headers={"Authorization": key},
@@ -341,7 +352,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
                 resp = await client.get(
                     "https://api.coverr.co/videos",
                     params={"keywords": query, "api_key": key, "per_page": 5},
@@ -376,7 +387,7 @@ class BrollService:
         if not key:
             return None
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
                 resp = await client.get(
                     "https://pixabay.com/api/videos/",
                     params={
