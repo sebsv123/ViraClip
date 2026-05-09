@@ -1,3 +1,4 @@
+from src.constants import LLM_CB_WINDOW_SECONDS, LLM_CB_BYPASS_SECONDS, LLM_CB_THRESHOLD
 """
 MEJORA — Motor de scoring viral con DeepSeek + datos reales
 
@@ -37,20 +38,20 @@ async def _cb_record_failure(redis=None) -> None:
     try:
         if redis is not None:
             failures = await redis.incr("llm:deepseek:failures")
-            await redis.expire("llm:deepseek:failures", 300)
-            if failures >= 3:
-                bypass_until = _time.time() + 600
+            await redis.expire("llm:deepseek:failures", LLM_CB_WINDOW_SECONDS)
+            if failures >= LLM_CB_THRESHOLD:
+                bypass_until = _time.time() + LLM_CB_BYPASS_SECONDS
                 await redis.set("llm:deepseek:bypassed_until", bypass_until, ex=600)
                 logger.warning("[LLM] Circuit breaker triggered: DeepSeek bypassed for 10min")
         else:
             _cb_failures_mem += 1
-            if _cb_failures_mem >= 3:
-                _cb_bypassed_until_mem = _time.time() + 600
+            if _cb_failures_mem >= LLM_CB_THRESHOLD:
+                _cb_bypassed_until_mem = _time.time() + LLM_CB_BYPASS_SECONDS
                 logger.warning("[LLM] Circuit breaker triggered (memory): DeepSeek bypassed for 10min")
     except Exception:
         _cb_failures_mem += 1
-        if _cb_failures_mem >= 3:
-            _cb_bypassed_until_mem = _time.time() + 600
+        if _cb_failures_mem >= LLM_CB_THRESHOLD:
+            _cb_bypassed_until_mem = _time.time() + LLM_CB_BYPASS_SECONDS
             logger.warning("[LLM] Circuit breaker triggered (memory): DeepSeek bypassed for 10min")
 
 async def _cb_record_success(redis=None) -> None:

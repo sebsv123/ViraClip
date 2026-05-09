@@ -1,3 +1,4 @@
+from src.constants import ELEVENLABS_HTTP_TIMEOUT
 """
 SFX Orchestrator — coordinates LLM query generation + Freesound download + ElevenLabs + mixing.
 """
@@ -55,7 +56,7 @@ class SFXOrchestrator:
             return str(cache_path)
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=5.0)) as client:
+            async with httpx.AsyncClient(timeout=ELEVENLABS_HTTP_TIMEOUT) as client:
                 resp = await client.post(
                     "https://api.elevenlabs.io/v1/sound-generation",
                     headers={"xi-api-key": api_key},

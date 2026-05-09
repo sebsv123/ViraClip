@@ -176,3 +176,26 @@ ERROR_VIDEO_TOO_LONG = f"Video duration exceeds maximum of {MAX_VIDEO_DURATION /
 ERROR_NO_API_KEY = "No LLM API key configured. Set GROQ_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY"
 ERROR_TASK_NOT_FOUND = "Task not found or access denied"
 ERROR_RATE_LIMIT = "Rate limit exceeded. Please try again later"
+
+
+# ============================================================================
+# HTTP Timeouts (centralized)
+# ============================================================================
+import httpx as _httpx
+BROLL_HTTP_TIMEOUT       = _httpx.Timeout(15.0, connect=5.0)
+ELEVENLABS_HTTP_TIMEOUT  = _httpx.Timeout(20.0, connect=5.0)
+SFX_HTTP_TIMEOUT         = _httpx.Timeout(15.0, connect=5.0)
+
+# ============================================================================
+# Locks and TTLs
+# ============================================================================
+COMFYUI_LOCK_TIMEOUT_SECONDS  = 120
+TASK_STALE_TIMEOUT_MINUTES    = 45
+ELEVENLABS_SFX_CACHE_TTL_DAYS = 7
+
+# ============================================================================
+# Circuit Breaker (DeepSeek)
+# ============================================================================
+LLM_CB_WINDOW_SECONDS = 300   # ventana de observación (5 min)
+LLM_CB_BYPASS_SECONDS = 600   # tiempo de bypass (10 min)
+LLM_CB_THRESHOLD      = 3     # fallos para activar
