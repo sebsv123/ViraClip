@@ -7,7 +7,7 @@
 #   Result: ~6-8GB final image instead of 42GB
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────
-FROM nvidia/cuda:12.8.0-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_DEFAULT_TIMEOUT=600
