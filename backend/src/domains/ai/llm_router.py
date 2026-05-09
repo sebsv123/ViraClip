@@ -64,6 +64,47 @@ async def _cb_record_success(redis=None) -> None:
     _cb_failures_mem = 0
     _cb_bypassed_until_mem = 0.0
 
+async def call_vision(
+    prompt: str,
+    images_b64: list[str],
+    model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
+    max_tokens: int = 1024,
+) -> str:
+    """Groq vision call. Returns empty string on any failure."""
+    import httpx
+    import os
+    try:
+        api_key = os.environ.get("GROQ_API_KEY", "")
+        if not api_key:
+            logger.warning("[LLM Vision] GROQ_API_KEY not set")
+            return ""
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                *[{"type": "image_url",
+                   "image_url": {"url": f"data:image/jpeg;base64,{img}"}}
+                  for img in images_b64],
+            ],
+        }]
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+            return result["choices"][0]["message"]["content"] or ""
+    except Exception as exc:
+        logger.warning("[LLM Vision] failed: %s: %s", type(exc).__name__, exc)
+        return ""
+
+
 async def _cb_is_bypassed(redis=None) -> bool:
     global _cb_bypassed_until_mem
     try:
