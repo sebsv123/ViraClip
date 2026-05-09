@@ -85,3 +85,33 @@ async def test_admin_usage_returns_valid_schema(client):
     assert isinstance(data["total_cost_today"], (int, float))
     assert "alert_level" in data
     assert data["alert_level"] in ("ok", "moderate", "high")
+
+
+@pytest.mark.asyncio
+async def test_longform_topic_too_short_returns_400(client):
+    """POST /longform/create with short topic returns 400."""
+    response = await client.post("/api/longform/create", json={
+        "topic": "Hi",
+        "duration_seconds": 600,
+    })
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_longform_duration_too_long_returns_400(client):
+    """POST /longform/create with excessive duration returns 400."""
+    response = await client.post("/api/longform/create", json={
+        "topic": "A very interesting topic for a long video",
+        "duration_seconds": 999999,
+    })
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_longform_duration_too_short_returns_400(client):
+    """POST /longform/create with duration < 60s returns 400."""
+    response = await client.post("/api/longform/create", json={
+        "topic": "A very interesting topic for a long video",
+        "duration_seconds": 30,
+    })
+    assert response.status_code == 400
