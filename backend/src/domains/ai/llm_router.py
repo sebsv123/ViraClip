@@ -1,3 +1,7 @@
+import os
+_ENV = os.getenv("APP_ENV", "production")
+_CB_KEY_FAILURES = f"{_ENV}:llm:deepseek:failures"
+_CB_KEY_BYPASS = f"{_ENV}:llm:deepseek:bypassed_until"
 from src.constants import LLM_CB_WINDOW_SECONDS, LLM_CB_BYPASS_SECONDS, LLM_CB_THRESHOLD
 """
 MEJORA — Motor de scoring viral con DeepSeek + datos reales
@@ -37,11 +41,11 @@ async def _cb_record_failure(redis=None) -> None:
     global _cb_failures_mem, _cb_bypassed_until_mem
     try:
         if redis is not None:
-            failures = await redis.incr("llm:deepseek:failures")
-            await redis.expire("llm:deepseek:failures", LLM_CB_WINDOW_SECONDS)
+            failures = await redis.incr(_CB_KEY_FAILURES)
+            await redis.expire(_CB_KEY_FAILURES, LLM_CB_WINDOW_SECONDS)
             if failures >= LLM_CB_THRESHOLD:
                 bypass_until = _time.time() + LLM_CB_BYPASS_SECONDS
-                await redis.set("llm:deepseek:bypassed_until", bypass_until, ex=600)
+                await redis.set(_CB_KEY_BYPASS, bypass_until, ex=600)
                 logger.warning("[LLM] Circuit breaker triggered: DeepSeek bypassed for 10min")
         else:
             _cb_failures_mem += 1
@@ -58,8 +62,8 @@ async def _cb_record_success(redis=None) -> None:
     global _cb_failures_mem, _cb_bypassed_until_mem
     try:
         if redis is not None:
-            await redis.delete("llm:deepseek:failures")
-            await redis.delete("llm:deepseek:bypassed_until")
+            await redis.delete(_CB_KEY_FAILURES)
+            await redis.delete(_CB_KEY_BYPASS)
     except Exception:
         pass
     _cb_failures_mem = 0
@@ -110,7 +114,7 @@ async def _cb_is_bypassed(redis=None) -> bool:
     global _cb_bypassed_until_mem
     try:
         if redis is not None:
-            val = await redis.get("llm:deepseek:bypassed_until")
+            val = await redis.get(_CB_KEY_BYPASS)
             if val and float(val) > _time.time():
                 return True
         else:

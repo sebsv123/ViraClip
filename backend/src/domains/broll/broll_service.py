@@ -1,3 +1,6 @@
+import os
+_ENV = os.getenv("APP_ENV", "production")
+COMFYUI_LOCK_KEY = f"{_ENV}:lock:comfyui"
 from src.constants import BROLL_HTTP_TIMEOUT, COMFYUI_LOCK_TIMEOUT_SECONDS
 """
 BRoll Service - AI-powered B-roll injection for viral video enhancement.
@@ -229,7 +232,7 @@ class BrollService:
                 _cfg = get_config()
                 _r = aioredis.Redis(host=_cfg.redis_host, port=_cfg.redis_port, password=_cfg.redis_password or None, decode_responses=True)
                 for _attempt in range(3):
-                    _lock_acquired = await _r.set("lock:comfyui", "1", nx=True, ex=COMFYUI_LOCK_TIMEOUT_SECONDS)
+                    _lock_acquired = await _r.set(COMFYUI_LOCK_KEY, "1", nx=True, ex=COMFYUI_LOCK_TIMEOUT_SECONDS)
                     if _lock_acquired:
                         break
                     await asyncio.sleep(2)
@@ -276,7 +279,7 @@ class BrollService:
                     # Release lock
                     try:
                         _r2 = aioredis.Redis(host=_cfg.redis_host, port=_cfg.redis_port, password=_cfg.redis_password or None, decode_responses=True)
-                        await _r2.delete("lock:comfyui")
+                        await _r2.delete(COMFYUI_LOCK_KEY)
                         await _r2.aclose()
                     except Exception:
                         pass
