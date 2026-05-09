@@ -275,6 +275,88 @@ async def concurrency_metrics():
         }
 
 
+@router.get("/worker")
+async def worker_health():
+    """
+    Check ARQ worker health via Redis heartbeats.
+    
+    Returns:
+    - workers_active: number of workers with recent heartbeats
+    - last_heartbeat: ISO timestamp of most recent heartbeat
+    - seconds_since_heartbeat: seconds since last heartbeat
+    - queued_tasks: number of jobs waiting in queue
+    - processing_tasks: number of jobs currently being processed
+    - status: "healthy" | "degraded" | "down"
+    """
+    import time
+    from datetime import datetime
+    from ...config import get_config
+    
+    queue_name = "viraclip_cpu_tasks"
+    cfg = get_config()
+    
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.Redis(host=cfg.redis_host, port=cfg.redis_port, password=cfg.redis_password or None, decode_responses=True)
+        
+        # Get worker health data
+        health_key = f"arq:health:{queue_name}"
+        health_data = await r.hgetall(health_key)
+        
+        # Get queue lengths
+        queued = await r.zcard(f"arq:queue:{queue_name}")
+        processing = await r.zcard(f"arq:in-progress:{queue_name}")
+        
+        await r.aclose()
+        
+        workers_active = 0
+        last_heartbeat = None
+        seconds_since_heartbeat = None
+        
+        if health_data:
+            workers_active = int(health_data.get("workers", 0))
+            hb_str = health_data.get("heartbeat")
+            if hb_str:
+                try:
+                    hb_ts = float(hb_str)
+                    seconds_since_heartbeat = int(time.time() - hb_ts)
+                    last_heartbeat = datetime.fromtimestamp(hb_ts).isoformat()
+                except (ValueError, TypeError):
+                    pass
+        
+        if workers_active > 0 and seconds_since_heartbeat is not None and seconds_since_heartbeat < 60:
+            status = "healthy"
+        elif workers_active > 0:
+            status = "degraded"
+        else:
+            status = "down"
+        
+        result = {
+            "workers_active": workers_active,
+            "last_heartbeat": last_heartbeat,
+            "seconds_since_heartbeat": seconds_since_heartbeat,
+            "queued_tasks": queued,
+            "processing_tasks": processing,
+            "status": status,
+        }
+        
+        if status == "down":
+            from fastapi.responses import JSONResponse
+            return JSONResponse(status_code=503, content=result)
+        return result
+        
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "error": f"Redis unavailable: {e}",
+            "workers_active": 0,
+            "last_heartbeat": None,
+            "seconds_since_heartbeat": None,
+            "queued_tasks": 0,
+            "processing_tasks": 0,
+        }
+
+
 @router.get("/system")
 async def system_health():
     """

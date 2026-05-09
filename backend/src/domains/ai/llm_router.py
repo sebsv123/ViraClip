@@ -26,6 +26,59 @@ from enum import Enum
 
 logger = logging.getLogger(__name__)
 
+# ── Circuit breaker for DeepSeek (module-level, no class dependency) ──────────
+import time as _time
+_cb_failures_mem: int = 0
+_cb_bypassed_until_mem: float = 0.0
+
+async def _cb_record_failure(redis=None) -> None:
+    """Incrementa contador de fallos DeepSeek. Circuit breaker se activa a 3."""
+    global _cb_failures_mem, _cb_bypassed_until_mem
+    try:
+        if redis is not None:
+            failures = await redis.incr("llm:deepseek:failures")
+            await redis.expire("llm:deepseek:failures", 300)
+            if failures >= 3:
+                bypass_until = _time.time() + 600
+                await redis.set("llm:deepseek:bypassed_until", bypass_until, ex=600)
+                logger.warning("[LLM] Circuit breaker triggered: DeepSeek bypassed for 10min")
+        else:
+            _cb_failures_mem += 1
+            if _cb_failures_mem >= 3:
+                _cb_bypassed_until_mem = _time.time() + 600
+                logger.warning("[LLM] Circuit breaker triggered (memory): DeepSeek bypassed for 10min")
+    except Exception:
+        _cb_failures_mem += 1
+        if _cb_failures_mem >= 3:
+            _cb_bypassed_until_mem = _time.time() + 600
+            logger.warning("[LLM] Circuit breaker triggered (memory): DeepSeek bypassed for 10min")
+
+async def _cb_record_success(redis=None) -> None:
+    global _cb_failures_mem, _cb_bypassed_until_mem
+    try:
+        if redis is not None:
+            await redis.delete("llm:deepseek:failures")
+            await redis.delete("llm:deepseek:bypassed_until")
+    except Exception:
+        pass
+    _cb_failures_mem = 0
+    _cb_bypassed_until_mem = 0.0
+
+async def _cb_is_bypassed(redis=None) -> bool:
+    global _cb_bypassed_until_mem
+    try:
+        if redis is not None:
+            val = await redis.get("llm:deepseek:bypassed_until")
+            if val and float(val) > _time.time():
+                return True
+        else:
+            if _cb_bypassed_until_mem > _time.time():
+                return True
+    except Exception:
+        if _cb_bypassed_until_mem > _time.time():
+            return True
+    return False
+
 
 class LLMBackend(str, Enum):
     """Available LLM backends."""
@@ -43,6 +96,9 @@ class LLMRouter:
         self.dataset_size = 0
         self.dspy_available = False
         self.finetuned_available = False
+        # Circuit breaker for DeepSeek (in-memory fallback)
+        self._deepseek_failures_mem = 0
+        self._deepseek_bypassed_until_mem = 0.0
         # FIX Problema 3: Validar GROQ_API_KEY en init
         import os
         _groq_key = os.environ.get("GROQ_API_KEY", "").strip()
@@ -88,11 +144,19 @@ class LLMRouter:
             # DeepSeek is primary, Groq is fallback
             _deepseek_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
             if _deepseek_key:
-                backend = LLMBackend.DEEPSEEK
-                logger.info(
-                    f"🔷 Using DeepSeek V3 (primary: {dataset_size} examples, "
-                    f"need 50 for DSPy, 200 for fine-tuning)"
-                )
+                # Check circuit breaker before selecting DeepSeek
+                if await _cb_is_bypassed():
+                    backend = LLMBackend.GROQ
+                    logger.info(
+                        f"☁️  Using Groq (circuit breaker: DeepSeek bypassed, "
+                        f"{dataset_size} examples)"
+                    )
+                else:
+                    backend = LLMBackend.DEEPSEEK
+                    logger.info(
+                        f"🔷 Using DeepSeek V3 (primary: {dataset_size} examples, "
+                        f"need 50 for DSPy, 200 for fine-tuning)"
+                    )
             else:
                 backend = LLMBackend.GROQ
                 logger.info(
@@ -176,28 +240,34 @@ class LLMRouter:
             "Focus on moments with highest retention potential."
         )
         
-        async with httpx.AsyncClient(timeout=60) as client:
-            response = await client.post(
-                "https://api.deepseek.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "deepseek-chat",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    "response_format": {"type": "json_object"},
-                    "temperature": 0.3,
-                    "max_tokens": 2000,
-                }
-            )
-            response.raise_for_status()
-            result = response.json()
-            logger.info("[LLMRouter] DeepSeek V3 scoring complete")
-            return result["choices"][0]["message"]["content"]
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                response = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": "deepseek-chat",
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.3,
+                        "max_tokens": 2000,
+                    }
+                )
+                response.raise_for_status()
+                result = response.json()
+                await _cb_record_success()
+                logger.info("[LLMRouter] DeepSeek V3 scoring complete")
+                return result["choices"][0]["message"]["content"]
+        except Exception as e:
+            await _cb_record_failure()
+            logger.warning(f"[LLMRouter] DeepSeek failed ({e}), falling back to Groq")
+            return await self._score_with_groq(transcript, language, num_clips)
 
     async def _score_with_groq(
         self,
