@@ -375,8 +375,11 @@ services:
     <<: *worker-base
     profiles: ["scale"]
     container_name: viraclip-worker-2
+    runtime: nvidia
     environment:
       <<: [*core-env, *editing-env, *ai-env]
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       RENDER_CONCURRENCY: 2
 
@@ -384,8 +387,11 @@ services:
     <<: *worker-base
     profiles: ["scale"]
     container_name: viraclip-worker-3
+    runtime: nvidia
     environment:
       <<: [*core-env, *editing-env, *ai-env]
+      WHISPER_DEVICE: cuda
+      WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       RENDER_CONCURRENCY: 4
 
