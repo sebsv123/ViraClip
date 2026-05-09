@@ -54,6 +54,26 @@ def _verify_token(token: str) -> dict | None:
         return None
 
 
+MAX_SHARE_LINKS_PER_CLIP = int(os.getenv("MAX_SHARE_LINKS_PER_CLIP", "10"))
+
+
+async def _count_active_share_links(clip_id: str, redis) -> int:
+    """Count active share links in Redis for this clip."""
+    try:
+        env = os.getenv("APP_ENV", "production")
+        pattern = f"{env}:share:{clip_id}:*"
+        count = 0
+        cursor = 0
+        while True:
+            cursor, keys = await redis.scan(cursor=cursor, match=pattern, count=100)
+            count += len(keys)
+            if cursor == 0:
+                break
+        return count
+    except Exception:
+        return 0
+
+
 async def create_share_link(
     clip_id: str,
     user_id: str,
@@ -61,6 +81,21 @@ async def create_share_link(
     expiry_hours: int = DEFAULT_EXPIRY_HOURS,
 ) -> dict:
     """Create a signed share link with Redis metadata."""
+    # Check active share links limit
+    active_count = await _count_active_share_links(clip_id, redis)
+    if active_count >= MAX_SHARE_LINKS_PER_CLIP:
+        from fastapi import HTTPException
+        raise HTTPException(
+            429,
+            {
+                "error": "Too many active share links",
+                "active": active_count,
+                "max": MAX_SHARE_LINKS_PER_CLIP,
+                "message": f"This clip has {active_count} active share links. "
+                           f"Revoke some before creating new ones.",
+            },
+        )
+
     expires_at = datetime.utcnow() + timedelta(hours=expiry_hours)
     token = _generate_token(clip_id, expires_at)
     share_url = f"{SHARE_BASE_URL}/share/{token}"
