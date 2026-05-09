@@ -58,6 +58,17 @@ async def check_longform_rate_limit(user_id: str, redis) -> tuple[bool, int]:
 @router.post("/create", summary="Create a long-form YouTube video")
 async def create_longform(body: LongformCreateRequest, request: Request):
     """Enqueue a long-form video creation job."""
+    # Input validation (pre-flight, before enqueue)
+    if len(body.topic.strip()) < 10:
+        raise HTTPException(400, "Topic must be at least 10 characters")
+    if len(body.topic) > 500:
+        raise HTTPException(400, "Topic must be under 500 characters")
+    if body.duration_seconds < 60:
+        raise HTTPException(400, "Minimum duration is 60 seconds")
+    max_dur = int(os.getenv("LONGFORM_MAX_DURATION_SECONDS", "1800"))
+    if body.duration_seconds > max_dur:
+        raise HTTPException(400, f"Maximum duration is {max_dur // 60} minutes")
+
     # Rate limiting
     user_id = request.headers.get("X-User-Id", "anonymous")
     try:
