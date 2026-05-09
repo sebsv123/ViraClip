@@ -212,6 +212,81 @@ async def get_system_metrics(
     }
 
 
+@router.get("/usage")
+async def admin_usage(request: Request):
+    """Get LLM and TTS usage stats with cost estimation."""
+    _verify_admin_jwt(request)
+    import os
+    from datetime import datetime, timedelta
+
+    env = os.getenv("APP_ENV", "production")
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    try:
+        import redis.asyncio as aioredis
+        from ...config import get_config
+        cfg = get_config()
+        r = aioredis.Redis(host=cfg.redis_host, port=cfg.redis_port, password=cfg.redis_password or None, decode_responses=True)
+
+        # Today's usage
+        deepseek_today = int(await r.get(f"{env}:usage:deepseek:tokens:{today}") or 0)
+        groq_today = int(await r.get(f"{env}:usage:groq:tokens:{today}") or 0)
+        elevenlabs_today = int(await r.get(f"{env}:usage:elevenlabs:chars:{today}") or 0)
+
+        # 30-day accumulated usage (parallel reads)
+        import asyncio
+        today_date = datetime.utcnow().date()
+        deepseek_30d = 0
+        groq_30d = 0
+        elevenlabs_30d = 0
+
+        async def _read_day(day_offset):
+            day = (today_date - timedelta(days=day_offset)).strftime("%Y-%m-%d")
+            ds = int(await r.get(f"{env}:usage:deepseek:tokens:{day}") or 0)
+            gq = int(await r.get(f"{env}:usage:groq:tokens:{day}") or 0)
+            el = int(await r.get(f"{env}:usage:elevenlabs:chars:{day}") or 0)
+            return ds, gq, el
+
+        results = await asyncio.gather(*[_read_day(i) for i in range(30)])
+        for ds, gq, el in results:
+            deepseek_30d += ds
+            groq_30d += gq
+            elevenlabs_30d += el
+
+        await r.aclose()
+    except Exception:
+        deepseek_today = groq_today = elevenlabs_today = 0
+        deepseek_30d = groq_30d = elevenlabs_30d = 0
+
+    # Cost calculations
+    deepseek_cost_today = round(deepseek_today * 0.00000027, 4)
+    groq_cost_today = round(groq_today * 0.0000001, 4)
+    elevenlabs_cost_today = round(elevenlabs_today * 0.00003, 4)
+    deepseek_cost_30d = round(deepseek_30d * 0.00000027, 4)
+    groq_cost_30d = round(groq_30d * 0.0000001, 4)
+    elevenlabs_cost_30d = round(elevenlabs_30d * 0.00003, 4)
+
+    total_today = round(deepseek_cost_today + groq_cost_today + elevenlabs_cost_today, 4)
+    total_30d = round(deepseek_cost_30d + groq_cost_30d + elevenlabs_cost_30d, 4)
+
+    if total_today > 5:
+        alert = "high"
+    elif total_today > 2:
+        alert = "moderate"
+    else:
+        alert = "ok"
+
+    return {
+        "date": today,
+        "deepseek": {"tokens_today": deepseek_today, "cost_today": deepseek_cost_today, "cost_30d": deepseek_cost_30d},
+        "groq": {"tokens_today": groq_today, "cost_today": groq_cost_today, "cost_30d": groq_cost_30d},
+        "elevenlabs": {"chars_today": elevenlabs_today, "cost_today": elevenlabs_cost_today, "cost_30d": elevenlabs_cost_30d},
+        "total_cost_today": total_today,
+        "total_cost_30d": total_30d,
+        "alert_level": alert,
+    }
+
+
 @router.post("/cleanup")
 async def run_cleanup(
     request: Request,
