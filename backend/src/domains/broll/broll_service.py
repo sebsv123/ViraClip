@@ -220,37 +220,65 @@ class BrollService:
 
         # ── 0. ComfyUI/LTX-Video generation (PRIMER proveedor) ───────────────
         if _comfy_enabled and _ltx_enabled and task_id:
+            # Try to acquire Redis lock (max 1 concurrent ComfyUI process)
+            _lock_acquired = False
             try:
-                prompt = (
-                    f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical, "
-                    "photorealistic, 4K, cinematic footage, real video, "
-                    "sharp focus, professional camera, natural lighting, "
-                    "documentary style, high detail"
-                )
-                logger.info(f"🎬 Generating B-roll with ComfyUI/LTX-Video: '{keyword}'")
-                _ltx_result = await asyncio.wait_for(
-                    comfyui_integration.process_with_comfyui(
-                        task_id=f"{task_id}_broll_{safe}",
-                        video_path=None,
-                        operation="broll_generate",
-                        prompt=prompt,
-                        duration=3.0,
-                        width=608,
-                        height=1088,
-                    ),
-                    timeout=_broll_timeout,
-                )
-                if _ltx_result and Path(_ltx_result).exists():
+                import redis.asyncio as aioredis
+                from ...config import get_config
+                _cfg = get_config()
+                _r = aioredis.Redis(host=_cfg.redis_host, port=_cfg.redis_port, password=_cfg.redis_password or None, decode_responses=True)
+                for _attempt in range(3):
+                    _lock_acquired = await _r.set("lock:comfyui", "1", nx=True, ex=120)
+                    if _lock_acquired:
+                        break
+                    await asyncio.sleep(2)
+                await _r.aclose()
+            except Exception:
+                logger.warning("[BRoll] Redis unavailable, ComfyUI lock disabled — OOM risk with parallel workers")
+                _lock_acquired = True  # proceed without lock
+
+            if not _lock_acquired:
+                logger.warning(f"[BRoll] ComfyUI busy (lock held), falling back to Pexels")
+            else:
+                try:
+                    prompt = (
+                        f"cinematic B-roll footage of {keyword}, professional quality, smooth motion, 9:16 vertical, "
+                        "photorealistic, 4K, cinematic footage, real video, "
+                        "sharp focus, professional camera, natural lighting, "
+                        "documentary style, high detail"
+                    )
+                    logger.info(f"🎬 Generating B-roll with ComfyUI/LTX-Video: '{keyword}'")
+                    _ltx_result = await asyncio.wait_for(
+                        comfyui_integration.process_with_comfyui(
+                            task_id=f"{task_id}_broll_{safe}",
+                            video_path=None,
+                            operation="broll_generate",
+                            prompt=prompt,
+                            duration=3.0,
+                            width=608,
+                            height=1088,
+                        ),
+                        timeout=_broll_timeout,
+                    )
+                    if _ltx_result and Path(_ltx_result).exists():
+                        try:
+                            shutil.copy2(_ltx_result, cached_video)
+                        except Exception as _copy_e:
+                            logger.debug(f"[BRoll] No pude cachear LTX en {cached_video}: {_copy_e}")
+                        logger.info(f"[BRoll] ✓ ComfyUI/LTX B-roll generated for '{keyword}': {_ltx_result}")
+                        return Path(_ltx_result)
+                except asyncio.TimeoutError:
+                    logger.warning(f"[BRoll] ComfyUI/LTX timeout after {_broll_timeout}s, trying next")
+                except Exception as _ltx_e:
+                    logger.warning(f"⚠️ ComfyUI/LTX B-roll failed, falling back to stock footage: {_ltx_e}")
+                finally:
+                    # Release lock
                     try:
-                        shutil.copy2(_ltx_result, cached_video)
-                    except Exception as _copy_e:
-                        logger.debug(f"[BRoll] No pude cachear LTX en {cached_video}: {_copy_e}")
-                    logger.info(f"[BRoll] ✓ ComfyUI/LTX B-roll generated for '{keyword}': {_ltx_result}")
-                    return Path(_ltx_result)
-            except asyncio.TimeoutError:
-                logger.warning(f"[BRoll] ComfyUI/LTX timeout after {_broll_timeout}s, trying next")
-            except Exception as _ltx_e:
-                logger.warning(f"⚠️ ComfyUI/LTX B-roll failed, falling back to stock footage: {_ltx_e}")
+                        _r2 = aioredis.Redis(host=_cfg.redis_host, port=_cfg.redis_port, password=_cfg.redis_password or None, decode_responses=True)
+                        await _r2.delete("lock:comfyui")
+                        await _r2.aclose()
+                    except Exception:
+                        pass
 
         # ── 1. Stock video APIs: Pexels + Coverr + Pixabay en paralelo ────────
         pexels_task  = asyncio.create_task(self._search_pexels(keyword))
