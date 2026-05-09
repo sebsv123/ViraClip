@@ -44,6 +44,10 @@ x-core-env: &core-env
   FREESOUND_SFX_ENABLED: ${FREESOUND_SFX_ENABLED:-true}
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+  NVIDIA_VISIBLE_DEVICES: all
+  NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+  NVIDIA_DISABLE_REQUIRE: "1"
+  CUDA_MODULE_LOADING: LAZY
 
 x-editing-env: &editing-env
   CONTEXTUAL_OVERLAYS_ENABLED: ${CONTEXTUAL_OVERLAYS_ENABLED:-true}
@@ -361,10 +365,7 @@ services:
     runtime: nvidia
     environment:
       <<: [*core-env, *editing-env, *ai-env]
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
       NVIDIA_REQUIRE_CUDA: ""
-      NVIDIA_DISABLE_REQUIRE: "1"
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
