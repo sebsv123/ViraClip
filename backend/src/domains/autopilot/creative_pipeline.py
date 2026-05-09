@@ -17,6 +17,7 @@ import os
 import traceback
 from pathlib import Path
 
+
 from ...domains.video.background_composite_service import background_composite_service
 
 logger = logging.getLogger(__name__)
@@ -295,7 +296,7 @@ class CreativePipeline:
                 else:
                     reordered.unlink(missing_ok=True)
           except Exception as exc:
-            logger.debug("  [Creative] Hook reorder failed: %s", exc)
+            logger.warning("  [Creative] Hook reorder skipped: %s", exc)
 
         # ── Background Composite (SAM2 + LTX) ────────────────────────────
         _composite_enabled = os.getenv("BACKGROUND_COMPOSITE_ENABLED", "false").lower() == "true"
@@ -432,7 +433,7 @@ class CreativePipeline:
                                 ),
                             )
                     except Exception as _sp_e:
-                        logger.debug("  [Creative] SemanticPlan B-roll failed: %s", _sp_e)
+                        logger.warning("  [Creative] SemanticPlan B-roll skipped: %s", _sp_e)
                         broll_pairs = []
 
                 # Priority 1: timeline-based (multimodal detector hook/impact events)
@@ -465,7 +466,7 @@ class CreativePipeline:
                                 "  [Creative] B-roll LLM fallback: keywords=%s", llm_kws
                             )
                     except Exception as _fb:
-                        logger.debug("  [Creative] B-roll LLM fallback skipped: %s", _fb)
+                        logger.warning("  [Creative] B-roll LLM fallback skipped: %s", _fb)
 
                 brolled = None
                 if broll_pairs:
@@ -533,7 +534,7 @@ class CreativePipeline:
                 )
             else:
                 overlayed.unlink(missing_ok=True)
-                logger.debug("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
+                logger.warning("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
             if overlay_result.success:
                 steps_ok.append("step_5_5_overlays")
             else:
@@ -740,7 +741,7 @@ class CreativePipeline:
                         else:
                             ducked.unlink(missing_ok=True)
                     except Exception as duck_err:
-                        logger.debug("  [Creative] Audio ducking skipped: %s", duck_err)
+                        logger.warning("  [Creative] Audio ducking skipped: %s", duck_err)
                 
                 logger.info(
                     "  [Creative] ✓ Step 7/8: Audio mastered (sfx=%d bgm=%s ducking=%s)",
