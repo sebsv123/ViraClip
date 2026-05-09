@@ -200,6 +200,12 @@ class BrollService:
         3. If all APIs are unavailable (no keys / network error) → use local cache
         Cache is a safety net, not the primary source.
         """
+        _ltx_enabled = os.getenv("BROLL_USE_LTX", "false").lower() == "true"
+        _comfy_enabled = os.getenv("COMFYUI_ENABLED", "false").lower() == "true"
+        logger.info(
+            "[BRoll] Provider chain for '%s': LTX=%s ComfyUI=%s → Pexels → Coverr → Cache",
+            keyword, _ltx_enabled, _comfy_enabled,
+        )
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
         cached_photo = self.broll_dir / f"{safe}.jpg"
