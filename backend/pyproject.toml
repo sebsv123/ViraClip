@@ -29,7 +29,9 @@ dependencies = [
     "resend>=2.13.0",
     "requests>=2.32.0",
     "transformers>=4.40.0",
-    "torch>=2.2.0",
+    "torch==2.10.0+cu130",
+    "torchvision==0.25.0+cu130",
+    "torchaudio==2.10.0+cu130",
     "sentencepiece>=0.2.0",
     "librosa>=0.10.1",
     "soundfile>=0.12.1",
@@ -110,6 +112,16 @@ line-ending = "lf"
 
 [tool.uv]
 package = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+torchaudio = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
