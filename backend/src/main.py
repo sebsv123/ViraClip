@@ -30,6 +30,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 from sqlalchemy.ext.asyncio import AsyncSession
 import os as _os
+import os  # noqa: E401 — explicit public alias so `os.getenv` works in middleware
 from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
@@ -117,9 +118,9 @@ class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
             if content_length:
                 try:
                     size = int(content_length)
-                    max_bytes = int(os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
+                    max_bytes = int(_os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
                     if size > max_bytes:
-                        max_mb = int(os.getenv("MAX_UPLOAD_MB", "500"))
+                        max_mb = int(_os.getenv("MAX_UPLOAD_MB", "500"))
                         return JSONResponse(
                             status_code=413,
                             content={
