@@ -45,6 +45,13 @@ export function UploadVideo({ onModeChange }: { onModeChange?: (mode: "url" | "u
     formData.append("file", f);
     formData.append("processing_mode", "fast");
 
+    // Get user_id from cookies
+    const getCookie = (name: string): string | null => {
+      const match = document.cookie.match(new RegExp(`(?:^|;\\s*)${name}=([^;]+)`));
+      return match ? match[1] : null;
+    };
+    const userId = getCookie("user_id") ?? "local-test-user";
+
     const xhr = new XMLHttpRequest();
 
     xhr.upload.onprogress = (e) => {
@@ -53,13 +60,39 @@ export function UploadVideo({ onModeChange }: { onModeChange?: (mode: "url" | "u
       }
     };
 
-    xhr.onload = () => {
+    xhr.onload = async () => {
       if (xhr.status >= 200 && xhr.status < 300) {
-        const data = JSON.parse(xhr.responseText);
-        setState("done");
-        setTimeout(() => {
-          router.push(`/tasks/${data.task_id}`);
-        }, 1000);
+        try {
+          const data = JSON.parse(xhr.responseText);
+          const videoPath: string = data.video_path ?? data.videoPath ?? "";
+
+          // Create task via POST /api/tasks
+          const taskRes = await fetch("/api/tasks", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "user_id": userId,
+            },
+            body: JSON.stringify({
+              source: { url: videoPath },
+              processing_mode: "fast",
+            }),
+          });
+
+          if (!taskRes.ok) {
+            const errBody = await taskRes.json().catch(() => ({}));
+            throw new Error(errBody.detail ?? errBody.message ?? "Error al crear la tarea");
+          }
+
+          const taskData = await taskRes.json();
+          setState("done");
+          setTimeout(() => {
+            router.push(`/tasks/${taskData.task_id}`);
+          }, 1000);
+        } catch (err) {
+          setErrorMsg(err instanceof Error ? err.message : "Error al procesar el video.");
+          setState("error");
+        }
       } else {
         try {
           const data = JSON.parse(xhr.responseText);
@@ -77,8 +110,10 @@ export function UploadVideo({ onModeChange }: { onModeChange?: (mode: "url" | "u
     };
 
     xhr.open("POST", "/api/tasks/upload");
+    xhr.setRequestHeader("user_id", userId);
     xhr.send(formData);
   }, [router, validateFile]);
+
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
