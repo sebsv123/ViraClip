@@ -231,8 +231,8 @@ class TranscriptAnalysis(BaseModel):
     most_relevant_segments: List[TranscriptSegment]
     summary: str = Field(description="Brief summary of the video content")
     key_topics: List[str] = Field(description="List of main topics discussed")
-    broll_opportunities: Optional[List[BRollOpportunity]] = Field(
-        default=None, description="B-roll insertion opportunities"
+    broll_opportunities: List[BRollOpportunity] = Field(
+        default_factory=list, description="B-roll insertion opportunities (min 3 keywords per segment)"
     )
 
 
