@@ -119,3 +119,4 @@ genmail/
 # Ignore all embedded git repos in comfyui custom_nodes (prevents submodule warnings)
 comfyui/custom_nodes/
 comfyui/.git/
+watch_*
