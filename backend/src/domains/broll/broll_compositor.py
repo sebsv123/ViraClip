@@ -213,7 +213,7 @@ def normalize_broll(
             "-hwaccel", "none",
             "-i", str(broll_path),
             "-t", str(duration),
-            "-vf", f"scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1",
             "-pix_fmt", "yuv420p",
             "-c:v", "libx264",
             "-crf", "18",
@@ -227,22 +227,23 @@ def normalize_broll(
         result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
         if result.returncode != 0:
             stderr_text = result.stderr.decode()
-            # If nvenc failed at runtime (CUDA_ERROR_UNKNOWN etc.), retry with libx264
-            if any(k in stderr_text for k in ("nvenc", "CUDA_ERROR", "cuInit")):
+            # Retry with libx264 on ANY encoder error (nvenc, hwaccel, codec init, etc.)
+            _encoder_keywords = ("nvenc", "CUDA_ERROR", "cuInit", "Error initializing output stream",
+                                 "Error while opening encoder", "encoder setup failed")
+            if any(k in stderr_text for k in _encoder_keywords):
                 try:
                     from gpu_utils import clear_nvenc_cache
                     clear_nvenc_cache()
                 except Exception:
                     pass
-                logger.warning("[BrollCompositor] nvenc failed, retrying with libx264 (%s…)",
-                               stderr_text[:80])
+                logger.warning("[BrollCompositor] encoder failed, retrying with libx264 (%s…)",
+                               stderr_text[:120])
                 cpu_cmd: list = []
                 i = 0
                 while i < len(cmd):
                     if cmd[i] == "-c:v" and i + 1 < len(cmd) and "nvenc" in cmd[i + 1]:
                         cpu_cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
                         i += 2
-                        # Skip nvenc-specific flags (-preset, -rc, -cq, -qp, -b:v)
                         while i < len(cmd) and cmd[i] in ("-preset", "-rc", "-cq", "-qp", "-b:v"):
                             i += 2
                     else:
@@ -250,8 +251,8 @@ def normalize_broll(
                         i += 1
                 result = subprocess.run(cpu_cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
             if result.returncode != 0:
-                logger.error("[BrollCompositor] normalize_broll failed: %s",
-                             result.stderr.decode()[-400:])
+                logger.error("[BrollCompositor] normalize_broll failed (retcode=%d): %s",
+                             result.returncode, result.stderr.decode()[-400:])
                 output_path.unlink(missing_ok=True)
                 return None
         if not output_path.exists() or output_path.stat().st_size < 1000:

@@ -60,10 +60,12 @@ async def generate_transcript(video_path: Path, processing_mode: str = "balanced
 
 
 class _SegmentsWrapper:
-    """Thin wrapper so callers can use .most_relevant_segments on the list returned by ai.py."""
+    """Minimal wrapper so callers can access .most_relevant_segments, .summary, .key_topics."""
 
     def __init__(self, segments: list) -> None:
         self.most_relevant_segments = segments
+        self.summary = ""
+        self.key_topics: list[str] = []
 
 
 async def analyze_transcript(

@@ -248,45 +248,35 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         # record — they are passed directly as job arguments so the worker can act on
         # them at render time.  task_service.process_task() uses generate_ab_variants
         # to optionally render a B-variant clip for each segment (P3.5).
+        logger.info("[ENQUEUE] Attempting to enqueue task %s (mode=%s, source=%s)", task_id, processing_mode, source_type)
         queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
-        job_id = await queue_adapter.enqueue_processing_job(
-            "process_video_task",
-            processing_mode,
-            task_id,
-            raw_source["url"],
-            source_type,
-            user_id,
-            font_family,
-            font_size,
-            font_color,
-            caption_template,
-            processing_mode,
-            output_format,
-            add_subtitles,
-            target_language,
-            auto_center_face,
-            eye_contact_correction,
-            include_broll,
-            split_screen,
-            target_platform,
-            generate_ab_variants=generate_ab_variants,  # P3.5
-            num_clips=num_clips,
-            jump_cut=jump_cut,  # Viral editing
-            jump_cut_min_silence=jump_cut_min_silence,
-            zoom_on_cuts=zoom_on_cuts,
-            cut_zoom_factor=cut_zoom_factor,
-            denoise_audio=denoise_audio,
-            contextual_overlays=contextual_overlays,  # NEW
-            overlay_frequency=overlay_frequency,
-            audio_ducking=audio_ducking,
-            playback_speed=playback_speed,
-            dramatic_slowmo=dramatic_slowmo,
-            speed_ramp_enabled=speed_ramp_enabled,
-            use_scene_detection=use_scene_detection,
-            force_fresh=force_fresh,
-            use_comfyui_reframe=use_comfyui_reframe,
-            use_comfyui_thumbnail=use_comfyui_thumbnail,
-        )
+        try:
+            job_id = await queue_adapter.enqueue_processing_job(
+                "process_video_task",
+                processing_mode,
+                task_id,
+                raw_source["url"],
+                source_type,
+                user_id,
+                font_family,
+                font_size,
+                font_color,
+                caption_template,
+                processing_mode,
+                output_format,
+                add_subtitles,
+                target_language,
+                auto_center_face,
+                eye_contact_correction,
+                include_broll,
+                split_screen,
+            )
+            logger.info("[ENQUEUE] ✅ Success: task %s → job %s (queue=%s)", task_id, job_id, processing_mode)
+        except Exception as exc:
+            logger.error("[ENQUEUE] ❌ Failed to enqueue task %s: %s", task_id, exc)
+            raise
+
+        # Save source metadata for resume/retries in environments without sources.url column
 
         # Save source metadata for resume/retries in environments without sources.url column
         redis_client = aioredis.Redis(
