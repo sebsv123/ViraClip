@@ -346,7 +346,14 @@ async def get_validated_segments(
     )
 
     result = await agent.run(user_prompt)
-    analysis = result.data
+    # pydantic-ai >= 0.0.40 renamed result.data → result.output
+    # Keep .data as fallback for older installs
+    analysis = getattr(result, "output", None) or getattr(result, "data", None)
+    if analysis is None:
+        raise ValueError(
+            f"AgentRunResult has neither 'output' nor 'data' attribute. "
+            f"Available attrs: {[a for a in dir(result) if not a.startswith('_')]}"
+        )
 
     # Filter segments below minimum score
     filtered_segments = [
