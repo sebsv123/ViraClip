@@ -59,10 +59,17 @@ async def generate_transcript(video_path: Path, processing_mode: str = "balanced
     return transcript
 
 
+class _SegmentsWrapper:
+    """Thin wrapper so callers can use .most_relevant_segments on the list returned by ai.py."""
+
+    def __init__(self, segments: list) -> None:
+        self.most_relevant_segments = segments
+
+
 async def analyze_transcript(
     transcript: str,
     video_duration: float = 0.0,
-    include_broll: bool = False,
+    include_broll: bool = False,  # kept for API compat; B-roll handled downstream
 ) -> Any:
     """
     Analyze transcript with AI to find relevant segments.
@@ -70,7 +77,7 @@ async def analyze_transcript(
     Args:
         transcript: Video transcript text
         video_duration: Total video duration in seconds (0 if unknown)
-        include_broll: Whether to include B-roll suggestions
+        include_broll: Reserved for future use; B-roll logic lives in the creative pipeline.
     """
     logger.info(
         f"[AI ANALYSIS] Starting transcript analysis "
@@ -79,11 +86,14 @@ async def analyze_transcript(
     logger.info(f"[AI ANALYSIS] LLM model configured: {Config().llm}")
 
     try:
-        relevant_parts = await get_most_relevant_parts_by_transcript(
+        # get_most_relevant_parts_by_transcript returns List[Dict] — wrap it so
+        # downstream code can use .most_relevant_segments without changes.
+        segments = await get_most_relevant_parts_by_transcript(
             transcript,
-            include_broll=include_broll,
             video_duration=video_duration,
         )
+
+        relevant_parts = _SegmentsWrapper(segments)
 
         segments_count = len(relevant_parts.most_relevant_segments)
         logger.info(f"[AI ANALYSIS] ✅ Complete: {segments_count} segments found")
