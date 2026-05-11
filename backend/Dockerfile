@@ -130,6 +130,10 @@ RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx \
     /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \
     /app/storage/ingested /app/data /app/data/creator_profiles /app/luts
 
+# Create temp/output dirs in /tmp so workers always have write access
+RUN mkdir -p /tmp/viraclip/temp /tmp/viraclip/outputs /tmp/viraclip/clips /tmp/viraclip/downloads \
+    && chmod -R 777 /tmp/viraclip
+
 # Generate SFX assets at build time (fast, pure Python + ffmpeg)
 RUN .venv/bin/python /app/scripts/generate_sfx_assets.py || echo "SFX generation skipped"
 
