@@ -169,10 +169,9 @@ class Config:
         if whisper_device == "cuda":
             logger.info("[GPU] Whisper configured for CUDA/GPU.")
         
-        # Ensure temp/output dirs exist at startup
-        for d in [self.temp_dir, self.output_dir]:
-            os.makedirs(d, exist_ok=True)
-            logger.info(f"[DIR] Ensured directory exists: {d}")
+        # Check if critical directories exist (Docker handles this, but warn in standalone mode)
+        if not os.path.exists(self.temp_dir):
+            logger.warning(f"[WARN] Temp directory not found: {self.temp_dir}. Will be created on first use.")
         
         # Log configured LLM
         logger.info(f"[LLM] configured: {self.llm}")
