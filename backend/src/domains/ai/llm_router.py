@@ -99,7 +99,6 @@ async def _call_with_retry(
 
 
 async def call_vision(
-async def call_vision(
     prompt: str,
     images_b64: list[str],
     model: str = "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -413,7 +412,6 @@ class LLMRouter:
                 status_code = getattr(exc, 'response', None) and exc.response.status_code
                 
                 if status_code == 429:
-                    # Already handled above, but catch if it came via raise_for_status
                     delay = base_delay * (2 ** attempt)
                     logger.warning(
                         "[LLMRouter] Groq 429 (attempt %d/%d). Retrying in %ds...",
@@ -451,9 +449,7 @@ class LLMRouter:
         num_clips: int
     ) -> Dict[str, Any]:
         """Score using Ollama with DSPy-optimized prompts."""
-        # TODO: Load optimized prompt from file
         logger.info("📚 Using DSPy-optimized Ollama (not yet implemented)")
-        # Fallback to Groq for now
         return await self._score_with_groq(transcript, language, num_clips)
     
     async def _score_with_ollama_finetuned(
@@ -463,9 +459,7 @@ class LLMRouter:
         num_clips: int
     ) -> Dict[str, Any]:
         """Score using fine-tuned Ollama model."""
-        # TODO: Load fine-tuned model
         logger.info("🎓 Using fine-tuned Ollama (not yet implemented)")
-        # Fallback to Groq for now
         return await self._score_with_groq(transcript, language, num_clips)
     
     def _rule_based_fallback(self, transcript: str, language: str, num_clips: int) -> str:
@@ -480,7 +474,6 @@ class LLMRouter:
             blocks = [transcript[:500]] if transcript else []
         segments = []
         for i, block in enumerate(blocks[:num_clips]):
-            # Simple text-signal heuristics (0-10 scale each)
             hook_strength = min(10.0, 4.0
                 + (2.0 if "?" in block else 0)
                 + (1.5 if "!" in block else 0)
@@ -507,7 +500,6 @@ class LLMRouter:
 
     def _language_supported(self, language: str) -> bool:
         """Check if language is supported by local models."""
-        # For now, support common languages
         supported = ["es", "en", "fr", "de", "pt", "it"]
         return language in supported
     
