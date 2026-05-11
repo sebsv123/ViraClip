@@ -64,9 +64,6 @@ class YouTubeDownloader:
 
         opts = {
             "outtmpl": str(output_path),
-            # Prefer h264/mp4 over VP9/webm to guarantee mp4 output.
-            # 4K on YouTube is VP9-only; 1080p (h=1920 portrait) has h264/mp4.
-            # Priority: best mp4/h264 + m4a → best mp4 + any audio → any → best.
             "format": "bestvideo[ext=mp4][vcodec!=vp9]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
             "format_sort": ["ext:mp4", "vcodec:h264", "res:1920", "fps"],
             "merge_output_format": "mp4",
@@ -74,25 +71,20 @@ class YouTubeDownloader:
             "writeautomaticsub": False,
             "noplaylist": True,
             "overwrites": True,
-            # Speed: parallel fragment downloads (inspired by yt-dlp concurrent downloader)
             "concurrent_fragment_downloads": 4,
-            # Optimized for speed and reliability
             "socket_timeout": 30,
             "retries": 5,
             "fragment_retries": 5,
-            "http_chunk_size": 10485760,  # 10MB chunks
-            # Quiet operation - only errors/warnings
+            "http_chunk_size": 10485760,
             "quiet": True,
             "no_warnings": False,
             "ignoreerrors": False,
-            # Use the web client extractor (better 403 bypass than mweb)
             "extractor_args": {
                 "youtube": {
                     "player_client": ["ios", "android", "web", "tv_embedded"],
                     "skip": ["translated_subs"],
                 }
             },
-            # Enhanced headers to avoid 403 errors - rotate user agents
             "http_headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -106,18 +98,11 @@ class YouTubeDownloader:
                 "Upgrade-Insecure-Requests": "1",
                 "Cookie": "CONSENT=YES+cb.20210328-17-p0.en+FX+{};",
             },
-            # Enable bypass for age-restricted and blocked content
-            # Prefer a pre-exported cookies file; fall back to browser cookies
             "cookiesfrombrowser": _get_browser_cookies_config(),
             "cookiefile": os.environ.get("YOUTUBE_COOKIES_FILE") or None,
-            # Deno runtime + EJS challenge solver (required since 2025)
-            # yt-dlp >= 2025.7 auto-detects JS runtimes in PATH (Deno is at /root/.deno/bin)
-            # Note: --js-runtimes flag was removed in yt-dlp 2025.07.21
             "legacyserverconnect": True,
-            # Metadata extraction
             "extract_flat": False,
             "writeinfojson": False,
-            # Additional bypass options
             "nocheckcertificate": True,
             "prefer_insecure": False,
             "age_limit": None,
@@ -127,11 +112,7 @@ class YouTubeDownloader:
 
 
 def _build_ejs_postprocessor_args() -> list:
-    """Return extra command line args list for yt-dlp subprocess calls.
-    
-    Note: --js-runtimes flag was removed in yt-dlp 2025.07.21.
-    yt-dlp auto-detects JS runtimes (Deno, Node) from PATH.
-    """
+    """Return extra command line args list for yt-dlp subprocess calls."""
     return ["--remote-components", "ejs:github"]
 
 
@@ -288,7 +269,6 @@ def get_youtube_video_id(url: str) -> Optional[str]:
 
     url = url.strip()
 
-    # Comprehensive regex patterns for different YouTube URL formats
     patterns = [
         r"(?:youtube\.com/(?:.*v=|v/|embed/|shorts/)|youtu\.be/)([A-Za-z0-9_-]{11})",
         r"youtube\.com/watch\?v=([A-Za-z0-9_-]{11})",
@@ -303,11 +283,9 @@ def get_youtube_video_id(url: str) -> Optional[str]:
         match = re.search(pattern, url, re.IGNORECASE)
         if match:
             video_id = match.group(1)
-            # Validate video ID length (YouTube IDs are always 11 characters)
             if len(video_id) == 11:
                 return video_id
 
-    # Fallback: parse query parameters
     try:
         parsed_url = urlparse(url)
         if "youtube.com" in parsed_url.netloc.lower():
@@ -501,24 +479,9 @@ async def async_get_youtube_video_title(url: str) -> Optional[str]:
     return video_info.get("title") if video_info else None
 
 
-def download_youtube_video_with_apify(
-    url: str,
-    video_id: str,
-) -> Path:
-    config = get_config()
-    downloader = YouTubeDownloader()
-    logger.info(
-        "Attempting Apify YouTube download for %s with quality %s",
-        video_id,
-        config.apify_youtube_default_quality,
-    )
-    return download_video_via_apify(
-        url=url,
-        video_id=video_id,
-        temp_dir=downloader.temp_dir,
-        api_token=config.apify_api_token,
-        quality=config.apify_youtube_default_quality,
-    )
+def download_youtube_video_with_apify(url: str, video_id: str) -> Path:
+    """Apify provider removed — raises RuntimeError so caller falls back to yt-dlp."""
+    raise RuntimeError("Apify provider has been removed. Use yt-dlp instead.")
 
 
 def _download_youtube_video_with_ytdlp(
@@ -558,13 +521,8 @@ def _download_youtube_video_with_ytdlp(
         try:
             logger.info("Download attempt %s/%s", attempt + 1, max_retries)
 
-            ydl_opts = downloader.get_optimal_download_options(video_id)
-
-            # Use subprocess CLI to support --js-runtimes node --remote-components ejs:github
-            # (Python API does not expose these options, but they are required since 2025)
             output_template = str(downloader.temp_dir / f"{video_id}.%(ext)s")
 
-            # Locate ffmpeg for yt-dlp merge step. Prefer system ffmpeg (full build).
             import shutil as _shutil
             _ffmpeg_location = _shutil.which("ffmpeg")
             if not _ffmpeg_location:
@@ -576,7 +534,6 @@ def _download_youtube_video_with_ytdlp(
 
             cmd = [
                 YT_DLP_BIN,
-                # --js-runtimes and --remote-components removed — yt-dlp 2025.07.21+ doesn't support them
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
                 "-S", "ext:mp4,vcodec:h264,res:1920,fps",
                 "--merge-output-format", "mp4",
@@ -669,8 +626,8 @@ def download_youtube_video(
     task_id: Optional[str] = None,
 ) -> Optional[Path]:
     """
-    Download YouTube video with Apify as the primary provider and yt-dlp fallback.
-    Returns the path to the downloaded file, or None if both providers fail.
+    Download YouTube video using yt-dlp.
+    Returns the path to the downloaded file, or None if download fails.
     """
     logger.info("Starting YouTube download: %s", url)
 
@@ -685,27 +642,13 @@ def download_youtube_video(
     config = get_config()
     if config.apify_api_token:
         try:
-            downloaded_path = download_youtube_video_with_apify(url, video_id)
-            file_size = downloaded_path.stat().st_size
-            width, height = _get_local_video_dimensions(downloaded_path)
-            logger.info(
-                "Apify download successful: %s (%sMB, %sx%s)",
-                downloaded_path.name,
-                file_size // 1024 // 1024,
-                width,
-                height,
-            )
-            return downloaded_path
-        except ApifyDownloadError as exc:
-            logger.warning("Apify download failed for %s, falling back to yt-dlp: %s", url, exc)
+            download_youtube_video_with_apify(url, video_id)
+        except RuntimeError as exc:
+            logger.info("Apify unavailable (%s), using yt-dlp for %s", exc, url)
         except Exception as exc:
-            logger.error(
-                "Unexpected Apify download error for %s, falling back to yt-dlp: %s",
-                url,
-                exc,
-            )
+            logger.warning("Apify error for %s, falling back to yt-dlp: %s", url, exc)
     else:
-        logger.info("APIFY_API_TOKEN not set; using yt-dlp fallback for %s", url)
+        logger.info("APIFY_API_TOKEN not set; using yt-dlp for %s", url)
 
     return _download_youtube_video_with_ytdlp(url, max_retries, task_id)
 
@@ -738,14 +681,11 @@ def is_video_suitable_for_processing(
 
     duration = video_info.get("duration", 0)
 
-    # Check duration constraints
     if duration < min_duration or duration > max_duration:
         logger.warning(
             f"Video duration {duration}s outside allowed range ({min_duration}-{max_duration}s)"
         )
         return False
-
-    # Additional checks could go here (e.g., content type, quality, etc.)
 
     return True
 
