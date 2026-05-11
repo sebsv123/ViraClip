@@ -395,6 +395,20 @@ services:
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       RENDER_CONCURRENCY: 4
 
+  watchdog:
+    <<: *worker-base
+    command: [".venv/bin/python", "-m", "src.services.watchdog_service"]
+    container_name: viraclip-watchdog
+    restart: always
+    runtime: ""
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    environment:
+      WATCHDOG_INTERVAL_SECONDS: 60
+      WATCHDOG_WORKER_CONTAINER: viraclip-worker
+
   gpu_worker:
     profiles: ["gpu"]
     build:
