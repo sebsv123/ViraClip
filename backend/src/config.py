@@ -36,12 +36,12 @@ class Config:
         )
 
         self.max_video_duration = int(os.getenv("MAX_VIDEO_DURATION", "5400"))
-        self.output_dir = os.getenv("OUTPUT_DIR", "outputs")
+        self.output_dir = os.getenv("OUTPUT_DIR", "/tmp/viraclip/outputs")
 
         self.max_clips = int(os.getenv("MAX_CLIPS", "10"))
         self.clip_duration = int(os.getenv("CLIP_DURATION", "30"))  # seconds
 
-        self.temp_dir = os.getenv("TEMP_DIR", "temp")
+        self.temp_dir = os.getenv("TEMP_DIR", "/tmp/viraclip/temp")
 
         # Database
         self.database_url = os.getenv(
@@ -169,9 +169,10 @@ class Config:
         if whisper_device == "cuda":
             logger.info("[GPU] Whisper configured for CUDA/GPU.")
         
-        # Check if critical directories exist (Docker handles this, but warn in standalone mode)
-        if not os.path.exists(self.temp_dir):
-            logger.warning(f"[WARN] Temp directory not found: {self.temp_dir}. Will be created on first use.")
+        # Ensure temp/output dirs exist at startup
+        for d in [self.temp_dir, self.output_dir]:
+            os.makedirs(d, exist_ok=True)
+            logger.info(f"[DIR] Ensured directory exists: {d}")
         
         # Log configured LLM
         logger.info(f"[LLM] configured: {self.llm}")
