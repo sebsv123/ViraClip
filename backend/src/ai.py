@@ -333,7 +333,7 @@ async def get_validated_segments(
 
     agent = Agent(
         model=model,
-        result_type=TranscriptAnalysis,
+        output_type=TranscriptAnalysis,
         system_prompt=VIRAL_SCORER_SYSTEM_PROMPT,
     )
 
@@ -346,14 +346,10 @@ async def get_validated_segments(
     )
 
     result = await agent.run(user_prompt)
-    # pydantic-ai >= 0.0.40 renamed result.data → result.output
-    # Keep .data as fallback for older installs
+    # pydantic-ai moderno usa .output; fallback a .data para compatibilidad
     analysis = getattr(result, "output", None) or getattr(result, "data", None)
     if analysis is None:
-        raise ValueError(
-            f"AgentRunResult has neither 'output' nor 'data' attribute. "
-            f"Available attrs: {[a for a in dir(result) if not a.startswith('_')]}"
-        )
+        raise ValueError("AgentRunResult has neither 'output' nor 'data' attribute")
 
     # Filter segments below minimum score
     filtered_segments = [
@@ -386,7 +382,7 @@ async def get_most_relevant_parts_by_transcript(
     Returns a list of dicts compatible with the legacy segment format used
     throughout the codebase.
     """
-    effective_model = model or config.groq_model or "groq:llama-3.3-70b-versatile"
+    effective_model = model or config.llm or "groq:llama-3.3-70b-versatile"
 
     try:
         analysis = await get_validated_segments(

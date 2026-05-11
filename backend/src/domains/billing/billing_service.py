@@ -160,6 +160,10 @@ class BillingService:
         }
 
     async def assert_can_create_task(self, user_id: str) -> None:
+        # ── Self-host / dev: skip ALL billing checks ──────────────────────
+        if not self.config.monetization_enabled:
+            return
+        # ──────────────────────────────────────────────────────────────────
         summary = await self.get_usage_summary(user_id)
         if summary.get("can_create_task"):
             return

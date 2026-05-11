@@ -182,6 +182,7 @@ x-worker-base: &worker-base
   platform: linux/amd64
   command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
   restart: always
+  user: "0:0"
   dns:
     - 8.8.8.8
     - 1.1.1.1

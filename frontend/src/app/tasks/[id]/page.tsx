@@ -497,12 +497,15 @@ export default function TaskPage() {
     // Only connect to SSE if task is queued or processing
     if (taskStatus !== "queued" && taskStatus !== "processing") return;
 
+    let reconnectAttempts = 0;
     const eventSource = new EventSource(`${taskApiUrl}/${params.id}/progress`);
 
     console.log("📡 Connected to SSE for real-time progress");
 
     eventSource.addEventListener("status", (e) => {
       const data = JSON.parse(e.data);
+      // Ignore keepalive heartbeats
+      if (data.event_type === "heartbeat" || data.progress === -1) return;
       console.log("📊 Status:", data);
       setProgress(data.progress || 0);
       setProgressMessage(data.message || "");
@@ -517,6 +520,8 @@ export default function TaskPage() {
 
     eventSource.addEventListener("progress", (e) => {
       const data = JSON.parse(e.data);
+      // Ignore keepalive heartbeats
+      if (data.event_type === "heartbeat" || data.progress === -1) return;
       console.log("📈 Progress:", data);
       setProgress(data.progress || 0);
       setProgressMessage(data.message || "");
@@ -559,14 +564,14 @@ export default function TaskPage() {
       triggerAutoRefresh();
     });
 
-    eventSource.addEventListener("error", (e) => {
-      console.error("❌ SSE error:", e);
-      const maybeMessageEvent = e as MessageEvent<string>;
-      if (typeof maybeMessageEvent.data === "string" && maybeMessageEvent.data.length > 0) {
-        const data = JSON.parse(maybeMessageEvent.data);
-        setError(data.error || "Connection error");
+    eventSource.addEventListener("error", () => {
+      // EventSource reconnects automatically — only show error after 3 failed attempts
+      reconnectAttempts++;
+      console.warn(`⚠️ SSE error (attempt ${reconnectAttempts}/3)`);
+      if (reconnectAttempts >= 3) {
+        setError("Connection error");
+        eventSource.close();
       }
-      eventSource.close();
     });
 
     return () => {

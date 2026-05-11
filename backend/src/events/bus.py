@@ -79,6 +79,12 @@ class EventBus:
             redis = await _get_redis()
             payload = json.dumps(event.to_dict())
             await redis.publish(_channel(event.task_id), payload)
+            # Persist last known state so late subscribers can catch up
+            await redis.setex(
+                f"progress:last:{event.task_id}",
+                3600,
+                payload,
+            )
             logger.debug(
                 "📡 [EventBus] publish task=%s type=%s progress=%d%%",
                 event.task_id,
@@ -109,9 +115,46 @@ class EventBus:
             await pubsub.subscribe(channel)
             logger.info("📡 [EventBus] subscribed to %s", channel)
 
-            async for message in pubsub.listen():
-                if message["type"] != "message":
+            # Send last known state to new subscribers (avoids race condition)
+            try:
+                last = await redis.get(f"progress:last:{task_id}")
+                if last:
+                    data = json.loads(last)
+                    event = PipelineEvent.from_dict(data)
+                    yield event
+            except Exception as exc:
+                logger.warning(
+                    "[EventBus] could not replay last event for %s: %s",
+                    task_id, exc,
+                )
+
+            # Loop with heartbeat to avoid SSE timeout
+            import asyncio as _asyncio
+
+            while True:
+                try:
+                    message = await _asyncio.wait_for(
+                        pubsub.get_message(ignore_subscribe_messages=True),
+                        timeout=15.0,
+                    )
+                except _asyncio.TimeoutError:
+                    # Emit keepalive (progress=-1 signals heartbeat to frontend)
+                    yield PipelineEvent(
+                        task_id=task_id,
+                        event_type="heartbeat",
+                        stage="heartbeat",
+                        progress=-1,
+                        message="keepalive",
+                    )
                     continue
+
+                if message is None:
+                    await _asyncio.sleep(0.05)
+                    continue
+
+                if message.get("type") != "message":
+                    continue
+
                 try:
                     data = json.loads(message["data"])
                     event = PipelineEvent.from_dict(data)
