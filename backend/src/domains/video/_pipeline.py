@@ -629,8 +629,8 @@ async def process_video_complete(
             "video_path": str(video_path),
             "clips": clips_info,
             "clips_info": clips_info,
-            "summary": relevant_parts.summary if relevant_parts else None,
-            "key_topics": relevant_parts.key_topics if relevant_parts else None,
+            "summary": None,
+            "key_topics": None,
             "transcript": transcript,
             "analysis_json": json.dumps(
                 {

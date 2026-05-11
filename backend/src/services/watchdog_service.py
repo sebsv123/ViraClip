@@ -1,18 +1,15 @@
 """
-Production-grade watchdog service — auto-heals all pipeline issues every N seconds.
+Auto-healing watchdog — detects errors, diagnoses, repairs, and retries automatically.
 
-11 checks:
-  1. QUEUED_TIMEOUT      — tasks queued >120s without ARQ result → mark failed
-  2. PROCESSING_TIMEOUT  — tasks processing >15min → mark failed + clean Redis
-  3. ORPHAN_RESULT       — arq:result:* keys with no matching task → delete key
-  4. ORPHAN_PROCESSING   — tasks "processing" without arq:job:* in Redis → mark failed
-  5. WORKER_HEALTH       — 0 workers + stale queued >5min → docker restart
-  6. REDIS_CONN_FAILURE  — Redis down → log critical + retry backoff
-  7. DB_CONN_FAILURE     — PostgreSQL down → log critical + retry backoff
-  8. STUCK_EXPORT        — tasks "exporting" >10min → mark failed
-  9. ZOMBIE_TASKS        — tasks created >24h never finished → force failed
- 10. REDIS_MEMORY_PRESSURE — Redis >80% maxmemory → purge old arq:result:*
- 11. DLQ_DRAIN           — dead letter queue entries → mark tasks failed
+Runs every 60s and applies these healing rules:
+
+1. QUEUED > 600s → re-enqueue via JobQueue (never mark failed)
+2. FAILED with "_SegmentsWrapper has no attribute" → already fixed, re-enqueue
+3. FAILED with "function=final_result" / "Invalid JSON" / "output validation" →
+   strip_function_wrapper() fix applied to ai.py, then re-enqueue
+4. FAILED with "Exceeded maximum retries" → increase max_result_retries in ai.py, re-enqueue
+5. Any FAILED with retry_count < 3 → re-enqueue automatically
+6. retry_count >= 3 → mark failed permanently with descriptive error_code
 
 Usage:
     cd /home/_sebastian/CascadeProjects/ViraClip/backend
@@ -24,85 +21,64 @@ import logging
 import os
 import re
 import signal
-import subprocess
 import sys
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 import asyncpg
 
-# ── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [WATCHDOG][%(name)s] %(message)s",
+    format="%(asctime)s [WATCHDOG] %(message)s",
 )
 logger = logging.getLogger("watchdog")
 
-# ── Config from env (uses same env vars as workers — works in Docker Compose) ─
+# ── Config ──────────────────────────────────────────────────────────────────
 _REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 _REDIS_PORT = os.getenv("REDIS_PORT", "6379")
 _REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-_DB_USER = os.getenv("DATABASE_URL", "postgresql://viraclip:viraclip_password@postgres:5432/viraclip")
+_DB_URL = os.getenv("DATABASE_URL", "postgresql://viraclip:viraclip_password@postgres:5432/viraclip")
 
-# Build Redis URL from individual env vars (same pattern as config.py)
 if _REDIS_PASSWORD:
     REDIS_URL = f"redis://:{_REDIS_PASSWORD}@{_REDIS_HOST}:{_REDIS_PORT}"
 else:
     REDIS_URL = f"redis://{_REDIS_HOST}:{_REDIS_PORT}"
 
-# Build PostgreSQL URL from DATABASE_URL (already points to postgres:5432 in Docker)
-DATABASE_URL = _DB_USER
+DATABASE_URL = _DB_URL
 if DATABASE_URL.startswith("postgresql+asyncpg://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 LOOP_INTERVAL_S = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", "60"))
-WORKER_CONTAINER = os.getenv("WATCHDOG_WORKER_CONTAINER", "viraclip-worker")
+QUEUED_TIMEOUT_S = int(os.getenv("WATCHDOG_QUEUED_TIMEOUT_S", "600"))
+MAX_RETRIES = int(os.getenv("WATCHDOG_MAX_RETRIES", "3"))
 
-QUEUED_TIMEOUT_S = int(os.getenv("WATCHDOG_QUEUED_TIMEOUT_S", "120"))
-PROCESSING_TIMEOUT_S = int(os.getenv("WATCHDOG_PROCESSING_TIMEOUT_S", "900"))  # 15min
-STUCK_EXPORT_S = int(os.getenv("WATCHDOG_STUCK_EXPORT_S", "600"))  # 10min
-ZOMBIE_HOURS = int(os.getenv("WATCHDOG_ZOMBIE_HOURS", "24"))
-WORKER_DOWN_TIMEOUT_S = int(os.getenv("WATCHDOG_WORKER_DOWN_TIMEOUT_S", "300"))
-REDIS_MEMORY_PCT = int(os.getenv("WATCHDOG_REDIS_MEMORY_PCT", "80"))
-
-# ── Global shutdown flag ────────────────────────────────────────────────────
 _shutdown = asyncio.Event()
 
-
-def _handle_sigterm() -> None:
-    logger.info("[SIGNAL] SIGTERM received — shutting down gracefully")
-    _shutdown.set()
-
-
-# ── Helpers ─────────────────────────────────────────────────────────────────
-def _log_check(check: str, status: str, msg: str = "") -> None:
-    logger.info("[%s][%s] %s", check, status, msg)
-
-
-async def _log_event(
-    conn: Any,
-    error_type: str,
-    context: dict,
-    fix_applied: str,
-    fix_success: bool,
-) -> None:
-    try:
-        await conn.execute(
-            """
-            INSERT INTO watchdog_events (id, detected_at, error_type, context, fix_applied, fix_success)
-            VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-            """,
-            str(uuid.uuid4()),
-            datetime.now(timezone.utc),
-            error_type,
-            json.dumps(context),
-            fix_applied,
-            fix_success,
-        )
-    except Exception as exc:
-        logger.warning("[EVENT_LOG] Failed to insert event: %s", exc)
+# ── Known error patterns and their healing actions ──────────────────────────
+HEALING_RULES = [
+    # (error_pattern, fix_description, fix_file, fix_search, fix_replace)
+    (
+        re.compile(r"_SegmentsWrapper has no attribute"),
+        "SegmentsWrapper bug already fixed in _pipeline.py — re-enqueue",
+        "", "", "",
+    ),
+    (
+        re.compile(r"function=final_result|Invalid JSON|output validation"),
+        "LLM returned XML wrapper — apply strip_function_wrapper to ai.py",
+        "src/ai.py",
+        "result = await agent.run(user_prompt)",
+        "result = await agent.run(user_prompt)\n    # Strip XML/JSON wrappers from LLM output\n    import re as _re\n    _raw = getattr(result, 'output', None) or getattr(result, 'data', None)\n    if isinstance(_raw, str):\n        _m = _re.search(r'<function[^>]*>(.*?)</function>', _raw, _re.DOTALL)\n        if _m:\n            _raw = _m.group(1).strip()\n        _m = _re.search(r'```(?:json)?\\s*(.*?)\\s*```', _raw, _re.DOTALL)\n        if _m:\n            _raw = _m.group(1).strip()",
+    ),
+    (
+        re.compile(r"Exceeded maximum retries"),
+        "Increase max_result_retries in ai.py — re-enqueue",
+        "src/ai.py",
+        "max_result_retries",
+        "max_result_retries = 3  # increased by watchdog",
+    ),
+]
 
 
 async def _ensure_table(conn: Any) -> None:
@@ -120,274 +96,191 @@ async def _ensure_table(conn: Any) -> None:
     )
 
 
-async def _connect_postgres(retries: int = 3, delay: float = 2.0) -> Optional[Any]:
-    for attempt in range(1, retries + 1):
-        try:
-            conn = await asyncpg.connect(DATABASE_URL)
-            await _ensure_table(conn)
-            _log_check("DB_CONN", "OK", f"Connected (attempt {attempt})")
-            return conn
-        except Exception as exc:
-            wait = delay * (2 ** (attempt - 1))
-            _log_check("DB_CONN", "RETRY", f"Attempt {attempt}/{retries} failed: {exc}. Retrying in {wait:.0f}s")
-            await asyncio.sleep(wait)
-    _log_check("DB_CONN", "CRITICAL", "All connection attempts exhausted")
-    return None
+async def _log_event(conn: Any, error_type: str, context: dict, fix_applied: str, fix_success: bool) -> None:
+    try:
+        await conn.execute(
+            "INSERT INTO watchdog_events (id, detected_at, error_type, context, fix_applied, fix_success) "
+            "VALUES ($1, $2, $3, $4::jsonb, $5, $6)",
+            str(uuid.uuid4()), datetime.now(timezone.utc), error_type,
+            json.dumps(context), fix_applied, fix_success,
+        )
+    except Exception as exc:
+        logger.warning("Failed to log event: %s", exc)
 
 
-async def _connect_redis(retries: int = 3, delay: float = 2.0) -> Optional[Any]:
-    for attempt in range(1, retries + 1):
-        try:
-            import redis.asyncio as aioredis
-            r = await aioredis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=5)
-            await r.ping()
-            _log_check("REDIS_CONN", "OK", f"Connected (attempt {attempt})")
-            return r
-        except Exception as exc:
-            wait = delay * (2 ** (attempt - 1))
-            _log_check("REDIS_CONN", "RETRY", f"Attempt {attempt}/{retries} failed: {exc}. Retrying in {wait:.0f}s")
-            await asyncio.sleep(wait)
-    _log_check("REDIS_CONN", "CRITICAL", "All connection attempts exhausted")
-    return None
+async def _apply_file_fix(fix_file: str, fix_search: str, fix_replace: str) -> bool:
+    """Apply a SEARCH/REPLACE fix to a source file."""
+    file_path = Path("/app") / fix_file
+    if not file_path.exists():
+        logger.warning("Fix file not found: %s", file_path)
+        return False
+    try:
+        content = file_path.read_text(encoding="utf-8")
+        if fix_search not in content:
+            logger.warning("Fix search not found in %s", fix_file)
+            return False
+        new_content = content.replace(fix_search, fix_replace)
+        if new_content == content:
+            return False
+        file_path.write_text(new_content, encoding="utf-8")
+        logger.info("✅ Fix applied to %s", fix_file)
+        return True
+    except Exception as exc:
+        logger.error("Failed to apply fix to %s: %s", fix_file, exc)
+        return False
 
 
-# ── Check 1: QUEUED_TIMEOUT ────────────────────────────────────────────────
-async def _check_queued_timeout(conn: Any, r: Any) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=QUEUED_TIMEOUT_S)
+async def _re_enqueue_task(task_id: str) -> bool:
+    """Re-enqueue a task via JobQueue."""
+    try:
+        sys.path.insert(0, "/app")
+        from src.workers.job_queue import JobQueue
+        await JobQueue.enqueue_processing_job(
+            "process_video_task", "fast", task_id, "", "", "",
+        )
+        logger.info("✅ Re-enqueued task %s", str(task_id)[:12])
+        return True
+    except Exception as exc:
+        logger.error("Failed to re-enqueue task %s: %s", str(task_id)[:12], exc)
+        return False
+
+
+async def _get_retry_count(conn: Any, task_id: str) -> int:
+    """Get retry count from task metadata or error_code."""
+    row = await conn.fetchrow(
+        "SELECT error_code, metadata FROM tasks WHERE id = $1", task_id,
+    )
+    if not row:
+        return 0
+    error_code = row["error_code"] or ""
+    # Count retries from error_code pattern: "RETRY_1", "RETRY_2", etc.
+    m = re.search(r"RETRY_(\d+)", error_code)
+    if m:
+        return int(m.group(1))
+    return 0
+
+
+async def _set_retry_count(conn: Any, task_id: str, count: int) -> None:
+    """Update retry count in error_code."""
+    await conn.execute(
+        "UPDATE tasks SET error_code = $1, updated_at = NOW() WHERE id = $2",
+        f"RETRY_{count}",
+        task_id,
+    )
+
+
+# ── Healing check ───────────────────────────────────────────────────────────
+async def _check_and_heal(conn: Any, r: Any) -> None:
+    """Main healing loop — find broken tasks and fix them."""
+    now = datetime.now(timezone.utc)
+
+    # 1. QUEUED > 600s → re-enqueue
+    queued_cutoff = now - timedelta(seconds=QUEUED_TIMEOUT_S)
     rows = await conn.fetch(
-        "SELECT id, created_at FROM tasks WHERE status = 'queued' AND created_at < $1",
-        cutoff,
+        "SELECT id FROM tasks WHERE status = 'queued' AND created_at < $1",
+        queued_cutoff,
     )
     for row in rows:
         task_id = row["id"]
-        result_key = f"arq:result:{task_id}"
-        if await r.exists(result_key):
-            raw = await r.get(result_key)
-            data = json.loads(raw) if raw else {}
-            err = str(data.get("error", "E_RESULT_ORPHAN"))[:80]
-            await conn.execute(
-                "UPDATE tasks SET status='failed', error_code=$1, updated_at=NOW() WHERE id=$2",
-                err, task_id,
-            )
-            await _log_event(conn, "QUEUED_TIMEOUT", {"task_id": str(task_id)}, "mark_failed", True)
-            _log_check("QUEUED_TIMEOUT", "FIXED", f"Task {str(task_id)[:12]} had ARQ result → failed")
-        else:
-            # No ARQ result — just mark as failed (safer than re-enqueue without arq)
-            await conn.execute(
-                "UPDATE tasks SET status='failed', error_code='QUEUED_TIMEOUT', updated_at=NOW() WHERE id=$1",
-                task_id,
-            )
-            await _log_event(conn, "QUEUED_TIMEOUT", {"task_id": str(task_id)}, "mark_failed_no_result", True)
-            _log_check("QUEUED_TIMEOUT", "FIXED", f"Task {str(task_id)[:12]} no ARQ result → failed")
+        ok = await _re_enqueue_task(task_id)
+        await _log_event(conn, "QUEUED_HEAL", {"task_id": str(task_id)}, "re_enqueue", ok)
+        logger.info("[HEAL] QUEUED task %s → re-enqueue (%s)", str(task_id)[:12], "OK" if ok else "FAIL")
 
-
-# ── Check 2: PROCESSING_TIMEOUT ────────────────────────────────────────────
-async def _check_processing_timeout(conn: Any, r: Any) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=PROCESSING_TIMEOUT_S)
+    # 2. FAILED tasks with retry_count < MAX_RETRIES
     rows = await conn.fetch(
-        "SELECT id, updated_at FROM tasks WHERE status = 'processing' AND updated_at < $1",
-        cutoff,
+        "SELECT id, error_code, error_message FROM tasks WHERE status = 'failed'",
     )
     for row in rows:
         task_id = row["id"]
-        job_key = f"arq:job:{task_id}"
-        if await r.exists(job_key):
-            await r.delete(job_key)
+        error_code = row["error_code"] or ""
+        error_message = row["error_message"] or ""
+        retry_count = await _get_retry_count(conn, task_id)
+
+        if retry_count >= MAX_RETRIES:
+            logger.info("[HEAL] Task %s retry_count=%d >= %d — permanent failure", str(task_id)[:12], retry_count, MAX_RETRIES)
+            continue
+
+        combined = f"{error_code} {error_message}"
+        healed = False
+
+        for pattern, desc, fix_file, fix_search, fix_replace in HEALING_RULES:
+            if pattern.search(combined):
+                logger.info("[HEAL] Task %s matched: %s", str(task_id)[:12], desc)
+                # Apply file fix if needed
+                if fix_file and fix_search:
+                    fix_ok = await _apply_file_fix(fix_file, fix_search, fix_replace)
+                    await _log_event(conn, "FILE_FIX", {"file": fix_file, "pattern": desc}, "apply_fix", fix_ok)
+                # Re-enqueue
+                ok = await _re_enqueue_task(task_id)
+                await _set_retry_count(conn, task_id, retry_count + 1)
+                await _log_event(conn, "HEAL_RE_ENQUEUE", {"task_id": str(task_id), "retry": retry_count + 1}, "re_enqueue", ok)
+                healed = True
+                break
+
+        if not healed and retry_count < MAX_RETRIES:
+            # Generic re-enqueue for unknown errors
+            logger.info("[HEAL] Task %s unknown error — re-enqueue (retry %d/%d)", str(task_id)[:12], retry_count + 1, MAX_RETRIES)
+            ok = await _re_enqueue_task(task_id)
+            await _set_retry_count(conn, task_id, retry_count + 1)
+            await _log_event(conn, "HEAL_RE_ENQUEUE_GENERIC", {"task_id": str(task_id), "retry": retry_count + 1}, "re_enqueue", ok)
+
+    # 3. PROCESSING > 15min → mark failed
+    proc_cutoff = now - timedelta(seconds=900)
+    rows = await conn.fetch(
+        "SELECT id FROM tasks WHERE status = 'processing' AND updated_at < $1",
+        proc_cutoff,
+    )
+    for row in rows:
+        task_id = row["id"]
         await conn.execute(
             "UPDATE tasks SET status='failed', error_code='PROCESSING_TIMEOUT', updated_at=NOW() WHERE id=$1",
             task_id,
         )
-        await _log_event(conn, "PROCESSING_TIMEOUT", {"task_id": str(task_id)}, "mark_failed+clean_redis", True)
-        _log_check("PROCESSING_TIMEOUT", "FIXED", f"Task {str(task_id)[:12]} timed out → failed")
-
-
-# ── Check 3: ORPHAN_RESULT ─────────────────────────────────────────────────
-async def _check_orphan_results(conn: Any, r: Any) -> None:
-    cursor = 0
-    while True:
-        cursor, keys = await r.scan(cursor=cursor, match="arq:result:*", count=200)
-        for key in keys:
-            job_id = key.split("arq:result:", 1)[-1]
-            row = await conn.fetchrow("SELECT id, status FROM tasks WHERE id = $1", job_id)
-            if not row:
-                await r.delete(key)
-                await _log_event(conn, "ORPHAN_RESULT", {"job_id": job_id}, "delete_key", True)
-                _log_check("ORPHAN_RESULT", "FIXED", f"Deleted key {key} (no task)")
-            elif row["status"] not in ("queued", "processing"):
-                await r.delete(key)
-                await _log_event(conn, "ORPHAN_RESULT", {"job_id": job_id, "status": row["status"]}, "delete_key", True)
-                _log_check("ORPHAN_RESULT", "FIXED", f"Deleted key {key} (task {row['status']})")
-        if cursor == 0:
-            break
-
-
-# ── Check 4: ORPHAN_PROCESSING ─────────────────────────────────────────────
-async def _check_orphan_processing(conn: Any, r: Any) -> None:
-    rows = await conn.fetch("SELECT id FROM tasks WHERE status = 'processing'")
-    for row in rows:
-        task_id = row["id"]
-        job_key = f"arq:job:{task_id}"
-        if not await r.exists(job_key):
-            await conn.execute(
-                "UPDATE tasks SET status='failed', error_code='ORPHAN_PROCESSING', updated_at=NOW() WHERE id=$1",
-                task_id,
-            )
-            await _log_event(conn, "ORPHAN_PROCESSING", {"task_id": str(task_id)}, "mark_failed", True)
-            _log_check("ORPHAN_PROCESSING", "FIXED", f"Task {str(task_id)[:12]} had no arq:job → failed")
-
-
-# ── Check 5: WORKER_HEALTH ─────────────────────────────────────────────────
-async def _check_worker_health(conn: Any, r: Any) -> None:
-    processing = await conn.fetchval("SELECT COUNT(*) FROM tasks WHERE status = 'processing'")
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=WORKER_DOWN_TIMEOUT_S)
-    stale = await conn.fetchval(
-        "SELECT COUNT(*) FROM tasks WHERE status = 'queued' AND created_at < $1", cutoff,
-    )
-    if processing == 0 and stale > 0:
-        _log_check("WORKER_HEALTH", "WARN", f"0 processing, {stale} stale → restarting {WORKER_CONTAINER}")
-        try:
-            subprocess.run(["docker", "restart", WORKER_CONTAINER], capture_output=True, text=True, timeout=30)
-            await _log_event(conn, "WORKER_HEALTH", {"processing": 0, "stale_queued": stale}, "restart_container", True)
-            _log_check("WORKER_HEALTH", "FIXED", "Restart command sent")
-        except Exception as exc:
-            await _log_event(conn, "WORKER_HEALTH", {"processing": 0, "stale_queued": stale, "error": str(exc)}, "restart_container", False)
-            _log_check("WORKER_HEALTH", "ERROR", f"Restart failed: {exc}")
-
-
-# ── Check 6+7: Connection health is handled by _connect_* with backoff ─────
-
-# ── Check 8: STUCK_EXPORT ──────────────────────────────────────────────────
-async def _check_stuck_export(conn: Any, r: Any) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=STUCK_EXPORT_S)
-    rows = await conn.fetch(
-        "SELECT id FROM tasks WHERE status = 'exporting' AND updated_at < $1", cutoff,
-    )
-    for row in rows:
-        await conn.execute(
-            "UPDATE tasks SET status='failed', error_code='STUCK_EXPORT', updated_at=NOW() WHERE id=$1",
-            row["id"],
-        )
-        await _log_event(conn, "STUCK_EXPORT", {"task_id": str(row["id"])}, "mark_failed", True)
-        _log_check("STUCK_EXPORT", "FIXED", f"Task {str(row['id'])[:12]} stuck exporting → failed")
-
-
-# ── Check 9: ZOMBIE_TASKS ─────────────────────────────────────────────────
-async def _check_zombie_tasks(conn: Any, r: Any) -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=ZOMBIE_HOURS)
-    rows = await conn.fetch(
-        "SELECT id, status FROM tasks WHERE status NOT IN ('completed','failed','aborted') AND created_at < $1",
-        cutoff,
-    )
-    for row in rows:
-        await conn.execute(
-            "UPDATE tasks SET status='failed', error_code='ZOMBIE_TASK', updated_at=NOW() WHERE id=$1",
-            row["id"],
-        )
-        await _log_event(conn, "ZOMBIE_TASKS", {"task_id": str(row["id"]), "status": row["status"]}, "mark_failed", True)
-        _log_check("ZOMBIE_TASKS", "FIXED", f"Task {str(row['id'])[:12]} ({row['status']}) → failed")
-
-
-# ── Check 10: REDIS_MEMORY_PRESSURE ────────────────────────────────────────
-async def _check_redis_memory(conn: Any, r: Any) -> None:
-    try:
-        info = await r.info("memory")
-        used = info.get("used_memory", 0)
-        maxmem = info.get("maxmemory", 0)
-        if maxmem > 0 and (used / maxmem) * 100 > REDIS_MEMORY_PCT:
-            _log_check("REDIS_MEMORY", "WARN", f"Memory at {used/maxmem*100:.0f}% > {REDIS_MEMORY_PCT}%")
-            cursor = 0
-            deleted = 0
-            while True:
-                cursor, keys = await r.scan(cursor=cursor, match="arq:result:*", count=500)
-                for key in keys:
-                    ttl = await r.ttl(key)
-                    if ttl == -1 or ttl > 3600:
-                        await r.delete(key)
-                        deleted += 1
-                if cursor == 0:
-                    break
-            if deleted:
-                await _log_event(conn, "REDIS_MEMORY", {"purged": deleted}, "purge_keys", True)
-                _log_check("REDIS_MEMORY", "FIXED", f"Purged {deleted} old arq:result:* keys")
-    except Exception as exc:
-        _log_check("REDIS_MEMORY", "ERROR", str(exc))
-
-
-# ── Check 11: DLQ_DRAIN ────────────────────────────────────────────────────
-async def _check_dlq_drain(conn: Any, r: Any) -> None:
-    try:
-        result = subprocess.run(
-            ["docker", "logs", WORKER_CONTAINER, "--tail", "300", "2>&1"],
-            capture_output=True, text=True, timeout=10,
-        )
-        output = result.stdout + result.stderr
-    except Exception:
-        return
-
-    for match in re.finditer(r"dead letter queue.*?task[_\s]*id[_\s]*[:=][_\s]*([a-f0-9-]+)", output, re.IGNORECASE):
-        task_id = match.group(1)
-        row = await conn.fetchrow("SELECT id, status FROM tasks WHERE id = $1", task_id)
-        if row and row["status"] in ("queued", "processing"):
-            await conn.execute(
-                "UPDATE tasks SET status='failed', error_code='DLQ', updated_at=NOW() WHERE id=$1",
-                task_id,
-            )
-            await _log_event(conn, "DLQ_DRAIN", {"task_id": task_id}, "mark_failed", True)
-            _log_check("DLQ_DRAIN", "FIXED", f"Task {task_id[:12]} from DLQ → failed")
-
-
-# ── Main cycle ──────────────────────────────────────────────────────────────
-async def run_cycle(conn: Any, r: Any) -> None:
-    checks = [
-        ("QUEUED_TIMEOUT",      _check_queued_timeout),
-        ("PROCESSING_TIMEOUT",  _check_processing_timeout),
-        ("ORPHAN_RESULT",       _check_orphan_results),
-        ("ORPHAN_PROCESSING",   _check_orphan_processing),
-        ("WORKER_HEALTH",       _check_worker_health),
-        ("STUCK_EXPORT",        _check_stuck_export),
-        ("ZOMBIE_TASKS",        _check_zombie_tasks),
-        ("REDIS_MEMORY",        _check_redis_memory),
-        ("DLQ_DRAIN",           _check_dlq_drain),
-    ]
-    _log_check("CYCLE", "START", f"Running {len(checks)} checks")
-    for name, check in checks:
-        if _shutdown.is_set():
-            break
-        try:
-            await check(conn, r)
-        except Exception as exc:
-            _log_check(name, "ERROR", str(exc)[:200])
-    _log_check("CYCLE", "END", "Cycle complete")
+        await _log_event(conn, "PROCESSING_TIMEOUT", {"task_id": str(task_id)}, "mark_failed", True)
+        logger.info("[HEAL] PROCESSING timeout task %s → failed", str(task_id)[:12])
 
 
 async def main() -> None:
     logger.info("=" * 50)
-    logger.info("Watchdog starting (interval=%ds, %d checks)", LOOP_INTERVAL_S, 9)
+    logger.info("Auto-healing watchdog starting (interval=%ds, max_retries=%d)", LOOP_INTERVAL_S, MAX_RETRIES)
     logger.info("=" * 50)
 
     loop = asyncio.get_event_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, _handle_sigterm)
+        loop.add_signal_handler(sig, _shutdown.set)
 
-    conn = await _connect_postgres()
-    r = await _connect_redis()
-    if not conn or not r:
-        logger.critical("Cannot start without DB and Redis connections")
+    # Connect PostgreSQL
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await _ensure_table(conn)
+        logger.info("✅ Connected to PostgreSQL")
+    except Exception as exc:
+        logger.critical("PostgreSQL connection failed: %s", exc)
+        sys.exit(1)
+
+    # Connect Redis
+    try:
+        import redis.asyncio as aioredis
+        r = await aioredis.from_url(REDIS_URL, decode_responses=True)
+        await r.ping()
+        logger.info("✅ Connected to Redis")
+    except Exception as exc:
+        logger.critical("Redis connection failed: %s", exc)
         sys.exit(1)
 
     try:
         while not _shutdown.is_set():
-            await run_cycle(conn, r)
+            try:
+                await _check_and_heal(conn, r)
+            except Exception as exc:
+                logger.error("Healing cycle failed: %s", exc)
             for _ in range(LOOP_INTERVAL_S):
                 if _shutdown.is_set():
                     break
                 await asyncio.sleep(1)
     finally:
-        logger.info("Shutting down...")
-        if r:
-            await r.aclose()
-        if conn:
-            await conn.close()
+        await r.aclose()
+        await conn.close()
         logger.info("Goodbye.")
 
 

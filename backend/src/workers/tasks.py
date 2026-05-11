@@ -374,15 +374,15 @@ async def cleanup_stale_tasks(ctx: dict) -> None:
     cutoff = datetime.utcnow() - timedelta(minutes=timeout_min)
 
     try:
-        from ..database import get_db
+        from ..database import AsyncSessionLocal
         from sqlalchemy import text
 
-        async with get_db() as db:
+        async with AsyncSessionLocal() as db:
             result = await db.execute(
                 text("""
                     UPDATE tasks
                     SET status = 'failed',
-                        error_message = 'Task timed out — worker may have crashed',
+                        error_code = 'WORKER_TIMEOUT',
                         updated_at = NOW()
                     WHERE status = 'processing'
                       AND updated_at < :cutoff
@@ -390,6 +390,7 @@ async def cleanup_stale_tasks(ctx: dict) -> None:
                 """),
                 {"cutoff": cutoff},
             )
+            await db.commit()
             stale = result.fetchall()
             if stale:
                 logger.warning(
@@ -457,8 +458,19 @@ def _safe_cron(func, name, **kwargs):
 try:
     from .feedback_cron import periodic_model_retraining  # re-exported shim
     from .data_pipeline_cron import fetch_trending_data, retrain_scorer_monthly
+    from ..services.self_healing_agent import run_healing_cycle
     
     _cron_jobs = []
+    
+    # Self-healing agent every 30s
+    _job = _safe_cron(
+        run_healing_cycle,
+        "cron:self_healing",
+        second={0, 30},
+        timeout=25,
+    )
+    if _job:
+        _cron_jobs.append(_job)
     
     # Stale task cleanup every 10 minutes
     _job = _safe_cron(

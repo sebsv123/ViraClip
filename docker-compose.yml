@@ -409,6 +409,23 @@ services:
       WATCHDOG_INTERVAL_SECONDS: 60
       WATCHDOG_WORKER_CONTAINER: viraclip-worker
 
+  diagnostic:
+    <<: *worker-base
+    command: [".venv/bin/python", "-m", "src.workers.code_diagnostic_agent", "--watch"]
+    container_name: viraclip-diagnostic
+    restart: always
+    runtime: ""
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    environment:
+      WATCHDOG_WORKER_CONTAINER: viraclip-worker
+      REPO_ROOT: /app
+      LOG_FILE: /var/log/worker/worker.log
+    volumes:
+      - worker_logs:/var/log/worker
+
   gpu_worker:
     profiles: ["gpu"]
     build:
@@ -587,6 +604,7 @@ volumes:
   gpu_models_lora:
   gpu_models_lora_cache:
   llm_datasets:
+  worker_logs:
 
 networks:
   default:

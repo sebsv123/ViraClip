@@ -16,69 +16,70 @@ datasource db {
 }
 
 // Better Auth User model with backend compatibility
+
 model User {
-  id            String    @id @default(uuid())
+  id            String   @id @default(uuid())
   name          String
-  email         String    @unique
-  emailVerified Boolean   @default(false)
+  email         String   @unique
+  emailVerified Boolean  @default(false)
   image         String?
-  createdAt     DateTime  @default(now()) @db.Timestamptz
-  updatedAt     DateTime  @updatedAt @db.Timestamptz
+  createdAt     DateTime @default(now()) @db.Timestamptz
+  updatedAt     DateTime @updatedAt @db.Timestamptz
 
   // Additional fields for backend compatibility
-  first_name    String?   @db.VarChar(100)
-  last_name     String?   @db.VarChar(100)
-  password_hash String?   @db.VarChar(255)
+  first_name    String? @db.VarChar(100)
+  last_name     String? @db.VarChar(100)
+  password_hash String? @db.VarChar(255)
 
   // Default font preferences
-  default_font_family String?   @default("TikTokSans-Regular") @db.VarChar(100)
-  default_font_size   Int?      @default(24)
-  default_font_color  String?   @default("#FFFFFF") @db.VarChar(7)
-  notify_on_completion Boolean  @default(true)
+  default_font_family  String? @default("TikTokSans-Regular") @db.VarChar(100)
+  default_font_size    Int?    @default(24)
+  default_font_color   String? @default("#FFFFFF") @db.VarChar(7)
+  notify_on_completion Boolean @default(true)
 
   // Waitlist and beta access - AUTO-APPROVED for testing
-  waitlist_status      String    @default("approved") @db.VarChar(20) // pending|approved|rejected
-  beta_access          Boolean   @default(true)
-  clips_this_month     Int       @default(0)
-  last_reset_date      DateTime  @default(now()) @db.Timestamptz
+  waitlist_status  String   @default("approved") @db.VarChar(20) // pending|approved|rejected
+  beta_access      Boolean  @default(true)
+  clips_this_month Int      @default(0)
+  last_reset_date  DateTime @default(now()) @db.Timestamptz
 
   // Monetization and billing
-  plan                 String    @default("free") @db.VarChar(20)
-  subscription_status  String    @default("inactive") @db.VarChar(20)
-  is_admin             Boolean   @default(false)
-  stripe_customer_id   String?   @unique @db.VarChar(255)
-  stripe_subscription_id String? @unique @db.VarChar(255)
-  billing_period_start DateTime? @db.Timestamptz
-  billing_period_end   DateTime? @db.Timestamptz
-  trial_ends_at        DateTime? @db.Timestamptz
+  plan                   String    @default("free") @db.VarChar(20)
+  subscription_status    String    @default("inactive") @db.VarChar(20)
+  is_admin               Boolean   @default(false)
+  stripe_customer_id     String?   @unique @db.VarChar(255)
+  stripe_subscription_id String?   @unique @db.VarChar(255)
+  billing_period_start   DateTime? @db.Timestamptz
+  billing_period_end     DateTime? @db.Timestamptz
+  trial_ends_at          DateTime? @db.Timestamptz
 
   // Relationships
-  tasks         Task[]
-  sessions      Session[]
-  accounts      Account[]
+  tasks    Task[]
+  sessions Session[]
+  accounts Account[]
 
   @@map("users")
 }
 
 model Task {
-  id                   String    @id @default(uuid())
-  user_id              String
-  source_id            String?
-  generated_clips_ids  String[]
-  status               String    @default("pending") @db.VarChar(20)
+  id                              String    @id @default(uuid())
+  user_id                         String
+  source_id                       String?
+  generated_clips_ids             String[]
+  status                          String    @default("pending") @db.VarChar(20)
   completion_notification_sent_at DateTime? @db.Timestamptz
 
   // Font customization fields
-  font_family          String?   @default("TikTokSans-Regular") @db.VarChar(100)
-  font_size            Int?      @default(24)
-  font_color           String?   @default("#FFFFFF") @db.VarChar(7)
+  font_family String? @default("TikTokSans-Regular") @db.VarChar(100)
+  font_size   Int?    @default(24)
+  font_color  String? @default("#FFFFFF") @db.VarChar(7)
 
-  created_at           DateTime  @default(now()) @db.Timestamptz
-  updated_at           DateTime  @default(now()) @updatedAt @db.Timestamptz
+  created_at DateTime @default(now()) @db.Timestamptz
+  updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
 
   // Relationships
-  user                 User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
-  source               Source?   @relation(fields: [source_id], references: [id], onDelete: SetNull)
+  user   User    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+  source Source? @relation(fields: [source_id], references: [id], onDelete: SetNull)
 
   @@index([user_id])
   @@index([source_id])
@@ -88,27 +89,23 @@ model Task {
 }
 
 model Clip {
-  id              String    @id @default(uuid())
-  task_id         String
-  user_id         String
-  
+  id            String   @id @default(uuid())
+  task_id       String
+  user_id       String
   // File metadata
-  filename        String    @db.VarChar(500)
-  duration        Float     // in seconds
-  file_size       Int?      // in bytes
-  
+  filename      String   @db.VarChar(500)
+  duration      Float // in seconds
+  file_size     Int? // in bytes
   // Viral metrics
-  viral_score     Int?      // 0-100
-  
+  viral_score   Int? // 0-100
   // User feedback
-  rating          Int?      // 1-5 stars
-  thumbs          String?   @db.VarChar(20) // thumbs_up|thumbs_down|neutral
-  feedback_text   String?   @db.VarChar(500)
-  
+  rating        Int? // 1-5 stars
+  thumbs        String?  @db.VarChar(20) // thumbs_up|thumbs_down|neutral
+  feedback_text String?  @db.VarChar(500)
   // Timestamps
-  created_at      DateTime  @default(now()) @db.Timestamptz
-  updated_at      DateTime  @updatedAt @db.Timestamptz
-  
+  created_at    DateTime @default(now()) @db.Timestamptz
+  updated_at    DateTime @updatedAt @db.Timestamptz
+
   @@index([task_id])
   @@index([user_id])
   @@index([created_at])
@@ -116,22 +113,23 @@ model Clip {
 }
 
 model Source {
-  id              String   @id @default(uuid())
-  type            String   @db.VarChar(20)
-  title           String   @db.VarChar(500)
-  url             String?  @db.VarChar(1000)
-  url_secondary   String?  @db.VarChar(1000)
-  created_at      DateTime @default(now()) @db.Timestamptz
-  updated_at      DateTime @default(now()) @updatedAt @db.Timestamptz
+  id            String   @id @default(uuid())
+  type          String   @db.VarChar(20)
+  title         String   @db.VarChar(500)
+  url           String?  @db.VarChar(1000)
+  url_secondary String?  @db.VarChar(1000)
+  created_at    DateTime @default(now()) @db.Timestamptz
+  updated_at    DateTime @default(now()) @updatedAt @db.Timestamptz
 
   // Relationships
-  tasks      Task[]
+  tasks Task[]
 
   @@index([created_at])
   @@map("sources")
 }
 
 // Better Auth Session management
+
 model Session {
   id        String   @id
   expiresAt DateTime
@@ -144,6 +142,7 @@ model Session {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@map("session")
+  @@index([userId])
 }
 
 model Account {
@@ -163,6 +162,7 @@ model Account {
   updatedAt             DateTime
 
   @@map("account")
+  @@index([userId])
 }
 
 model Verification {
@@ -174,6 +174,7 @@ model Verification {
   updatedAt  DateTime?
 
   @@map("verification")
+  @@index([identifier])
 }
 
 model StripeWebhookEvent {

@@ -22,7 +22,7 @@ class _QueriesMixin:
             return None
 
         if self._is_stale_queued_task(task):
-            timeout_seconds = self.config.queued_task_timeout_seconds
+            timeout_seconds = max(600, self.config.queued_task_timeout_seconds)
             logger.warning(
                 f"Task {task_id} stuck in queued status for over {timeout_seconds}s; marking as error"
             )
