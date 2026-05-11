@@ -37,7 +37,13 @@ from ...core.error_handler import execute_with_recovery, get_circuit_breaker, wi
 from ...core.metrics_service import get_metrics_collector, timed_stage
 from ...domains.ai.elite_ai_service import EliteAIService
 from ...domains.ai.llm_service import LLMService
-from ...domains.ai.phi3_virality_service import Phi3ViralityService, get_phi3_service
+try:
+    from ...domains.ai.phi3_virality_service import Phi3ViralityService, get_phi3_service
+    _PHI3_IMPORT_OK = True
+except ImportError:
+    _PHI3_IMPORT_OK = False
+    def get_phi3_service():  # type: ignore
+        raise RuntimeError("phi3_virality_service not available — LLMRouter fallback will handle scoring")
 from ...domains.audio.sound_design_service import SoundDesignService, add_viral_sound_effects
 from ...domains.broll.broll_service import BrollService
 from ...domains.broll.hook_visual_service import HookVisualService
