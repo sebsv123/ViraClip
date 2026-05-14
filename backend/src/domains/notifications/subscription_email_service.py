@@ -2,14 +2,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ...config import Config
+from ...config import get_config, Config
 from ...models import User
 from .email_service import EmailContent, ResendEmailService, first_name_for
 
 
 class SubscriptionEmailService:
     def __init__(self, config: Optional[Config] = None):
-        self.config = config or Config()
+        self.config = config or get_config()
         self.email_service = ResendEmailService(self.config)
 
     @property

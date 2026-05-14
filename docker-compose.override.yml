@@ -68,10 +68,11 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, video, compute, utility]
     environment:
       - RENDER_CONCURRENCY=6
       - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
       - WHISPER_DEVICE=cuda
       - WHISPER_COMPUTE_TYPE=float16
       - SAM2_ENABLED=true

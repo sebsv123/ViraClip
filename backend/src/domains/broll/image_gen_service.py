@@ -15,7 +15,7 @@ import aiofiles
 import requests
 import httpx
 import os
-from ...config import Config
+from ...config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class ImageGenService:
             provider: Provider to use (auto, dalle, google_imagen, replicate, stability, sdxl)
                      "auto" = try all available providers in order
         """
-        self.config = Config()
+        self.config = get_config()
         self.provider = provider
         self.output_dir = Path(self.config.temp_dir) / "generated_assets"
         self.output_dir.mkdir(parents=True, exist_ok=True)

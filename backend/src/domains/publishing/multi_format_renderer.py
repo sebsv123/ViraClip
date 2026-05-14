@@ -14,6 +14,7 @@ import os
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -263,7 +264,7 @@ async def render_for_platform(
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "0:a?",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",

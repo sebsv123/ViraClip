@@ -369,13 +369,13 @@ async def system_health():
     """
     import subprocess as _sp
     import os as _os
-    from ...gpu_utils import nvenc_available, cuda_available, gpu_name
+    from src import gpu_utils
     
     result = {
         "gpu": {
-            "available": cuda_available(),
-            "encoder": "nvenc_h264" if nvenc_available() else "libx264",
-            "name": gpu_name(),
+            "available": gpu_utils.cuda_available(),
+            "encoder": gpu_utils.get_video_encoder(),
+            "name": gpu_utils.gpu_name(),
             "utilization_pct": 0.0,
             "vram_used_mb": 0,
             "vram_total_mb": 0,

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Optional, cast
 
 from ...ai import get_most_relevant_parts_by_transcript
-from ...config import Config
+from ...config import get_config
 from ...video_processing import get_video_transcript
 from ...youtube_utils import (
     async_download_youtube_video,
@@ -85,7 +85,7 @@ async def analyze_transcript(
         f"[AI ANALYSIS] Starting transcript analysis "
         f"(duration={video_duration:.1f}s, transcript_length={len(transcript)} chars)"
     )
-    logger.info(f"[AI ANALYSIS] LLM model configured: {Config().llm}")
+    logger.info(f"[AI ANALYSIS] LLM model configured: {get_config().llm}")
 
     try:
         # get_most_relevant_parts_by_transcript returns List[Dict] — wrap it so

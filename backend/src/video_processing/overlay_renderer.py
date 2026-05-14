@@ -1,4 +1,5 @@
 """
+from src import gpu_utils
 Overlay Renderer — Contextual Overlay System
 FFmpeg-based rendering: full-screen overlay with speaker in corner bubble.
 """
@@ -102,7 +103,7 @@ class OverlayRenderer:
                 _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
                 *inputs,
                 "-filter_complex", filter_complex,
-                "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "copy",
                 "-movflags", "+faststart",
                 str(output_path)

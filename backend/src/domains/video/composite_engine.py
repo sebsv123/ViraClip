@@ -16,6 +16,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,7 @@ class CompositeEngine:
                 "-filter_complex", filter_complex,
                 "-map", "[out]",
                 "-map", "0:a?",        # audio original si existe
-                "-c:v", "libx264",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-preset", "medium",
                 "-crf", "18",
                 "-pix_fmt", "yuv420p",

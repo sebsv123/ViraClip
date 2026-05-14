@@ -60,7 +60,7 @@ async def apply_sfx(
         ";".join(filter_parts) + ";"
         f"{mix_labels_str}amix=inputs={n_inputs}:"
         f"duration=first:dropout_transition=0,"
-        f"aresample=async=1000[aout]"
+        f"aresample=44100,aformat=channel_layouts=stereo[aout]"
     )
 
     cmd = [

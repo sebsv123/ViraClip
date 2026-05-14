@@ -33,6 +33,8 @@ from ...api.middleware.rate_limit import task_rate_limit_dependency
 import redis.asyncio as aioredis
 from ...clip_editor import export_with_preset, EXPORT_PRESETS
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -108,6 +110,11 @@ async def list_tasks(
         raise HTTPException(status_code=500, detail=f"Error retrieving tasks: {str(e)}")
 
 
+# Timeout for create_task handler — prevents hanging indefinitely if
+# Redis, DB, or any downstream dependency blocks.
+_CREATE_TASK_TIMEOUT = 25.0
+
+
 @router.post("", dependencies=[Depends(task_rate_limit_dependency)])
 @router.post("/", dependencies=[Depends(task_rate_limit_dependency)])
 async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
@@ -115,7 +122,13 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     Create a new task and enqueue it for processing.
     Returns task_id immediately.
     """
-    data = await request.json()
+    try:
+        data = await asyncio.wait_for(
+            request.json(),
+            timeout=10.0,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=400, detail="Request body read timed out")
     # FIX 2: Normalize: accept both {"source": {"url": ...}} and {"youtube_url": ...}
     if "youtube_url" in data and "source" not in data:
         data["source"] = {"url": data["youtube_url"]}
@@ -220,6 +233,25 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
 
         task_service = TaskService(db)
 
+        # ── Idempotency check: prevent duplicate submissions ──────────────
+        # BUG 4 fix: if the same user already has a task for the same URL
+        # that is still queued or processing, return the existing task_id
+        # instead of creating a duplicate.
+        existing_task = await task_service.task_repo.find_task_by_user_and_url(
+            db, user_id, raw_source["url"]
+        )
+        if existing_task and existing_task.get("status") in ("queued", "processing"):
+            logger.info(
+                f"Idempotency hit: user {user_id} already has task "
+                f"{existing_task['id']} for URL {raw_source['url'][:60]} "
+                f"(status={existing_task['status']}) — returning existing task"
+            )
+            return {
+                "task_id": existing_task["id"],
+                "message": "Task already exists and is being processed",
+                "duplicate": True,
+            }
+
         # Create task
         task_id = await task_service.create_task_with_source(
             user_id=user_id,
@@ -277,13 +309,10 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
             raise
 
         # Save source metadata for resume/retries in environments without sources.url column
-
-        # Save source metadata for resume/retries in environments without sources.url column
-        redis_client = aioredis.Redis(
-            host=config.redis_host, port=config.redis_port, password=config.redis_password, decode_responses=True
-        )
+        # Use the existing JobQueue pool (ArqRedis) instead of creating a new connection
         try:
-            await redis_client.set(
+            pool = await JobQueue.get_pool()
+            await pool.set(
                 f"task_source:{task_id}",
                 json.dumps({
                     "url": raw_source["url"],
@@ -294,8 +323,9 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
                 }),
                 ex=60 * 60 * 24 * 7,
             )
-        finally:
-            await redis_client.aclose()
+        except Exception as e:
+            logger.warning(f"Failed to save task source metadata to Redis: {e}")
+            # Non-fatal: task will still work without this cache entry
 
         logger.info(f"Task {task_id} created and job {job_id} enqueued")
 
@@ -642,6 +672,20 @@ async def get_task_progress_sse(task_id: str, request: Request):
                     logger.info(f"SSE client disconnected for task {task_id}, closing stream")
                     break
 
+                from src.core.feature_flags import FEATURE_FLAGS
+                degraded = [k for k, v in FEATURE_FLAGS.get_all().items() if not v]
+                progress_data["degraded_features"] = degraded
+                progress_data["degraded_message"] = (
+                    f"{len(degraded)} features desactivadas por incompatibilidad de dependencias. "
+                    "Los clips se generarán en modo degradado."
+                ) if degraded else None
+                from src.core.feature_flags import FEATURE_FLAGS
+                degraded = [k for k, v in FEATURE_FLAGS.get_all().items() if not v]
+                progress_data["degraded_features"] = degraded
+                progress_data["degraded_message"] = (
+                    f"{len(degraded)} features desactivadas por incompatibilidad de dependencias. "
+                    "Los clips se generarán en modo degradado."
+                ) if degraded else None
                 event_type = progress_data.get("event_type", "progress")
                 yield {"event": event_type, "data": json.dumps(progress_data)}
 
@@ -845,7 +889,7 @@ async def update_clip_suggestion(
 
         body = await request.json()
         new_status = body.get("status")
-        if new_status not in {"pending", "approved", "rejected"}:
+        if new_status not in {"pending", "approved", "rejected", "ready_for_review"}:
             raise HTTPException(
                 status_code=400,
                 detail="status must be one of: pending, approved, rejected",
@@ -1393,7 +1437,7 @@ async def compile_clips_into_reel(
                         merged = concatenate_videoclips([clip_a, clip_b], method="compose")
                         merged.write_videofile(
                             str(temp_output),
-                            codec="libx264",
+                            codec=gpu_utils.get_video_encoder(),
                             audio_codec="aac",
                             preset="veryfast",
                             logger=None,

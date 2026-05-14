@@ -1,4 +1,5 @@
 """
+from src import gpu_utils
 Silence and filler-word removal via FFmpeg select/aselect filters.
 Produces tighter jump-cut clips — silences > SILENCE_THRESHOLD are removed
 and common filler words ("um", "uh", etc.) are cut out.
@@ -129,7 +130,7 @@ async def remove_silences(
         _get_ffmpeg_exe(), "-y", "-i", video_path,
         "-vf", f"select='{select_expr}',setpts=N/FRAME_RATE/TB",
         "-af", f"aselect='{select_expr}',asetpts=N/SR/TB",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,
@@ -241,7 +242,7 @@ async def speed_ramp_silences(
         _get_ffmpeg_exe(), "-y", "-i", video_path,
         "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "[aout]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",
         output_path,

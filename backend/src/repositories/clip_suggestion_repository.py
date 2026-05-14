@@ -14,10 +14,12 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..domains.autopilot.clip_suggestion_status import ClipSuggestionStatus
+
 logger = logging.getLogger(__name__)
 
 
-_VALID_STATUSES = {"pending", "approved", "rejected"}
+_VALID_STATUSES = ClipSuggestionStatus.valid_statuses()
 _VALID_CATEGORIES = {"timing", "captions", "media", "polish"}
 
 

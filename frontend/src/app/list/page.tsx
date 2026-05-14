@@ -37,6 +37,8 @@ import {
   RotateCcw,
   Trash2,
   X,
+  Zap,
+  Plus,
 } from "lucide-react";
 import Link from "next/link";
 
@@ -331,11 +333,11 @@ export default function ListPage() {
 
   if (isPending) {
     return (
-      <div className="min-h-screen bg-white flex items-center justify-center p-4">
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center p-4">
         <div className="space-y-4">
-          <Skeleton className="h-4 w-32 mx-auto" />
-          <Skeleton className="h-4 w-48 mx-auto" />
-          <Skeleton className="h-4 w-24 mx-auto" />
+          <Skeleton className="h-4 w-32 mx-auto bg-white/10" />
+          <Skeleton className="h-4 w-48 mx-auto bg-white/10" />
+          <Skeleton className="h-4 w-24 mx-auto bg-white/10" />
         </div>
       </div>
     );
@@ -343,10 +345,10 @@ export default function ListPage() {
 
   if (!session?.user) {
     return (
-      <div className="min-h-screen bg-white">
+      <div className="min-h-screen bg-[#0a0a0f]">
         <div className="max-w-4xl mx-auto px-4 py-24 text-center">
-          <h1 className="text-3xl font-bold text-black mb-4">Sign In Required</h1>
-          <p className="text-gray-600 mb-8">
+          <h1 className="text-3xl font-bold text-white mb-4">Sign In Required</h1>
+          <p className="text-gray-400 mb-8">
             You need to be signed in to view your generations.
           </p>
           <Link href="/sign-in">
@@ -408,8 +410,7 @@ export default function ListPage() {
               { label: "Dashboard", href: "/dashboard", active: false },
               { label: "My Clips", href: "/list", active: true },
               { label: "Auto-Pilot", href: "/autopilot", active: false },
-              { label: "Analytics", href: "/analytics", active: false },
-              { label: "Settings", href: "/settings", active: false },
+              { label: "Settings", href: "/dashboard/settings", active: false },
             ].map((item) => (
               <Link
                 key={item.label}
@@ -463,7 +464,7 @@ export default function ListPage() {
                 </div>
               )}
               
-              <Link href="/new">
+              <Link href="/dashboard">
                 <button className="flex items-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all hover:shadow-[0_0_30px_-5px_rgba(34,211,238,0.5)]">
                   <Plus className="w-5 h-5" />
                   New Project
@@ -522,7 +523,7 @@ export default function ListPage() {
               <p className="text-gray-500 mb-6 text-sm">
                 Start by processing your first video to create clips.
               </p>
-              <Link href="/new">
+              <Link href="/dashboard">
                 <button className="px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all hover:shadow-[0_0_30px_-5px_rgba(34,211,238,0.5)]">
                   Create New Generation
                 </button>

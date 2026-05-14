@@ -26,7 +26,7 @@ pydub==0.25.1
 sentence-transformers==2.3.1
 transformers==4.37.0
 faster-whisper==0.10.0
-mediapipe==0.10.9
+mediapipe==0.10.5
 sentencepiece==0.1.99
 faiss-cpu==1.7.4
 
@@ -37,7 +37,7 @@ soundfile==0.12.1
 
 # === System ===
 psutil==5.9.8
-numpy>=1.24.0,<2.0
+numpy==2.2.6
 numba>=0.59.0
 
 # === Auth / Utils ===

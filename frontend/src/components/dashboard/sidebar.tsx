@@ -20,10 +20,10 @@ interface SidebarProps {
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: Home },
-  { name: "Create Clip", href: "/dashboard/create", icon: PlusCircle },
-  { name: "My Clips", href: "/dashboard/clips", icon: Film },
+  { name: "Create Clip", href: "/dashboard", icon: PlusCircle },
+  { name: "My Clips", href: "/list", icon: Film },
   { name: "Settings", href: "/dashboard/settings", icon: Settings },
-  { name: "Help", href: "/dashboard/help", icon: HelpCircle },
+  { name: "Help", href: "/dashboard/settings", icon: HelpCircle },
 ];
 
 export function DashboardSidebar({ user }: SidebarProps) {

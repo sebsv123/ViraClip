@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,7 +76,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="8M",
                 audio_bitrate="192k",
@@ -132,7 +134,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="10M",  # Higher bitrate for YT
                 audio_bitrate="192k",
@@ -190,7 +192,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="6M",
                 audio_bitrate="128k",
@@ -248,7 +250,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=30,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="4M",
                 audio_bitrate="128k",
@@ -302,7 +304,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="5M",
                 audio_bitrate="128k",
@@ -355,7 +357,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="5M",
                 audio_bitrate="128k",
@@ -413,7 +415,7 @@ class PlatformExportPresets:
                 fps=30,
                 min_fps=24,
                 max_fps=60,
-                video_codec="libx264",
+                video_codec=gpu_utils.get_video_encoder(),
                 audio_codec="aac",
                 video_bitrate="8M",
                 audio_bitrate="192k",

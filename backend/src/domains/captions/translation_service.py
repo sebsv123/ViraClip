@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional, List, Dict
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +278,7 @@ class TranslationService:
                     "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=40'"
                 ),
                 "-c:a", "copy",
-                "-c:v", "libx264",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-preset", "fast",
                 "-crf", "23",
                 str(output_path),

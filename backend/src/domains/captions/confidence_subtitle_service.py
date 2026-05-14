@@ -258,7 +258,8 @@ class ConfidenceSubtitleGenerator:
         segment_video_path: str,
         original_words: Optional[List[Dict]] = None,
         language: Optional[str] = None,
-        anticipation_offset_ms: float = -50.0
+        anticipation_offset_ms: float = -50.0,
+        has_clean_audio: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
         """
         Re-transcribe un clip ya cortado para obtener timestamps exactos.
@@ -267,12 +268,18 @@ class ConfidenceSubtitleGenerator:
         Al re-transcribir solo el segmento (15-60s), faster-whisper da timestamps
         con precision de +-30ms.
 
+        BUG 3 FIX: Si el segmento tiene B-roll, musica de fondo o subtitulos
+        quemados (has_clean_audio=False), se salta la re-transcripcion y devuelve
+        las palabras originales para evitar desincronizacion por audio contaminado.
+
         Args:
             segment_video_path: Ruta al clip ya cortado (el .mp4 que sale de create_optimized_clip)
             original_words: Palabras remapeadas del video original (para validacion)
             language: Codigo de idioma ('es', 'en', etc.)
             anticipation_offset_ms: Offset en ms para que subtitulos aparezcan
                                     ligeramente ANTES de la palabra (-50ms = aparece 50ms antes)
+            has_clean_audio: Si es False, se salta la re-transcripcion. Si es None,
+                             se detecta automaticamente (heuristica basica).
 
         Returns:
             Lista de dicts compatibles con words_with_confidence:
@@ -283,6 +290,20 @@ class ConfidenceSubtitleGenerator:
         import tempfile
 
         logger.info(f"[RE-ALIGN] Transcribiendo segmento: {segment_video_path}")
+
+        # ── BUG 3 FIX: Verificar si el audio es limpio ──────────────────────
+        if has_clean_audio is None:
+            # Heuristica: detectar si el segmento tiene B-roll o musica
+            # basado en el nombre del archivo o metadatos del pipeline
+            has_clean_audio = self._detect_clean_audio(segment_video_path)
+
+        if has_clean_audio is False:
+            logger.warning(
+                f"[RE-ALIGN] Segmento {segment_video_path} no tiene audio limpio "
+                "(B-roll, musica o subtitulos quemados detectados). "
+                "Saltando re-transcripcion para evitar desincronizacion."
+            )
+            return original_words or []
 
         # Normalizar codigo ISO 639-3 → ISO 639-1 (faster-whisper solo acepta 2 letras)
         _ISO3_TO_ISO1 = {
@@ -378,6 +399,76 @@ class ConfidenceSubtitleGenerator:
         finally:
             if tmp_audio_path:
                 Path(tmp_audio_path).unlink(missing_ok=True)
+
+    def _detect_clean_audio(self, video_path: str) -> bool:
+        """
+        Detecta si el segmento tiene audio limpio (solo voz original)
+        o si tiene B-roll, musica o subtitulos quemados.
+
+        BUG 3 FIX: Heuristica basada en:
+        1. Nombre del archivo (si contiene indicadores de B-roll)
+        2. Cantidad de pistas de audio en el contenedor
+        3. Duracion del audio vs duracion del video
+
+        Returns:
+            True si el audio parece limpio, False si parece contaminado.
+        """
+        import subprocess
+        from pathlib import Path
+
+        path = Path(video_path)
+        fname = path.stem.lower()
+
+        # Heuristica 1: Nombre del archivo con indicadores de B-roll/post-procesado
+        broll_indicators = [
+            "_broll", "_composite", "_final", "_polished",
+            "_with_music", "_with_sfx", "_enhanced",
+        ]
+        for indicator in broll_indicators:
+            if indicator in fname:
+                logger.info(
+                    f"[RE-ALIGN] Audio contaminado detectado por nombre: "
+                    f"'{indicator}' en '{fname}'"
+                )
+                return False
+
+        # Heuristica 2: Verificar numero de pistas de audio
+        # Un video limpio tiene 1 pista de audio (voz original)
+        # B-roll/musica anaden pistas adicionales
+        try:
+            probe_cmd = [
+                _get_ffmpeg_exe(), '-i', video_path,
+                '-hide_banner',
+            ]
+            result = subprocess.run(
+                probe_cmd, capture_output=True, text=True, timeout=15
+            )
+            stderr = result.stderr
+
+            # Contar pistas de audio
+            import re
+            audio_streams = re.findall(r'Stream #0:\d+\(?.*?\)?: Audio:', stderr)
+            if len(audio_streams) > 1:
+                logger.info(
+                    f"[RE-ALIGN] Audio contaminado: {len(audio_streams)} pistas "
+                    f"de audio detectadas (esperado: 1)"
+                )
+                return False
+
+            # Heuristica 3: Verificar si hay codificacion de audio multiple
+            # (indica mezcla de fuentes)
+            if "aac" in stderr and "pcm" in stderr:
+                logger.info(
+                    "[RE-ALIGN] Audio potencialmente contaminado: "
+                    "mezcla de codecs de audio detectada"
+                )
+                return False
+        except Exception as e:
+            logger.debug(f"[RE-ALIGN] Error en deteccion de audio limpio: {e}")
+
+        # Si pasamos todas las heuristicas, asumimos audio limpio
+        logger.info(f"[RE-ALIGN] Audio parece limpio para segmento: {fname}")
+        return True
 
 
 def _transfer_emphasis_flags(realigned: List[Dict], original: List[Dict]):

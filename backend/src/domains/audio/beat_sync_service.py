@@ -118,6 +118,16 @@ def analyse_bpm(audio_path: Path, duration: float = 60.0, bgm_path: Optional[Pat
           "confidence": float (0-1),
         }
     """
+    from src.core.feature_flags import FEATURE_FLAGS
+    if not FEATURE_FLAGS.get("beat_sync_librosa", True):
+        logger.info("[BeatSync] librosa unavailable — using FFmpeg tempo estimate")
+        return {"bpm": 120.0, "beat_times": [], "category": "unknown", "confidence": 0.0}
+
+    from src.core.feature_flags import FEATURE_FLAGS
+    if not FEATURE_FLAGS.get("beat_sync_librosa", True):
+        logger.info("[BeatSync] librosa unavailable — using FFmpeg tempo estimate")
+        return {"bpm": 120.0, "beat_times": [], "category": "unknown", "confidence": 0.0}
+
     try:
         import librosa
 

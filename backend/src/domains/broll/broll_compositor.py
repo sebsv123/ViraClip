@@ -23,11 +23,12 @@ import os
 import subprocess
 import sys
 sys.path.insert(0, "/app/src") if "/app/src" not in sys.path else None
+from src import gpu_utils
 try:
     from gpu_utils import ffmpeg_codec_flags as _gpu_codec
 except ImportError:
     def _gpu_codec(quality="high"):
-        return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22" if quality == "high" else "24"]
+        return gpu_utils.ffmpeg_codec_flags(quality)
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
@@ -215,9 +216,7 @@ def normalize_broll(
             "-t", str(duration),
             "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1",
             "-pix_fmt", "yuv420p",
-            "-c:v", "libx264",
-            "-crf", "18",
-            "-preset", "fast",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-an",
             "-movflags", "+faststart",
             str(output_path),
@@ -242,7 +241,7 @@ def normalize_broll(
                 i = 0
                 while i < len(cmd):
                     if cmd[i] == "-c:v" and i + 1 < len(cmd) and "nvenc" in cmd[i + 1]:
-                        cpu_cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+                        cpu_cmd += gpu_utils.ffmpeg_codec_flags("medium")
                         i += 2
                         while i < len(cmd) and cmd[i] in ("-preset", "-rc", "-cq", "-qp", "-b:v"):
                             i += 2
@@ -534,7 +533,7 @@ async def compose_overlay_multi(
                 j = 0
                 while j < len(cmd):
                     if cmd[j] == "-c:v" and j + 1 < len(cmd) and "nvenc" in cmd[j + 1]:
-                        cpu_cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "22"]
+                        cpu_cmd += gpu_utils.ffmpeg_codec_flags("high")
                         j += 2
                         while j < len(cmd) and cmd[j] in ("-preset", "-rc", "-cq", "-qp", "-b:v"):
                             j += 2

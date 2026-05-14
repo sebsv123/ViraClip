@@ -9,7 +9,10 @@ Runs every 60s and applies these healing rules:
    strip_function_wrapper() fix applied to ai.py, then re-enqueue
 4. FAILED with "Exceeded maximum retries" → increase max_result_retries in ai.py, re-enqueue
 5. Any FAILED with retry_count < 3 → re-enqueue automatically
-6. retry_count >= 3 → mark failed permanently with descriptive error_code
+6. retry_count >= 3 → mark dead permanently with descriptive error_code
+
+Retry tracking uses the watchdog_events table (not error_code column, which gets
+cleared by workers). This prevents infinite re-enqueue loops.
 
 Usage:
     cd /home/_sebastian/CascadeProjects/ViraClip/backend
@@ -53,6 +56,8 @@ if DATABASE_URL.startswith("postgresql+asyncpg://"):
 LOOP_INTERVAL_S = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", "60"))
 QUEUED_TIMEOUT_S = int(os.getenv("WATCHDOG_QUEUED_TIMEOUT_S", "600"))
 MAX_RETRIES = int(os.getenv("WATCHDOG_MAX_RETRIES", "3"))
+# Circuit breaker: how far back to look for re-enqueue events (default 24h)
+RETRY_WINDOW_HOURS = int(os.getenv("WATCHDOG_RETRY_WINDOW_HOURS", "24"))
 
 _shutdown = asyncio.Event()
 
@@ -82,6 +87,7 @@ HEALING_RULES = [
 
 
 async def _ensure_table(conn: Any) -> None:
+    """Create watchdog_events and dead_letter_tasks tables if they don't exist."""
     await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS watchdog_events (
@@ -94,6 +100,44 @@ async def _ensure_table(conn: Any) -> None:
         )
         """
     )
+    # Add index on (error_type, context->>'task_id') for fast retry counting
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_watchdog_events_task_retry
+        ON watchdog_events (error_type, (context->>'task_id'))
+        """
+    )
+    # Dead-letter table — tasks that have exhausted all retries
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dead_letter_tasks (
+            id              UUID PRIMARY KEY,
+            task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            original_status VARCHAR(50) NOT NULL DEFAULT 'dead',
+            error_code      VARCHAR(100) NOT NULL,
+            error_message   TEXT,
+            source          VARCHAR(50) NOT NULL DEFAULT 'watchdog',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            retried_at      TIMESTAMPTZ,
+            retried_by      VARCHAR(100),
+            UNIQUE(task_id)
+        )
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dead_letter_tasks_created_at
+            ON dead_letter_tasks (created_at DESC)
+        """
+    )
+    await conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dead_letter_tasks_retried
+            ON dead_letter_tasks (retried_at)
+            WHERE retried_at IS NULL
+        """
+    )
+
 
 
 async def _log_event(conn: Any, error_type: str, context: dict, fix_applied: str, fix_success: bool) -> None:
@@ -130,43 +174,92 @@ async def _apply_file_fix(fix_file: str, fix_search: str, fix_replace: str) -> b
         return False
 
 
-async def _re_enqueue_task(task_id: str) -> bool:
-    """Re-enqueue a task via JobQueue."""
+async def _re_enqueue_task(r: Any, task_id: str) -> bool:
+    """Re-enqueue a task via arq directly (no JobQueue import to avoid zombie subprocesses)."""
     try:
-        sys.path.insert(0, "/app")
-        from src.workers.job_queue import JobQueue
-        await JobQueue.enqueue_processing_job(
-            "process_video_task", "fast", task_id, "", "", "",
+        from arq import create_pool
+        from arq.connections import RedisSettings
+
+        settings = RedisSettings(
+            host=_REDIS_HOST,
+            port=int(_REDIS_PORT),
+            password=_REDIS_PASSWORD or None,
+            database=0,
         )
-        logger.info("✅ Re-enqueued task %s", str(task_id)[:12])
-        return True
+        pool = await create_pool(settings)
+        try:
+            job = await pool.enqueue_job(
+                "process_video_task",
+                task_id, "", "", "",
+                _queue_name="viraclip_cpu_tasks",
+            )
+            if job:
+                logger.info("✅ Re-enqueued task %s (job %s)", str(task_id)[:12], getattr(job, "job_id", "?"))
+                return True
+            logger.error("Failed to enqueue job for task %s", str(task_id)[:12])
+            return False
+        finally:
+            await pool.close()
     except Exception as exc:
         logger.error("Failed to re-enqueue task %s: %s", str(task_id)[:12], exc)
         return False
 
 
 async def _get_retry_count(conn: Any, task_id: str) -> int:
-    """Get retry count from task metadata or error_code."""
+    """
+    Get retry count from watchdog_events table (not error_code).
+
+    Counts HEAL_RE_ENQUEUE or HEAL_RE_ENQUEUE_GENERIC events for this task
+    within the retry window. This is reliable because watchdog_events are
+    append-only and never cleared by workers.
+    """
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=RETRY_WINDOW_HOURS)
     row = await conn.fetchrow(
-        "SELECT error_code, metadata FROM tasks WHERE id = $1", task_id,
+        """
+        SELECT COUNT(*) AS cnt FROM watchdog_events
+        WHERE error_type IN ('HEAL_RE_ENQUEUE', 'HEAL_RE_ENQUEUE_GENERIC')
+          AND context->>'task_id' = $1
+          AND detected_at >= $2
+        """,
+        str(task_id),
+        cutoff,
     )
-    if not row:
-        return 0
-    error_code = row["error_code"] or ""
-    # Count retries from error_code pattern: "RETRY_1", "RETRY_2", etc.
-    m = re.search(r"RETRY_(\d+)", error_code)
-    if m:
-        return int(m.group(1))
-    return 0
+    return row["cnt"] if row else 0
 
 
-async def _set_retry_count(conn: Any, task_id: str, count: int) -> None:
-    """Update retry count in error_code."""
+async def _mark_task_dead(conn: Any, task_id: str, error_code: str, error_message: str) -> None:
+    """Mark a task as permanently dead (circuit breaker) and write to dead-letter store."""
     await conn.execute(
-        "UPDATE tasks SET error_code = $1, updated_at = NOW() WHERE id = $2",
-        f"RETRY_{count}",
+        """
+        UPDATE tasks
+        SET status = 'dead',
+            error_code = $1,
+            error_message = $2,
+            updated_at = NOW()
+        WHERE id = $3
+        """,
+        error_code,
+        error_message[:500],
         task_id,
     )
+    # Write to dead_letter_tasks table (idempotent via UNIQUE(task_id))
+    await conn.execute(
+        """
+        INSERT INTO dead_letter_tasks (id, task_id, original_status, error_code, error_message, source)
+        VALUES ($1, $2, 'dead', $3, $4, 'watchdog')
+        ON CONFLICT (task_id) DO UPDATE
+            SET error_code = EXCLUDED.error_code,
+                error_message = EXCLUDED.error_message,
+                retried_at = NULL,
+                retried_by = NULL
+        """,
+        str(uuid.uuid4()),
+        task_id,
+        error_code,
+        error_message[:500],
+    )
+    logger.info("🔴 Task %s marked dead: %s", str(task_id)[:12], error_code)
+
 
 
 # ── Healing check ───────────────────────────────────────────────────────────
@@ -182,11 +275,11 @@ async def _check_and_heal(conn: Any, r: Any) -> None:
     )
     for row in rows:
         task_id = row["id"]
-        ok = await _re_enqueue_task(task_id)
+        ok = await _re_enqueue_task(r, task_id)
         await _log_event(conn, "QUEUED_HEAL", {"task_id": str(task_id)}, "re_enqueue", ok)
         logger.info("[HEAL] QUEUED task %s → re-enqueue (%s)", str(task_id)[:12], "OK" if ok else "FAIL")
 
-    # 2. FAILED tasks with retry_count < MAX_RETRIES
+    # 2. FAILED tasks — check retry count and heal or mark dead
     rows = await conn.fetch(
         "SELECT id, error_code, error_message FROM tasks WHERE status = 'failed'",
     )
@@ -196,8 +289,23 @@ async def _check_and_heal(conn: Any, r: Any) -> None:
         error_message = row["error_message"] or ""
         retry_count = await _get_retry_count(conn, task_id)
 
+        # Circuit breaker: if already exhausted, skip
         if retry_count >= MAX_RETRIES:
-            logger.info("[HEAL] Task %s retry_count=%d >= %d — permanent failure", str(task_id)[:12], retry_count, MAX_RETRIES)
+            logger.info(
+                "[HEAL] Task %s retry_count=%d >= %d — marking dead (circuit breaker)",
+                str(task_id)[:12], retry_count, MAX_RETRIES,
+            )
+            await _mark_task_dead(
+                conn, task_id,
+                "WATCHDOG_EXHAUSTED",
+                f"Watchdog re-enqueued {retry_count} times without success. "
+                f"Last error: {error_code} — {error_message}",
+            )
+            await _log_event(
+                conn, "CIRCUIT_BREAKER",
+                {"task_id": str(task_id), "retry_count": retry_count, "error_code": error_code},
+                "mark_dead", True,
+            )
             continue
 
         combined = f"{error_code} {error_message}"
@@ -211,17 +319,18 @@ async def _check_and_heal(conn: Any, r: Any) -> None:
                     fix_ok = await _apply_file_fix(fix_file, fix_search, fix_replace)
                     await _log_event(conn, "FILE_FIX", {"file": fix_file, "pattern": desc}, "apply_fix", fix_ok)
                 # Re-enqueue
-                ok = await _re_enqueue_task(task_id)
-                await _set_retry_count(conn, task_id, retry_count + 1)
+                ok = await _re_enqueue_task(r, task_id)
                 await _log_event(conn, "HEAL_RE_ENQUEUE", {"task_id": str(task_id), "retry": retry_count + 1}, "re_enqueue", ok)
                 healed = True
                 break
 
-        if not healed and retry_count < MAX_RETRIES:
+        if not healed:
             # Generic re-enqueue for unknown errors
-            logger.info("[HEAL] Task %s unknown error — re-enqueue (retry %d/%d)", str(task_id)[:12], retry_count + 1, MAX_RETRIES)
-            ok = await _re_enqueue_task(task_id)
-            await _set_retry_count(conn, task_id, retry_count + 1)
+            logger.info(
+                "[HEAL] Task %s unknown error — re-enqueue (retry %d/%d)",
+                str(task_id)[:12], retry_count + 1, MAX_RETRIES,
+            )
+            ok = await _re_enqueue_task(r, task_id)
             await _log_event(conn, "HEAL_RE_ENQUEUE_GENERIC", {"task_id": str(task_id), "retry": retry_count + 1}, "re_enqueue", ok)
 
     # 3. PROCESSING > 15min → mark failed

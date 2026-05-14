@@ -3,7 +3,7 @@ name = "viraclip-backend"
 version = "0.1.0"
 description = "Python-based backend for SupoClip"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "apify-client>=1.8.1",
     "fastapi>=0.110.0",
@@ -20,8 +20,9 @@ dependencies = [
     "opencv-python-headless>=4.8.0",
     "assemblyai>=0.35.0",
     "srt>=3.5.3",
-    "mediapipe>=0.10.0",
-    "numpy>=1.24.0",
+    # mediapipe excluido: protobuf<4 incompatible con pydantic-ai>=1.0
+    # Se instala vía pip en Dockerfile
+    "numpy==2.2.6",
     "aiofiles>=23.2.0",
     "sse-starlette>=1.6.5",
     "arq>=0.26.0",
@@ -29,9 +30,13 @@ dependencies = [
     "resend>=2.13.0",
     "requests>=2.32.0",
     "transformers>=4.40.0",
-    "torch==2.10.0+cu130",
-    "torchvision==0.25.0+cu130",
-    "torchaudio==2.10.0+cu130",
+    "torch==2.12.0+cu132",
+    "torchvision==0.27.0+cu132",
+    "torchaudio>=2.2.0",
+    # nvidia-cublas-cu12 provides CUDA 12.x cuBLAS libs for faster-whisper/ctranslate2
+    # (container has CUDA 13.2 runtime, but ctranslate2 needs CUDA 12.x .so files)
+    "nvidia-cublas-cu12>=12.0.0",
+    # torchcodec removed — conflicts with FFmpeg 4.4.2 libavutil.so.56
     "sentencepiece>=0.2.0",
     "librosa>=0.10.1",
     "soundfile>=0.12.1",
@@ -45,7 +50,6 @@ dependencies = [
     "imageio[ffmpeg]>=2.34.0",
     "peft>=0.11.0",
     "safetensors>=0.4.0",
-    "TTS>=0.22.0",
     "imageio-ffmpeg>=0.5.0",
     # ── Monitoring & Automation (Phase 10) ──────────────────────────────────
     "prometheus-client>=0.19.0",
@@ -58,7 +62,7 @@ dependencies = [
     "langchain>=0.3.0",
     "langchain-openai>=0.2.0",
     "langchain-anthropic>=0.3.0",
-    "langchain-community>=0.3.0",
+    "langchain-community>=0.3.28",
 ]
 
 [dependency-groups]
@@ -112,15 +116,18 @@ line-ending = "lf"
 
 [tool.uv]
 package = true
+environments = ["sys_platform == 'linux'"]
+index-strategy = "unsafe-best-match"
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
-torchaudio = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu132" }
+torchvision = { index = "pytorch-cu132" }
+# torchaudio removed from cu132 index — max version on cu132 is 2.2.0
+# torchaudio>=2.2.0 resolves from PyPI (no +cu132 suffix needed)
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
 [tool.pytest.ini_options]

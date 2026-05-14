@@ -95,6 +95,7 @@ except (ImportError, Exception):
     _confidence_subtitle_available = False
     ConfidenceSubtitleGenerator = None  # type: ignore
 
+from ...domains.virality.viral_scorer_service import get_viral_scorer
 from . import _clip_polish as _polish
 from . import _helpers, _subtitles, _transcript
 from ._helpers import get_ffmpeg_exe, get_service_config
@@ -210,7 +211,6 @@ async def create_single_clip(
             )
             # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
             try:
-                from ...domains.virality.viral_scorer_service import get_viral_scorer
                 _mlp = get_viral_scorer()
                 if _mlp.is_available():
                     _blended = _mlp.blend_with_phi3(

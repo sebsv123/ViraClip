@@ -1,4 +1,5 @@
 """
+from src import gpu_utils
 Smart Reframe — produce 1:1 (Instagram feed) and 16:9 (YouTube/LinkedIn)
 variants from a 9:16 source clip using FFmpeg crop + face-tracking.
 
@@ -125,7 +126,7 @@ async def reframe_to_square(
     cmd = [
         FFMPEG, "-y", "-i", video_path,
         "-vf", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]
@@ -175,7 +176,7 @@ async def reframe_to_landscape(
     cmd = [
         FFMPEG, "-y", "-i", video_path,
         "-filter_complex", vf,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "128k",
         output_path,
     ]

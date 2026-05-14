@@ -6,6 +6,8 @@ import logging
 import os
 from pathlib import Path
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 KNOWN_WATERMARKS = {
@@ -30,9 +32,6 @@ KNOWN_WATERMARKS = {
 DELOGO_ENABLED = os.getenv("DELOGO_ENABLED", "false").lower() == "true"
 DELOGO_TARGETS = [t.strip() for t in os.getenv("DELOGO_TARGETS", "tiktok_br,tiktok_bc").split(",")]
 
-
-def _gpu_available() -> bool:
-    return bool(os.getenv("CUDA_VISIBLE_DEVICES", ""))
 
 
 async def build_delogo_filter(targets: list[str]) -> str | None:
@@ -66,7 +65,7 @@ async def remove_watermarks(
         "ffmpeg", "-y",
         "-i", str(input_path),
         "-vf", vf,
-        "-c:v", "h264_nvenc" if _gpu_available() else "libx264",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-crf", "20", "-preset", "fast",
         "-c:a", "copy",
         "-movflags", "+faststart",

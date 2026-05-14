@@ -6,7 +6,19 @@ import logging
 from typing import Dict, Any, Optional
 import json
 
+from sqlalchemy import text
+
 from ..observability import configure_logging, set_trace_id
+
+# ── Belt-and-suspenders: force MoviePy to use the system FFmpeg with NVENC ──
+import moviepy.config as _mpy_cfg
+_mpy_cfg.FFMPEG_BINARY = "/usr/local/bin/ffmpeg"
+# Also patch the underlying imageio_ffmpeg so any direct import also picks it up
+try:
+    import imageio_ffmpeg
+    imageio_ffmpeg.get_ffmpeg_exe = lambda: "/usr/local/bin/ffmpeg"  # type: ignore
+except ImportError:
+    pass
 
 configure_logging()
 
@@ -72,11 +84,120 @@ async def process_video_task(
     from ..database import AsyncSessionLocal
     from ..domains.autopilot.task_service import TaskService
     from ..workers.progress import ProgressTracker
+    from ..repositories.task_repository import TaskRepository
 
     from src.core.log_context import set_task_id, clear_task_id
     set_task_id(str(task_id))
     set_trace_id(f"task-{task_id}")
     logger.info(f"Worker processing task {task_id}")
+
+    # ── Atomic status guard: only process if task is 'queued' ──────────────
+    # Prevents duplicate execution when multiple workers race on the same task
+    # (BUG 4 fix: pipeline running 3 times due to arq retries + no guard).
+    async with AsyncSessionLocal() as guard_db:
+        guard_repo = TaskRepository()
+        acquired = await guard_repo.update_task_status_atomic(
+            guard_db,
+            task_id,
+            new_status="processing",
+            expected_current_status="queued",
+            progress=0,
+            progress_message="Starting processing...",
+        )
+        if not acquired:
+            # Query actual status for the warning log
+            try:
+                from datetime import datetime, timedelta, timezone
+                async with AsyncSessionLocal() as warn_db:
+                    warn_row = await warn_db.execute(
+                        text("SELECT status, updated_at FROM tasks WHERE id = :task_id"),
+                        {"task_id": task_id},
+                    )
+                    warn_data = warn_row.fetchone()
+                    actual_status = warn_data[0] if warn_data else "unknown"
+            except Exception:
+                actual_status = "unknown"
+
+            logger.warning(
+                f"Task {task_id} status is not 'queued' (current status: "
+                f"{actual_status}) — another worker is already processing it. Skipping."
+            )
+
+            # Fix 6: Dirty state handling — check if task has been in inconsistent
+            # state > 15 minutes and auto-cleanup
+            try:
+                async with AsyncSessionLocal() as dirty_db:
+                    row = await dirty_db.execute(
+                        text("SELECT status, updated_at FROM tasks WHERE id = :task_id"),
+                        {"task_id": task_id},
+                    )
+                    dirty_row = row.fetchone()
+                    if dirty_row:
+                        status = dirty_row[0]
+                        updated_at = dirty_row[1]
+                        if updated_at and status in ("processing", "queued"):
+                            age = datetime.now(timezone.utc) - updated_at.replace(tzinfo=timezone.utc)
+                            if age > timedelta(minutes=15):
+                                logger.warning(
+                                    f"Fix 6: Task {task_id} in dirty state '{status}' for "
+                                    f"{age.total_seconds():.0f}s — auto-failing"
+                                )
+                                await dirty_db.execute(
+                                    text("""
+                                        UPDATE tasks
+                                        SET status = 'failed',
+                                            error_code = 'DIRTY_STATE_TIMEOUT',
+                                            error_message = 'Task stuck in dirty state > 15 min',
+                                            updated_at = NOW()
+                                        WHERE id = :task_id
+                                    """),
+                                    {"task_id": task_id},
+                                )
+                                await dirty_db.commit()
+                                # Clean Redis keys using proper UUID-based ARQ cleanup
+                                try:
+                                    import redis.asyncio as aioredis
+                                    from ..config import get_config
+                                    cfg = get_config()
+                                    r = aioredis.Redis(
+                                        host=cfg.redis_host, port=cfg.redis_port,
+                                        password=cfg.redis_password, decode_responses=True,
+                                    )
+                                    # Scan ARQ queue for UUID-based job keys referencing this task_id
+                                    queue_name = "arq:queue:viraclip_cpu_tasks"
+                                    members = await r.zrange(queue_name, 0, -1)
+                                    for member in members:
+                                        job_key = f"arq:job:{member}"
+                                        raw = await r.get(job_key)
+                                        if raw:
+                                            try:
+                                                data = json.loads(raw)
+                                                args = data.get("args", [])
+                                                if task_id in args or str(task_id) in [str(a) for a in args]:
+                                                    await r.delete(job_key)
+                                                    await r.zrem(queue_name, member)
+                                                    logger.info(
+                                                        "Fix 6: Removed stale ARQ job %s for dirty task %s",
+                                                        member[:12], task_id[:12],
+                                                    )
+                                            except (json.JSONDecodeError, TypeError):
+                                                continue
+                                    # Also clean known direct keys
+                                    await r.delete(f"task_cancel:{task_id}")
+                                    await r.delete(f"circuit_breaker:task_id:{task_id}")
+                                    await r.delete(f"arq:job:{task_id}")
+                                    await r.aclose()
+                                except Exception as redis_clean_err:
+                                    logger.warning(
+                                        "Fix 6: Redis cleanup failed for dirty task %s: %s",
+                                        task_id[:12], redis_clean_err,
+                                    )
+            except Exception as dirty_err:
+                logger.warning(
+                    "Fix 6: Dirty state check failed for task %s: %s",
+                    task_id[:12], dirty_err,
+                )
+            return {"status": "skipped", "task_id": task_id, "reason": "already_processing"}
 
     # Create progress tracker
     progress = ProgressTracker(ctx["redis"], task_id)
@@ -276,13 +397,97 @@ def _log_llm_routing_status():
         logger.error("❌ Sin LLM configurado — GROQ_API_KEY y DEEPSEEK_API_KEY ausentes")
 
 
+async def _cleanup_stale_tasks_on_startup() -> None:
+    """Fix 3: On worker boot, mark tasks stuck in 'processing' or 'queued' for > 2 hours as 'dead'.
+
+    This prevents ghost tasks from previous crashed sessions from re-entering
+    the infinite healing loop. Uses status='dead' so get_healable_tasks()
+    automatically excludes them.
+    """
+    from datetime import datetime, timedelta, timezone
+    import os
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+    try:
+        import asyncpg
+        db_url = os.getenv("DATABASE_URL", "postgresql://viraclip:viraclip_password@postgres:5432/viraclip")
+        if db_url.startswith("postgresql+asyncpg://"):
+            db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(db_url)
+        try:
+            rows = await conn.fetch(
+                """
+                UPDATE tasks
+                SET status = 'dead',
+                    error_code = 'STARTUP_STALE_CLEANUP',
+                    error_message = 'Task stuck in processing/queued > 2 hours at worker startup',
+                    updated_at = NOW()
+                WHERE status IN ('processing', 'queued')
+                  AND updated_at < $1
+                RETURNING id, status
+                """,
+                cutoff,
+            )
+            if rows:
+                logger.warning(
+                    "Fix 3: Marked %d stale task(s) as 'dead' at startup: %s",
+                    len(rows),
+                    [str(r["id"])[:12] for r in rows],
+                )
+                # Also clean Redis keys for these tasks
+                for row in rows:
+                    try:
+                        from ..services.self_healing_agent import _clean_redis_keys_for_task
+                        await _clean_redis_keys_for_task(row["id"])
+                    except Exception as redis_clean_err:
+                        logger.warning(
+                            "Fix 3: Redis cleanup failed for stale task %s: %s",
+                            row["id"][:12], redis_clean_err,
+                        )
+            else:
+                logger.info("Fix 3: No stale tasks found at startup")
+        finally:
+            await conn.close()
+    except Exception as exc:
+        logger.warning("Fix 3: Startup stale task cleanup failed: %s", exc)
+
+
 async def worker_startup(ctx: Dict[str, Any]) -> None:
+    # ── Fix 3: Startup stale task cleanup ──────────────────────────────────────
+    # Run before anything else to prevent ghost tasks from re-entering the loop
+    await _cleanup_stale_tasks_on_startup()
+
+    # ── Dependency Health Check ────────────────────────────────────────────────
+    # Run once at startup to verify all dependencies and set FEATURE_FLAGS.
+    try:
+        from ..core.dependency_health_checker import DependencyHealthChecker
+        from ..core.feature_flags import FEATURE_FLAGS
+        import json
+        checker = DependencyHealthChecker()
+        flags = checker.run_checks()
+        # Persist feature flags to Redis so other services can read them
+        try:
+            import redis.asyncio as aioredis
+            from ..config import get_config
+            _cfg = get_config()
+            _r = aioredis.Redis(
+                host=_cfg.redis_host,
+                port=_cfg.redis_port,
+                password=_cfg.redis_password,
+                decode_responses=True,
+            )
+            await _r.set("worker:feature_flags", json.dumps(flags), ex=3600)
+            await _r.aclose()
+        except Exception as _redis_err:
+            logger.warning("[HealthCheck] No se pudo guardar en Redis: %s", _redis_err)
+    except RuntimeError as _fatal:
+        logger.critical("❌ Dependency health check failed: %s", _fatal)
+        raise
+    except Exception as _hc_err:
+        logger.warning("[HealthCheck] Non-fatal error during startup check: %s", _hc_err)
 
     # Log LLM routing status at startup
     _log_llm_routing_status()
-    """
-    Run cleanup on worker startup to remove old files.
-    """
+
     import asyncio
     from pathlib import Path
     from ..config import get_config
@@ -325,7 +530,7 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     # Aggressive temp cleanup to free disk space
     temp_base = Path(cfg.temp_dir)
     cleanup_temp_files(temp_base / "segments", max_age_hours=12)
-    cleanup_temp_files(temp_base / "uploads", max_age_hours=24)
+    cleanup_temp_files(temp_base / "uploads", max_age_hours=24, exclude_dirs=["downloads"])
 
     # B-7 fix: collect filenames referenced by active/queued tasks so we never
     # delete their output files even if they exceed the retention window.
@@ -404,14 +609,91 @@ async def cleanup_stale_tasks(ctx: dict) -> None:
         logger.error("[Cleanup] Failed to run stale task cleanup: %s", exc)
 
 
+# ── Fix 4: ARQ job lifecycle hooks ──────────────────────────────────────────
+# These hooks sync ARQ job state with the task_repository to prevent
+# stale ARQ jobs from re-entering the healing loop after a worker crash.
+
+
+async def _on_job_start(ctx: dict) -> None:
+    """Fix 4: Called by ARQ when a job starts executing.
+
+    Syncs the ARQ job state with the task_repository by checking if the
+    task is still in a valid state ('queued') before allowing processing.
+    If the task has been marked 'dead' or 'failed' by the self-healing agent,
+    this hook prevents the ARQ job from proceeding.
+    """
+    job_id = ctx.get("job_id", "")
+    task_id = ctx.get("args", [None])[0] if ctx.get("args") else None
+    if not task_id:
+        return
+
+    try:
+        import asyncpg
+        db_url = os.getenv("DATABASE_URL", "postgresql://viraclip:viraclip_password@postgres:5432/viraclip")
+        if db_url.startswith("postgresql+asyncpg://"):
+            db_url = db_url.replace("postgresql+asyncpg://", "postgresql://")
+        conn = await asyncpg.connect(db_url)
+        try:
+            row = await conn.fetchrow(
+                "SELECT status FROM tasks WHERE id = $1",
+                task_id,
+            )
+            if row:
+                status = row["status"]
+                if status in ("dead", "failed", "cancelled"):
+                    logger.warning(
+                        "Fix 4: Job %s for task %s blocked at start — task status is '%s'",
+                        job_id[:12] if job_id else "?", task_id[:12], status,
+                    )
+                    # Raise JobExecutionFailed to prevent ARQ from processing
+                    raise asyncio.CancelledError(
+                        f"Task {task_id[:12]} is '{status}' — ARQ job blocked"
+                    )
+        finally:
+            await conn.close()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Fix 4: on_job_start check failed for job %s: %s",
+            job_id[:12] if job_id else "?", exc,
+        )
+
+
+async def _on_job_complete(ctx: dict) -> None:
+    """Fix 4: Called by ARQ when a job completes (success or failure).
+
+    Cleans up Redis keys for the completed task to prevent stale state
+    from accumulating in Redis.
+    """
+    job_id = ctx.get("job_id", "")
+    task_id = ctx.get("args", [None])[0] if ctx.get("args") else None
+    if not task_id:
+        return
+
+    try:
+        from ..services.self_healing_agent import _clean_redis_keys_for_task
+        deleted = await _clean_redis_keys_for_task(task_id)
+        if deleted:
+            logger.debug(
+                "Fix 4: Cleaned %d Redis keys for completed task %s (job %s)",
+                deleted, task_id[:12], job_id[:12] if job_id else "?",
+            )
+    except Exception as exc:
+        logger.warning(
+            "Fix 4: Redis cleanup on job complete failed for %s: %s",
+            task_id[:12], exc,
+        )
+
+
 # Worker configuration for arq
 class WorkerSettings:
     """Configuration for arq worker."""
 
-    from ..config import Config
+    from ..config import get_config
     from arq.connections import RedisSettings
 
-    config = Config()
+    config = get_config()
 
     # Functions to run
     functions = [process_video_task, analyze_ab_test, process_scheduled_job]
@@ -423,8 +705,10 @@ class WorkerSettings:
         host=config.redis_host, port=config.redis_port, password=config.redis_password, database=0
     )
 
-    # Retry settings
-    max_tries = 3  # Retry failed jobs up to 3 times
+    # Fix 4: Set max_tries = 1 — self-healing agent handles retries, ARQ should not retry
+    # This prevents ARQ from re-enqueuing failed jobs that the self-healing agent
+    # has already marked as 'dead' or 'SELF_HEALING_EXHAUSTED'
+    max_tries = 1
     job_timeout = 14400  # 4 hour timeout for video processing (ComfyUI B-roll generation)
 
     # Worker pool settings
@@ -434,6 +718,10 @@ class WorkerSettings:
 
     # Startup/shutdown hooks
     on_startup = worker_startup
+
+    # Fix 4: Job lifecycle hooks to sync ARQ state with task_repository
+    on_job_start = _on_job_start
+    on_job_complete = _on_job_complete
     
     # Periodic tasks — built dynamically below via _safe_cron()
     cron_jobs = []

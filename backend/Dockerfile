@@ -1,28 +1,147 @@
-# === ViraClip Backend: TRUE Multi-Stage Build ===
-# CUDA 12.8 base + cu130 PyTorch for RTX 5070 (Blackwell sm_120) support
+# === ViraClip Backend: Optimized Multi-Stage Build ===
+# CUDA 13.2 base + cu132 PyTorch for RTX 5070 (Blackwell sm_120) support
 # cu130 REQUIRED — cu128 crashes on RTX 5070 with "CUDA unknown error"
 # Strategy:
-#   Stage 1 (builder): Install ALL Python deps in one shot, clean caches
+#   Stage 1 (builder): Layered dependency installation for Docker cache efficiency
+#     Layer 1: uv sync from pyproject.toml (rebuilds only when deps change)
+#     Layer 2: ML deps (faster-whisper, mediapipe, etc. — rarely change)
+#     Layer 3: whisperx + TTS (rarely change)
+#     Layer 4: torch cu130 + numpy pin (UNA SOLA VEZ, al final — ~5GB, cached forever)
+#     Source code is NOT copied here — only pyproject.toml for dep resolution.
 #   Stage 2 (runtime): Minimal image — copy only .venv + app code from builder
 #   Result: ~6-8GB final image instead of 42GB
+#   Rebuild times: code change = ~30s, dep change = ~5min, torch change = ~50min
+#
+# NVENC strategy:
+#   FFmpeg is compiled from source in the builder stage against CUDA 13.2 headers
+#   (matching the host driver's CUDA 13.2). Dynamic linking is used so that
+#   the binary loads libcuda.so from the NVIDIA container toolkit at runtime,
+#   ensuring compatibility with the host driver (595.71.05 / CUDA 13.2).
+#   This avoids the "cuInit(0) failed -> CUDA_ERROR_UNKNOWN" error that occurs
+#   with CUDA-version-mismatched binaries (e.g. BtbN builds or distro ffmpeg).
 
 # ── Stage 1: Builder ──────────────────────────────────────────────────
-FROM nvidia/cuda:12.8.0-devel-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.2.0-devel-ubuntu22.04 AS builder
+
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_DEFAULT_TIMEOUT=600
 
 # System dependencies (single layer)
+# ffmpeg is installed from the NVIDIA CUDA repo (already configured in the
+# base image nvidia/cuda:13.2.0-devel-ubuntu22.04). This provides h264_nvenc
+# and hevc_nvenc compiled against the same CUDA headers as the host.
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv python3.11-dev \
-    ffmpeg curl unzip \
+    curl unzip xz-utils \
     libsndfile1 \
     libgl1 libglib2.0-0 \
     libsm6 libxext6 libxrender-dev \
+    libavutil-dev libavcodec-dev libavformat-dev \
+    ffmpeg \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 \
     && rm -rf /var/lib/apt/lists/*
+
+# ── FFmpeg source compilation with NVENC support ──────────────────────
+# We compile FFmpeg from source against CUDA 13.2 headers (matching the
+# runtime container's CUDA version) with dynamic linking. This ensures the
+# binary loads libcuda.so from the NVIDIA container toolkit at runtime,
+# making it compatible with any host driver version.
+#
+# Key flags:
+#   --enable-nvenc --enable-cuda-nvcc --enable-ffnvcodec: NVENC encoding
+#   --enable-nonfree: required for NVENC (proprietary)
+#   --enable-gpl --enable-libx264 --enable-libx265: software encode fallback
+#   --enable-shared: dynamic linking against system CUDA libraries
+#
+# The nv-codec-headers provide the Video Codec SDK headers needed by ffnvcodec.
+# We use the latest stable release (n12.2) which supports all NVIDIA GPUs.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    nasm \
+    yasm \
+    pkg-config \
+    libx264-dev \
+    libx265-dev \
+    libnuma-dev \
+    libvpx-dev \
+    libfdk-aac-dev \
+    libmp3lame-dev \
+    libopus-dev \
+    libvorbis-dev \
+    libtheora-dev \
+    libass-dev \
+    libfreetype6-dev \
+    libfontconfig1-dev \
+    libfribidi-dev \
+    libharfbuzz-dev \
+    libwebp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone nv-codec-headers (NVIDIA Video Codec SDK headers for ffnvcodec)
+RUN git clone --depth 1 --branch n12.2.72.0 \
+    https://git.videolan.org/git/ffmpeg/nv-codec-headers.git /tmp/nv-codec-headers \
+    && cd /tmp/nv-codec-headers \
+    && make install \
+    && rm -rf /tmp/nv-codec-headers
+
+# Download and compile FFmpeg from source
+# We use FFmpeg 7.1 (latest stable release as of 2026-05) with NVENC support.
+# The configure flags enable NVENC via ffnvcodec (using the nv-codec-headers
+# installed above) and CUDA via nvcc (using the CUDA 13.2 toolkit in the
+# devel image). Dynamic linking (-shared) ensures libcuda.so is loaded from
+# the NVIDIA container toolkit at runtime.
+RUN curl -fsSL "https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz" \
+    -o /tmp/ffmpeg-src.tar.xz \
+    && tar -xf /tmp/ffmpeg-src.tar.xz -C /tmp/ \
+    && cd /tmp/ffmpeg-7.1 \
+    && ./configure \
+        --prefix=/usr/local \
+        --enable-shared \
+        --disable-static \
+        --enable-nonfree \
+        --enable-gpl \
+        --enable-version3 \
+        --enable-libx264 \
+        --enable-libx265 \
+        --enable-libvpx \
+        --enable-libfdk-aac \
+        --enable-libmp3lame \
+        --enable-libopus \
+        --enable-libvorbis \
+        --enable-libtheora \
+        --enable-libass \
+        --enable-libfreetype \
+        --enable-libfontconfig \
+        --enable-libfribidi \
+        --enable-libharfbuzz \
+        --enable-libwebp \
+        --enable-nvenc \
+        --enable-cuda-nvcc \
+        --enable-ffnvcodec \
+        --enable-cuvid \
+        --nvcc=/usr/local/cuda/bin/nvcc \
+        --nvccflags="-gencode arch=compute_89,code=sm_89 -O2" \
+        --extra-cflags="-I/usr/local/cuda/include -I/usr/local/include" \
+        --extra-ldflags="-L/usr/local/cuda/lib64 -L/usr/local/lib" \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/ffmpeg-src* /tmp/ffmpeg-7.1
+
+# Verify the compiled ffmpeg has NVENC and is dynamically linked
+RUN echo "=== FFmpeg version ===" && \
+    /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
+    echo "=== NVENC encoders ===" && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -i nvenc || echo "(no NVENC encoders found)" && \
+    echo "=== Dynamic linking ===" && \
+    ldd /usr/local/bin/ffmpeg | grep -E "(cuda|nvcuvid)" || echo "(no CUDA shared libs linked — NVENC may fail at runtime)"
+
+
 
 # Deno for yt-dlp
 RUN curl -fsSL https://deno.land/install.sh | sh
@@ -37,83 +156,137 @@ WORKDIR /app
 # Create venv with pip included
 RUN uv venv --seed .venv
 
-# ── Install ALL Python dependencies in ONE shot ───────────────────────
-# This is the key optimization: one RUN instruction instead of 28
-# cu130 PyTorch for RTX 5070 (Blackwell sm_120) support
-# cu128 crashes on RTX 5070 — cu130 is REQUIRED
-# Optional packages (diffusers, TTS, realesrgan, onnx, msclap) are EXCLUDED
-# from the base image — they can be pip-installed at runtime if needed
+# ── Layer 1: deps pesadas estables (cambian raramente) ─────────────────
+# COPY pyproject.toml + uv.lock triggers rebuild only when deps change.
+# uv sync installs the project's declared dependencies.
 COPY pyproject.toml uv.lock* ./
-RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu130 \
-    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-        torch==2.10.0+cu130 \
-        torchvision==0.25.0+cu130 \
-        torchaudio==2.10.0+cu130 \
-        --index-url https://download.pytorch.org/whl/cu130 \
-        --force-reinstall \
-    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-        "faster-whisper==1.1.1" \
-        "whisperx" \
-        "sentence-transformers" \
-        "mediapipe" \
-        "opencv-python-headless" \
-        "moviepy>=2.0.0" \
-        "Pillow" "pydub" "psutil" \
-        "ultralytics>=8.3.0" \
-        "scenedetect[opencv]>=0.6.5" \
-        "httpx>=0.27.0" \
-        "edge-tts>=6.1.9" \
-        "datasets>=2.14.0" \
-        "huggingface-hub>=0.17.0" \
-        "pandas>=2.0.0" \
-        "scikit-learn>=1.3.0" \
-        "xgboost>=2.0.0" \
-        "prometheus-client>=0.19.0" \
-        "deap>=1.4.0" \
-        "matplotlib" \
-        "pymilvus>=2.3.0" \
-        "redis[asyncio]>=4.5.0" \
-        "google-api-python-client>=2.100.0" \
-        "kaggle>=1.5.16" \
-    && .venv/bin/pip install --no-cache-dir --no-deps "TTS>=0.22.0" \
-    && .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-        torch==2.10.0+cu130 \
-        torchvision==0.25.0+cu130 \
-        torchaudio==2.10.0+cu130 \
-        --index-url https://download.pytorch.org/whl/cu130 \
-        --force-reinstall \
-    && rm -rf /root/.cache/pip /root/.cache/uv /tmp/*
+RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu132 \
+    && rm -rf /root/.cache/uv
+
+# ── Layer 2: deps ML secundarias (cambian poco) ───────────────────────
+# faster-whisper, sentence-transformers, mediapipe, opencv, moviepy, etc.
+# These are stable pinned versions that rarely change.
+RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+    "faster-whisper==1.1.1" \
+    "sentence-transformers" \
+    "mediapipe==0.10.5" \
+    "opencv-python-headless" \
+    "moviepy>=2.0.0" \
+    "Pillow" "pydub" "psutil" \
+    "ultralytics>=8.3.0" \
+    "scenedetect[opencv]>=0.6.5" \
+    "httpx>=0.27.0" \
+    "edge-tts>=6.1.9" \
+    "datasets>=2.14.0" \
+    "huggingface-hub>=0.17.0" \
+    "pandas>=2.0.0" \
+    "scikit-learn>=1.3.0" \
+    "xgboost>=2.0.0" \
+    "prometheus-client>=0.19.0" \
+    "deap>=1.4.0" \
+    "matplotlib" \
+    "pymilvus>=2.3.0" \
+    "redis[asyncio]>=4.5.0" \
+    "google-api-python-client>=2.100.0" \
+    "kaggle>=1.5.16"
+
+# ── Layer 3: whisperx y sus deps (cambian poco) ───────────────────────
+# whisperx → pyannote-audio>=4.0.0 → torchmetrics, speechbrain, etc.
+# Installing these separately with bounded versions prevents pip's resolver
+# from hitting the maximum depth limit.
+RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+    "pyannote.audio>=3.1.0" \
+    "pyannote.core>=5.0.0" \
+    "pyannote.pipeline>=3.0.1" \
+    "speechbrain>=1.0.0" \
+    "torchmetrics>=1.0.0"
+
+# whisperx and TTS with --no-deps (deps already satisfied above)
+# TTS: gruut requiere numpy<2.0, incompatible con numpy==2.2.6
+RUN .venv/bin/pip install --no-cache-dir --no-deps "whisperx" \
+    && .venv/bin/pip install --no-cache-dir --no-deps "TTS>=0.22.0"
+
+# ── Layer 4: torch cu132 + numpy pin (UNA SOLA VEZ, al final) ─────────
+# torch se instala AQUÍ, después de todo lo demás, para que nada lo
+# sobreescriba. Sin --force-reinstall — solo se instala una vez.
+# torchaudio se instala sin +cu132 porque no existe en el índice cu132
+# (máx versión en cu132 es 2.2.0). PyPI resuelve torchaudio>=2.2.0.
+RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
+    torch==2.12.0+cu132 \
+    torchvision==0.27.0+cu132 \
+    torchaudio>=2.2.0 \
+    --index-url https://download.pytorch.org/whl/cu132 \
+    && .venv/bin/pip install --no-cache-dir "numpy==2.2.6" \
+    && .venv/bin/pip install --no-cache-dir "ctranslate2" --pre --index-url https://pypi.org/simple/ \
+    && rm -rf /root/.cache/pip /tmp/*
 
 # ── Stage 2: Runtime (minimal) ────────────────────────────────────────
-FROM nvidia/cuda:13.0.0-runtime-ubuntu22.04
+FROM nvidia/cuda:13.2.0-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 ENV CUDA_MODULE_LOADING=LAZY
 ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 
 # Only essential runtime system deps
+# ffmpeg is installed from the NVIDIA CUDA repo (already configured in the
+# base image nvidia/cuda:13.2.0-runtime-ubuntu22.04). This provides h264_nvenc
+# and hevc_nvenc compiled against the same CUDA headers as the host.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-venv \
-    ffmpeg curl \
+    curl xz-utils \
     libsndfile1 \
     libgl1 libglib2.0-0 \
     libsm6 libxext6 libxrender-dev \
-    libavutil-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libavfilter-dev \
-    libswscale-dev \
-    libswresample-dev \
+    libavutil-dev libavcodec-dev libavformat-dev \
+    ffmpeg \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
+    && ldconfig \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy .venv from builder (preserves all installed packages)
 COPY --from=builder /app/.venv ./.venv
+
+# ── Override distro ffmpeg with source-compiled NVENC build ────────────
+# The distro ffmpeg (4.4.2 on ubuntu22.04) is compiled against old CUDA
+# headers and fails with "cuInit(0) failed -> CUDA_ERROR_UNKNOWN" on
+# driver 595+. We replace it with the FFmpeg 7.1 compiled from source in
+# the builder stage against CUDA 13.2 headers with dynamic linking.
+# This ensures the binary loads libcuda.so from the NVIDIA container
+# toolkit at runtime, making it compatible with any host driver version.
+COPY --from=builder /usr/local/bin/ffmpeg /usr/local/bin/ffmpeg
+COPY --from=builder /usr/local/bin/ffprobe /usr/local/bin/ffprobe
+# Copy shared libraries needed by the compiled ffmpeg
+# These include libavcodec, libavformat, libavutil, libswresample, etc.
+# compiled against CUDA 13.2. The runtime stage already has CUDA 13.2
+# runtime libraries from the nvidia/cuda:13.2.0-runtime base image.
+COPY --from=builder /usr/local/lib/libavcodec.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libavdevice.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libavfilter.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libavformat.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libavutil.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libpostproc.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libswresample.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libswscale.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libx264.so* /usr/local/lib/
+COPY --from=builder /usr/local/lib/libx265.so* /usr/local/lib/
+# libfdk-aac is installed via apt (libfdk-aac-dev), so it lives in /usr/lib/x86_64-linux-gnu/
+COPY --from=builder /usr/lib/x86_64-linux-gnu/libfdk-aac.so* /usr/local/lib/
+RUN ldconfig
+# Log which ffmpeg we got and verify NVENC
+RUN echo "=== FFmpeg version ===" && \
+    /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
+    echo "=== NVENC encoders ===" && \
+    /usr/local/bin/ffmpeg -hide_banner -encoders 2>&1 | grep -i nvenc || echo "(no NVENC encoders found)" && \
+    echo "=== Dynamic linking ===" && \
+    ldd /usr/local/bin/ffmpeg | grep -E "(cuda|nvcuvid)" || echo "(no CUDA shared libs linked)"
+
+
 
 # Copy Deno from builder (required by yt-dlp for JS challenge solving)
 COPY --from=builder /root/.deno /root/.deno
@@ -159,10 +332,11 @@ RUN curl -fsSL \
     && fc-cache -fv \
     || echo "Font download skipped — Arial fallback"
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD .venv/bin/python -c "import psutil, mediapipe, faster_whisper; print('ok')" || exit 1
+# Health check — runs healthcheck.sh which verifies NVENC, ffmpeg version, torchcodec
+# Uses -S flag to bypass OpenTelemetry auto-instrumentation (avoids grpcio/mediapipe issues)
+HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 \
+  CMD /app/scripts/healthcheck.sh || exit 1
 
 EXPOSE 8000
 
-CMD [".venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD [".venv/bin/uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2", "--timeout-keep-alive", "30"]

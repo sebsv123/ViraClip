@@ -7,13 +7,12 @@ import logging
 import os
 from pathlib import Path
 
+from src import gpu_utils
+
 from ..core.platform_profiles import get_profile
 
 logger = logging.getLogger(__name__)
 
-
-def _gpu_available() -> bool:
-    return bool(os.getenv("CUDA_VISIBLE_DEVICES", ""))
 
 
 async def _get_clip_duration(clip_path: Path) -> dict:
@@ -43,7 +42,7 @@ async def export_for_platform(
     suffix = platform.lower()
     out_path = output_dir / f"{clip_id}_{suffix}.mp4"
 
-    encoder = "h264_nvenc" if (use_gpu and _gpu_available()) else "libx264"
+    encoder = gpu_utils.get_video_encoder()
     preset = "p4" if encoder == "h264_nvenc" else "medium"
 
     clip_info = await _get_clip_duration(clip_path)

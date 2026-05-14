@@ -1,4 +1,5 @@
 """
+from src import gpu_utils
 Professional B-Roll Overlay System — Phase 2
 
 Cinematic B-roll insertion with:
@@ -108,7 +109,7 @@ class BRollOverlayEngine:
                 # Map original audio from main video (B-roll is muted)
                 "-map", "0:a",
                 # Encode settings
-                "-c:v", "libx264",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-preset", "medium",
                 "-crf", "23",
                 "-pix_fmt", "yuv420p",

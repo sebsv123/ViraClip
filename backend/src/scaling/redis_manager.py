@@ -13,7 +13,7 @@ from typing import Optional
 import redis.asyncio as redis
 from redis.asyncio.sentinel import Sentinel
 
-from ..config import Config
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class RedisManager:
     """
     
     def __init__(self):
-        self.config = Config()
+        self.config = get_config()
         self._client: Optional[redis.Redis] = None
         self._sentinel: Optional[Sentinel] = None
         self._use_sentinel = False

@@ -11,7 +11,7 @@ from typing import Optional
 
 from redis.asyncio import Redis, ConnectionPool
 
-from ..config import Config
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ def get_connection_pool() -> ConnectionPool:
     global _connection_pool
     
     if _connection_pool is None:
-        config = Config()
+        config = get_config()
         _connection_pool = ConnectionPool(
             host=config.redis_host,
             port=config.redis_port,

@@ -37,6 +37,9 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from ..gpu_utils import nvenc_available
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 # ─── Defaults (overridable via env) ──────────────────────────────────────────
@@ -121,7 +124,7 @@ def apply_hook_slowmo(
                     [
                         "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                         "-i", str(concat_list),
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                        *gpu_utils.ffmpeg_codec_flags("medium"),
                         "-c:a", "aac", "-b:a", "128k",
                         "-movflags", "+faststart",
                         str(output_path),
@@ -237,16 +240,33 @@ def _extract_slowmo_segment(
     target_fps = int(fps / speed)  # e.g. 30 → 60 for 0.5×
 
     vf_parts = [f"setpts={pts_factor:.4f}*PTS"]
-    if use_interpolation and speed <= 0.7:
+
+    # BUG 2 FIX: Only use minterpolate (CPU-heavy frame interpolation) when
+    # a GPU is detected. minterpolate is extremely slow on CPU-only systems
+    # and can cause 120s+ timeouts. When no GPU is available, skip interpolation
+    # and rely on setpts alone (still produces smooth slow-mo, just without
+    # motion-compensated intermediate frames).
+    from src.core.feature_flags import FEATURE_FLAGS
+    has_gpu = FEATURE_FLAGS.get("gpu_encode", False)
+    if use_interpolation and speed <= 0.7 and has_gpu:
         # minterpolate: motion-compensated interpolation for smooth slo-mo
         # mi_mode=mci is highest quality; fps is output frame rate
         vf_parts.append(f"minterpolate=fps={target_fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1")
+    elif use_interpolation and speed <= 0.7 and not has_gpu:
+        logger.info(
+            "[slowmo] GPU not detected — skipping minterpolate interpolation "
+            "(would be too slow on CPU). Using setpts-only slow-mo."
+        )
 
     vf = ",".join(vf_parts)
 
     # Audio: atempo only works for 0.5-2.0 range; chain for extreme values
     audio_speed = max(0.5, min(2.0, speed))
     af = f"atempo={audio_speed:.4f}"
+
+    # BUG 2 FIX: Reduce timeout for CPU-only paths (minterpolate is skipped,
+    # so setpts-only is much faster). Use 60s for no-GPU, 120s for GPU.
+    ffmpeg_timeout = 60 if not has_gpu else 120
 
     result = subprocess.run(
         [
@@ -255,12 +275,12 @@ def _extract_slowmo_segment(
             "-i", str(src),
             "-vf", vf,
             "-af", af,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-c:a", "aac", "-b:a", "128k",
             "-movflags", "+faststart",
             str(dest),
         ],
-        capture_output=True, timeout=120,
+        capture_output=True, timeout=ffmpeg_timeout,
     )
 
     if result.returncode != 0:
@@ -278,12 +298,12 @@ def _extract_slowmo_segment(
                     "-i", str(src),
                     "-vf", vf_simple,
                     "-af", af,
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+                    *gpu_utils.ffmpeg_codec_flags("high"),
                     "-c:a", "aac", "-b:a", "128k",
                     "-movflags", "+faststart",
                     str(dest),
                 ],
-                capture_output=True, timeout=120,
+                capture_output=True, timeout=ffmpeg_timeout,
             )
             return result2.returncode == 0 and dest.exists()
         return False

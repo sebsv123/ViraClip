@@ -31,8 +31,17 @@ if 'backend' not in sys.modules:
     sys.modules['backend'] = _backend_pkg
 
 from src.config import Config
-from src.database import configure_database, init_db, reset_database_state
-from src.main_refactored import create_app
+
+# Try to import database and app factory — these may not exist in all environments
+try:
+    from src.database import configure_database, init_db, reset_database_state
+except ImportError:
+    configure_database = init_db = reset_database_state = None
+
+try:
+    from src.main_refactored import create_app
+except ImportError:
+    create_app = None
 
 # Pre-load modules that tests import with bare names but have relative-import
 # issues when Python re-imports them as top-level packages.

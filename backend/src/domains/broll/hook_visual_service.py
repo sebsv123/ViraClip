@@ -5,6 +5,7 @@ Añade texto grande impactante en los primeros 2 segundos para scroll-stop effec
 import asyncio
 import logging
 from typing import Optional, Dict, List
+from src import gpu_utils
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
@@ -211,7 +212,7 @@ class HookVisualService:
                 "ffmpeg", "-y",
                 "-i", video_path,
                 "-vf", vf_filter,
-                "-c:v", "libx264",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-crf", "23",
                 "-preset", "fast",
                 "-c:a", "copy",

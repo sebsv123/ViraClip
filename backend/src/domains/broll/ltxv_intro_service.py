@@ -23,6 +23,7 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +146,7 @@ async def _ffmpeg_concat_with_xfade(
             f"[0:a][1:a]acrossfade=d={xfade_d}[a]"
         ),
         "-map", "[v]", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         str(out),
     ]
@@ -162,7 +163,7 @@ async def _ffmpeg_concat_with_xfade(
     list_path.write_text(f"file '{intro.resolve()}'\nfile '{main.resolve()}'\n")
     cmd2 = [
         "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_path),
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         str(out),
     ]

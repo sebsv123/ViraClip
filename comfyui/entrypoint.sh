@@ -21,11 +21,8 @@ fi
 
 # Iniciar ComfyUI
 # EXTRA_ARGS permite override desde docker-compose sin reconstruir imagen.
-# Default: --lowvram para 8GB VRAM (RTX 5070 Laptop) — evita OOM en Flux UNET + T5.
-#   --lowvram                     : offloadea bloques a RAM, solo el activo vive en GPU
-#   --use-split-cross-attention   : reduce picos de VRAM en attention
-#   --disable-smart-memory        : no cachea modelos entre prompts (libera T5 tras encode)
-: "${COMFYUI_EXTRA_ARGS:=--lowvram --use-split-cross-attention --disable-smart-memory}"
+# CPU-only mode (RTX 5070 Blackwell no tiene soporte PyTorch CUDA aún).
+: "${COMFYUI_EXTRA_ARGS:=--cpu}"
 
 echo "[ViraClip] Iniciando ComfyUI en 0.0.0.0:8188 (args: $COMFYUI_EXTRA_ARGS)"
 exec python3 main.py --listen 0.0.0.0 --port 8188 $COMFYUI_EXTRA_ARGS

@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -203,7 +205,7 @@ class UpscalingService:
                 "-i", str(out_frames_dir / "frame_%06d.png"),
                 "-i", str(audio_src),
                 "-map", "0:v", "-map", "1:a",
-                "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-c:a", "copy",
                 "-shortest",
                 str(dest),
@@ -220,7 +222,7 @@ class UpscalingService:
         cmd = [
             "ffmpeg", "-y", "-i", str(src),
             "-vf", f"scale={w}:{h}:flags=lanczos",
-            "-c:v", "libx264", "-crf", "20", "-c:a", "copy",
+            *gpu_utils.ffmpeg_codec_flags("high"), "-c:a", "copy",
             str(dest),
         ]
         proc = await asyncio.create_subprocess_exec(

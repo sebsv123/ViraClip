@@ -20,6 +20,11 @@ def _import_librosa():
         raise
 
 
+    from ..core.feature_flags import FEATURE_FLAGS
+    if not FEATURE_FLAGS.get("audio_spectral_analysis", True):
+        logger.info("[AudioAnalysis] Skipped — feature disabled by health check")
+        return {}
+
 def analyze_audio_virality(audio_path: str) -> Dict:
     """
     Analyze audio for viral potential using spectral features.

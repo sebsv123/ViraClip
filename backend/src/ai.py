@@ -22,10 +22,10 @@ except ImportError:
     Agent = None
 from pydantic import BaseModel, Field, field_validator, model_validator, computed_field
 
-from .config import Config
+from .config import get_config
 
 logger = logging.getLogger(__name__)
-config = Config()
+config = get_config()
 
 
 class CampaignStrategy(BaseModel):

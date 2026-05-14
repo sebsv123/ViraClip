@@ -5,6 +5,7 @@ This is the core service that materializes AI suggestions into actual video pixe
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 import subprocess
@@ -96,6 +97,15 @@ class SuggestionApplicator:
                     if _sfx_result:
                         _inputs, _input_audio = _sfx_result
 
+            # Pre-check: verify input file exists before building FFmpeg command
+            _input_path_str = str(input_path)
+            if not os.path.exists(_input_path_str):
+                logger.error(
+                    "[SuggestionApplicator] Input file not found: %s",
+                    _input_path_str,
+                )
+                return {"success": False, "error": f"Input file not found: {_input_path_str}"}
+
             _cmd = self._build_ffmpeg_command(
                 inputs=_inputs,
                 video_filters=_video_filters,
@@ -104,15 +114,15 @@ class SuggestionApplicator:
                 clip_info=clip_info,
             )
 
-            logger.info("[SuggestionApplicator] Executing: %s", " ".join(_cmd[:10]) + "...")
+            logger.info("[SuggestionApplicator] Executing: %s", " ".join(_cmd))
             _result = await self._run_ffmpeg(_cmd)
 
             if _result.returncode == 0:
                 return {"success": True, "output_path": str(output_path)}
             else:
                 _stderr = _result.stderr.decode() if _result.stderr else "Unknown error"
-                logger.error("[SuggestionApplicator] FFmpeg failed: %s", _stderr[:500])
-                return {"success": False, "error": f"FFmpeg failed: {_stderr[:200]}"}
+                logger.error("[SuggestionApplicator] FFmpeg stderr:\n%s", _stderr)
+                return {"success": False, "error": f"FFmpeg failed: {_stderr}"}
 
         except Exception as e:
             logger.exception("[SuggestionApplicator] Error applying suggestions")
@@ -165,9 +175,14 @@ class SuggestionApplicator:
         _duration = payload.get("duration", 1.0)
         _end = _start + _duration
         if _zoom_type == "punch_in":
+            # NOTE: FFmpeg's eval parser chokes on nested parens inside sin().
+            # Using a temporary variable via the zoompan expression avoids the issue.
+            # We compute the normalized progress (t-start)/dur first, then apply sin.
+            # The expression: 1 + 0.3 * sin(PI * (t-start) / dur)
+            # Putting PI * (t-start) / dur avoids nested parens inside sin().
             return (
                 f"zoompan=z='if(lte(t,{_start}),1,"
-                f"if(lte(t,{_end}),1+0.3*sin((t-{_start})/{_duration}*PI),1))':"
+                f"if(lte(t,{_end}),1+0.3*sin(PI*(t-{_start})/{_duration}),1))':"
                 f"d={int(_duration * 30)}:s=1080x1920"
             )
         elif _zoom_type == "slow_push":

@@ -7,6 +7,7 @@ Applies playback speed control and dramatic slow-mo to clips using FFmpeg.
 import asyncio
 import logging
 from pathlib import Path
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ class SpeedControlService:
                 "-filter_complex", filter_complex,
                 "-map", "[outv]",
                 "-map", "[outa]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 str(output_path)
             ]
@@ -148,7 +149,7 @@ class SpeedControlService:
                 "-i", str(clip_path),
                 "-filter:v", f"setpts={pts_multiplier}*PTS",
                 "-filter:a", atempo_filters,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 str(output_path)
             ]
