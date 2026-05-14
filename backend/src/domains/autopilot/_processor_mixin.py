@@ -758,6 +758,7 @@ class _ProcessorMixin:
                 try:
                     from .suggestion_applicator import SuggestionApplicator
                     from ...repositories.clip_suggestion_repository import ClipSuggestionRepository
+                    from ...domains.autopilot.clip_suggestion_status import ClipSuggestionStatus
 
                     _suggestions = await ClipSuggestionRepository.list_by_clip(self.db, clip_id)
 
@@ -772,7 +773,7 @@ class _ProcessorMixin:
 
                         _suggestions_to_apply = [
                             s for s in _suggestions
-                            if s.get("kind") in _auto_apply_kinds and s.get("status") == "pending"
+                            if s.get("kind") in _auto_apply_kinds and s.get("status") == ClipSuggestionStatus.PENDING.value
                         ]
 
                         if _suggestions_to_apply:
@@ -799,7 +800,7 @@ class _ProcessorMixin:
                                 )
                                 for s in _suggestions_to_apply:
                                     await ClipSuggestionRepository.update_status(
-                                        self.db, s["id"], "applied"
+                                        self.db, s["id"], ClipSuggestionStatus.APPLIED.value
                                     )
                                 logger.info(
                                     "[suggestion_applicator] Successfully enhanced clip %s",
@@ -813,11 +814,11 @@ class _ProcessorMixin:
 
                         _manual_suggestions = [
                             s for s in _suggestions
-                            if s.get("kind") not in _auto_apply_kinds and s.get("status") == "pending"
+                            if s.get("kind") not in _auto_apply_kinds and s.get("status") == ClipSuggestionStatus.PENDING.value
                         ]
                         for s in _manual_suggestions:
                             await ClipSuggestionRepository.update_status(
-                                self.db, s["id"], "ready_for_review"
+                                self.db, s["id"], ClipSuggestionStatus.READY_FOR_REVIEW.value
                             )
 
                         await self.db.commit()

@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +26,7 @@ class CompressionPreset(Enum):
 
 class VideoCodec(Enum):
     """Supported video codecs."""
-    H264 = "libx264"
+    H264 = gpu_utils.get_video_encoder()
     H265 = "libx265"
     VP9 = "libvpx-vp9"
     AV1 = "libaom-av1"

@@ -15,6 +15,7 @@ at its natural position.  Total duration increases by ~1s.
 import asyncio
 import logging
 from pathlib import Path
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ async def prepend_hook_flash(
             "-filter_complex", filter_complex,
             "-map", "[vout]",
             "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-c:a", "aac", "-b:a", "192k",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,

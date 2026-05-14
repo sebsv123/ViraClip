@@ -23,6 +23,7 @@ import asyncio
 import logging
 import re
 import tempfile
+from src import gpu_utils
 
 
 def _get_ffmpeg_exe() -> str:
@@ -376,7 +377,7 @@ async def burn_captions(
             _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(video_path),
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-c:a", "copy",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,

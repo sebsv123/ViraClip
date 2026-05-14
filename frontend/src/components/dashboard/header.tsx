@@ -84,14 +84,7 @@ export function DashboardHeader({ user }: HeaderProps) {
                   Settings
                 </Link>
 
-                <Link
-                  href="/dashboard/settings"
-                  className="flex items-center gap-3 px-4 py-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-white"
-                  onClick={() => setShowDropdown(false)}
-                >
-                  <User className="w-4 h-4" />
-                  Profile
-                </Link>
+                {/* Profile link removed — Settings covers the same page */}
 
                 <div className="border-t border-gray-700 my-2" />
 

@@ -34,6 +34,8 @@ from typing import Optional
 
 import numpy as np
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -304,7 +306,7 @@ def _raft_morph_clip(
             subprocess.run(
                 [
                     "ffmpeg", "-y", "-i", str(output_path),
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    *gpu_utils.ffmpeg_codec_flags("medium"),
                     "-movflags", "+faststart", str(reenc),
                 ],
                 capture_output=True, timeout=30,
@@ -355,7 +357,7 @@ def _apply_raft_transition(
             [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
                 "-i", str(concat_list),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(output_path),
@@ -438,7 +440,7 @@ def _apply_xfade_transition(
                 "-i", str(clip_b),
                 "-filter_complex", filter_complex,
                 "-map", "[v]", "-map", "[a]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(output_path),
@@ -462,7 +464,7 @@ def _apply_xfade_transition(
                 f":duration={transition_duration:.3f}"
                 f":offset={xfade_offset:.3f}[v]",
                 "-map", "[v]", "-map", "0:a?",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(output_path),
@@ -982,7 +984,7 @@ def _simple_concatenate(clip1: Path, clip2: Path, output: Path) -> bool:
             "-i", str(clip2),
             "-filter_complex", "[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[outv][outa]",
             "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            *gpu_utils.ffmpeg_codec_flags("medium"),
             "-c:a", "aac", "-b:a", "192k",
             str(output)
         ]
@@ -1037,7 +1039,7 @@ def _apply_xfade_transition(
             "-i", str(clip2),
             "-filter_complex", filter_complex,
             "-map", "[vout]", "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "23",
+            *gpu_utils.ffmpeg_codec_flags("medium"),
             "-c:a", "aac", "-b:a", "192k",
             str(output)
         ]

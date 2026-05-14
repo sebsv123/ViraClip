@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ async def apply_lut(
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(video_path),
             "-vf", vf,
-            "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-c:a", "copy",
             str(tmp),
             stdout=asyncio.subprocess.DEVNULL,

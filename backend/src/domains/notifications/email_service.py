@@ -6,7 +6,7 @@ from typing import Optional
 
 import resend
 
-from ...config import Config
+from ...config import get_config, Config
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class EmailContent:
 
 class ResendEmailService:
     def __init__(self, config: Optional[Config] = None):
-        self.config = config or Config()
+        self.config = config or get_config()
         self.api_key = self.config.resend_api_key
         self.from_email = self.config.resend_from_email
 

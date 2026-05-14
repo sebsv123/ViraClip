@@ -496,6 +496,10 @@ export default function TaskEditPage() {
     }
   };
 
+  const selectClip = (clip: Clip) => {
+    setSelectedClipId(clip.id);
+  };
+
   const toggleMergeSelection = (clipId: string) => {
     setMergeSelection((current) => (current.includes(clipId) ? current.filter((id) => id !== clipId) : [...current, clipId]));
   };
@@ -561,36 +565,37 @@ export default function TaskEditPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-white p-4">
+      <div className="min-h-screen bg-[#0a0a0f] p-4">
         <div className="max-w-7xl mx-auto space-y-4">
-          <Skeleton className="h-10 w-56" />
-          <Skeleton className="h-[420px] w-full" />
+          <Skeleton className="h-10 w-56 bg-white/10" />
+          <Skeleton className="h-[420px] w-full bg-white/10" />
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-            <Skeleton className="h-[520px] xl:col-span-7" />
-            <Skeleton className="h-[520px] xl:col-span-5" />
+            <Skeleton className="h-[520px] xl:col-span-7 bg-white/10" />
+            <Skeleton className="h-[520px] xl:col-span-5 bg-white/10" />
           </div>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-white">
-      <div className="border-b bg-white">
+  try {
+    return (
+    <div className="min-h-screen bg-[#0a0a0f] text-white">
+      <div className="border-b border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-4 py-5 flex items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-3">
               <Link href={`/tasks/${params.id}`}>
-                <Button variant="ghost" size="sm">
+                <Button variant="ghost" size="sm" className="text-gray-300 hover:text-white">
                   <ArrowLeft className="w-4 h-4" />
                   Back to Task
                 </Button>
               </Link>
-              <Badge variant="outline">Studio Editor</Badge>
+              <Badge variant="outline" className="border-white/10 text-gray-300">Studio Editor</Badge>
             </div>
-            <h1 className="text-2xl font-bold text-black">{task?.source_title || "Clip Editor"}</h1>
+            <h1 className="text-2xl font-bold text-white">{task?.source_title || "Clip Editor"}</h1>
           </div>
-          <Button onClick={handleExport} disabled={!selectedClip || isSaving}>
+          <Button onClick={handleExport} disabled={!selectedClip || isSaving} className="bg-cyan-500 hover:bg-cyan-400 text-black font-semibold">
             <Download className="w-4 h-4" />
             {exportProgress !== null ? `Exporting ${exportProgress}%` : "Export Selected"}
           </Button>
@@ -599,38 +604,38 @@ export default function TaskEditPage() {
 
       <div className="max-w-7xl mx-auto px-4 py-6 space-y-6">
         {error && (
-          <Alert>
-            <AlertDescription>{error}</AlertDescription>
+          <Alert className="border-red-500/30 bg-red-500/10">
+            <AlertDescription className="text-red-300">{error}</AlertDescription>
           </Alert>
         )}
 
         {!task ? (
-          <Alert>
-            <AlertDescription>Task not found.</AlertDescription>
+          <Alert className="border-white/10 bg-white/5">
+            <AlertDescription className="text-gray-300">Task not found.</AlertDescription>
           </Alert>
         ) : task.status !== "completed" ? (
-          <Card>
+          <Card className="bg-white/5 border-white/10">
             <CardContent className="p-8 text-center space-y-3">
-              <p className="text-lg font-semibold">This editor is available once processing completes.</p>
-              <p className="text-gray-600">Current status: {task.status}</p>
+              <p className="text-lg font-semibold text-white">This editor is available once processing completes.</p>
+              <p className="text-gray-400">Current status: {task.status}</p>
               <Link href={`/tasks/${task.id}`}>
-                <Button variant="outline">Return to Task</Button>
+                <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white">Return to Task</Button>
               </Link>
             </CardContent>
           </Card>
         ) : clips.length === 0 ? (
-          <Card>
+          <Card className="bg-white/5 border-white/10">
             <CardContent className="p-8 text-center space-y-3">
-              <p className="text-lg font-semibold">No clips to edit yet.</p>
+              <p className="text-lg font-semibold text-white">No clips to edit yet.</p>
               <Link href={`/tasks/${task.id}`}>
-                <Button variant="outline">Return to Task</Button>
+                <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white">Return to Task</Button>
               </Link>
             </CardContent>
           </Card>
         ) : (
           <>
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
-              <Card className="xl:col-span-7">
+              <Card className="xl:col-span-7 bg-white/5 border-white/10">
                 <CardContent className="p-4 lg:p-5 space-y-4">
                   {selectedClip ? (
                     <>
@@ -670,8 +675,8 @@ export default function TaskEditPage() {
                         </div>
                       </div>
 
-                      <div className="border rounded-lg p-3 space-y-3">
-                        <div className="flex items-center justify-between text-sm text-gray-600">
+                      <div className="border border-white/10 rounded-lg p-3 space-y-3">
+                        <div className="flex items-center justify-between text-sm text-gray-400">
                           <span>Playhead: {formatDuration(currentTime)} / {formatDuration(selectedClip.duration)}</span>
                           <span>{isPlaying ? "Playing" : "Paused"}</span>
                         </div>
@@ -685,15 +690,15 @@ export default function TaskEditPage() {
                         />
 
                         <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
-                          <Button variant="outline" size="sm" onClick={() => seekTo(Math.max(0, currentTime - 1))}>-1s</Button>
-                          <Button variant="outline" size="sm" onClick={() => seekTo(Math.min(selectedClip.duration, currentTime + 1))}>+1s</Button>
-                          <Button variant="outline" size="sm" onClick={setTrimInToPlayhead}>Set In</Button>
-                          <Button variant="outline" size="sm" onClick={setTrimOutToPlayhead}>Set Out</Button>
+                          <Button variant="outline" size="sm" className="border-white/10 text-gray-300 hover:text-white" onClick={() => seekTo(Math.max(0, currentTime - 1))}>-1s</Button>
+                          <Button variant="outline" size="sm" className="border-white/10 text-gray-300 hover:text-white" onClick={() => seekTo(Math.min(selectedClip.duration, currentTime + 1))}>+1s</Button>
+                          <Button variant="outline" size="sm" className="border-white/10 text-gray-300 hover:text-white" onClick={setTrimInToPlayhead}>Set In</Button>
+                          <Button variant="outline" size="sm" className="border-white/10 text-gray-300 hover:text-white" onClick={setTrimOutToPlayhead}>Set Out</Button>
                         </div>
                       </div>
 
-                      <div className="border rounded-lg p-3 space-y-3">
-                        <div className="flex items-center justify-between text-sm text-gray-700">
+                      <div className="border border-white/10 rounded-lg p-3 space-y-3">
+                        <div className="flex items-center justify-between text-sm text-gray-300">
                           <span className="font-medium">Trim Range</span>
                           <span>{formatDuration(trimRange[0])} - {formatDuration(trimRange[1])}</span>
                         </div>
@@ -705,32 +710,32 @@ export default function TaskEditPage() {
                           onValueChange={handleTrimRangeChange}
                         />
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                          <Button onClick={handleTrim} disabled={isSaving}>
+                          <Button onClick={handleTrim} disabled={isSaving} className="bg-cyan-500 hover:bg-cyan-400 text-black font-semibold">
                             <Scissors className="w-4 h-4" />
                             Apply Trim
                           </Button>
-                          <Button variant="outline" onClick={() => seekTo(trimRange[0])}>Jump In</Button>
-                          <Button variant="outline" onClick={() => seekTo(trimRange[1])}>Jump Out</Button>
+                          <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white" onClick={() => seekTo(trimRange[0])}>Jump In</Button>
+                          <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white" onClick={() => seekTo(trimRange[1])}>Jump Out</Button>
                         </div>
                       </div>
                     </>
                   ) : (
-                    <p className="text-sm text-gray-600">Select a clip to start editing.</p>
+                    <p className="text-sm text-gray-400">Select a clip to start editing.</p>
                   )}
                 </CardContent>
               </Card>
 
               <div className="xl:col-span-5 space-y-4">
-                <Card>
+                <Card className="bg-white/5 border-white/10">
                   <CardHeader className="pb-3">
-                    <CardTitle className="text-base flex items-center gap-2">
+                    <CardTitle className="text-base flex items-center gap-2 text-white">
                       <Layers className="w-4 h-4" />
                       Fine Controls
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-5">
                     <div className="space-y-3">
-                      <div className="flex items-center justify-between text-sm">
+                      <div className="flex items-center justify-between text-sm text-gray-300">
                         <span className="flex items-center gap-2"><SplitSquareVertical className="w-4 h-4" />Split</span>
                         <span>{splitTime.toFixed(2)}s</span>
                       </div>
@@ -742,35 +747,35 @@ export default function TaskEditPage() {
                         onValueChange={(value) => setSplitTime(value[0] || MIN_GAP_SECONDS)}
                       />
                       <div className="grid grid-cols-2 gap-2">
-                        <Button variant="outline" onClick={() => setSplitTime(currentTime)} disabled={!selectedClip}>Set to Playhead</Button>
-                        <Button variant="outline" onClick={() => void handleSplit()} disabled={isSaving || !selectedClip}>Split Clip</Button>
+                        <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white" onClick={() => setSplitTime(currentTime)} disabled={!selectedClip}>Set to Playhead</Button>
+                        <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white" onClick={() => void handleSplit()} disabled={isSaving || !selectedClip}>Split Clip</Button>
                       </div>
                     </div>
 
                     <div className="space-y-3">
-                      <div className="text-sm font-medium flex items-center gap-2"><AudioLines className="w-4 h-4" />Audio</div>
+                      <div className="text-sm font-medium flex items-center gap-2 text-gray-200"><AudioLines className="w-4 h-4" />Audio</div>
                       <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs text-gray-600">
+                        <div className="flex items-center justify-between text-xs text-gray-400">
                           <span>Volume</span>
                           <span>{volume}%</span>
                         </div>
                         <Slider min={0} max={200} step={1} value={[volume]} onValueChange={(v) => setVolume(v[0] || 0)} />
                       </div>
                       <div className="space-y-2">
-                        <div className="flex items-center justify-between text-xs text-gray-600">
+                        <div className="flex items-center justify-between text-xs text-gray-400">
                           <span>Playback Rate</span>
                           <span>{playbackRate.toFixed(2)}x</span>
                         </div>
                         <Slider min={0.5} max={2} step={0.05} value={[playbackRate]} onValueChange={(v) => setPlaybackRate(v[0] || 1)} />
                       </div>
-                      <Button variant="outline" className="w-full" onClick={() => setIsMuted((m) => !m)}>
+                      <Button variant="outline" className="w-full border-white/10 text-gray-300 hover:text-white" onClick={() => setIsMuted((m) => !m)}>
                         {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                         {isMuted ? "Unmute" : "Mute"}
                       </Button>
                     </div>
 
                     <div className="space-y-3">
-                      <div className="text-sm font-medium flex items-center gap-2"><Palette className="w-4 h-4" />Video FX</div>
+                      <div className="text-sm font-medium flex items-center gap-2 text-gray-200"><Palette className="w-4 h-4" />Video FX</div>
                       {[
                         ["Brightness", "brightness", 40, 180, 1],
                         ["Contrast", "contrast", 40, 180, 1],
@@ -783,7 +788,7 @@ export default function TaskEditPage() {
                         const currentValue = videoFx[typedKey];
                         return (
                           <div key={key} className="space-y-1.5">
-                            <div className="flex items-center justify-between text-xs text-gray-600">
+                            <div className="flex items-center justify-between text-xs text-gray-400">
                               <span>{label}</span>
                               <span>{currentValue}</span>
                             </div>
@@ -799,16 +804,16 @@ export default function TaskEditPage() {
                       })}
                     </div>
 
-                    <Button variant="outline" className="w-full" onClick={resetPreviewAdjustments}>
+                    <Button variant="outline" className="w-full border-white/10 text-gray-300 hover:text-white" onClick={resetPreviewAdjustments}>
                       <Gauge className="w-4 h-4" />
                       Reset Preview Adjustments
                     </Button>
                   </CardContent>
                 </Card>
 
-                <Card>
+                <Card className="bg-white/5 border-white/10">
                   <CardHeader className="pb-3">
-                    <CardTitle className="text-base flex items-center gap-2">
+                    <CardTitle className="text-base flex items-center gap-2 text-white">
                       <Subtitles className="w-4 h-4" />
                       Subtitle Control
                     </CardTitle>
@@ -818,15 +823,15 @@ export default function TaskEditPage() {
                       value={captionText}
                       onChange={(e) => setCaptionText(e.target.value)}
                       placeholder="Edit subtitle script"
-                      className="w-full min-h-24 rounded-md border border-gray-200 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-gray-900"
+                      className="w-full min-h-24 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-cyan-400"
                     />
 
                     <div className="grid grid-cols-2 gap-2">
                       <Select value={captionPosition} onValueChange={setCaptionPosition}>
-                        <SelectTrigger>
+                        <SelectTrigger className="bg-white/5 border-white/10 text-white">
                           <SelectValue placeholder="Position" />
                         </SelectTrigger>
-                        <SelectContent>
+                        <SelectContent className="bg-[#1a1a2e] border-white/10 text-white">
                           <SelectItem value="top">Top</SelectItem>
                           <SelectItem value="middle">Middle</SelectItem>
                           <SelectItem value="bottom">Bottom</SelectItem>
@@ -834,10 +839,10 @@ export default function TaskEditPage() {
                       </Select>
 
                       <Select value={exportPreset} onValueChange={setExportPreset}>
-                        <SelectTrigger>
+                        <SelectTrigger className="bg-white/5 border-white/10 text-white">
                           <SelectValue placeholder="Preset" />
                         </SelectTrigger>
-                        <SelectContent>
+                        <SelectContent className="bg-[#1a1a2e] border-white/10 text-white">
                           <SelectItem value="tiktok">TikTok</SelectItem>
                           <SelectItem value="reels">Reels</SelectItem>
                           <SelectItem value="shorts">Shorts</SelectItem>
@@ -846,7 +851,7 @@ export default function TaskEditPage() {
                     </div>
 
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between text-xs text-gray-600">
+                      <div className="flex items-center justify-between text-xs text-gray-400">
                         <span>Subtitle Size</span>
                         <span>{subtitleSize}</span>
                       </div>
@@ -854,7 +859,7 @@ export default function TaskEditPage() {
                     </div>
 
                     <div className="space-y-2">
-                      <div className="flex items-center justify-between text-xs text-gray-600">
+                      <div className="flex items-center justify-between text-xs text-gray-400">
                         <span>Vertical Offset</span>
                         <span>{subtitleY}%</span>
                       </div>
@@ -862,8 +867,8 @@ export default function TaskEditPage() {
                     </div>
 
                     <div className="space-y-2">
-                      <div className="text-xs text-gray-600">Highlight words (click to toggle)</div>
-                      <div className="max-h-28 overflow-y-auto rounded-md border border-gray-200 p-2 flex flex-wrap gap-1.5">
+                      <div className="text-xs text-gray-400">Highlight words (click to toggle)</div>
+                      <div className="max-h-28 overflow-y-auto rounded-md border border-white/10 bg-white/5 p-2 flex flex-wrap gap-1.5">
                         {subtitleWords.length === 0 ? (
                           <span className="text-xs text-gray-500">No words yet.</span>
                         ) : (
@@ -876,7 +881,7 @@ export default function TaskEditPage() {
                                 type="button"
                                 onClick={() => toggleHighlightedWord(word)}
                                 className={`px-1.5 py-0.5 rounded text-xs border ${
-                                  highlighted ? "bg-yellow-100 border-yellow-300 text-yellow-900" : "bg-white border-gray-200 text-gray-700"
+                                  highlighted ? "bg-yellow-500/20 border-yellow-500/50 text-yellow-300" : "bg-white/10 border-white/10 text-gray-300"
                                 }`}
                               >
                                 {word}
@@ -887,7 +892,7 @@ export default function TaskEditPage() {
                       </div>
                     </div>
 
-                    <Button onClick={handleUpdateCaptions} disabled={isSaving || !selectedClip} className="w-full">
+                    <Button onClick={handleUpdateCaptions} disabled={isSaving || !selectedClip} className="w-full bg-cyan-500 hover:bg-cyan-400 text-black font-semibold">
                       Save Subtitle Changes
                     </Button>
                   </CardContent>
@@ -895,9 +900,9 @@ export default function TaskEditPage() {
               </div>
             </div>
 
-            <Card>
+            <Card className="bg-white/5 border-white/10">
               <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
+                <CardTitle className="text-base flex items-center gap-2 text-white">
                   <Clapperboard className="w-4 h-4" />
                   Clips
                 </CardTitle>
@@ -905,44 +910,68 @@ export default function TaskEditPage() {
               <CardContent className="space-y-3">
                 {mergeSelection.length >= 2 && (
                   <div className="flex justify-end">
-                    <Button variant="outline" onClick={handleMerge} disabled={isSaving}>
+                    <Button variant="outline" className="border-white/10 text-gray-300 hover:text-white" onClick={handleMerge} disabled={isSaving}>
                       Merge Selected ({mergeSelection.length})
                     </Button>
                   </div>
                 )}
                 <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                  {clips.map((clip) => {
-                    const isActive = clip.id === selectedClipId;
-                    const isSelectedForMerge = mergeSelection.includes(clip.id);
-                    return (
-                      <button
-                        key={clip.id}
-                        type="button"
-                        onClick={() => setSelectedClipId(clip.id)}
-                        className={`text-left rounded-lg border p-3 transition ${
-                          isActive ? "border-black bg-gray-50" : "border-gray-200 hover:border-gray-400"
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div>
-                            <p className="font-medium text-sm text-black">Clip {clip.clip_order}</p>
-                            <p className="text-xs text-gray-500">{clip.start_time} - {clip.end_time}</p>
-                            <p className="text-xs text-gray-500">{formatDuration(clip.duration)}</p>
-                          </div>
-                          <label className="flex items-center gap-1 text-xs text-gray-600" onClick={(e) => e.stopPropagation()}>
-                            <input type="checkbox" checked={isSelectedForMerge} onChange={() => toggleMergeSelection(clip.id)} />
-                            Merge
-                          </label>
+                  {clips.map((clip) => (
+                    <div
+                      key={clip.id}
+                      className={`relative rounded-lg border p-3 cursor-pointer transition-colors ${
+                        selectedClipId === clip.id
+                          ? "border-cyan-500 bg-cyan-500/10"
+                          : "border-white/10 bg-white/5 hover:border-white/20"
+                      }`}
+                      onClick={() => selectClip(clip)}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-white truncate">{clip.filename}</p>
+                          <p className="text-xs text-gray-400 mt-0.5">{formatDuration(clip.duration)}</p>
                         </div>
-                      </button>
-                    );
-                  })}
+                        <input
+                          type="checkbox"
+                          checked={mergeSelection.includes(clip.id)}
+                          onChange={(e) => {
+                            e.stopPropagation();
+                            toggleMergeSelection(clip.id);
+                          }}
+                          className="ml-2 mt-0.5 accent-cyan-500"
+                        />
+                      </div>
+                      {clip.video_url && (
+                        <div className="mt-2 aspect-video rounded overflow-hidden bg-black/40">
+                          <video
+                            src={clip.video_url}
+                            className="w-full h-full object-cover"
+                            muted
+                            preload="metadata"
+                          />
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
               </CardContent>
             </Card>
           </>
         )}
+        </div>
       </div>
-    </div>
-  );
+    );
+  } catch (error) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center p-4">
+        <div className="text-center">
+          <h2 className="text-xl font-semibold text-red-400 mb-2">Something went wrong</h2>
+          <p className="text-gray-400 mb-4">{(error as Error).message}</p>
+          <Link href="/dashboard" className="text-cyan-400 hover:underline">
+            Back to Dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
 }

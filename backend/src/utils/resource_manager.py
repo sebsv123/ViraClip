@@ -10,7 +10,7 @@ import os
 import platform
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     import psutil
@@ -156,7 +156,7 @@ def get_adaptive_settings(hw_caps: Optional[Dict] = None) -> Dict[str, any]:
     return settings.get(tier, settings["low"])
 
 
-def cleanup_temp_files(base_dir: Path, max_age_hours: int = 24, dry_run: bool = False) -> Tuple[int, int]:
+def cleanup_temp_files(base_dir: Path, max_age_hours: int = 24, dry_run: bool = False, exclude_dirs: Optional[List[str]] = None) -> Tuple[int, int]:
     """
     Aggressively clean up old temporary files to prevent disk bloat.
     
@@ -164,6 +164,7 @@ def cleanup_temp_files(base_dir: Path, max_age_hours: int = 24, dry_run: bool = 
         base_dir: Root temp directory to clean
         max_age_hours: Delete files older than this
         dry_run: If True, only report what would be deleted
+        exclude_dirs: List of directory names to exclude from cleanup (e.g., ["downloads"])
         
     Returns:
         (files_deleted, mb_freed)
@@ -177,6 +178,7 @@ def cleanup_temp_files(base_dir: Path, max_age_hours: int = 24, dry_run: bool = 
     max_age_seconds = max_age_hours * 3600
     files_deleted = 0
     bytes_freed = 0
+    exclude_dirs = set(exclude_dirs or [])
     
     patterns = [
         "*.mp4",
@@ -199,6 +201,13 @@ def cleanup_temp_files(base_dir: Path, max_age_hours: int = 24, dry_run: bool = 
             for file_path in base_dir.rglob(pattern):
                 if not file_path.is_file():
                     continue
+                    
+                # Skip files inside excluded directories (e.g., downloads/)
+                if exclude_dirs:
+                    rel_path = file_path.relative_to(base_dir)
+                    parts = rel_path.parts
+                    if any(part in exclude_dirs for part in parts[:-1]):
+                        continue
                     
                 try:
                     age = now - file_path.stat().st_mtime

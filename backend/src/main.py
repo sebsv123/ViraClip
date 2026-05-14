@@ -1,3 +1,4 @@
+import json
 import sys as _sys
 import io as _io
 
@@ -8,7 +9,7 @@ if hasattr(_sys.stderr, 'buffer'):
     _sys.stderr = _io.TextIOWrapper(_sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 
 from .video_processing import get_available_transitions
-from .config import Config
+from .config import get_config
 from .caption_templates import get_template_info
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -50,7 +51,7 @@ from .api.routes.jobs import router as jobs_router
 from .api.routes.whatsapp import router as whatsapp_router
 from .domains.video.video_service import UPLOAD_URL_PREFIX
 
-config = Config()
+config = get_config()
 
 
 @asynccontextmanager
@@ -110,31 +111,57 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Upload size limit middleware (rejects large files before body is read)
-class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        if request.method in ("POST", "PUT", "PATCH"):
-            content_length = request.headers.get("content-length")
+# Upload size limit middleware (ASGI-level, NOT BaseHTTPMiddleware — avoids
+# the known Starlette bug where BaseHTTPMiddleware consumes the ASGI receive
+# stream, preventing request.json() from ever receiving the body).
+from starlette.types import ASGIApp, Receive, Scope, Send
+
+
+class UploadSizeLimitMiddlewareASGI:
+    """ASGI middleware that rejects oversized requests before body is read."""
+
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] == "http" and scope["method"] in ("POST", "PUT", "PATCH"):
+            headers = dict(scope.get("headers", []))
+            content_length = None
+            for key, val in headers.items():
+                if key == b"content-length":
+                    content_length = val
+                    break
             if content_length:
                 try:
                     size = int(content_length)
                     max_bytes = int(_os.getenv("MAX_UPLOAD_MB", "500")) * 1024 * 1024
                     if size > max_bytes:
                         max_mb = int(_os.getenv("MAX_UPLOAD_MB", "500"))
-                        return JSONResponse(
-                            status_code=413,
-                            content={
-                                "error": "File too large",
-                                "max_mb": max_mb,
-                                "received_mb": round(size / 1024 / 1024, 1),
-                                "message": f"Maximum upload size is {max_mb}MB",
-                            },
-                        )
+                        body = json.dumps({
+                            "error": "File too large",
+                            "max_mb": max_mb,
+                            "received_mb": round(size / 1024 / 1024, 1),
+                            "message": f"Maximum upload size is {max_mb}MB",
+                        }).encode("utf-8")
+                        await send({
+                            "type": "http.response.start",
+                            "status": 413,
+                            "headers": [
+                                (b"content-type", b"application/json"),
+                                (b"content-length", str(len(body)).encode()),
+                            ],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": body,
+                        })
+                        return
                 except ValueError:
                     pass
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
-app.add_middleware(UploadSizeLimitMiddleware)
+
+app.add_middleware(UploadSizeLimitMiddlewareASGI)
 
 app.add_middleware(
     CORSMiddleware,

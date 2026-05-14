@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from src import gpu_utils
 import httpx
 from .broll_compositor import compose_overlay
 
@@ -103,7 +104,7 @@ async def download_and_crop_broll(
                 "setsar=1"
             ),
             "-an",
-            "-c:v", "libx264",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-preset", "fast",
             "-crf", "23",
             "-pix_fmt", "yuv420p",

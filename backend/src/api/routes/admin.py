@@ -3,19 +3,23 @@ from __future__ import annotations
 import datetime
 import logging
 from pathlib import Path
+from typing import Optional
 
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...admin_auth import require_admin_user
 from ...config import get_config
 from ...database import get_db
+from ...repositories.task_repository import TaskRepository
 from ...utils.cleanup import cleanup_old_clips, cleanup_old_downloads
+from ...workers.job_queue import JobQueue
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
+
 
 
 # ── JWT helpers ──────────────────────────────────────────────────────────────
@@ -285,6 +289,73 @@ async def admin_usage(request: Request):
         "total_cost_30d": total_30d,
         "alert_level": alert,
     }
+
+
+@router.get("/dead-letter", summary="List dead-letter tasks (requires admin JWT)")
+async def list_dead_letter_tasks(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    source: Optional[str] = Query(None, pattern="^(watchdog|self_healing)$"),
+    error_code: Optional[str] = Query(None),
+):
+    """
+    List tasks that have been sent to the dead-letter store.
+    
+    These are tasks that exhausted all retry attempts and were permanently
+    marked as dead by either the watchdog or the self-healing agent.
+    
+    Supports pagination and optional filtering by source and error_code.
+    """
+    _verify_admin_jwt(request)
+    tasks = await TaskRepository.get_dead_letter_tasks(
+        db, limit=limit, offset=offset, source=source, error_code=error_code,
+    )
+    total = await TaskRepository.count_dead_letter_tasks(
+        db, source=source, error_code=error_code,
+    )
+    return {
+        "total": total,
+        "tasks": tasks,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@router.post("/dead-letter/{dead_letter_id}", summary="Retry a dead-letter task (requires admin JWT)")
+async def retry_dead_letter_task(
+    dead_letter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Manually retry a task that was sent to the dead-letter store.
+    
+    Marks the dead-letter record as retried and re-enqueues the task
+    for processing via the job queue.
+    
+    Returns 404 if the dead-letter record is not found or was already retried.
+    """
+    _verify_admin_jwt(request)
+    result = await TaskRepository.retry_dead_letter_task(
+        db, dead_letter_id=dead_letter_id, retried_by="admin",
+    )
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail="Dead-letter record not found or already retried",
+        )
+    task_id = result["task_id"]
+    # Re-enqueue the task for processing
+    await JobQueue.enqueue_processing_job(
+        "process_video_task", "fast", task_id,
+    )
+    logger.info(
+        f"Admin retried dead-letter task {task_id} "
+        f"(error_code={result['error_code']}, source={result['source']})"
+    )
+    return {"status": "ok", "task_id": task_id}
 
 
 @router.post("/cleanup")

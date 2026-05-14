@@ -43,10 +43,10 @@ def _register_cuda_dll_paths() -> None:
 
 _register_cuda_dll_paths()
 
-from ..config import Config
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
-config = Config()
+config = get_config()
 
 _TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
 _TRANSCRIPT_HASH_CACHE_DIR = Path("/tmp/viraclip_transcript_cache")
@@ -339,6 +339,7 @@ async def get_video_transcript(
                 language_code="es",
                 punctuate=True,
                 format_text=True,
+                speech_models=["universal-2"],
             )
             _transcript = _aai.transcribe(str(video_path), config=_config)
             if _transcript.status == aai.TranscriptStatus.error:

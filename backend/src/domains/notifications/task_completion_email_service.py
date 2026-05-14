@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import Optional
 
-from ...config import Config
+from ...config import get_config, Config
 from .email_service import EmailContent, ResendEmailService, first_name_for
 
 
@@ -17,7 +17,7 @@ class TaskCompletionRecipient:
 
 class TaskCompletionEmailService:
     def __init__(self, config: Optional[Config] = None):
-        self.config = config or Config()
+        self.config = config or get_config()
         self.email_service = ResendEmailService(self.config)
         self.app_url = self.config.app_base_url
 

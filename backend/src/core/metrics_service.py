@@ -286,8 +286,8 @@ async def check_redis_connection():
     """Check Redis connectivity."""
     try:
         import redis.asyncio as aioredis
-        from ..config import Config
-        config = Config()
+        from ..config import get_config
+        config = get_config()
         
         redis = aioredis.Redis(
             host=config.redis_host,
@@ -304,8 +304,8 @@ async def check_redis_connection():
 async def check_disk_space():
     """Check available disk space."""
     import shutil
-    from ..config import Config
-    config = Config()
+    from ..config import get_config
+    config = get_config()
     
     temp_dir = Path(config.temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)

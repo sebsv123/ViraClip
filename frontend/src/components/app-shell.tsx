@@ -29,8 +29,7 @@ interface NavItem {
 const navItems: NavItem[] = [
   { icon: LayoutDashboard, label: "Dashboard", href: "/dashboard" },
   { icon: Film, label: "My Clips", href: "/list" },
-  { icon: CreditCard, label: "Billing", href: "/settings" },
-  { icon: Settings, label: "Settings", href: "/settings" },
+  { icon: Settings, label: "Settings", href: "/dashboard/settings" },
 ];
 
 interface AppShellProps {

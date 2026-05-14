@@ -100,10 +100,10 @@ export default function AdminStatsPage() {
 
   if (!token) {
     return (
-      <main className="flex min-h-screen items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-sm rounded-xl border border-gray-200 bg-white p-8 shadow-sm">
-          <h1 className="mb-1 text-xl font-semibold text-gray-900">Admin Stats</h1>
-          <p className="mb-6 text-sm text-gray-500">Enter your ADMIN_SECRET to continue.</p>
+      <main className="flex min-h-screen items-center justify-center bg-[#0a0a0f] px-4">
+        <div className="w-full max-w-sm rounded-xl border border-white/10 bg-white/5 p-8 shadow-sm">
+          <h1 className="mb-1 text-xl font-semibold text-white">Admin Stats</h1>
+          <p className="mb-6 text-sm text-gray-400">Enter your ADMIN_SECRET to continue.</p>
           <form onSubmit={handleLogin} className="space-y-4">
             <input
               type="password"
@@ -111,14 +111,14 @@ export default function AdminStatsPage() {
               value={secret}
               onChange={(e) => setSecret(e.target.value)}
               autoFocus
-              className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-gray-500 focus:outline-none"
+              className="w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-white placeholder-gray-500 focus:border-cyan-500 focus:outline-none"
             />
             {loginError && (
-              <p className="text-sm text-red-600">{loginError}</p>
+              <p className="text-sm text-red-400">{loginError}</p>
             )}
             <button
               type="submit"
-              className="w-full rounded-lg bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors"
+              className="w-full rounded-lg bg-cyan-500 px-4 py-2 text-sm font-medium text-black hover:bg-cyan-400 transition-colors"
             >
               Sign in
             </button>
@@ -129,22 +129,22 @@ export default function AdminStatsPage() {
   }
 
   return (
-    <main className="mx-auto max-w-4xl px-6 py-10">
+    <main className="mx-auto max-w-4xl px-6 py-10 min-h-screen bg-[#0a0a0f]">
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold text-gray-900">Live Stats</h1>
+          <h1 className="text-2xl font-semibold text-white">Live Stats</h1>
           <p className="mt-1 text-xs text-gray-400">
             Auto-refreshes every 30s
             {lastUpdated && ` · Last: ${lastUpdated.toLocaleTimeString()}`}
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <a href="/admin" className="text-sm text-gray-500 underline">
+          <a href="/admin" className="text-sm text-cyan-400 underline hover:text-cyan-300">
             Full dashboard
           </a>
           <button
             onClick={handleLogout}
-            className="rounded-lg border border-gray-200 px-3 py-1.5 text-sm text-gray-600 hover:bg-gray-50"
+            className="rounded-lg border border-white/10 px-3 py-1.5 text-sm text-gray-300 hover:bg-white/10"
           >
             Sign out
           </button>
@@ -152,7 +152,7 @@ export default function AdminStatsPage() {
       </div>
 
       {fetchError && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+        <div className="mb-4 rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
           {fetchError}
         </div>
       )}
@@ -182,8 +182,8 @@ export default function AdminStatsPage() {
             />
           </section>
 
-          <section className="mt-8 rounded-xl border border-gray-200 bg-white p-6">
-            <h2 className="mb-4 text-base font-semibold text-gray-900">Clip ratings</h2>
+          <section className="mt-8 rounded-xl border border-white/10 bg-white/5 p-6">
+            <h2 className="mb-4 text-base font-semibold text-white">Clip ratings</h2>
             <div className="grid gap-4 sm:grid-cols-4">
               <StatCard label="Total clips" value={stats.ratings.total} />
               <StatCard label="Good (4–5 ★)" value={stats.ratings.good} highlight="green" />
@@ -192,11 +192,11 @@ export default function AdminStatsPage() {
             </div>
             {stats.ratings.total > 0 && (
               <div className="mt-4">
-                <div className="mb-1 flex justify-between text-xs text-gray-500">
+                <div className="mb-1 flex justify-between text-xs text-gray-400">
                   <span>Positive rating</span>
                   <span>{stats.ratings.good_pct}%</span>
                 </div>
-                <div className="h-2 w-full overflow-hidden rounded-full bg-gray-100">
+                <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
                   <div
                     className="h-full rounded-full bg-green-500 transition-all"
                     style={{ width: `${stats.ratings.good_pct}%` }}
@@ -222,13 +222,13 @@ function StatCard({
 }) {
   const valueClass =
     highlight === "green"
-      ? "text-green-600"
+      ? "text-green-400"
       : highlight === "red"
-      ? "text-red-600"
-      : "text-gray-900";
+      ? "text-red-400"
+      : "text-white";
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <p className="text-xs uppercase tracking-wide text-gray-500">{label}</p>
+    <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+      <p className="text-xs uppercase tracking-wide text-gray-400">{label}</p>
       <p className={`mt-2 text-2xl font-semibold ${valueClass}`}>{value}</p>
     </div>
   );

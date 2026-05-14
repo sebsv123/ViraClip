@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 import aiofiles
 import httpx
-from ...config import Config
+from ...config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ class GoogleImagenService:
     """Service for generating images using Google Imagen 3."""
     
     def __init__(self):
-        self.config = Config()
+        self.config = get_config()
         self.api_key = self.config.google_api_key
         self.output_dir = Path(self.config.temp_dir) / "generated_assets"
         self.output_dir.mkdir(parents=True, exist_ok=True)

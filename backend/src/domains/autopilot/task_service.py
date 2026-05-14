@@ -17,6 +17,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import Config, get_config
@@ -121,8 +122,21 @@ class TaskService(_ProcessorMixin, _QueriesMixin, _EditorMixin):
         force_fresh: bool = False,
     ) -> str:
         """Create a new task with its associated source. Returns task ID."""
-        if not await self.task_repo.user_exists(self.db, user_id):
-            raise ValueError(f"User {user_id} not found")
+        # In self-host mode, skip the user existence check since users aren't
+        # pre-registered in the database. The billing service also skips billing
+        # checks when monetization is disabled.
+        if self.config.monetization_enabled:
+            if not await self.task_repo.user_exists(self.db, user_id):
+                raise ValueError(f"User {user_id} not found")
+        else:
+            # Auto-create the user if they don't exist (self-host mode)
+            if not await self.task_repo.user_exists(self.db, user_id):
+                logger.info(f"Auto-creating user {user_id} (self-host mode)")
+                await self.db.execute(
+                    text('INSERT INTO users (id, name, email, "createdAt", "updatedAt") VALUES (:id, :name, :email, NOW(), NOW()) ON CONFLICT (id) DO NOTHING'),
+                    {"id": user_id, "name": f"User {user_id[:8]}", "email": f"{user_id}@selfhost.local"},
+                )
+                await self.db.commit()
 
         source_type = self.video_service.determine_source_type(url)
 

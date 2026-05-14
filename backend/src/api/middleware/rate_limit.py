@@ -230,7 +230,14 @@ async def task_rate_limit_dependency(request: Request) -> None:
 
     Limit defaults to 20 tasks/hour; override via RATE_LIMIT_TASKS_PER_HOUR env var.
     Fails **open** if Redis is unavailable so a Redis outage never blocks submissions.
+    Bypasses rate limiting entirely when SELF_HOST=True (self-hosted mode).
     """
+    # Bypass rate limiting for self-hosted instances
+    from ...config import get_config
+    cfg = get_config()
+    if cfg.self_host:
+        return
+
     user_id = (
         request.headers.get("x-viraclip-user-id")
         or request.headers.get("user_id")

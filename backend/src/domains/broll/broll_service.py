@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from src import gpu_utils
 
 import httpx
 
@@ -753,7 +754,7 @@ class BrollService:
                             "ffmpeg", "-y", "-i", str(_ba),
                             "-vf", _efx_filter,
                             "-t", str(overlay_duration_s),
-                            "-c:v", "libx264", "-preset", "ultrafast", "-an",
+                            *gpu_utils.ffmpeg_codec_flags("high"), "-an",
                             str(_efx_out),
                         ]
                         _efx_res = _sp.run(_efx_cmd, capture_output=True, timeout=30)

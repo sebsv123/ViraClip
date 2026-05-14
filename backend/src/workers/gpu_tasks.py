@@ -284,10 +284,10 @@ class GpuWorkerSettings:
     Reads from the SAME Redis instance but a DIFFERENT queue: viraclip_gpu_tasks.
     """
 
-    from ..config import Config
+    from ..config import get_config
     from arq.connections import RedisSettings
 
-    config = Config()
+    config = get_config()
 
     functions = [
         generate_broll_t2v,

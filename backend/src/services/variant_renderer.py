@@ -8,6 +8,8 @@ import os
 from enum import Enum
 from pathlib import Path
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,9 +25,6 @@ RATIO_SPECS = {
     AspectRatio.LANDSCAPE: {"w": 1920, "h": 1080, "vf": "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"},
 }
 
-
-def _gpu_available() -> bool:
-    return bool(os.getenv("CUDA_VISIBLE_DEVICES", ""))
 
 
 async def render_aspect_variant(
@@ -43,7 +42,7 @@ async def render_aspect_variant(
         "ffmpeg", "-y",
         "-i", str(source_clip_path),
         "-vf", spec["vf"],
-        "-c:v", "h264_nvenc" if _gpu_available() else "libx264",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-crf", "23", "-preset", "fast",
         "-c:a", "copy",
         "-movflags", "+faststart",

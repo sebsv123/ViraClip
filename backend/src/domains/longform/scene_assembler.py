@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from src import gpu_utils
 from .narrator_tts import NarrationAudio
 from .script_writer import ScriptSection
 
@@ -52,7 +53,7 @@ async def assemble_video(
                 "[0:a]volume=0.15[bga];[1:a][bga]amix=inputs=2:duration=first[aout]",
                 "-map", "0:v",
                 "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 "-t", str(audio_duration),
                 "-shortest",
@@ -130,7 +131,7 @@ async def _compress_final_video(input_path: Path, output_path: Path) -> Path:
     if gpu_available:
         video_codec = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
     else:
-        video_codec = ["-c:v", "libx264", "-preset", "medium", "-crf", "23"]
+        video_codec = gpu_utils.ffmpeg_codec_flags("medium")
 
     cmd = [
         "ffmpeg", "-y",
@@ -172,7 +173,7 @@ async def _fetch_broll(keywords: List[str], target_duration: float) -> Path:
     fallback = Path(f"/tmp/broll_fallback_{keyword}.mp4")
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s=1920x1080:d={target_duration}",
-         "-c:v", "libx264", "-preset", "ultrafast", str(fallback)],
+         *gpu_utils.ffmpeg_codec_flags("high"), str(fallback)],
         capture_output=True, timeout=30,
     )
     return fallback
@@ -185,7 +186,7 @@ def _create_fallback_scene(scene_path: Path, audio_path: Path, duration: float, 
         ["ffmpeg", "-y",
          "-f", "lavfi", "-i", f"color=c=0x1a1a2e:s={w}x{h}:d={duration}",
          "-i", str(audio_path),
-         "-c:v", "libx264", "-preset", "ultrafast",
+         *gpu_utils.ffmpeg_codec_flags("high"),
          "-c:a", "aac", "-b:a", "128k",
          "-shortest",
          str(scene_path)],

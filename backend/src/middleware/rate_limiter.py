@@ -15,7 +15,7 @@ from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 import redis.asyncio as redis
 
-from ..config import Config
+from ..config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class RateLimiter:
     
     def __init__(self, redis_client: Optional[redis.Redis] = None):
         self.redis = redis_client
-        self.config = Config()
+        self.config = get_config()
         
         # Rate limit definitions (requests per window_seconds)
         self.limits = {

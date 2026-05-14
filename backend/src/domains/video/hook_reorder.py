@@ -20,6 +20,7 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,7 @@ async def reorder_hook(
         *inputs,
         "-filter_complex", f"{filter_v};{filter_a}",
         "-map", "[outv]", "-map", "[outa]",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "21",
+        *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         output_path,
     ]

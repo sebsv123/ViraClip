@@ -12,6 +12,7 @@ import json
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
+from src import gpu_utils
 
 
 def _get_ffmpeg_exe() -> str:
@@ -133,7 +134,7 @@ async def apply_cut_zooms(
         _get_ffmpeg_exe(), "-y", "-v", "error",
         "-i", video_path,
         "-vf", zoompan_filter,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        *gpu_utils.ffmpeg_codec_flags("medium"),
         "-c:a", "copy",
         output_path,
     ]

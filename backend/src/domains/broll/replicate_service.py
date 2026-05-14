@@ -14,7 +14,7 @@ from typing import Optional, Dict, Any
 import aiofiles
 import httpx
 import os
-from ...config import Config
+from ...config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ class ReplicateService:
     SDXL = "stability-ai/sdxl"
     
     def __init__(self):
-        self.config = Config()
+        self.config = get_config()
         self.api_token = os.getenv("REPLICATE_API_TOKEN")
         self.output_dir = Path(self.config.temp_dir) / "generated_assets"
         self.output_dir.mkdir(parents=True, exist_ok=True)

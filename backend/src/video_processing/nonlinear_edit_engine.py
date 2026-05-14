@@ -1,4 +1,5 @@
 """
+from src import gpu_utils
 Non-Linear Editing Engine ("Frankenstein" Editing)
 Une segmentos no contiguos de forma coherente, ocultando cortes con transiciones
 """
@@ -205,7 +206,7 @@ class NonLinearEditingEngine:
             "-ss", str(start),
             "-to", str(end),
             "-i", source_video,
-            "-c:v", "libx264",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-preset", "fast",
             "-crf", "18",
             "-c:a", "aac",

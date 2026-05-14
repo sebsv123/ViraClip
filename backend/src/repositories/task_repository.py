@@ -166,6 +166,7 @@ class TaskRepository:
             "processing_mode": getattr(row, "processing_mode", "fast"),
             "cache_hit": getattr(row, "cache_hit", False),
             "error_code": getattr(row, "error_code", None),
+            "error_message": getattr(row, "error_message", None),
             "stage_timings_json": getattr(row, "stage_timings_json", None),
             "started_at": getattr(row, "started_at", None),
             "completed_at": getattr(row, "completed_at", None),
@@ -322,17 +323,22 @@ class TaskRepository:
         error_code: str,
         error_message: str
     ) -> None:
-        """Update task with error details."""
+        """Update task with error details. Saves both error_code and error_message."""
         await db.execute(
             text("""
                 UPDATE tasks
                 SET error_code = :error_code,
+                    error_message = :error_message,
                     status = 'failed'
                 WHERE id = :task_id
             """),
-            {"task_id": task_id, "error_code": error_code[:80]}
+            {
+                "task_id": task_id,
+                "error_code": error_code[:80],
+                "error_message": error_message[:500],
+            }
         )
-    
+
     @staticmethod
     async def update_task_status(
         db: AsyncSession,
@@ -368,6 +374,118 @@ class TaskRepository:
             f"Updated task {task_id} status to {status}"
             + (f" (progress: {progress}%)" if progress else "")
         )
+
+    @staticmethod
+    async def update_task_status_atomic(
+        db: AsyncSession,
+        task_id: str,
+        new_status: str,
+        expected_current_status: str,
+        progress: Optional[int] = None,
+        progress_message: Optional[str] = None,
+    ) -> bool:
+        """Atomically update task status only if it matches expected_current_status.
+        
+        Returns True if the row was updated, False if the status didn't match
+        (prevents duplicate processing when multiple workers race).
+        """
+        params = {
+            "task_id": task_id,
+            "new_status": new_status,
+            "expected_status": expected_current_status,
+            "progress": progress,
+            "progress_message": progress_message,
+        }
+
+        set_parts = ["status = :new_status"]
+
+        if progress is not None:
+            set_parts.append("progress = :progress")
+
+        if progress_message is not None:
+            set_parts.append("progress_message = :progress_message")
+
+        set_parts.append("updated_at = NOW()")
+
+        query = f"""
+            UPDATE tasks 
+            SET {', '.join(set_parts)} 
+            WHERE id = :task_id AND status = :expected_status
+        """
+
+        result = await db.execute(text(query), params)
+        await db.commit()
+        updated = result.rowcount > 0
+        if updated:
+            logger.info(
+                f"Atomic status update: task {task_id} {expected_current_status} → {new_status}"
+                + (f" (progress: {progress}%)" if progress else "")
+            )
+        else:
+            # Check current status to determine log level
+            # If task is already 'failed' or 'dead', this is expected — log at DEBUG
+            try:
+                current_row = await db.execute(
+                    text("SELECT status FROM tasks WHERE id = :task_id"),
+                    {"task_id": task_id},
+                )
+                current = current_row.fetchone()
+                current_status = current[0] if current else "unknown"
+            except Exception:
+                current_status = "unknown"
+
+            if current_status in ("failed", "dead", "cancelled"):
+                logger.debug(
+                    f"Atomic status update skipped: task {task_id} expected {expected_current_status}, "
+                    f"current status is '{current_status}' — expected, no action needed"
+                )
+            else:
+                logger.warning(
+                    f"Atomic status update FAILED: task {task_id} expected {expected_current_status}, "
+                    f"current status is '{current_status}' — skipping"
+                )
+        return updated
+
+    @staticmethod
+    async def find_task_by_user_and_url(
+        db: AsyncSession,
+        user_id: str,
+        url: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Find an existing task for a user by source URL.
+        
+        Used by the idempotency check in create_task to prevent duplicate
+        submissions of the same URL by the same user.
+        Returns the task dict if found, None otherwise.
+        """
+        try:
+            result = await db.execute(
+                text("""
+                    SELECT t.id, t.status, t.user_id, t.created_at
+                    FROM tasks t
+                    JOIN sources s ON t.source_id = s.id
+                    WHERE t.user_id = :user_id
+                      AND s.url = :url
+                      AND t.status IN ('queued', 'processing')
+                    ORDER BY t.created_at DESC
+                    LIMIT 1
+                """),
+                {"user_id": user_id, "url": url},
+            )
+        except Exception:
+            await db.rollback()
+            return None
+
+        row = result.fetchone()
+        if not row:
+            return None
+
+        return {
+            "id": row.id,
+            "status": row.status,
+            "user_id": row.user_id,
+            "created_at": row.created_at,
+        }
 
     @staticmethod
     async def update_task_clips(
@@ -511,3 +629,121 @@ class TaskRepository:
         )
         await db.commit()
         return result.fetchone() is not None
+
+    # ── Dead-letter helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    async def get_dead_letter_tasks(
+        db: AsyncSession,
+        limit: int = 50,
+        offset: int = 0,
+        source: Optional[str] = None,
+        error_code: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List dead-letter tasks with optional filtering and pagination."""
+        conditions = []
+        params: Dict[str, Any] = {"limit": limit, "offset": offset}
+
+        if source:
+            conditions.append("dl.source = :source")
+            params["source"] = source
+        if error_code:
+            conditions.append("dl.error_code = :error_code")
+            params["error_code"] = error_code
+
+        where_clause = " AND ".join(conditions) if conditions else "TRUE"
+
+        query = f"""
+            SELECT
+                dl.id,
+                dl.task_id,
+                dl.original_status,
+                dl.error_code,
+                dl.error_message,
+                dl.source,
+                dl.created_at,
+                dl.retried_at,
+                dl.retried_by,
+                t.status AS task_status,
+                t.user_id
+            FROM dead_letter_tasks dl
+            LEFT JOIN tasks t ON t.id = dl.task_id
+            WHERE {where_clause}
+            ORDER BY dl.created_at DESC
+            LIMIT :limit OFFSET :offset
+        """
+        result = await db.execute(text(query), params)
+        rows = result.fetchall()
+
+        return [
+            {
+                "id": row.id,
+                "task_id": row.task_id,
+                "original_status": row.original_status,
+                "error_code": row.error_code,
+                "error_message": row.error_message,
+                "source": row.source,
+                "created_at": row.created_at,
+                "retried_at": row.retried_at,
+                "retried_by": row.retried_by,
+                "task_status": row.task_status,
+                "user_id": row.user_id,
+            }
+            for row in rows
+        ]
+
+    @staticmethod
+    async def count_dead_letter_tasks(
+        db: AsyncSession,
+        source: Optional[str] = None,
+        error_code: Optional[str] = None,
+    ) -> int:
+        """Count dead-letter tasks with optional filtering."""
+        conditions = []
+        params: Dict[str, Any] = {}
+
+        if source:
+            conditions.append("source = :source")
+            params["source"] = source
+        if error_code:
+            conditions.append("error_code = :error_code")
+            params["error_code"] = error_code
+
+        where_clause = " AND ".join(conditions) if conditions else "TRUE"
+
+        result = await db.execute(
+            text(f"SELECT COUNT(*) FROM dead_letter_tasks WHERE {where_clause}"),
+            params,
+        )
+        return result.scalar() or 0
+
+    @staticmethod
+    async def retry_dead_letter_task(
+        db: AsyncSession,
+        dead_letter_id: str,
+        retried_by: str = "admin",
+    ) -> Optional[Dict[str, Any]]:
+        """Mark a dead-letter task as retried and return the task_id for re-enqueueing.
+        
+        Returns the task dict (with task_id and user_id) if found, None otherwise.
+        """
+        result = await db.execute(
+            text("""
+                UPDATE dead_letter_tasks
+                SET retried_at = NOW(),
+                    retried_by = :retried_by
+                WHERE id = :id
+                  AND retried_at IS NULL
+                RETURNING task_id, error_code, source
+            """),
+            {"id": dead_letter_id, "retried_by": retried_by},
+        )
+        await db.commit()
+        row = result.fetchone()
+        if not row:
+            return None
+        return {
+            "task_id": row.task_id,
+            "error_code": row.error_code,
+            "source": row.source,
+        }

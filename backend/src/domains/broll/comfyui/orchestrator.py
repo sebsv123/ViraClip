@@ -10,6 +10,7 @@ import random
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -316,7 +317,7 @@ class ComfyUIOrchestrator:
                 f"[0:a][1:a]acrossfade=d={duration}[a]"
             ),
             "-map", "[v]", "-map", "[a]",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *gpu_utils.ffmpeg_codec_flags("high"),
             "-c:a", "aac", "-b:a", "192k",
             str(out_path),
         ]
@@ -337,7 +338,7 @@ class ComfyUIOrchestrator:
                 "-filter_complex",
                 f"[0:v][1:v]xfade=transition={xfade}:duration={duration}:offset={offset}[v]",
                 "-map", "[v]",
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-an",
                 str(out_path),
             ]

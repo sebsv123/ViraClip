@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import json
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,7 @@ class FaceDetectionService:
                 "ffmpeg", "-y",
                 "-i", input_path,
                 "-vf", full_filter,
-                "-c:v", "libx264",
+                *gpu_utils.ffmpeg_codec_flags("high"),
                 "-crf", "23",
                 "-preset", "fast",
                 "-c:a", "copy",

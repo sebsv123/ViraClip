@@ -169,7 +169,7 @@ x-gpu-reserve: &gpu-reserve
       devices:
         - driver: nvidia
           count: 1
-          capabilities: [gpu]
+          capabilities: [gpu, video]
 
 x-worker-deps: &worker-deps
   postgres:
@@ -189,13 +189,12 @@ x-worker-base: &worker-base
   volumes: *worker-volumes
   depends_on: *worker-deps
   deploy:
-    <<: *gpu-reserve
     resources:
       reservations:
         devices:
           - driver: nvidia
             count: 1
-            capabilities: [gpu]
+            capabilities: [gpu, video]
       limits:
         memory: 6G
 
@@ -336,9 +335,6 @@ services:
       - ~/CascadeProjects/ViraClip/outputs:/comfyui/output
       - ~/CascadeProjects/ViraClip/models:/comfyui/models
     environment:
-      NVIDIA_VISIBLE_DEVICES: all
-      PYTORCH_CUDA_ALLOC_CONF: max_split_size_mb:512,garbage_collection_threshold:0.6
-      CUDA_MODULE_LOADING: LAZY
       OMP_NUM_THREADS: 8
       VIRACLIP_API_URL: http://backend:8000
     deploy:
@@ -346,11 +342,6 @@ services:
         limits:
           cpus: '6.0'
           memory: 10G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8188/system_stats || exit 1"]
@@ -363,13 +354,21 @@ services:
     <<: *worker-base
     container_name: viraclip-worker
     runtime: nvidia
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-modeset:/dev/nvidia-modeset
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
     environment:
       <<: [*core-env, *editing-env, *ai-env]
       NVIDIA_REQUIRE_CUDA: ""
+      NVIDIA_DRIVER_CAPABILITIES: all
       WHISPER_DEVICE: cuda
       WHISPER_COMPUTE_TYPE: float16
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       RENDER_CONCURRENCY: 4
+      FFMPEG_BINARY: /usr/local/bin/ffmpeg
 
   worker-2:
     <<: *worker-base

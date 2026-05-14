@@ -6,6 +6,7 @@ import logging
 load_dotenv()
 
 _config_override = None
+_config_singleton = None
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +26,7 @@ class Config:
 
         self.whisper_model = os.getenv("WHISPER_MODEL_SIZE", "medium")
         self.llm = self._get_optional_env("LLM") or self._infer_default_llm()
+        self.hf_token = self._get_optional_env("HF_TOKEN")
         self.assembly_ai_api_key = os.getenv("ASSEMBLY_AI_API_KEY")
         self.pexels_api_key = os.getenv("PEXELS_API_KEY")
         self.apify_api_token = self._get_optional_env("APIFY_API_TOKEN")
@@ -241,10 +243,14 @@ class Config:
 
 
 def get_config() -> Config:
+    """Return a cached Config singleton to avoid re-initializing on every call."""
+    global _config_singleton
     override = _config_override
     if override is not None:
         return override
-    return Config()
+    if _config_singleton is None:
+        _config_singleton = Config()
+    return _config_singleton
 
 
 def set_config_override(config: Config | None) -> None:

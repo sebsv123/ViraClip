@@ -2,6 +2,7 @@
 Job queue setup using arq (async Redis queue).
 """
 
+import asyncio
 import logging
 from typing import Optional
 from arq import create_pool
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 # Queue names
 DEFAULT_QUEUE_NAME = "viraclip_cpu_tasks"  # must match WorkerSettings.queue_name
 FAST_QUEUE_NAME = "viraclip_cpu_tasks"
+
+# Timeout for creating the Redis pool (seconds)
+_REDIS_POOL_TIMEOUT = 5.0
 
 
 def _get_redis_settings() -> RedisSettings:
@@ -30,10 +34,25 @@ class JobQueue:
         """Get or create the Redis connection pool."""
         if cls._pool is None:
             config = get_config()
-            cls._pool = await create_pool(_get_redis_settings())
-            logger.info(
-                f"Created arq Redis pool: {config.redis_host}:{config.redis_port}"
-            )
+            try:
+                cls._pool = await asyncio.wait_for(
+                    create_pool(_get_redis_settings()),
+                    timeout=_REDIS_POOL_TIMEOUT,
+                )
+                logger.info(
+                    f"Created arq Redis pool: {config.redis_host}:{config.redis_port}"
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"Timeout creating arq Redis pool to {config.redis_host}:{config.redis_port} "
+                    f"after {_REDIS_POOL_TIMEOUT}s"
+                )
+                raise
+            except Exception:
+                logger.exception(
+                    f"Failed to create arq Redis pool to {config.redis_host}:{config.redis_port}"
+                )
+                raise
         return cls._pool
 
     @classmethod

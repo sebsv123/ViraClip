@@ -29,7 +29,8 @@
       "width": 576,
       "height": 1024,
       "length": 49,
-      "batch_size": 1
+      "batch_size": 1,
+      "guiding_latent": ["14", 0]
     }
   },
   "5": {
@@ -107,6 +108,14 @@
     "inputs": {
       "clip_name": "t5xxl_fp16.safetensors",
       "type": "stable_diffusion"
+    }
+  },
+  "14": {
+    "class_type": "EmptyLatentImage",
+    "inputs": {
+      "width": 576,
+      "height": 1024,
+      "batch_size": 1
     }
   }
 }

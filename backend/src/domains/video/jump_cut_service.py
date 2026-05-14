@@ -16,6 +16,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
+from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
@@ -299,7 +300,7 @@ async def apply_jump_cuts(
         + [
             "-filter_complex", f"{filter_v};{filter_a}",
             "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            *gpu_utils.ffmpeg_codec_flags("medium"),
             "-c:a", "aac", "-b:a", "128k",
             output_path,
         ]

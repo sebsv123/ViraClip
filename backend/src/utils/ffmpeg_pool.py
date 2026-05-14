@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,7 +148,7 @@ class FFmpegPool:
                 "-ss", str(start_time),
                 "-i", str(input_path),
                 "-t", str(duration),
-                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                *gpu_utils.ffmpeg_codec_flags("medium"),
                 "-c:a", "aac", "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(output_path)
@@ -229,7 +231,7 @@ class FFmpegPool:
                     "ffmpeg", "-y",
                     "-f", "concat", "-safe", "0",
                     "-i", str(concat_list),
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    *gpu_utils.ffmpeg_codec_flags("medium"),
                     "-c:a", "aac", "-b:a", "128k",
                     str(output_path)
                 ]

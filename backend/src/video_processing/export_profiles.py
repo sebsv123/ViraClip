@@ -7,6 +7,8 @@ from typing import Dict, List, Optional
 from enum import Enum
 import logging
 
+from src import gpu_utils
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,7 +81,7 @@ EXPORT_PROFILES = {
         name="TikTok Optimized",
         platform=Platform.TIKTOK,
         resolution="1080x1920",
-        video_codec="libx264",
+        video_codec=gpu_utils.get_video_encoder(),
         video_bitrate="8M",
         audio_codec="aac",
         audio_bitrate="192k",
@@ -126,7 +128,7 @@ EXPORT_PROFILES = {
         name="TikTok Upload (Small)",
         platform=Platform.TIKTOK_UPLOAD,
         resolution="1080x1920",
-        video_codec="libx264",
+        video_codec=gpu_utils.get_video_encoder(),
         video_bitrate="4M",
         audio_codec="aac",
         audio_bitrate="128k",
@@ -150,7 +152,7 @@ EXPORT_PROFILES = {
         name="Instagram Reels",
         platform=Platform.REELS,
         resolution="1080x1920",
-        video_codec="libx264",
+        video_codec=gpu_utils.get_video_encoder(),
         video_bitrate="15M",
         audio_codec="aac",
         audio_bitrate="192k",
@@ -196,7 +198,7 @@ EXPORT_PROFILES = {
         name="YouTube Shorts",
         platform=Platform.SHORTS,
         resolution="1080x1920",
-        video_codec="libx264",
+        video_codec=gpu_utils.get_video_encoder(),
         video_bitrate="16M",
         audio_codec="aac",
         audio_bitrate="256k",
@@ -240,7 +242,7 @@ EXPORT_PROFILES = {
         name="Universal 9:16",
         platform=Platform.UNIVERSAL,
         resolution="1080x1920",
-        video_codec="libx264",
+        video_codec=gpu_utils.get_video_encoder(),
         video_bitrate="10M",
         audio_codec="aac",
         audio_bitrate="128k",

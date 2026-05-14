@@ -32,7 +32,6 @@ import {
 import Link from "next/link";
 import { useSession, signOut } from "@/lib/auth-client";
 import { useRouter } from "next/navigation";
-import { AppShell } from "@/components/app-shell";
 import { ShimmerButton } from "@/components/ui/shimmer-button";
 import { MagicCard } from "@/components/ui/magic-card";
 import { cn } from "@/lib/utils";
@@ -617,8 +616,7 @@ export default function DashboardPage() {
   }
   
   return (
-    <AppShell user={session.user} credits={50 - (Array.isArray(tasks) ? tasks.length : 0)}>
-      <div className="p-6 lg:p-8 max-w-7xl mx-auto">
+    <div className="p-6 lg:p-8 max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
           <div>
@@ -747,14 +745,12 @@ export default function DashboardPage() {
             )}
           </AnimatePresence>
         </div>
+        {/* Create Task Modal */}
+        <CreateTaskModal
+          isOpen={isCreateModalOpen}
+          onClose={() => setIsCreateModalOpen(false)}
+          onSubmit={handleCreateTask}
+        />
       </div>
-      
-      {/* Create Task Modal */}
-      <CreateTaskModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onSubmit={handleCreateTask}
-      />
-    </AppShell>
-  );
-}
+    );
+  }

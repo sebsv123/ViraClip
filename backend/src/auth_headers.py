@@ -6,7 +6,7 @@ import time
 
 from fastapi import HTTPException, Request
 
-from .config import Config
+from .config import get_config
 
 
 USER_ID_HEADER = "x-viraclip-user-id"
@@ -22,7 +22,7 @@ def _expected_signature(secret: str, user_id: str, timestamp: str) -> str:
 def get_signed_user_id(request: Request, config=None) -> str:
     """Extract and verify signed user ID from request headers."""
     if config is None:
-        config = Config()
+        config = get_config()
     
     user_id = request.headers.get(USER_ID_HEADER)
     timestamp = request.headers.get(TIMESTAMP_HEADER)

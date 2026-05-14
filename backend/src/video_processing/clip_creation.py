@@ -507,31 +507,33 @@ def create_optimized_clip(
                 except Exception as _fade_e:
                     logger.debug(f"Fade effects skipped: {_fade_e}")
 
-            # 8. Write final clip
+            # 8. Write final clip — delegate encoder selection to gpu_utils.py
+            #    (the single source of truth for GPU detection).
             if gpu_encoding_settings:
                 encoding_settings = gpu_encoding_settings
                 logger.info(f"Using GPU encoding: {encoding_settings.get('codec')}")
             else:
                 from ..gpu_utils import get_ffmpeg_video_codec_args as _get_enc
                 _enc = _get_enc("high")
-                # Proactive NVENC test: if nvenc fails, fall back to libx264
-                USE_NVENC = _enc["codec"] == "nvenc_h264" and _test_nvenc()
-                if USE_NVENC:
+                if _enc["codec"] == "h264_nvenc":
                     # Use NVENC-compatible params for MoviePy (no -rc constqp)
                     encoding_settings = {
-                        "codec": "nvenc_h264",
+                        "codec": "h264_nvenc",
                         "preset": _enc.get("preset", "p4"),
-                        "ffmpeg_params": ["-rc", "vbr", "-cq", "20", "-pix_fmt", "yuv420p"],
+                        # NOTE: -cq is an h264_nvenc encoder-specific AVOption that
+                        # MoviePy 2.1.2 places in a position where FFmpeg doesn't
+                        # recognize it. Use -b:v (standard FFmpeg option) instead.
+                        "ffmpeg_params": ["-b:v", "10M", "-pix_fmt", "yuv420p"],
                     }
-                    logger.info(f"Using GPU encoding: nvenc_h264 (tested OK)")
+                    logger.info(f"Using GPU encoding: h264_nvenc (via gpu_utils)")
                 else:
-                    # Safe fallback to libx264
+                    # Safe fallback to CPU encoding (libx264)
                     encoding_settings = {
-                        "codec": "libx264",
-                        "preset": "ultrafast",
+                        "codec": _enc["codec"],
+                        "preset": _enc.get("preset", "ultrafast"),
                         "ffmpeg_params": ["-crf", "22", "-pix_fmt", "yuv420p"],
                     }
-                    logger.info(f"Using encoding: libx264 (NVENC unavailable or failed test)")
+                    logger.info(f"Using encoding: {_enc['codec']} (NVENC unavailable, via gpu_utils)")
 
             _fps_used = clip.fps or 30
 
