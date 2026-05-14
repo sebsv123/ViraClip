@@ -2,9 +2,9 @@
 
 # 🎬 ViraClip
 
-**AI-powered video clipping for content creators**
+### Turn any long video into viral short clips — fully automated, fully self-hostable.
 
-Turn long-form videos into viral short clips for TikTok, Reels, and Shorts — automatically.
+Drop a YouTube URL (or upload a file). Get back TikTok-ready vertical clips with AI-scored hooks, word-level subtitles, B-roll, beat-synced music, and platform export presets. Zero manual editing.
 
 [![Tests](https://github.com/sebsv123/ViraClip/actions/workflows/tests.yml/badge.svg)](https://github.com/sebsv123/ViraClip/actions/workflows/tests.yml)
 [![Lint](https://github.com/sebsv123/ViraClip/actions/workflows/lint.yml/badge.svg)](https://github.com/sebsv123/ViraClip/actions/workflows/lint.yml)
@@ -14,228 +14,230 @@ Turn long-form videos into viral short clips for TikTok, Reels, and Shorts — a
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-[Quick start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](CONTRIBUTING.md) · [Docs](docs/)
+[Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](CONTRIBUTING.md) · [Docs](docs/)
 
 </div>
 
 ---
 
-## ✨ What is ViraClip?
+## 🤔 Why ViraClip?
 
-ViraClip ingests a long video (YouTube URL or upload), transcribes it, scores the most viral moments with AI, and renders ready-to-publish vertical short-form clips with subtitles, B-roll, captions, and platform-specific export presets.
+Most AI clipping tools are black boxes — you upload, they charge, you get clips. ViraClip is different:
 
-It is **open-source**, **self-hostable**, and **GPU-accelerated** end-to-end.
+- **Open source & self-hostable** — your videos never leave your infrastructure
+- **Full pipeline control** — every stage (transcription → scoring → rendering → export) is inspectable and overridable
+- **GPU-accelerated end-to-end** — Whisper, ComfyUI B-roll generation, and FFmpeg all run on your hardware
+- **Multi-provider LLM** — swap between Gemini, GPT-4o, Claude, or a local Ollama model with one env variable
 
-```
-URL  ─►  Download  ─►  Whisper transcript  ─►  AI virality scoring
-          │
-          └─►  Per-clip pipeline:
-                 Subtitles  →  B-roll  →  Beat-sync BGM  →  Polish  →  Export
-```
+---
 
-## 🚀 Quick start
+## 🚀 Quick Start
 
 ```bash
 git clone https://github.com/sebsv123/ViraClip.git
 cd ViraClip
-cp .env.example .env       # add at least ASSEMBLY_AI_API_KEY + one LLM provider key
+cp .env.example .env   # add ASSEMBLY_AI_API_KEY + one LLM key
 docker compose up -d --build
 ```
 
-Then open:
+| Service          | URL                          |
+|------------------|------------------------------|
+| Frontend         | http://localhost:3000        |
+| API docs         | http://localhost:8000/docs   |
+| Postgres         | localhost:5432               |
+| Redis            | localhost:6379               |
 
-| Service          | URL                                         |
-|------------------|---------------------------------------------|
-| Frontend         | <http://localhost:3000>                     |
-| Backend API docs | <http://localhost:8000/docs>                |
-| Postgres         | `localhost:5432` (`viraclip` / env-driven)  |
-| Redis            | `localhost:6379`                            |
+> **GPU acceleration:** requires NVIDIA Container Toolkit. CPU-only mode works but is ~5–10× slower for transcription and rendering.
 
-The first build pulls heavy ML images (CUDA, Whisper, ComfyUI). After that, `docker compose up -d` is fast.
+The first `build` pulls heavy ML images (CUDA, Whisper, ComfyUI). Subsequent `up -d` starts in seconds.
 
-> **Need GPU acceleration?** Make sure NVIDIA Container Toolkit is installed. CPU-only mode also works but transcription/clip rendering will be ~5–10× slower.
+---
 
-## 🎯 Features
+## ✨ Features
 
-### Pipeline
-- 🎬 **AI clip selection** — LLM ranks segments by virality and hook strength
-- 📝 **Word-level transcription** — `faster-whisper` with GPU acceleration
-- 🪄 **Multi-style subtitles** — ASS-rendered TikTok/CapCut/Hormozi presets
-- 🎞️ **B-roll generation** — Pexels, ComfyUI (LTXV), Stability AI, Replicate
-- 🎵 **Beat-synced BGM** — automatic BPM matching + sidechain ducking
-- 🔊 **Audio polish** — denoising, voice enhancement, EBU R128 loudness
-- 🎨 **Visual polish** — LUT grading, vignette, cut-zoom, hook slo-mo
-- 📱 **Platform exports** — TikTok / Reels / Shorts presets out of the box
+### AI Pipeline
+| Stage | What happens |
+|---|---|
+| **Ingest** | `yt-dlp` downloads from YouTube / upload any file |
+| **Transcribe** | `faster-whisper` (GPU) produces word-level timestamps |
+| **Score** | LLM ranks every segment by virality, hook strength, and emotional arc |
+| **Edit** | Cuts, pacing, impact zoom, hook slo-mo applied automatically |
+| **B-roll** | Pulled from Pexels, generated via ComfyUI (LTXV), Stability AI, or Replicate |
+| **Subtitles** | ASS-rendered TikTok / CapCut / Hormozi word-pop presets |
+| **Audio** | Denoising → voice enhancement → beat-synced BGM → EBU R128 loudness |
+| **Export** | TikTok 9:16, Reels 4:5, Shorts — ready to publish |
 
 ### Platform
-- 🚦 **Async worker queue** — `arq` + Redis for concurrent rendering
-- 💾 **Smart caching** — Redis + disk-tier cache for transcripts and AI analysis
-- 📊 **Observability** — Prometheus-friendly metrics, structured logging
+- ⚡ **Async rendering** — `arq` + Redis worker queue, multiple clips in parallel
+- 💾 **Smart caching** — Redis + disk cache for transcripts and AI analysis
+- 📊 **Observability** — Prometheus metrics, structured JSON logging
 - 🔐 **Auth** — `better-auth` with email/password + Google OAuth
-- 💳 **Billing (optional)** — Stripe subscriptions with Resend lifecycle emails
-- 🔄 **Self-host or hosted** — same codebase, toggled via `SELF_HOST` env var
+- 💳 **Billing (optional)** — Stripe subscriptions + Resend lifecycle emails
+- 🏠 **Self-host or hosted** — same codebase, toggled via `SELF_HOST` env var
+
+---
 
 ## 🧱 Architecture
 
 ```
-┌──────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│  Next.js 15  │───►│   FastAPI API    │───►│   arq worker    │
-│  (frontend)  │    │  (REST + SSE)    │    │  (clip render)  │
-└──────────────┘    └──────────────────┘    └─────────────────┘
-       │                     │                       │
-       │              ┌──────┴──────┐                │
-       └─────────────►│  Postgres   │◄───────────────┘
-                      │   Redis     │
-                      └─────────────┘
+┌─────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│  Next.js 15 │────►│  FastAPI + SSE   │────►│   arq Worker     │
+│  (frontend) │     │  (REST API)      │     │  (clip renderer) │
+└─────────────┘     └──────────────────┘     └──────────────────┘
+       │                     │                        │
+       │              ┌──────┴───────┐                │
+       └─────────────►│  PostgreSQL  │◄───────────────┘
+                      │    Redis     │
+                      └──────────────┘
                              ▲
-                             │
-                      ┌──────┴──────┐
-                      │  ComfyUI    │  (optional, GPU)
-                      │  Ollama     │  (optional, local LLM)
-                      └─────────────┘
+                    ┌────────┴────────┐
+                    │   ComfyUI       │  (GPU B-roll generation)
+                    │   Ollama        │  (local LLM, optional)
+                    │   Rust Agent    │  (high-perf task runner)
+                    └─────────────────┘
 ```
 
-Backend code is organised by **business domain** instead of one big `services/` folder:
+Backend is organized by **business domain** — not a flat `services/` dump:
 
 ```
-backend/src/
-├── api/                  # HTTP routes
-├── core/                 # cache, metrics, error handling, observability
-├── domains/
-│   ├── ai/               # LLMs, vision, editorial brain
-│   ├── audio/            # music, SFX, voice, beat sync
-│   ├── autopilot/        # task orchestration
-│   ├── billing/
-│   ├── broll/            # generative + stock B-roll
-│   ├── captions/         # subtitles + translation
-│   ├── detection/        # CV / face / scene
-│   ├── feedback/         # learning loops
-│   ├── notifications/
-│   ├── publishing/       # social distribution
-│   ├── thumbnails/
-│   ├── upscaling/
-│   ├── validation/       # QA & health
-│   ├── video/            # clip rendering pipeline
-│   └── virality/         # scoring, hooks, ML
-├── repositories/         # DB access
-├── workers/              # arq worker entrypoints
-└── agents/               # agent pipelines
+backend/src/domains/
+├── ai/          # LLMs, vision, editorial scoring
+├── audio/       # BGM, SFX, voice, beat sync
+├── broll/       # generative + stock B-roll
+├── captions/    # subtitles + translation
+├── detection/   # CV, face, scene detection
+├── video/       # core clip rendering pipeline
+├── virality/    # scoring, hooks, ML models
+└── ...          # billing, publishing, upscaling, thumbnails
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the full diagram.
+Full diagram: [`docs/architecture.md`](docs/architecture.md)
+
+---
 
 ## ⚙️ Configuration
 
-ViraClip is configured via environment variables. A complete annotated template is in [`.env.example`](.env.example). The minimum required:
+Everything is driven by environment variables. Annotated template: [`.env.example`](.env.example).
+
+**Minimum to get started:**
 
 ```env
 # Transcription
-ASSEMBLY_AI_API_KEY=...
+ASSEMBLY_AI_API_KEY=your_key
 
-# One of the following LLM providers
+# Pick one LLM provider
 LLM=google-gla:gemini-2.0-flash
-GOOGLE_API_KEY=...
+GOOGLE_API_KEY=your_key
 
-# Or:
+# Or OpenAI
 # LLM=openai:gpt-4o
-# OPENAI_API_KEY=...
+# OPENAI_API_KEY=your_key
 
-# Or fully local:
+# Or fully local (no API costs)
 # LLM=ollama:qwen2.5:7b
 # OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 ```
 
-| Section            | Doc                                                              |
-|--------------------|------------------------------------------------------------------|
-| All config keys    | [`docs/configuration.md`](docs/configuration.md)                 |
-| Getting API keys   | [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md)                         |
-| Production deploy  | [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md)                             |
-| Troubleshooting    | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)                       |
+| Section             | Doc                                                  |
+|---------------------|------------------------------------------------------|
+| All config keys     | [`docs/configuration.md`](docs/configuration.md)    |
+| Getting API keys    | [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md)             |
+| Production deploy   | [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md)                 |
+| Troubleshooting     | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)           |
+
+---
 
 ## 🧪 Testing
 
-> **Status (current):** lint runs in CI; the test suite is being rebuilt after the recent backend domain refactor. Smoke testing via `docker compose up -d` + creating a task end-to-end is the current verification baseline. Contributions to test coverage are very welcome.
-
-When tests are present:
+> Tests are being rebuilt after the recent backend domain refactor. Current baseline: smoke-test via `docker compose up -d` + submit a task end-to-end. Contributions to test coverage are very welcome — see [`good first issue`](https://github.com/sebsv123/ViraClip/issues?q=is%3Aopen+label%3A%22good+first+issue%22).
 
 ```bash
 make test            # backend + frontend unit tests
-make test-backend    # pytest with Postgres + Redis service containers
+make test-backend    # pytest (requires Postgres + Redis)
 make test-frontend   # Vitest + React Testing Library
 make test-e2e        # Playwright smoke flows
-make test-ci         # full CI matrix
 ```
 
-Local runs expect Postgres and Redis. Easiest path: `docker compose up -d postgres redis`, then `make test`.
+---
 
-## 🛠️ Local development
+## 🛠️ Local Development
 
-Pre-requisites: Docker, Node 20+, Python 3.11+, [`uv`](https://github.com/astral-sh/uv).
+**Prerequisites:** Docker, Node 20+, Python 3.11+, [`uv`](https://github.com/astral-sh/uv)
 
 ```bash
-# Frontend live reload
+# Frontend (live reload)
 cd frontend && npm install && npm run dev
 
-# Backend live reload (in another shell)
+# Backend (live reload)
 cd backend && uv sync && .venv/bin/uvicorn src.main:app --reload --port 8000
 
 # Worker
 cd backend && .venv/bin/arq src.workers.tasks.WorkerSettings
 ```
 
-Coding style and PR workflow are described in [`CONTRIBUTING.md`](CONTRIBUTING.md). Pre-commit hooks (`ruff`, `prettier`, `detect-secrets`, conventional commits) are pre-configured — install with:
+Pre-commit hooks (`ruff`, `prettier`, `detect-secrets`, conventional commits) are pre-configured:
 
 ```bash
 pip install pre-commit && pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
+Full guide: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`docs/development.md`](docs/development.md)
+
+---
+
 ## 📚 Documentation
 
-- 🏗️ [`docs/architecture.md`](docs/architecture.md) — system architecture
-- 🔧 [`docs/configuration.md`](docs/configuration.md) — config reference
-- 🚀 [`docs/setup.md`](docs/setup.md) — deployment setup
-- 📖 [`docs/api-reference.md`](docs/api-reference.md) — REST API
-- 🧑‍💻 [`docs/development.md`](docs/development.md) — developer guide
-- 🆘 [`docs/troubleshooting.md`](docs/troubleshooting.md) — common issues
-- 📋 [`AGENTS.md`](AGENTS.md) — repository conventions for AI/human contributors
-- 🔒 [`SECURITY.md`](SECURITY.md) — security policy
-- 📓 [`CHANGELOG.md`](CHANGELOG.md) — release notes
+| Doc | Contents |
+|-----|----------|
+| [`docs/architecture.md`](docs/architecture.md) | System architecture deep-dive |
+| [`docs/configuration.md`](docs/configuration.md) | All config keys reference |
+| [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md) | Production deployment (57KB guide) |
+| [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md) | Getting every API key |
+| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Common issues + fixes |
+| [`AGENTS.md`](AGENTS.md) | Repo conventions for AI/human contributors |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
+
+---
 
 ## 🤝 Contributing
 
-Pull requests are welcome! Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`docs/development.md`](docs/development.md) before starting. Good first issues are tagged [`good first issue`](https://github.com/sebsv123/ViraClip/issues?q=is%3Aopen+label%3A%22good+first+issue%22).
+PRs are welcome. Good first issues are labeled [`good first issue`](https://github.com/sebsv123/ViraClip/issues?q=is%3Aopen+label%3A%22good+first+issue%22).
 
 We follow [Conventional Commits](https://www.conventionalcommits.org/) and the [Contributor Covenant](.github/CODE_OF_CONDUCT.md).
 
+---
+
 ## 🛡️ Security
 
-Found a vulnerability? Please **do not** open a public issue. See [`SECURITY.md`](SECURITY.md) for our responsible disclosure process.
+Found a vulnerability? **Do not open a public issue.** See [`SECURITY.md`](SECURITY.md) for our responsible disclosure process.
+
+---
 
 ## 📝 License
 
-ViraClip is released under the [AGPL-3.0](LICENSE) license. If you offer ViraClip — modified or not — as a network service, you must release your source under the same license.
+Released under [AGPL-3.0](LICENSE). If you offer ViraClip as a network service (modified or not), you must release your source under the same license.
 
-For commercial licensing without AGPL obligations, please open a [GitHub discussion](https://github.com/sebsv123/ViraClip/discussions).
+For commercial licensing without AGPL obligations: open a [GitHub Discussion](https://github.com/sebsv123/ViraClip/discussions).
 
-## 🙏 Acknowledgments
+---
 
-ViraClip stands on the shoulders of giants:
+## 🙏 Built on top of
 
 - [`faster-whisper`](https://github.com/SYSTRAN/faster-whisper) — GPU-accelerated transcription
+- [`ComfyUI`](https://github.com/comfyanonymous/ComfyUI) — generative B-roll (LTXV)
 - [`pydantic-ai`](https://github.com/pydantic/pydantic-ai) — LLM orchestration
-- [`ComfyUI`](https://github.com/comfyanonymous/ComfyUI) — generative B-roll
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — robust YouTube ingestion
-- [Pexels](https://www.pexels.com/) — free stock B-roll
+- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) — robust video ingestion
 - [AssemblyAI](https://www.assemblyai.com/) — transcription API
-
-…and the SupoClip project, which inspired the original architecture.
+- [Pexels](https://www.pexels.com/) — free stock B-roll
 
 ---
 
 <div align="center">
 
-**Made for content creators who ship.**
+**Built for creators who ship.**
 
 [Website](https://www.viraclip.com) · [Issues](https://github.com/sebsv123/ViraClip/issues) · [Discussions](https://github.com/sebsv123/ViraClip/discussions)
+
+⭐ If ViraClip saves you editing time, a star helps others find it.
 
 </div>
