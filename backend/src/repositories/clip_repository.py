@@ -467,6 +467,33 @@ class ClipRepository:
         await db.commit()
 
     @staticmethod
+    async def update_clip_path(
+        db: AsyncSession, clip_id: str, new_path: str
+    ) -> bool:
+        """Update the file_path for a clip (used by suggestion_applicator after enhancement).
+
+        Args:
+            db: Database session.
+            clip_id: Clip UUID.
+            new_path: New file path for the enhanced clip.
+
+        Returns:
+            True if a row was updated.
+        """
+        result = await db.execute(
+            sa_text(
+                """
+                UPDATE generated_clips
+                SET file_path = :new_path, updated_at = NOW()
+                WHERE id = :clip_id
+                """
+            ),
+            {"clip_id": clip_id, "new_path": new_path},
+        )
+        await db.commit()
+        return (result.rowcount or 0) > 0
+
+    @staticmethod
     async def update_clip_rating(
         db: AsyncSession, clip_id: str, rating: int
     ) -> bool:
