@@ -34,18 +34,16 @@ Canonical documentation hub for ViraClip. If you only have time for one file, re
 | [`troubleshooting.md`](./troubleshooting.md) | Common failures and fixes |
 | [`archive/`](./archive/) | Historical docs preserved for reference (not maintained) |
 
-## Related root-level docs
-
-These live outside `docs/` because they are project-wide rather than user-facing:
+## Related project docs
 
 - [`README.md`](../README.md) — project overview, quick start, badges
-- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — branch strategy, commit conventions, PR checklist
-- [`AGENTS.md`](../AGENTS.md) — repository conventions for AI/human contributors
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md) — branch strategy, commit conventions, PR checklist
+- [`AGENTS.md`](./AGENTS.md) — repository conventions for AI/human contributors
 - [`SECURITY.md`](../SECURITY.md) — responsible disclosure
 - [`CHANGELOG.md`](../CHANGELOG.md) — release notes
-- [`DEPLOY_GUIDE.md`](../DEPLOY_GUIDE.md) — deployment recipes
-- [`API_KEYS_SETUP.md`](../API_KEYS_SETUP.md) — how to obtain provider keys
-- [`TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) — root-level troubleshooting (overlaps with the docs version; will be merged in a future cleanup)
+- [`DEPLOY_GUIDE.md`](./DEPLOY_GUIDE.md) — deployment recipes
+- [`API_KEYS_SETUP.md`](./API_KEYS_SETUP.md) — how to obtain provider keys
+- [`TROUBLESHOOTING.md`](./TROUBLESHOOTING.md) — root-level troubleshooting (overlaps with the docs version; will be merged in a future cleanup)
 
 ## What ViraClip is
 
@@ -61,4 +59,4 @@ Plus optional services: ComfyUI for generative B-roll, Ollama for local LLMs, an
 
 ## Contributing to the docs
 
-Docs follow the same flow as code: open a PR with a `docs(scope): summary` commit. See [`CONTRIBUTING.md`](../CONTRIBUTING.md). Old material that is no longer accurate should be moved to [`archive/`](./archive/) rather than deleted, so that history stays inspectable.
+Docs follow the same flow as code: open a PR with a `docs(scope): summary` commit. See [`CONTRIBUTING.md`](./CONTRIBUTING.md). Old material that is no longer accurate should be moved to [`archive/`](./archive/) rather than deleted, so that history stays inspectable.

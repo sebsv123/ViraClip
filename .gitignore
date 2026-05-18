@@ -37,6 +37,7 @@ env.bak/
 venv.bak/
 
 # ----- Secrets & environment files --------------------------
+.env.*
 .env.local
 .env.*.local
 .env.production

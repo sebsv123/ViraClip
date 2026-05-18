@@ -12,9 +12,9 @@ Drop a YouTube URL (or upload a file). Get back TikTok-ready vertical clips with
 [![Python](https://img.shields.io/badge/python-3.11+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=next.js&logoColor=white)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](docs/CONTRIBUTING.md)
 
-[Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](CONTRIBUTING.md) · [Docs](docs/)
+[Quick Start](#-quick-start) · [Features](#-features) · [Architecture](#-architecture) · [Configuration](#%EF%B8%8F-configuration) · [Contributing](docs/CONTRIBUTING.md) · [Docs](docs/)
 
 </div>
 
@@ -141,9 +141,9 @@ GOOGLE_API_KEY=your_key
 | Section             | Doc                                                  |
 |---------------------|------------------------------------------------------|
 | All config keys     | [`docs/configuration.md`](docs/configuration.md)    |
-| Getting API keys    | [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md)             |
-| Production deploy   | [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md)                 |
-| Troubleshooting     | [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md)           |
+| Getting API keys    | [`docs/API_KEYS_SETUP.md`](docs/API_KEYS_SETUP.md)   |
+| Production deploy   | [`docs/DEPLOY_GUIDE.md`](docs/DEPLOY_GUIDE.md)       |
+| Troubleshooting     | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
 
 ---
 
@@ -181,7 +181,7 @@ Pre-commit hooks (`ruff`, `prettier`, `detect-secrets`, conventional commits) ar
 pip install pre-commit && pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
-Full guide: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`docs/development.md`](docs/development.md)
+Full guide: [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) · [`docs/development.md`](docs/development.md)
 
 ---
 
@@ -191,10 +191,10 @@ Full guide: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`docs/development.md`](docs
 |-----|----------|
 | [`docs/architecture.md`](docs/architecture.md) | System architecture deep-dive |
 | [`docs/configuration.md`](docs/configuration.md) | All config keys reference |
-| [`DEPLOY_GUIDE.md`](DEPLOY_GUIDE.md) | Production deployment (57KB guide) |
-| [`API_KEYS_SETUP.md`](API_KEYS_SETUP.md) | Getting every API key |
-| [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) | Common issues + fixes |
-| [`AGENTS.md`](AGENTS.md) | Repo conventions for AI/human contributors |
+| [`docs/DEPLOY_GUIDE.md`](docs/DEPLOY_GUIDE.md) | Production deployment (57KB guide) |
+| [`docs/API_KEYS_SETUP.md`](docs/API_KEYS_SETUP.md) | Getting every API key |
+| [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) | Common issues + fixes |
+| [`docs/AGENTS.md`](docs/AGENTS.md) | Repo conventions for AI/human contributors |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes |
 
 ---
