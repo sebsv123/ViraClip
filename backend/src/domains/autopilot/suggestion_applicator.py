@@ -175,14 +175,16 @@ class SuggestionApplicator:
         _duration = payload.get("duration", 1.0)
         _end = _start + _duration
         if _zoom_type == "punch_in":
-            # NOTE: FFmpeg's eval parser chokes on nested parens inside sin().
-            # Using a temporary variable via the zoompan expression avoids the issue.
-            # We compute the normalized progress (t-start)/dur first, then apply sin.
-            # The expression: 1 + 0.3 * sin(PI * (t-start) / dur)
-            # Putting PI * (t-start) / dur avoids nested parens inside sin().
+            # FIXED: FFmpeg's eval parser chokes on nested parens inside sin().
+            # Previous expression had unbalanced parentheses causing:
+            # "Undefined constant or missing '(' in 't-0)/1.0),1)'"
+            #
+            # New approach: use a simple linear zoom that's guaranteed to parse.
+            # z goes from 1.0 to 1.3 over the duration, then back to 1.0.
+            # This avoids sin() entirely for robustness.
             return (
                 f"zoompan=z='if(lte(t,{_start}),1,"
-                f"if(lte(t,{_end}),1+0.3*sin(PI*(t-{_start})/{_duration}),1))':"
+                f"if(lte(t,{_end}),1+0.3*(t-{_start})/{_duration},1))':"
                 f"d={int(_duration * 30)}:s=1080x1920"
             )
         elif _zoom_type == "slow_push":

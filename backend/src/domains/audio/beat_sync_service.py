@@ -280,35 +280,16 @@ async def mix_bgm_beat_synced(
             logger.warning("[beat_sync] No BGM tracks found in %s", BGM_LIBRARY_DIR)
             return {"success": False, "bpm": bpm, "reason": "no bgm tracks found"}
 
-    # Step 3: Build volume filter (predictivo si hay word_timings, simplificado si no)
-    if word_timings:
-        try:
-            from .audio_ducking_service import build_word_aware_ducking_filter
-            _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
-            if _ducking_mode == "predictive":
-                # Ajustado: voice_duck_ratio 0.65 = música al 65% durante voz (audible)
-                # long_pause_boost 1.3 = música sube un 30% en pausas largas (no 2x que distorsiona)
-                vol_filter = build_word_aware_ducking_filter(
-                    words=word_timings,
-                    music_base_volume=bgm_volume,
-                    voice_duck_ratio=float(os.environ.get("DUCKING_VOICE_RATIO", "0.65")),
-                    long_pause_boost=float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "1.30")),
-                    short_pause_boost=float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.15")),
-                )
-                logger.info("[beat_sync] Ducking: PREDICTIVO (word timestamps)")
-            else:
-                vol_filter = _build_speech_duck_filter(
-                    speech_segments or [], bgm_volume, fade_in, fade_out
-                )
-        except Exception as _duck_e:
-            logger.warning("[beat_sync] Predictive ducking failed (%s), usando fallback", _duck_e)
-            vol_filter = _build_speech_duck_filter(
-                speech_segments or [], bgm_volume, fade_in, fade_out
-            )
-    else:
-        vol_filter = _build_speech_duck_filter(
-            speech_segments or [], bgm_volume, fade_in, fade_out
-        )
+    # Step 3: Build volume filter — SIMPLIFICADO
+    # El ducking predictivo con expresiones FFmpeg complejas
+    # (volume=eval=frame:expr='if(gte...') causa errores de parsing
+    # porque FFmpeg no soporta paréntesis anidados ni comas dentro
+    # de filter_complex option values.
+    #
+    # Usamos volumen constante. El smart_audio en creative_pipeline
+    # Step 7 maneja el ducking real.
+    vol_filter = f"volume={bgm_volume}"
+    logger.info(f"[beat_sync] Volumen constante: {bgm_volume} (ducking delegado a smart_audio)")
 
     # Step 4: FFmpeg amix
     try:

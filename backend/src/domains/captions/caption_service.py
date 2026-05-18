@@ -191,19 +191,22 @@ def build_ass_script(
     play_res_y: int = 1920,
     uppercase: bool = True,
     platform: str = "tiktok",
+    caption_offset_y: int = 0,
 ) -> str:
     """
     Build a complete ASS script from caption lines.
 
-    For 'karaoke' and 'tiktok' styles: one dialogue event per line using \\k tags.
+    For 'karaoke' and 'tiktok' styles: one dialogue event per line using \k tags.
     For 'highlight' style: one dialogue event PER WORD so each word can get its
                            own background-box highlight as it's spoken.
 
     platform: used to set platform-specific caption safe zones (MarginV).
               Supported: 'tiktok', 'reels', 'shorts', 'universal'.
+    caption_offset_y: additional vertical offset (px) to shift captions upward
+                      (used when source video has burned-in subtitles).
     """
     style_def = _STYLE_DEFS.get(style, _STYLE_DEFS["tiktok"])
-    style_def = style_def.replace("MARGINV", str(_margin_v(platform)))
+    style_def = style_def.replace("MARGINV", str(_margin_v(platform) + caption_offset_y))
     is_highlight = (style == "highlight")
 
     header = f"""\
@@ -333,6 +336,7 @@ async def burn_captions(
     max_words_per_line: int = 5,
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
+    caption_offset_y: int = 0,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
@@ -347,7 +351,7 @@ async def burn_captions(
 
     ass_content = build_ass_script(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
-        platform=platform,
+        platform=platform, caption_offset_y=caption_offset_y,
     )
 
     # ── Subtitle QA: speed guard + emoji injection + profanity filter ──────────
@@ -422,10 +426,12 @@ class CaptionService:
         style: str = "tiktok",
         font_dir: Optional[str] = None,
         platform: str = "tiktok",
+        caption_offset_y: int = 0,
     ) -> bool:
         return await burn_captions(
             video_path, output_path, words,
             style=style, font_dir=font_dir, platform=platform,
+            caption_offset_y=caption_offset_y,
         )
 
     def generate_ass(
@@ -435,12 +441,13 @@ class CaptionService:
         play_res_x: int = 1080,
         play_res_y: int = 1920,
         platform: str = "tiktok",
+        caption_offset_y: int = 0,
     ) -> str:
         """Return the raw ASS script string (for preview or saving)."""
         lines = segment_words_into_lines(words)
         return build_ass_script(lines, style=style,
                                 play_res_x=play_res_x, play_res_y=play_res_y,
-                                platform=platform)
+                                platform=platform, caption_offset_y=caption_offset_y)
 
     def segment_words(
         self,
@@ -462,6 +469,106 @@ class CaptionService:
 
     def get_styles(self) -> List[str]:
         return self.STYLES
+
+
+# ── CAPTION_BACKEND routing factory ──────────────────────────────────────────
+
+def _get_caption_backend() -> CaptionService:
+    """
+    Factory that returns the appropriate caption backend based on CAPTION_BACKEND.
+
+    - "auto_subtitle" → AutoSubtitleBackend (AssemblyAI + confidence-based)
+    - "legacy" (default) → CaptionService (ASS drawtext-based)
+
+    If AutoSubtitleBackend fails at runtime, falls back dynamically to
+    LegacyCaptionBackend for that clip.
+    """
+    from ...config import get_config
+    cfg = get_config()
+    backend_name = cfg.caption_backend
+
+    if backend_name == "auto_subtitle":
+        try:
+            from ...services.subtitle_backend_auto import get_auto_subtitle_backend
+            backend = get_auto_subtitle_backend()
+            logger.info("[Caption] Using AutoSubtitleBackend (CAPTION_BACKEND=auto_subtitle)")
+            return backend  # type: ignore[return-value]
+        except Exception as exc:
+            logger.warning(
+                "[Caption] AutoSubtitleBackend init failed: %s — falling back to LegacyCaptionBackend",
+                exc,
+            )
+            # Fall through to legacy
+
+    if backend_name not in ("legacy", "auto_subtitle"):
+        logger.warning(
+            "[Caption] Unknown CAPTION_BACKEND='%s' — falling back to legacy",
+            backend_name,
+        )
+
+    logger.info("[Caption] Using LegacyCaptionBackend (CAPTION_BACKEND=legacy)")
+    return get_caption_service()
+
+
+# ── Runtime fallback wrapper ─────────────────────────────────────────────────
+
+async def burn_captions_with_fallback(
+    video_path: Path,
+    output_path: Path,
+    words: List[Dict[str, Any]],
+    style: str = "tiktok",
+    font_dir: Optional[str] = None,
+    platform: str = "tiktok",
+    caption_offset_y: int = 0,
+) -> bool:
+    """
+    Burn captions using the backend selected by CAPTION_BACKEND.
+
+    If the selected backend fails at runtime, falls back dynamically to
+    LegacyCaptionBackend for this clip.
+    """
+    backend = _get_caption_backend()
+
+    # Check if this is an AutoSubtitleBackend instance
+    is_auto = type(backend).__name__ == "AutoSubtitleBackend"
+
+    try:
+        if is_auto:
+            # AutoSubtitleBackend has a different interface
+            result = await backend.generate(
+                video_path=str(video_path),
+                output_path=str(output_path),
+                words=words,
+            )
+            return bool(result)
+        else:
+            # Legacy CaptionService
+            return await backend.burn(
+                video_path=video_path,
+                output_path=output_path,
+                words=words,
+                style=style,
+                font_dir=font_dir,
+                platform=platform,
+                caption_offset_y=caption_offset_y,
+            )
+    except Exception as exc:
+        logger.warning(
+            "[Caption] %s failed: %s — falling back to LegacyCaptionBackend",
+            type(backend).__name__,
+            exc,
+        )
+        # Fallback to legacy
+        fallback = get_caption_service()
+        return await fallback.burn(
+            video_path=video_path,
+            output_path=output_path,
+            words=words,
+            style=style,
+            font_dir=font_dir,
+            platform=platform,
+            caption_offset_y=caption_offset_y,
+        )
 
 
 _instance: Optional[CaptionService] = None

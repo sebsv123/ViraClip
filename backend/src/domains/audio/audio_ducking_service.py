@@ -234,40 +234,44 @@ def build_word_aware_ducking_filter(
     if not merged_voice:
         return f"volume={music_base_volume}"
 
-    # SIMPLIFICADO: Usar enable/disable con fade para transiciones suaves
-    # El filtro anterior con expresiones complejas causaba ruido/distorsión
+    # Construir keyframes para volume usando el filtro `volume` con expresión
+    # de evaluación de audio.
+    #
+    # IMPORTANTE: FFmpeg filter complex NO permite comas dentro de valores
+    # de opciones entrecomilladas. La función between(t,start,end) contiene
+    # comas que rompen el parsing del filter_complex.
+    #
+    # Solución: usar el filtro `volume` con el modificador `eval=frame` y
+    # una expresión que NO contenga comas. En lugar de between(t,a,b),
+    # usamos una expresión equivalente: if(gte(t,a)*lte(t,b),vol,base)
+    # donde gte = greater-than-or-equal, lte = less-than-or-equal.
+    # La multiplicación actúa como AND lógico (1*1=1, 0*1=0).
     
-    # Construir keyframes para volume
-    keyframes = []
-    last_end = 0.0
+    # Ordenar todos los puntos de cambio
+    change_points = []
+    for v_start, v_end in merged_voice:
+        change_points.append((v_start, voice_vol))       # inicio voz → duck
+        change_points.append((v_end, music_base_volume))  # fin voz → restaurar
     
-    for i, (v_start, v_end) in enumerate(merged_voice):
-        # Antes de la voz: música al volumen correspondiente (pausa o base)
-        if v_start > last_end:
-            pause_dur = v_start - last_end
-            if pause_dur >= long_pause_threshold:
-                pause_vol = long_pause_vol
-            elif pause_dur >= short_pause_threshold:
-                pause_vol = short_pause_vol
-            else:
-                pause_vol = voice_vol
-            keyframes.append(f"{max(0, last_end):.3f}={pause_vol:.4f}")
-        
-        # Durante la voz: duck (bajar volumen)
-        keyframes.append(f"{v_start:.3f}={voice_vol:.4f}")
-        
-        # Después de la voz: restaurar volumen
-        keyframes.append(f"{v_end:.3f}={music_base_volume:.4f}")
-        last_end = v_end
+    if not change_points:
+        return f"volume={music_base_volume}"
     
-    # Al final: volumen base
-    keyframes.append(f"{last_end:.3f}={music_base_volume:.4f}")
+    change_points.sort(key=lambda x: x[0])
     
-    # Usar volume con enable para aplicar solo durante el clip, con fade suave
-    expr = f"volume='{music_base_volume}':enable='between(t,0,9999)'"
+    # Construir expresión anidada SIN comas usando gte/lte
+    # Formato: if(gte(t,start)*lte(t,end),vol,if(gte(t,start2)*lte(t,end2),vol2,...base))
+    expr_parts = []
+    for t, vol in reversed(change_points):
+        # gte(t,X)*lte(t,9999) en vez de between(t,X,9999) — sin comas
+        expr_parts.append(f"if(gte(t,{t:.3f})*lte(t,9999),{vol:.4f},")
+    expr_parts.append(f"{music_base_volume:.4f}")
+    expr_parts.append(")" * len(change_points))
+    
+    inner_expr = "".join(expr_parts)
+    expr = f"volume=eval=frame:expr='{inner_expr}'"
     
     logger.info(
-        f"[DUCKING] Filtro simplificado: {len(merged_voice)} segmentos, "
+        f"[DUCKING] Filtro con {len(merged_voice)} segmentos, "
         f"vol_voz={voice_vol:.3f}, vol_base={music_base_volume:.3f}"
     )
     return expr

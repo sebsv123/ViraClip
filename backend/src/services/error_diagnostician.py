@@ -70,6 +70,10 @@ class ErrorDiagnostician:
                 can_fix_in_runtime=True,
             )
 
+        # Rule 5: Editlist FFmpeg failure — detect if an FFmpeg error comes from an editlist operation
+        if cls._is_editlist_error(combined, traceback):
+            return cls._diagnose_editlist_error(traceback)
+
         return ErrorDiagnosis(error_type="UNKNOWN", fix_description="Unknown error — re-enqueue", can_fix_in_runtime=True)
 
     @classmethod
@@ -138,6 +142,64 @@ class ErrorDiagnostician:
             if fp.startswith("/app/src/"):
                 return fp, int(m.group(2))
         return None, None
+
+    @staticmethod
+    def _is_editlist_error(combined: str, traceback: str) -> bool:
+        """Detect if an FFmpeg failure comes from an editlist operation.
+
+        Looks for:
+        - "editlist" in the error message or traceback
+        - FFmpeg errors (non-zero exit, ffmpeg command failed) in editlist context
+        """
+        # Direct editlist reference in error
+        if "editlist" in combined.lower():
+            return True
+
+        # FFmpeg failure in editlist context (traceback mentions editlist_service)
+        if "editlist_service" in traceback and ("ffmpeg" in combined.lower() or "non-zero exit" in combined.lower()):
+            return True
+
+        # FFmpeg error with editlist-related keywords in traceback
+        editlist_keywords = ["editlist", "editlist_service", "apply_safe", "_apply_cut", "_apply_concat",
+                            "_apply_overlay", "_apply_transition"]
+        if any(kw in traceback.lower() for kw in editlist_keywords):
+            if any(ff in combined.lower() for ff in ["ffmpeg", "non-zero exit", "exit code", "pipe:"]):
+                return True
+
+        return False
+
+    @classmethod
+    def _diagnose_editlist_error(cls, traceback: str) -> ErrorDiagnosis:
+        """Diagnose an editlist FFmpeg failure and propose a safe fallback.
+
+        Analyzes the traceback to identify which operation failed and proposes
+        simplifying the editlist to cuts/concat only.
+        """
+        file_path, line = cls._extract_file_line(traceback)
+
+        # Determine which operation failed
+        failed_op = "unknown"
+        if "_apply_overlay" in traceback:
+            failed_op = "overlay"
+        elif "_apply_transition" in traceback:
+            failed_op = "transition"
+        elif "_apply_cut" in traceback:
+            failed_op = "cut"
+        elif "_apply_concat" in traceback:
+            failed_op = "concat"
+
+        fix_description = (
+            f"Editlist FFmpeg failure in {failed_op} operation — "
+            f"simplify editlist to cuts-only and retry"
+        )
+
+        return ErrorDiagnosis(
+            error_type="EDITLIST_ERROR",
+            file_path=file_path,
+            line_number=line,
+            fix_description=fix_description,
+            can_fix_in_runtime=True,
+        )
 
     @classmethod
     async def _check_knowledge_base(cls, error: str) -> Optional[ErrorDiagnosis]:

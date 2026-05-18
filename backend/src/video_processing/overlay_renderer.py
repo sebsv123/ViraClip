@@ -1,5 +1,4 @@
 """
-from src import gpu_utils
 Overlay Renderer — Contextual Overlay System
 FFmpeg-based rendering: full-screen overlay with speaker in corner bubble.
 """
@@ -10,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional
+
+from .. import gpu_utils
 
 logger = logging.getLogger(__name__)
 

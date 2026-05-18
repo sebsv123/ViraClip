@@ -11,6 +11,7 @@ from pathlib import Path
 import subprocess
 
 logger = logging.getLogger(__name__)
+from src.services.metrics_aggregator import record_event
 
 
 @dataclass
@@ -98,10 +99,18 @@ class BackgroundMusicService:
                         license="Pixabay License (Free)"
                     ))
                 
+                # [Metrics] music_background
+                record_event("music_background", payload={
+                    "genre": genre, "mood": mood, "tracks_found": len(tracks),
+                })
                 return tracks
                 
         except Exception as e:
             logger.error(f"Pixabay search failed: {e}")
+            # [Metrics] engine_error
+            record_event("engine_error", payload={
+                "engine": "background_music_service", "error": str(e)[:200],
+            })
             return []
     
     def download_music(self, track: MusicTrack, output_path: str) -> bool:

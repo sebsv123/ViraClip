@@ -499,12 +499,16 @@ def _build_filter_complex(
         elif z_expr.startswith("1+"):
             z_expr = "1+" + hook_term + "+" + z_expr[2:]
 
+    # FIX: Force minimum 24fps for zoompan output. Source videos with low FPS
+    # (e.g. talking head at 11.99fps) produce choppy output when zoompan inherits
+    # the source framerate. 24fps is the minimum standard for smooth video.
+    _zoompan_fps = max(24.0, fps)
     if z_expr == "1.0":
         filters.append(f"{prev_v}null[vzoom]")
     else:
         filters.append(
             f"{prev_v}zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-            f":d=1:s={w}x{h}:fps={fps:.3f}[vzoom]"
+            f":d=1:s={w}x{h}:fps={_zoompan_fps:.3f}[vzoom]"
         )
     prev_v = "[vzoom]"
 

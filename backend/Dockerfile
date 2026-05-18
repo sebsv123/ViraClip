@@ -188,7 +188,8 @@ RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
     "pymilvus>=2.3.0" \
     "redis[asyncio]>=4.5.0" \
     "google-api-python-client>=2.100.0" \
-    "kaggle>=1.5.16"
+    "kaggle>=1.5.16" \
+    "protobuf>=3.20.3,<4"
 
 # ── Layer 3: whisperx y sus deps (cambian poco) ───────────────────────
 # whisperx → pyannote-audio>=4.0.0 → torchmetrics, speechbrain, etc.

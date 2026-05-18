@@ -27,6 +27,9 @@ from ...domains.notifications.task_completion_email_service import (
     TaskCompletionEmailService,
     TaskCompletionRecipient,
 )
+from ...domains.validation.source_subtitle_detector import (
+    check_source_subtitles_and_adjust,
+)
 from ...domains.video.video_service import VideoService
 from ...repositories.cache_repository import CacheRepository
 from ...repositories.clip_repository import ClipRepository
@@ -218,6 +221,25 @@ class _ProcessorMixin:
                 raise FileNotFoundError(
                     f"[DOWNLOAD FAILED] Video file missing after download: {video_path}"
                 )
+            
+            # ── Source Subtitle Detector: preflight check ────────────────────────
+            # Lightweight heuristic detection of burned-in subtitles in the bottom
+            # band of the source video. Adjusts caption strategy accordingly.
+            _source_subtitle_result = await check_source_subtitles_and_adjust(
+                video_path=video_path,
+                add_subtitles=add_subtitles,
+                target_platform=target_platform,
+            )
+            _adjusted_add_subtitles = _source_subtitle_result["add_subtitles"]
+            _caption_offset_y = _source_subtitle_result["caption_offset_y"]
+            _caption_strategy = _source_subtitle_result["caption_strategy"]
+            if _caption_strategy != "normal":
+                logger.info(
+                    "[preflight] Source subtitle strategy: %s "
+                    "(add_subtitles=%s, offset_y=%d)",
+                    _caption_strategy, _adjusted_add_subtitles, _caption_offset_y,
+                )
+            # ─────────────────────────────────────────────────────────────────────
             
             # Get segments to render
             segments_to_render = result.get("segments_to_render", [])
@@ -426,7 +448,7 @@ class _ProcessorMixin:
                             font_color,
                             _pick_caption_template(segment),
                             output_format,
-                            add_subtitles,
+                            _adjusted_add_subtitles,  # Use adjusted value from source subtitle detector
                             broll_suggestions=segment.get("broll_suggestions"),
                             split_screen=split_screen,
                             hook_title=_build_hook_title(segment),
@@ -445,6 +467,7 @@ class _ProcessorMixin:
                             use_extracted_segment=(extracted_segment_paths[i] is not None),
                             target_platform=target_platform,
                             jump_cut=jump_cut,
+                            caption_offset_y=_caption_offset_y,  # Pass offset from source subtitle detector
                         )
                     except Exception as clip_error:
                         logger.error(
@@ -795,18 +818,39 @@ class _ProcessorMixin:
                             )
 
                             if _result.get("success"):
-                                await self.clip_repo.update_clip_path(
-                                    self.db, clip_id, str(_output_path)
-                                )
-                                for s in _suggestions_to_apply:
-                                    await ClipSuggestionRepository.update_status(
-                                        self.db, s["id"], ClipSuggestionStatus.APPLIED.value
+                                # Verify output is valid (not 0 bytes)
+                                if _output_path.exists() and _output_path.stat().st_size > 0:
+                                    await self.clip_repo.update_clip_path(
+                                        self.db, clip_id, str(_output_path)
                                     )
-                                logger.info(
-                                    "[suggestion_applicator] Successfully enhanced clip %s",
-                                    clip_id,
-                                )
+                                    for s in _suggestions_to_apply:
+                                        await ClipSuggestionRepository.update_status(
+                                            self.db, s["id"], ClipSuggestionStatus.APPLIED.value
+                                        )
+                                    logger.info(
+                                        "[suggestion_applicator] Successfully enhanced clip %s",
+                                        clip_id,
+                                    )
+                                else:
+                                    # Clean up 0-byte output
+                                    if _output_path.exists():
+                                        _output_path.unlink(missing_ok=True)
+                                        logger.warning(
+                                            "[suggestion_applicator] Removed 0-byte enhanced clip for %s",
+                                            clip_id,
+                                        )
+                                    logger.error(
+                                        "[suggestion_applicator] Enhanced clip %s is 0 bytes — keeping original",
+                                        clip_id,
+                                    )
                             else:
+                                # Clean up any 0-byte output on failure
+                                if _output_path.exists() and _output_path.stat().st_size == 0:
+                                    _output_path.unlink(missing_ok=True)
+                                    logger.warning(
+                                        "[suggestion_applicator] Removed 0-byte failed output for %s",
+                                        clip_id,
+                                    )
                                 logger.error(
                                     "[suggestion_applicator] Failed to enhance clip %s: %s",
                                     clip_id, _result.get("error"),

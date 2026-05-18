@@ -121,11 +121,88 @@ class Config:
             "DSPY_OPTIMIZED_PROMPT_PATH", "/app/datasets/dspy_optimized_prompt.txt"
         )
 
-        # Feature flags — all off by default, opt-in via env
+        # ============================================================================
+        # FEATURE FLAGS — Integration Module Toggles
+        # All new integrations are OFF by default (opt-in via env).
+        # See backend/.env.example for recommended values per environment.
+        # ============================================================================
+
+        # Legacy / admin / feedback
         self.admin_enabled = self._get_bool_env("ADMIN_ENABLED", False)
         self.feedback_enabled = self._get_bool_env("FEEDBACK_ENABLED", False)
         self.notifications_enabled = self._get_bool_env("NOTIFICATIONS_ENABLED", False)
         self.music_ducking_enabled = self._get_bool_env("MUSIC_DUCKING_ENABLED", True)
+
+        # ── AI B-Roll Recommender ──────────────────────────────────────────────
+        # LLM-powered B-roll keyword extraction from transcript segments.
+        # Fallback: uses simple TF-IDF keyword extraction (no LLM call).
+        self.ai_broll_enabled = self._get_bool_env("AI_BROLL_ENABLED", False)
+
+        # ── Short Video Maker Pexels Integration ───────────────────────────────
+        # Port of short-video-maker's Pexels client for B-roll fetching.
+        # Fallback: uses the existing PexelsService (pexels_client.py) directly.
+        self.short_video_maker_pexels_enabled = self._get_bool_env("SHORT_VIDEO_MAKER_PEXELS_ENABLED", False)
+
+        # ── Background Music Service ───────────────────────────────────────────
+        # Mood-based background music selection from local library.
+        # Fallback: no background music (pipeline continues silently).
+        self.background_music_enabled = self._get_bool_env("BACKGROUND_MUSIC_ENABLED", False)
+
+        # ── AI Clips Maker ─────────────────────────────────────────────────────
+        # External AI-driven clip segmentation (ai-clips-maker integration).
+        # Fallback: uses internal viral_gate segmentation only.
+        self.ai_clips_maker_enabled = self._get_bool_env("AI_CLIPS_MAKER_ENABLED", False)
+
+        # ── ClipsAI Integration ────────────────────────────────────────────────
+        # Third-party ClipsAI service for automated clip generation.
+        # Fallback: skips ClipsAI, uses native pipeline.
+        self.clipsai_enabled = self._get_bool_env("CLIPSAI_ENABLED", False)
+
+        # ── Shorts Highlight Engine ────────────────────────────────────────────
+        # LLM-based highlight detection + OpenCV face-aware vertical crop.
+        # Fallback: uses existing segment boundaries (no highlight re-ranking).
+        self.shorts_engine_enabled = self._get_bool_env("SHORTS_ENGINE_ENABLED", False)
+        self.shorts_engine_provider = os.getenv("SHORTS_ENGINE_PROVIDER", "samuraigpt")
+
+        # ── Editlist Backend ───────────────────────────────────────────────────
+        # Declarative editlist pipeline (gradual rollout: cuts → overlays → transitions).
+        # Fallback: builds FFmpeg commands directly (legacy approach).
+        self.editlist_enabled = self._get_bool_env("EDITLIST_ENABLED", True)  # master switch
+        self.editlist_enable_cuts = self._get_bool_env("EDITLIST_ENABLE_CUTS", True)
+        self.editlist_enable_overlays = self._get_bool_env("EDITLIST_ENABLE_OVERLAYS", False)
+        self.editlist_enable_transitions = self._get_bool_env("EDITLIST_ENABLE_TRANSITIONS", False)
+
+        # ── Face Auto-Crop ─────────────────────────────────────────────────────
+        # Intelligent face-tracking auto-crop to 9:16 using OpenCV Haar cascades.
+        # When enabled, takes priority over ImpactZoomService and zoom_punch
+        # to avoid conflicting crop trajectories.
+        # Fallback: fixed center crop (no face tracking).
+        self.face_autocrop_enabled = self._get_bool_env("FACE_AUTOCROP_ENABLED", True)
+
+        # ── Faceless Feature ───────────────────────────────────────────────────
+        # Automated faceless video generation (text-to-video + TTS narration).
+        # Fallback: requires source video input (no auto-generation).
+        self.faceless_feature_enabled = self._get_bool_env("FACELESS_FEATURE_ENABLED", False)
+
+        # ── Caption Backend Selector ───────────────────────────────────────────
+        # "legacy" = original subtitle rendering (drawtext filter)
+        # "auto_subtitle" = new auto-subtitle service (AssemblyAI + confidence-based)
+        self.caption_backend = os.getenv("CAPTION_BACKEND", "legacy")
+
+        # ── Export Preset ──────────────────────────────────────────────────────
+        # "tiktok_basic" = 9:16, 30fps, AAC 128k
+        # "fast_vertical" = 9:16, 24fps, AAC 96k (faster encode)
+        # "youtube_shorts" = 9:16, 30fps, AAC 192k
+        # "instagram_reels" = 9:16, 30fps, AAC 128k + interlace
+        self.export_preset = os.getenv("EXPORT_PRESET", "tiktok_basic")
+
+        # ── Optimization Loop ──────────────────────────────────────────────────
+        # Clip performance analysis + creative hints feedback loop.
+        # Fallback: no performance-driven optimization.
+        self.optimization_loop_enabled = self._get_bool_env("OPTIMIZATION_LOOP_ENABLED", False)
+        self.optimization_loop_workspace_id = os.getenv("OPTIMIZATION_LOOP_WORKSPACE_ID", "default")
+        self.optimization_loop_min_samples = int(os.getenv("OPTIMIZATION_LOOP_MIN_SAMPLES", "10"))
+        self.optimization_loop_min_delta = float(os.getenv("OPTIMIZATION_LOOP_MIN_DELTA", "0.05"))
 
         # Subtitle Re-alignment
         self.subtitle_realign_enabled = self._get_bool_env("SUBTITLE_REALIGN_ENABLED", True)
