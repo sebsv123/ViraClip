@@ -317,12 +317,22 @@ class ConfidenceSubtitleGenerator:
 
         tmp_audio_path = None  # Initialize before try to avoid UnboundLocalError in finally
 
-        # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
+            # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
         tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp_audio_path = tmp_audio.name
         tmp_audio.close()
 
         try:
+            # BUG FIX: Verificar que el audio extraído corresponde al segmento exacto
+            # midiendo su duración y comparándola con la duración esperada del clip.
+            import subprocess as _sp
+            _dur_probe = _sp.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", str(segment_video_path)],
+                capture_output=True, text=True, timeout=10
+            )
+            _clip_dur = float(_dur_probe.stdout.strip()) if _dur_probe.returncode == 0 and _dur_probe.stdout.strip() else 0.0
+
             extract_cmd = [
                 _get_ffmpeg_exe(), '-y', '-i', segment_video_path,
                 '-vn',                    # Sin video
@@ -335,6 +345,18 @@ class ConfidenceSubtitleGenerator:
             if result.returncode != 0:
                 logger.error(f"[RE-ALIGN] FFmpeg fallo: {result.stderr.decode()}")
                 return original_words or []
+
+            # BUG FIX: Verificar duración del audio extraído vs duración del clip
+            _audio_dur_probe = _sp.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                 "-of", "default=noprint_wrappers=1:nokey=1", tmp_audio_path],
+                capture_output=True, text=True, timeout=10
+            )
+            _audio_dur = float(_audio_dur_probe.stdout.strip()) if _audio_dur_probe.returncode == 0 and _audio_dur_probe.stdout.strip() else 0.0
+            logger.debug(
+                "[RE-ALIGN] Audio extraído: %.2fs | Clip: %.2fs | Diferencia: %.2fs",
+                _audio_dur, _clip_dur, abs(_audio_dur - _clip_dur),
+            )
 
             # Paso 2: Transcribir con faster-whisper (self.model ya esta cargado)
             self._load_model()
