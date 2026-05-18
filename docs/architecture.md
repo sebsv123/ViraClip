@@ -1,435 +1,179 @@
-# Architecture
+# ViraClip — Architecture Deep-Dive
 
-This guide explains how SupoClip is structured and how a task moves through the system.
+## Overview
 
-## High-Level System
+ViraClip is a self-hostable SaaS platform that converts long-form video into viral short-form clips. The system is designed around an async, event-driven pipeline with a clear separation between ingestion, AI processing, rendering, and distribution.
 
-SupoClip is a multi-service application built around asynchronous video processing.
-
-```text
-Browser
-  -> Frontend (Next.js)
-  -> Frontend API routes
-  -> Backend (FastAPI)
-  -> Redis queue
-  -> Worker (ARQ)
-  -> PostgreSQL and file storage
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         User / API Client                        │
+└─────────────────────────────┬───────────────────────────────────┘
+                              │  HTTP / SSE
+┌─────────────────────────────▼───────────────────────────────────┐
+│                   FastAPI Backend  (:8000)                        │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────────────────────┐ │
+│  │   REST API │  │  SSE Events  │  │  Auth (better-auth)       │ │
+│  └────────────┘  └──────────────┘  └──────────────────────────┘ │
+└─────────────┬───────────────────────────┬───────────────────────┘
+              │ Enqueue task               │ Read/Write
+┌─────────────▼──────────┐   ┌────────────▼───────────────────────┐
+│   Redis (arq queue)     │   │   PostgreSQL (persistent state)     │
+└─────────────┬──────────┘   └────────────────────────────────────┘
+              │ Dequeue
+┌─────────────▼──────────────────────────────────────────────────┐
+│                    arq Worker  (async)                           │
+│                                                                  │
+│  ┌─────────────────────────────────────────────────────────┐   │
+│  │                    coordinator.py                         │   │
+│  │                                                           │   │
+│  │  cache/preflight → parallel analysis → viral gate        │   │
+│  │       → segment scoring → creative pipeline              │   │
+│  │       → parallel render → post-render gate               │   │
+│  │       → export/finalization                              │   │
+│  └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│  External services called during render:                         │
+│  • Whisper / AssemblyAI  (transcription)                         │
+│  • Groq / OpenAI / Gemini  (LLM scoring, hooks, captions)        │
+│  • Pexels API  (stock B-roll)                                     │
+│  • ComfyUI  (:8188, generative B-roll via LTXV)                  │
+│  • ElevenLabs / Suno  (AI audio, optional)                       │
+└─────────────────────────────────────────────────────────────────┘
+              │
+┌─────────────▼──────────────────────────────────────────────────┐
+│               Export / Storage / Distribution                    │
+│   • Local disk  (exports/)                                       │
+│   • AWS S3 / Cloudflare R2  (cloud storage)                      │
+│   • CDN edge  (clip delivery)                                     │
+│   • TikTok / Instagram / YouTube  (publishing, Phase 3)          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-The key design choice is that task creation is fast, while clip generation runs out of band in a worker.
-
-## Runtime Components
-
-### Frontend
-
-Location:
-
-- `frontend/src/app`
-- `frontend/src/components`
-- `frontend/src/lib`
-
-Responsibilities:
-
-- Authentication UI
-- Task creation UI
-- Task list and clip editing UI
-- Admin dashboard
-- Billing UI and webhooks
-- Server-side API proxies to the backend
-
-Technology:
-
-- Next.js 15
-- React 19
-- Tailwind CSS
-- Better Auth
-- Prisma
-
-### Backend API
-
-Location:
-
-- `backend/src/main_refactored.py`
-- `backend/src/api/routes`
-- `backend/src/services`
-- `backend/src/repositories`
-
-Responsibilities:
-
-- Accept and validate requests
-- Create and update tasks
-- Manage clip editing actions
-- Serve fonts, transitions, upload endpoints, and clip files
-- Expose progress streams
-- Handle feedback, billing support, and admin flows
-
-Technology:
-
-- FastAPI
-- Async request handling
-- Repository and service layering
-
-### Worker
-
-Location:
-
-- `backend/src/workers`
-
-Responsibilities:
-
-- Poll jobs from Redis
-- Execute long-running video processing
-- Publish progress updates
-- Write final clip records back to PostgreSQL
-
-Technology:
-
-- ARQ
-- Redis
-
-### PostgreSQL
-
-Primary responsibilities:
-
-- Users and sessions
-- Task records
-- Source records
-- Generated clip metadata
-- Billing metadata
-- Processing cache
-
-Schema bootstrap lives in `init.sql`.
-
-### Redis
-
-Primary responsibilities:
-
-- Background queue transport
-- Real-time progress plumbing
-- Operational coordination for task state
-
-## Repository Structure
-
-Current top-level layout:
-
-- `backend/`
-- `frontend/`
-- `docker-compose.yml`
-- `init.sql`
-- `.env.example`
-- `start.sh`
-
-This repository snapshot does not currently include the separate `waitlist/` app referenced in older project guidance.
-
-## Backend Architecture
-
-The backend follows a layered pattern.
-
-### Routes
-
-Directory:
-
-- `backend/src/api/routes`
-
-Responsibilities:
-
-- HTTP request parsing
-- Route-level authorization
-- Response formatting
-
-Main route groups:
-
-- `tasks.py`
-- `media.py`
-- `billing.py`
-- `feedback.py`
-- `admin.py`
-
-### Services
-
-Directory:
-
-- `backend/src/services`
-
-Responsibilities:
-
-- Orchestration
-- Business logic
-- Coordinating repositories and processing modules
-
-Important services:
-
-- `task_service.py`
-- `video_service.py`
-- `billing_service.py`
-- `subscription_email_service.py`
-
-### Repositories
-
-Directory:
-
-- `backend/src/repositories`
-
-Responsibilities:
-
-- Direct database access
-- Raw query execution
-- Encapsulated persistence logic
-
-Important repositories:
-
-- `task_repository.py`
-- `clip_repository.py`
-- `source_repository.py`
-- `cache_repository.py`
-
-### Utility and domain modules
-
-Important backend modules:
-
-- `ai.py`
-  - Prompting and structured LLM output
-- `video_utils.py`
-  - Rendering, cropping, and subtitle logic
-- `clip_editor.py`
-  - Post-generation clip edits and exports
-- `caption_templates.py`
-  - Available subtitle template definitions
-- `broll.py`
-  - Optional Pexels integration
-- `font_registry.py`
-  - Font discovery and registration
-- `observability.py`
-  - Metrics and timing helpers
-
-## Frontend Architecture
-
-The frontend uses the App Router and keeps most product pages client-driven.
-
-### App pages
-
-Key pages:
-
-- `/`
-- `/list`
-- `/tasks/[id]`
-- `/settings`
-- `/sign-in`
-- `/sign-up`
-- `/admin`
-
-### Frontend API routes
-
-The frontend includes server routes under `frontend/src/app/api`. They serve several purposes:
-
-- Attach session-based auth context
-- Proxy requests to the backend
-- Handle Stripe callbacks and webhooks
-- Expose internal user preference and feedback endpoints
-
-This separation lets the browser talk to the frontend domain while the frontend securely talks to the backend.
-
-### Authentication
-
-SupoClip uses Better Auth with Prisma and PostgreSQL.
-
-Important details:
-
-- Email and password login is enabled
-- Additional user field `is_admin` is persisted
-- Trusted origins are derived from app configuration
-- Session cookies are used to identify the current user
-
-## End-to-End Task Lifecycle
-
-### 1. Task creation
-
-The user submits a YouTube URL or upload from the frontend.
-
-The backend:
-
-- Validates the request
-- Creates or links a source record
-- Creates a task row
-- Enqueues background work
-- Returns quickly to the frontend
-
-### 2. Queueing
-
-The task enters a queue-backed state such as `queued`.
-
-Redis carries the job definition to the worker.
-
-### 3. Processing
-
-The worker:
-
-- Pulls the job
-- Downloads or reads the source media
-- Creates a transcript
-- Runs AI analysis
-- Generates clips
-- Publishes progress updates
-
-The task status becomes `processing`.
-
-### 4. Completion
-
-Once clip generation succeeds:
-
-- Files are written to storage
-- clip metadata is persisted in `generated_clips`
-- the task status becomes `completed`
-- the frontend refetches task and clip data
-
-If anything fails:
-
-- the task status becomes `error`
-- resumable and diagnostic information is preserved where possible
-
-## Video Processing Pipeline
-
-The rough pipeline is:
-
-1. Input acquisition
-   - YouTube via Apify actor, with `yt-dlp` fallback
-   - Uploaded file from the frontend
-2. Transcription
-   - AssemblyAI for word-level timestamps
-3. Segment selection
-   - LLM chooses promising short moments
-4. Rendering
-   - Video trimming and formatting
-   - Subtitle placement and styling
-   - Face-aware cropping
-   - Optional transitions
-   - Optional B-roll
-5. Persistence
-   - Clip metadata in PostgreSQL
-   - media files in mounted storage
-
-### Cropping and subtitles
-
-The rendering path includes support for:
-
-- Vertical output
-- Face-centered cropping
-- Subtitle overlays
-- Caption templates
-- Font customization
-
-## Progress and Realtime Updates
-
-The task detail page subscribes to progress using Server-Sent Events.
-
-Backend route:
-
-- `GET /tasks/{task_id}/progress`
-
-The worker publishes progress updates during processing, and the frontend updates its UI without polling on every step.
-
-## Data Model Overview
-
-Important tables from `init.sql`:
-
-### `users`
-
-Stores:
-
-- Auth identity
-- Admin flag
-- Default font preferences
-- Billing plan and subscription fields
-
-### `sources`
-
-Stores:
-
-- Source type
-- Title
-- Original URL when applicable
-
-### `tasks`
-
-Stores:
-
-- User and source relationships
-- Task status
-- Progress percentage and message
-- Font and caption settings
-- B-roll setting
-- Processing mode
-- Timing and cache metadata
-
-### `generated_clips`
-
-Stores:
-
-- File name and path
-- Clip timing
-- Selected text
-- AI reasoning
-- Virality and scoring breakdown
-
-### `processing_cache`
-
-Stores reusable processing artifacts to avoid repeating expensive work when possible.
-
-### Better Auth tables
-
-- `session`
-- `account`
-- `verification`
-
-### Billing support
-
-- `stripe_webhook_events`
-
-## Storage Model
-
-In Docker, the system uses named volumes for:
-
-- uploads
-- clips
-- Redis data
-- PostgreSQL data
-- YouTube auth state
-
-Fonts and transitions are file-based assets mounted from the repository.
-
-## Operational Characteristics
-
-### Why the worker matters
-
-Without the worker, tasks may be created successfully but never progress beyond `queued`.
-
-### Why Redis matters
-
-Redis is required for:
-
-- ARQ queue delivery
-- progress messaging
-- coordination around task processing
-
-### Why FastAPI docs matter
-
-The backend exposes interactive docs at `/docs`, which is helpful for inspecting available endpoints outside the frontend.
-
-## Legacy and Active Entry Points
-
-The active backend entry point is:
-
-- `backend/src/main_refactored.py`
-
-The legacy monolithic file still exists:
-
-- `backend/src/main.py`
-
-For new work, use the refactored entry point and layered route structure.
-
-## Related Reading
-
-- [App Guide](./app-guide.md)
-- [API Reference](./api-reference.md)
-- [Development](./development.md)
-- [Troubleshooting](./troubleshooting.md)
+---
+
+## Pipeline Phases
+
+The coordinator (`backend/src/services/coordinator.py`) structures the pipeline into sequential phases with gates that can abort early:
+
+| Phase | Key Services | Gate |
+|---|---|---|
+| **1. Cache / Preflight** | `cache_checker`, `preflight_gate` | Abort if already processed or material fails basic checks |
+| **2. Parallel Analysis** | `VideoService.generate_transcript`, `vision_service.analyze_clip_visually` | — |
+| **3. Viral Gate** | LLM via Groq, `VIRAL_SCORER_SYSTEM_PROMPT` | Abort if no segments pass virality threshold |
+| **4. Segment Scoring** | `get_validated_segments`, `build_dynamic_user_prompt` | — |
+| **5. Scene Refinement** | `scene_aware_segmenter` | Optional — aligns cuts to visual scene boundaries |
+| **6. Creative Pipeline** | `langgraph_pipeline` | Enriches each segment: hook, edit decisions, audio, captions, quality score |
+| **7. Parallel Render** | `_parallel_rendering` → per-clip sub-pipeline | — |
+| **8. Post-render Gate** | Duration + quality validation | Drop clips that fail output checks |
+| **9. Export / Finalization** | `export_service`, `cdn_service`, `clip_share_link_service` | — |
+
+### Per-Clip Sub-Pipeline
+
+Each clip runs its own enrichment chain inside `_parallel_rendering`:
+
+```
+clip_validator
+  → VideoService.create_single_clip
+  → beat_sync_service
+  → creative_pipeline
+  → caption_service  (ASS subtitles)
+  → hook_visual_service
+  → lut_service
+  → smart_auto_editor
+  → timeline (optional)
+  → emoji_overlay_service
+  → variant_generator (A/B variants)
+  → transition_service
+  → audio_ducking_service
+  → cta_service
+  → brand_overlay_service
+  → audio_denoiser
+  → cut_zoom_service
+  → language_detection
+  → clip_health_service
+  → metadata persistence
+```
+
+---
+
+## Domain Structure
+
+The backend is organized by **business domain**, not by technical layer:
+
+```
+backend/src/domains/
+├── ai/           # LLMs, vision analysis, editorial scoring
+├── audio/        # BGM, SFX, voice enhancement, beat sync, ducking
+├── broll/        # Stock (Pexels) + generative (ComfyUI) B-roll
+├── captions/     # ASS subtitles, translation, word-level timing
+├── detection/    # CV, face tracking, scene detection
+├── video/        # Core clip rendering, FFmpeg orchestration
+├── virality/     # Segment scoring, hook generation, ML models
+├── publishing/   # Social platform OAuth, post scheduling
+├── billing/      # Stripe subscriptions, usage metering
+├── analytics/    # Engagement metrics, feedback loops, ML virality predictor
+└── platform/     # Auth, teams, collaboration, notifications
+```
+
+---
+
+## Key Design Decisions
+
+### Async-first with `asyncio.gather`
+All parallelizable work (transcript + vision analysis, multi-clip rendering) runs concurrently via `asyncio.gather`. This means a 10-clip job renders all clips in parallel rather than sequentially.
+
+### Smart caching before heavy compute
+Before invoking Whisper or any LLM, the system checks `cache_checker` for existing transcripts/analysis. Re-uploads of the same video cost near-zero compute.
+
+### LangGraph for creative enrichment
+`langgraph_pipeline` uses a multi-agent graph to produce structured decisions per segment (hook type, edit style, caption preset, quality warnings). Results above a quality threshold are stored in `rag_memory` as winning patterns for future jobs.
+
+### Graceful degradation
+Every service wraps its FFmpeg calls and external API calls in try/except with explicit fallbacks. A failed B-roll fetch falls back to no B-roll; a failed music mix falls back to the original audio. The pipeline never hard-crashes on a single service failure.
+
+---
+
+## Infrastructure
+
+| Service | Image | Port |
+|---|---|---|
+| `frontend` | Next.js 15 | 3000 |
+| `backend` | FastAPI + uvicorn | 8000 |
+| `worker` | arq async worker | — |
+| `postgres` | PostgreSQL 16 | 5432 |
+| `redis` | Redis 7 | 6379 |
+| `comfyui` | ComfyUI + CUDA | 8188 |
+| `watchdog` | Health monitor | — |
+| `diagnostic` | System diagnostics | — |
+
+All services are defined in `docker-compose.yml`. Local development overrides (volume mounts, debug ports) live in `docker-compose.override.yml`.
+
+---
+
+## Data Flow: Video → Clips
+
+```
+1. User uploads video or pastes YouTube URL
+2. yt-dlp downloads / file is stored in uploads/
+3. Task enqueued to Redis via arq
+4. Worker picks up task → coordinator.py takes over
+5. Whisper transcribes → word-level timestamps in DB
+6. LLM scores every 15-60s segment for virality (0-100)
+7. Top N segments selected (viral_gate filters the rest)
+8. Each segment rendered to 9:16 vertical clip with:
+   - Smart crop / face tracking
+   - Hook visual (first 3s)
+   - ASS subtitles burned in
+   - B-roll inserted at scene breaks
+   - Beat-synced BGM mixed at -12dB under voice
+   - LUT color grade applied
+9. Clips exported to exports/ and optionally uploaded to S3/R2
+10. Frontend polls via SSE for progress events
+11. User downloads or schedules publishing
+```
+
+---
+
+For local setup: [`docs/development.md`](development.md)  
+For production deployment: [`DEPLOY_GUIDE.md`](../DEPLOY_GUIDE.md)  
+For configuration reference: [`docs/configuration.md`](configuration.md)
