@@ -17,10 +17,13 @@ logger = logging.getLogger(__name__)
 # Audio normalization constants (Phase 1A — prevents white noise)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Normalize all audio to 44100Hz, float planar format before any mixing
+# Normalize all audio to 44100Hz, s16 format before any mixing
+# BUG FIX: fltp causes "Nothing was written" error with AAC/h264_nvenc output.
+# s16 (signed 16-bit) is the native format for AAC encoding and avoids the
+# codec incompatibility that triggers FFmpeg error -22 (Invalid argument).
 AUDIO_NORMALIZE_FILTER = (
     "aresample=44100:resampler=soxr:precision=28,"
-    "aformat=sample_fmts=fltp:channel_layouts=stereo"
+    "aformat=sample_fmts=s16:channel_layouts=stereo"
 )
 
 # Niche → Pixabay search query mapping
@@ -465,6 +468,18 @@ def mix_background_music(
         logger.warning(f"Skipping music mix: invalid music file")
         return False
 
+    # FIX 2: Verify clip has an audio stream before attempting mix
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_name",
+         "-of", "default=noprint_wrappers=1", str(video_path)],
+        capture_output=True, text=True, timeout=15
+    )
+    has_audio = bool(probe.stdout.strip())
+    if not has_audio:
+        logger.warning("[MusicMix] Clip has no audio stream, skipping mix")
+        return False
+
     logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume")
     try:
         # SIMPLIFICADO: Usar volumen constante para BGM.
@@ -482,10 +497,13 @@ def mix_background_music(
         # Use apad + shortest to handle shorter music gracefully instead of aloop
         # aloop=loop=-1:size=2000000000 can cause issues with some FFmpeg builds
         # apad ensures the audio stream is long enough, then we trim with shortest
+        # BUG FIX: Force both streams to s16 before amix to prevent codec mismatch
+        # that causes "Nothing was written" error with AAC/h264_nvenc output.
         filter_complex = (
-            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-            f"[1:a]{AUDIO_NORMALIZE_FILTER},{vol_filter},apad=whole_dur=9999[music_loop];"
-            "[voice][music_loop]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+            f"[0:a]aformat=sample_fmts=s16:channel_layouts=stereo[a0];"
+            f"[1:a]aformat=sample_fmts=s16:channel_layouts=stereo,"
+            f"{vol_filter},apad=whole_dur=9999[a1];"
+            "[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]"
         )
 
         cmd = [
