@@ -1,5 +1,11 @@
 blank_issues_enabled: false
 contact_links:
-  - name: 💬 Discussion
+  - name: 📖 Documentation
+    url: https://github.com/sebsv123/ViraClip/blob/main/DEVELOPMENT_SETUP.md
+    about: Read the development setup and deployment guides before opening an issue.
+  - name: 🔧 Troubleshooting Guide
+    url: https://github.com/sebsv123/ViraClip/blob/main/TROUBLESHOOTING.md
+    about: Check the troubleshooting guide — your issue may already be documented.
+  - name: 💬 Discussions
     url: https://github.com/sebsv123/ViraClip/discussions
-    about: Ask questions, share ideas, or get help from the community.
+    about: For questions, ideas and general conversation, use GitHub Discussions.

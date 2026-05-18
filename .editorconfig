@@ -1,31 +1,35 @@
 # EditorConfig — https://editorconfig.org
-# Top-most EditorConfig file
 root = true
 
 [*]
 charset = utf-8
 end_of_line = lf
+indent_style = space
+indent_size = 2
 insert_final_newline = true
 trim_trailing_whitespace = true
-indent_style = space
 
-# Python: 4 spaces
 [*.py]
 indent_size = 4
 max_line_length = 100
 
-# JS/TS/JSON/YAML/Markdown: 2 spaces
-[*.{js,jsx,ts,tsx,json,yml,yaml,md,css,scss,html}]
-indent_size = 2
+[*.md]
+trim_trailing_whitespace = false
 
-# Makefiles require tabs
 [Makefile]
 indent_style = tab
 
-# Docker/shell: keep defaults
-[*.{Dockerfile,sh,bash}]
+[*.sh]
 indent_size = 2
 
-# Markdown: preserve trailing whitespace (line breaks)
-[*.md]
-trim_trailing_whitespace = false
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.json]
+indent_size = 2
+
+[*.sql]
+indent_size = 2
+
+[{package.json,.travis.yml}]
+indent_size = 2
