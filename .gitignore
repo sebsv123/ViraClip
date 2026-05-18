@@ -1,127 +1,165 @@
-# Datos y modelos
-backend/temp/
-backend/uploads/
-backend/clips/
-*.mp4
-*.wav
-*.m4a
+# ============================================================
+# ViraClip — .gitignore
+# ============================================================
 
-# Entorno
-.env
-*.env
-**/.env
-.env.local
-
-# Python
+# ----- Python -----------------------------------------------
 __pycache__/
-*.pyc
 *.py[cod]
 *$py.class
-.venv/
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Virtual environments
+.env
+.venv
 env/
 venv/
-*.egg-info
-.Python
+ENV/
+env.bak/
+venv.bak/
 
-# Node
+# ----- Secrets & environment files --------------------------
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.env.broll
+*.env
+!.env.example
+
+# ----- Node / Frontend --------------------------------------
 node_modules/
+.npm
+.yarn/
+.pnp.*
+.next/
+out/
+.nuxt/
+dist/
+build/
+*.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
+# Root-level package files (not needed at monorepo root)
+/package-lock.json
+/package.json
 
-# OS
-.DS_Store
-.DS_Store?
-._*
-Thumbs.db
+# ----- Docker -----------------------------------------------
+# Never commit override files with local paths/ports
+docker-compose.override.yml
+# Old docker-compose backups
+docker-compose.yml.old
+docker-compose.*.old
 
-# Git
-.git/
-
-# Proyecto específico
-logs/
-temp/
-exports/
-downloads/
-output/
-outputs/
-uploads/
-.archive/
-backend-old/
-.cleanup-backup/
-.claude/
-
-# Log files generados en runtime
-worker_logs.txt
-worker_progress.txt
-backend/worker_logs.txt
-backend/worker_progress.txt
-
-# Audio files (download on setup)
+# ----- Media & video artifacts ------------------------------
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
 *.mp3
-backend/music/
-backend/assets/sounds/bgm/*.mp3
-backend/assets/sounds/sfx/*.mp3
+*.wav
+*.aac
+uploads/
+output/
+exports/
+clips/
+tmp/
+temp/
+.cache/
 
-# Storage and cache
-backend/storage/
-frontend/.next/
-frontend/out/
-backend/overlay_cache/
+# ----- Logs -------------------------------------------------
+logs/
+*.log
+*.log.*
+npm-debug.log*
 
-# Database
+# ----- Databases --------------------------------------------
 *.db
 *.sqlite
 *.sqlite3
-postgres-data/
 
-# Docker volumes
-.docker/
+# ----- OS ---------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
 
-# Debug/temp scripts (not part of the project)
-_clip_renderer.py
-fix_clip_renderer.py
-fix_indent.py
+# ----- IDEs & editors ---------------------------------------
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+.classpath
+*.sublime-workspace
 
-# Test artifacts
-htmlcov/
-.coverage
+# ----- Testing & coverage -----------------------------------
 .pytest_cache/
-test-results/
-backend/test_report_*.json
-backend/test_run_*.log
-backend/test_output.txt
-test_ltx_workflow.json
-test_sam2_workflow.json
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
 
-# Lockfiles (regenerate on install)
-frontend/bun.lockb
-backend/uv.lock
+# ----- Mypy / type checking ---------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
 
-# Windows scripts (not applicable on Linux server)
-*.bat
-*.ps1
-models/*.safetensors
-models/*.pth
-models/*.pt
-models/**/*.safetensors
-models/**/*.pth
-models/**/*.pt
+# ----- Misc residues ----------------------------------------
+# Files accidentally created from copy-pasting shell commands
+/-H
+/-c
+/-d
+/psql
+/agente_seguros_ai
+/qrr-quantum-relational-reasoner
 
-# Generated runtime outputs (not versioned)
-exports/
-uploads/
+# Empty HTML stubs
+/api_docs.html
 
-# Separate projects living in the same parent folder (not part of ViraClip)
-genmail/
+# ----- Terraform / infra ------------------------------------
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!*.tfvars.example
 
-# Ignore all embedded git repos in comfyui custom_nodes (prevents submodule warnings)
+# ----- ComfyUI runtime --------------------------------------
+comfyui/models/
+comfyui/output/
+comfyui/input/
 comfyui/custom_nodes/
-comfyui/.git/
-watch_*

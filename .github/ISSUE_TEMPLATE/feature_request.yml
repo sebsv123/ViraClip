@@ -1,45 +1,60 @@
 name: ✨ Feature Request
-description: Propose a new feature or improvement
-labels: [enhancement, triage]
+description: Propose a new feature or improvement for ViraClip
+labels: ["enhancement"]
+assignees: []
+
 body:
-  - type: textarea
-    id: problem
+  - type: markdown
     attributes:
-      label: Problem
-      description: What user need or pain point are you trying to solve?
+      value: |
+        Got an idea? Great! Please describe it clearly.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A short description of the feature.
+      placeholder: "Add support for exporting clips directly to YouTube Shorts via the YouTube Data API v3..."
     validations:
       required: true
 
   - type: textarea
-    id: proposal
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this useful? What problem does it solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed_solution
     attributes:
       label: Proposed solution
-      description: Describe the feature, including UX/API surface if relevant.
+      description: How would you implement this? (optional but helpful)
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area of the project
+      options:
+        - AI / LLM pipeline
+        - Video processing / FFmpeg
+        - Captions / subtitles
+        - B-roll / stock media
+        - Audio (ducking, normalization, music)
+        - Distribution (TikTok, Reels, Shorts)
+        - Analytics / feedback loop
+        - Frontend / UI
+        - Docker / Infrastructure
+        - Other
     validations:
       required: true
 
-  - type: textarea
-    id: alternatives
+  - type: checkboxes
+    id: checklist
     attributes:
-      label: Alternatives considered
-      description: Other approaches you've thought about and why they're worse.
-
-  - type: dropdown
-    id: scope
-    attributes:
-      label: Affected component
-      multiple: true
+      label: Checklist
       options:
-        - backend (FastAPI)
-        - worker (arq)
-        - frontend (Next.js)
-        - waitlist
-        - comfyui
-        - infrastructure
-        - documentation
-
-  - type: textarea
-    id: extras
-    attributes:
-      label: Additional context
-      description: Mockups, links, references, etc.
+        - label: I searched existing issues and this has not been requested before
+          required: true
+        - label: I am willing to contribute a PR for this feature
