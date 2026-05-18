@@ -183,24 +183,28 @@ def get_background_music_for_niche(niche: str = "general", config_obj=None, vide
         return pixabay_track
 
     # 2.5. BackgroundMusicService: Pixabay mood-search with adaptive volume metadata
-    try:
-        import asyncio as _asyncio2
-        from ..domains.audio.background_music_service import BackgroundMusicService as _BMS
-        _bms = _BMS()
-        _bms_loop = _asyncio2.new_event_loop()
-        _bms_tracks = _bms_loop.run_until_complete(_bms.search_music(mood=niche, duration=30))
-        _bms_loop.close()
-        if _bms_tracks:
-            _bms_track = _bms_tracks[0]
-            _bms_cache = Path(_cfg.temp_dir) / "bgm_service"
-            _bms_cache.mkdir(parents=True, exist_ok=True)
-            _bms_out = str(_bms_cache / f"{_bms_track.id}_{niche}.mp3")
-            _bms_ok = _bms.download_music(_bms_track, _bms_out)
-            if _bms_ok and Path(_bms_out).exists():
-                logger.info(f"[music] BackgroundMusicService track: {Path(_bms_out).name}")
-                return Path(_bms_out)
-    except Exception as _bms_e:
-        logger.debug(f"[music] BackgroundMusicService skipped: {_bms_e}")
+    # Guarded by BACKGROUND_MUSIC_ENABLED feature flag (default: false)
+    if os.environ.get("BACKGROUND_MUSIC_ENABLED", "false").lower() in ("true", "1"):
+        try:
+            import asyncio as _asyncio2
+            from ..domains.audio.background_music_service import BackgroundMusicService as _BMS
+            _bms = _BMS()
+            _bms_loop = _asyncio2.new_event_loop()
+            _bms_tracks = _bms_loop.run_until_complete(_bms.search_music(mood=niche, duration=30))
+            _bms_loop.close()
+            if _bms_tracks:
+                _bms_track = _bms_tracks[0]
+                _bms_cache = Path(_cfg.temp_dir) / "bgm_service"
+                _bms_cache.mkdir(parents=True, exist_ok=True)
+                _bms_out = str(_bms_cache / f"{_bms_track.id}_{niche}.mp3")
+                _bms_ok = _bms.download_music(_bms_track, _bms_out)
+                if _bms_ok and Path(_bms_out).exists():
+                    logger.info(f"[music] BackgroundMusicService track: {Path(_bms_out).name}")
+                    return Path(_bms_out)
+        except Exception as _bms_e:
+            logger.debug(f"[music] BackgroundMusicService skipped: {_bms_e}")
+    else:
+        logger.debug("[music] BackgroundMusicService disabled (BACKGROUND_MUSIC_ENABLED=false)")
 
     # 3. Try Freesound API (mood-matched background music)
     if os.environ.get("FREESOUND_API_KEY", "") and os.environ.get("FREESOUND_AUTO_MATCH", "true").lower() == "true":
@@ -463,53 +467,26 @@ def mix_background_music(
 
     logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume")
     try:
-        if ducking_enabled and word_timings:
-            # Ducking PREDICTIVO basado en timestamps de palabras
-            from ..domains.audio.audio_ducking_service import build_word_aware_ducking_filter
-            _ducking_mode = os.environ.get("DUCKING_MODE", "predictive").lower()
-            if _ducking_mode == "predictive":
-                _voice_ratio      = float(os.environ.get("DUCKING_VOICE_RATIO", "0.80"))
-                _long_boost       = float(os.environ.get("DUCKING_LONG_PAUSE_BOOST", "1.25"))
-                _short_boost      = float(os.environ.get("DUCKING_SHORT_PAUSE_BOOST", "1.15"))
-                ducking_filter = build_word_aware_ducking_filter(
-                    words=word_timings,
-                    music_base_volume=music_volume,
-                    voice_duck_ratio=_voice_ratio,
-                    long_pause_boost=_long_boost,
-                    short_pause_boost=_short_boost,
-                )
-                # Phase 1A: Apply normalization before ducking
-                filter_complex = (
-                    f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-                    f"[1:a]{AUDIO_NORMALIZE_FILTER},{ducking_filter},aloop=loop=-1:size=2000000000[music_ducked];"
-                    "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
-                )
-                logger.info("[DUCKING] Modo: PREDICTIVO (word timestamps)")
-            else:
-                # Sidechain cuando se pide explicitamente - CON NORMALIZACIÓN
-                filter_complex = (
-                    f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-                    f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                    "[music_loop][voice]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"
-                    "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
-                )
-                logger.info("[DUCKING] Modo: SIDECHAIN (reactivo)")
-        elif ducking_enabled:
-            # Fallback: sidechain cuando no hay word_timings - CON NORMALIZACIÓN
-            filter_complex = (
-                f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-                f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                "[music_loop][voice]sidechaincompress=threshold=0.08:ratio=2:attack=100:release=600[music_ducked];"
-                "[voice][music_ducked]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
-            )
-            logger.info("[DUCKING] Modo: SIDECHAIN fallback (sin word_timings)")
-        else:
-            # Sin ducking: usar build_music_mix_filter
-            filter_complex = (
-                f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-                f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f},aloop=loop=-1:size=2000000000[music_loop];"
-                "[voice][music_loop]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
-            )
+        # SIMPLIFICADO: Usar volumen constante para BGM.
+        # El ducking predictivo con expresiones FFmpeg complejas
+        # (volume=eval=frame:expr='if(gte...') causa errores de parsing
+        # porque FFmpeg no soporta paréntesis anidados ni comas dentro
+        # de filter_complex option values.
+        #
+        # El beat_sync_service (creative_pipeline Step 7) ya maneja el
+        # ducking real con smart_audio. Este mix_background_music solo
+        # necesita poner música de fondo a volumen constante.
+        vol_filter = f"volume={music_volume:.3f}"
+        logger.info(f"[DUCKING] Volumen constante: {music_volume:.3f} (ducking delegado a beat_sync_service)")
+
+        # Use apad + shortest to handle shorter music gracefully instead of aloop
+        # aloop=loop=-1:size=2000000000 can cause issues with some FFmpeg builds
+        # apad ensures the audio stream is long enough, then we trim with shortest
+        filter_complex = (
+            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
+            f"[1:a]{AUDIO_NORMALIZE_FILTER},{vol_filter},apad=whole_dur=9999[music_loop];"
+            "[voice][music_loop]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+        )
 
         cmd = [
             "ffmpeg", "-y",
@@ -528,11 +505,20 @@ def mix_background_music(
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
             logger.warning(f"Music mix failed: {result.stderr[-300:]}")
+            # Clean up 0-byte output if FFmpeg failed
+            if output_path.exists() and output_path.stat().st_size == 0:
+                output_path.unlink(missing_ok=True)
+                logger.warning(f"Removed 0-byte output: {output_path.name}")
+            return False
+        
+        # Verify output is valid (not 0 bytes)
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            logger.warning(f"Music mix produced 0-byte output: {output_path}")
+            output_path.unlink(missing_ok=True)
             return False
         
         # Phase 1C: Post-process audio RMS check
         try:
-            # Verify output has valid audio with acceptable RMS level
             rms_result = subprocess.run(
                 ["ffprobe", "-v", "error", "-f", "lavfi",
                  f"amovie={output_path},astats=metadata=1:reset=1",
@@ -544,23 +530,22 @@ def mix_background_music(
                 rms_str = rms_result.stdout.strip()
                 if rms_str and rms_str not in ("nan", "inf", "-inf"):
                     rms_db = float(rms_str)
-                    # Valid audio should be between -80 dB (silence) and 0 dB (max)
                     if rms_db < -80 or rms_db > 3:
                         logger.warning(f"[Phase 1C] Output audio suspicious: RMS={rms_db:.1f}dB")
-                        # Still return True but log warning — let caller decide
                     else:
                         logger.info(f"✅ Background music mixed into {output_path.name} (RMS: {rms_db:.1f}dB)")
                 else:
                     logger.warning(f"[Phase 1C] Cannot measure RMS — output may be silent")
             else:
-                # ffprobe failed but ffmpeg succeeded — likely fine
                 logger.info(f"✅ Background music mixed into {output_path.name}")
         except Exception as _rms_e:
-            # RMS check is optional — don't fail on it
             logger.debug(f"[Phase 1C] RMS check skipped: {_rms_e}")
             logger.info(f"✅ Background music mixed into {output_path.name}")
         
         return True
     except Exception as e:
         logger.error(f"Music mix error: {e}")
+        # Clean up 0-byte output on exception
+        if output_path.exists() and output_path.stat().st_size == 0:
+            output_path.unlink(missing_ok=True)
         return False

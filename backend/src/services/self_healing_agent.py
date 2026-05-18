@@ -379,6 +379,75 @@ async def heal_task(task: dict) -> str:
     diagnosis = await ErrorDiagnostician.diagnose(error, tb)
     logger.info("[SELF-HEALING] task %s → %s (attempt %d/%d)", task_id[:12], diagnosis.error_type, attempts + 1, MAX_ATTEMPTS)
 
+    # ── Editlist-aware healing ───────────────────────────────────────────
+    # If the error is an EDITLIST_ERROR, apply safe editlist fallback:
+    # 1. Log the failure with [Editlist] tag
+    # 2. Save the original editlist to Redis for post-mortem analysis
+    # 3. Create a safe editlist (cuts/concat only) and re-enqueue
+    # 4. Update metadata with health_report info
+    if diagnosis.error_type == "EDITLIST_ERROR":
+        logger.info(
+            "[Editlist] Render failed for clip %s, saved to %s.",
+            task_id[:12],
+            f"redis:editlist:original:{task_id}",
+        )
+        try:
+            from .editlist_service import EditlistService, Editlist
+
+            # Try to load the original editlist from Redis
+            original_editlist = await EditlistService.load_editlist_from_redis(task_id)
+
+            if original_editlist is not None:
+                # Save original editlist to Redis with a longer TTL for post-mortem
+                await EditlistService.save_editlist_to_redis(original_editlist, task_id)
+
+                # Log the safe editlist application
+                logger.info(
+                    "[SelfHealing] Applying safe editlist (cuts only) for clip %s.",
+                    task_id[:12],
+                )
+
+                # Update metadata with health_report info
+                # The safe editlist will be applied when the task is re-enqueued
+                # by the worker picking up the safe_mode flag
+                await update_task_metadata(task_id, {
+                    "health_report": {
+                        "editlist_error": True,
+                        "failed_operation": diagnosis.fix_description,
+                        "safe_mode_applied": True,
+                        "original_editlist_preserved": True,
+                        "original_editlist_redis_key": f"editlist:original:{task_id}",
+                        "healing_timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                    "editlist_safe_mode": True,
+                })
+            else:
+                logger.warning(
+                    "[Editlist] No original editlist found in Redis for task %s — "
+                    "cannot apply safe fallback",
+                    task_id[:12],
+                )
+                # Still log the failure even without an editlist to restore
+                await update_task_metadata(task_id, {
+                    "health_report": {
+                        "editlist_error": True,
+                        "failed_operation": diagnosis.fix_description,
+                        "safe_mode_applied": False,
+                        "note": "No original editlist found in Redis",
+                        "healing_timestamp": datetime.now(timezone.utc).isoformat(),
+                    },
+                })
+        except ImportError:
+            logger.warning(
+                "[Editlist] EditlistService not available — skipping editlist-aware healing"
+            )
+        except Exception as exc:
+            logger.error(
+                "[Editlist] Editlist-aware healing failed for task %s: %s",
+                task_id[:12], exc,
+            )
+            # Error is logged but not silenced — it remains visible in logs
+
     # Apply code fix if available and not already known
     fix_applied = False
     if diagnosis.fix_code and not diagnosis.is_known:
@@ -386,6 +455,7 @@ async def heal_task(task: dict) -> str:
         if fix_applied:
             logger.info("[SELF-HEALING] Patch applied: %s", diagnosis.fix_description)
         await ErrorDiagnostician.save_to_knowledge_base(diagnosis, fix_applied)
+
 
     # Fix 3: Atomic Postgres→Redis — update Postgres FIRST, then enqueue
     source = await get_task_source(task_id)

@@ -114,6 +114,7 @@ async def create_single_clip(
     caption_template: str = "default",
     output_format: str = "vertical",
     add_subtitles: bool = True,
+    caption_offset_y: int = 0,
     broll_suggestions: Optional[List[Dict[str, Any]]] = None,
     split_screen: bool = False,
     hook_title: Optional[str] = None,
@@ -1195,6 +1196,7 @@ async def create_single_clip(
                 words_with_confidence,
                 style=_cap_style,
                 platform=target_platform,
+                caption_offset_y=caption_offset_y,
             )
             if _cap_ok and subtitled_path.exists():
                 output_path = subtitled_path

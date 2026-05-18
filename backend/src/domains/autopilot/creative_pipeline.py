@@ -44,6 +44,139 @@ class CreativePipeline:
       the coordinator.
     """
 
+    async def _load_creative_hints(self) -> dict:
+        """
+        Load active CreativeHints from the optimization loop and return
+        a dict of adjusted parameters for the pipeline.
+
+        Returns:
+            Dict with keys like:
+              - preferred_hook_type: str | None
+              - preferred_caption_style: str | None
+              - broll_boost: float (0.0 = no boost, 1.0 = strong preference)
+              - target_duration_s: float | None
+              - zoom_punch_preference: bool | None
+              - music_preference: bool | None
+              - sfx_preference: str | None ("no_sfx", "1-3_sfx", "4+_sfx")
+              - hints_applied: list[str]  (human-readable descriptions)
+        """
+        result: dict = {
+            "preferred_hook_type": None,
+            "preferred_caption_style": None,
+            "broll_boost": 0.0,
+            "target_duration_s": None,
+            "zoom_punch_preference": None,
+            "music_preference": None,
+            "sfx_preference": None,
+            "hints_applied": [],
+        }
+
+        try:
+            from ...config import get_config
+            cfg = get_config()
+            if not cfg.optimization_loop_enabled:
+                return result
+
+            from ...services.clip_features import ClipFeaturesRepository
+            from sqlalchemy.ext.asyncio import AsyncSession
+            from ...main import get_db  # lazy import to avoid circular deps
+
+            # Get a DB session
+            db_gen = get_db()
+            db: AsyncSession = await db_gen.__anext__()
+
+            try:
+                workspace_id = cfg.optimization_loop_workspace_id
+                hints = await ClipFeaturesRepository.get_active_hints(db, workspace_id)
+
+                if not hints:
+                    logger.info("  [Creative] No active CreativeHints for workspace '%s'", workspace_id)
+                    return result
+
+                logger.info(
+                    "  [Creative] Loaded %d active CreativeHints for workspace '%s'",
+                    len(hints), workspace_id,
+                )
+
+                for h in hints:
+                    if h.hint_type == "hook" and h.delta > 0:
+                        # Extract hook type from pattern: "Hook type 'question' outperforms average"
+                        import re
+                        m = re.search(r"'([^']+)'", h.pattern)
+                        if m:
+                            result["preferred_hook_type"] = m.group(1)
+                            result["hints_applied"].append(
+                                f"hook_type={m.group(1)} (+{h.delta*100:.0f}% {h.metric})"
+                            )
+
+                    elif h.hint_type == "caption_style" and h.delta > 0:
+                        m = re.search(r"'([^']+)'", h.pattern)
+                        if m:
+                            result["preferred_caption_style"] = m.group(1)
+                            result["hints_applied"].append(
+                                f"caption_style={m.group(1)} (+{h.delta*100:.0f}% {h.metric})"
+                            )
+
+                    elif h.hint_type == "broll" and h.delta > 0:
+                        # B-roll boost: scale delta to 0.0–1.0 range
+                        result["broll_boost"] = min(1.0, max(0.0, h.delta * 3))
+                        result["hints_applied"].append(
+                            f"broll_boost={result['broll_boost']:.2f} (+{h.delta*100:.0f}% {h.metric})"
+                        )
+
+                    elif h.hint_type == "duration" and h.delta > 0:
+                        # Extract target duration from bucket label
+                        m = re.search(r"'([^']+)'", h.pattern)
+                        if m:
+                            bucket = m.group(1)
+                            if bucket == "0-15s":
+                                result["target_duration_s"] = 12.0
+                            elif bucket == "15-30s":
+                                result["target_duration_s"] = 22.0
+                            elif bucket == "30-60s":
+                                result["target_duration_s"] = 45.0
+                            elif bucket == "60s+":
+                                result["target_duration_s"] = 75.0
+                            result["hints_applied"].append(
+                                f"target_duration={result['target_duration_s']:.0f}s (+{h.delta*100:.0f}% {h.metric})"
+                            )
+
+                    elif h.hint_type == "pacing" and h.delta > 0:
+                        if "zoom" in h.pattern.lower():
+                            result["zoom_punch_preference"] = True
+                            result["hints_applied"].append(
+                                f"zoom_punch=enabled (+{h.delta*100:.0f}% {h.metric})"
+                            )
+
+                    elif h.hint_type == "audio" and h.delta > 0:
+                        if "music" in h.pattern.lower():
+                            result["music_preference"] = True
+                            result["hints_applied"].append(
+                                f"music=enabled (+{h.delta*100:.0f}% {h.metric})"
+                            )
+                        elif "sfx" in h.pattern.lower() or "SFX" in h.pattern:
+                            m = re.search(r"'([^']+)'", h.pattern)
+                            if m:
+                                result["sfx_preference"] = m.group(1)
+                                result["hints_applied"].append(
+                                    f"sfx={m.group(1)} (+{h.delta*100:.0f}% {h.metric})"
+                                )
+
+                logger.info(
+                    "  [Creative] Applied %d CreativeHints: %s",
+                    len(result["hints_applied"]), result["hints_applied"],
+                )
+
+            finally:
+                await db.close()
+
+        except ImportError:
+            logger.debug("  [Creative] CreativeHints not available (import error)")
+        except Exception as exc:
+            logger.warning("  [Creative] Failed to load CreativeHints: %s", exc)
+
+        return result
+
     async def enhance(
         self,
         clip_path: Path,
@@ -264,7 +397,67 @@ class CreativePipeline:
             _log_step_error("Step 4 (Hook)", exc)
             _mark_fail("step_4_hook")
 
-        # ── 4.5 Hook-flash reorder ────────────────────────────────────────────
+        # ── 4.5 Shorts Highlight Engine (LLM-based highlight detection) ──────
+        logger.info("  [Creative] Step 4.5/8: Shorts Highlight Engine...")
+        shorts_highlights = []
+        if _skip("shorts_highlight"):
+            logger.info("  [Creative] Step 4.5/8: Skipped (user override)")
+        else:
+            try:
+                from ...config import get_config
+                cfg = get_config()
+                if cfg.shorts_engine_enabled:
+                    from ...services.shorts_highlight_engine import get_shorts_highlight_engine
+                    engine = get_shorts_highlight_engine()
+                    # Build transcript dict from available data
+                    transcript_dict = {
+                        "segments": [
+                            {"start": w.get("start", 0), "end": w.get("end", 0), "text": w.get("word", "")}
+                            for w in (words or [])
+                        ],
+                        "duration": end - start,
+                    }
+                    # Build existing segments list for score fusion
+                    existing_segments = [segment] if segment else []
+                    highlights = await engine.find_highlights(
+                        transcript=transcript_dict,
+                        num_clips=3,
+                        existing_segments=existing_segments,
+                    )
+                    if highlights:
+                        shorts_highlights = [
+                            {
+                                "title": h.title,
+                                "start_time": h.start_time,
+                                "end_time": h.end_time,
+                                "score": h.score,
+                                "hook_sentence": h.hook_sentence,
+                                "virality_reason": h.virality_reason,
+                            }
+                            for h in highlights
+                        ]
+                        meta["shorts_highlights"] = shorts_highlights
+                        meta["shorts_highlight_count"] = len(shorts_highlights)
+                        logger.info(
+                            "  [Creative] ✓ Step 4.5/8: %d highlights found (top score=%.1f)",
+                            len(shorts_highlights),
+                            shorts_highlights[0]["score"] if shorts_highlights else 0,
+                        )
+                        steps_ok.append("step_4_5_shorts_highlight")
+                    else:
+                        _mark_fail("step_4_5_shorts_highlight_empty")
+                        logger.info("  [Creative] Step 4.5/8: No highlights found")
+                else:
+                    logger.info("  [Creative] Step 4.5/8: Shorts Engine disabled (config)")
+                    _mark_fail("step_4_5_shorts_engine_disabled")
+            except ImportError as exc:
+                _log_step_error("Step 4.5 (Shorts Highlight) - Import", exc)
+                _mark_fail("step_4_5_shorts_highlight")
+            except Exception as exc:
+                _log_step_error("Step 4.5 (Shorts Highlight)", exc)
+                _mark_fail("step_4_5_shorts_highlight")
+
+        # ── 4.75 Hook-flash reorder ──────────────────────────────────────────
         reordered = None
         if _skip("hook_reorder"):
             _hook_reorder = False
@@ -551,9 +744,20 @@ class CreativePipeline:
         meta["contextual_overlays"] = contextual_overlays
 
         # ── 6. Video effects (zoom punch + color grade from preset) ───────────
+        # NOTE: If FACE_AUTOCROP_ENABLED is True and autocrop was applied,
+        # zoom_punch is skipped to avoid conflicting crop trajectories.
         logger.info("  [Creative] Step 6/8: Video effects (zoom + grade)...")
         effected = None
         _skip_vfx = _skip("vfx")
+        # Check if autocrop was applied — if so, disable zoom_punch to avoid conflict
+        _autocrop_applied = meta.get("autocrop_applied", False)
+        _face_autocrop_enabled = False
+        try:
+            from ...config import get_config
+            _face_autocrop_enabled = get_config().face_autocrop_enabled
+        except Exception:
+            pass
+        _skip_zoom = _autocrop_applied and _face_autocrop_enabled
         try:
             if preset is None:
                 logger.warning("  [Creative] No preset selected, using default fallback")
@@ -572,6 +776,23 @@ class CreativePipeline:
             logger.warning("  [Creative] Fallback preset failed: %s", _fb)
         try:
             if preset is not None and not _skip_vfx:
+                # ── Zoom/crop conflict resolution ──────────────────────────────
+                # If face autocrop was applied, disable zoom_punch to avoid
+                # conflicting crop trajectories (triple zoom stack).
+                if _skip_zoom:
+                    logger.info(
+                        "  [Creative] Step 6/8: [Zoom] Skipping impact zoom: "
+                        "autocrop already applied for clip %s",
+                        clip_path.name,
+                    )
+                    # Disable zoom_punch but keep color grading
+                    preset.zoom_punch_enabled = False
+                    preset.zoom_punch_zoom = 1.0
+                    preset.zoom_punch_duration = 0.0
+                    meta["zoom_pipeline"] = "none"
+                else:
+                    meta["zoom_pipeline"] = "zoom_punch"
+
                 logger.debug("  [Creative] Importing video_effects for apply_preset_effects...")
                 from ...domains.video.video_effects import apply_preset_effects
                 logger.debug("  [Creative] video_effects import OK")

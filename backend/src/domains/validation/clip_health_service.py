@@ -315,6 +315,14 @@ def generate_health_report(
     hashtag_count: int = 0,
     thumbnail_path: Optional[str] = None,
     zoom_punch_applied: bool = False,
+    # ── Sanity check flags (from QA module) ──────────────────────────────
+    sanity_subtitles_ok: Optional[bool] = None,
+    sanity_broll_diversity_ok: Optional[bool] = None,
+    sanity_framing_ok: Optional[bool] = None,
+    sanity_audio_ok: Optional[bool] = None,
+    # ── Source subtitle detection flags ──────────────────────────────────
+    source_burned_subtitles_detected: Optional[bool] = None,
+    source_subtitles_band: Optional[str] = None,
 ) -> ClipHealthReport:
     checks: list[HealthCheck] = [
         check_hook_presence(hook_score, hook_start, hook_type),
@@ -335,6 +343,66 @@ def generate_health_report(
             icon="✅",
             message="Zoom punch applied at audio peaks — boosts perceived energy.",
         ))
+
+    # ── Sanity check flags ────────────────────────────────────────────────
+    if sanity_subtitles_ok is not None:
+        checks.append(HealthCheck(
+            name="QA: Triple Subtitles",
+            status="pass" if sanity_subtitles_ok else "fail",
+            icon="✅" if sanity_subtitles_ok else "❌",
+            message="No triple-subtitle issue detected." if sanity_subtitles_ok
+            else "Triple-subtitle risk detected — check embedded streams and burned-in overlays.",
+            fix="Ensure only one subtitle stream is embedded; disable burned-in subtitles if embedded streams exist.",
+        ))
+
+    if sanity_broll_diversity_ok is not None:
+        checks.append(HealthCheck(
+            name="QA: B-Roll Diversity",
+            status="pass" if sanity_broll_diversity_ok else "warn",
+            icon="✅" if sanity_broll_diversity_ok else "⚠️",
+            message="Good B-roll source diversity." if sanity_broll_diversity_ok
+            else "Low B-roll diversity — consider adding more unique sources.",
+            fix="Increase B-roll source variety from Pexels or AI generation.",
+        ))
+
+    if sanity_framing_ok is not None:
+        checks.append(HealthCheck(
+            name="QA: Stable Framing",
+            status="pass" if sanity_framing_ok else "fail",
+            icon="✅" if sanity_framing_ok else "❌",
+            message="Framing is stable." if sanity_framing_ok
+            else "Excessive jitter detected — camera shake or unstable framing.",
+            fix="Apply video stabilization or reduce impact zoom aggressiveness.",
+        ))
+
+    if sanity_audio_ok is not None:
+        checks.append(HealthCheck(
+            name="QA: Audio Sync & Loudness",
+            status="pass" if sanity_audio_ok else "fail",
+            icon="✅" if sanity_audio_ok else "❌",
+            message="Audio sync and loudness within acceptable range." if sanity_audio_ok
+            else "Audio issues detected — desync >100ms or loudness outside [-15, -13] LUFS.",
+            fix="Verify loudnorm is applied (target -14 LUFS) and check audio-video sync in rendering pipeline.",
+        ))
+
+    # ── Source subtitle detection ─────────────────────────────────────────
+    if source_burned_subtitles_detected is not None:
+        if source_burned_subtitles_detected:
+            band_desc = f" in {source_subtitles_band}" if source_subtitles_band else ""
+            checks.append(HealthCheck(
+                name="Source: Burned-in Subtitles",
+                status="warn",
+                icon="⚠️",
+                message=f"Burned-in subtitles detected{band_desc} — may clash with ViraClip captions.",
+                fix="Captions will be shifted upward or disabled to avoid double-subtitle clutter.",
+            ))
+        else:
+            checks.append(HealthCheck(
+                name="Source: Burned-in Subtitles",
+                status="pass",
+                icon="✅",
+                message="No significant burned-in subtitles detected in source video.",
+            ))
 
     score = _score_from_checks(checks)
     grade = _grade(score)
