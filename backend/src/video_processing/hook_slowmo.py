@@ -40,6 +40,23 @@ from typing import Optional
 from ..gpu_utils import nvenc_available
 from src import gpu_utils
 
+
+def _is_nvenc_available() -> bool:
+    """Check if NVENC is available via FFmpeg (more reliable than torch/CUDA detection).
+
+    The system has h264_nvenc active for clip rendering (confirmed in logs), but
+    gpu_utils may use a different detection method (CUDA/torch) that fails.
+    This function checks FFmpeg's encoder list directly.
+    """
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
+
 logger = logging.getLogger(__name__)
 
 # ─── Defaults (overridable via env) ──────────────────────────────────────────
@@ -241,13 +258,11 @@ def _extract_slowmo_segment(
 
     vf_parts = [f"setpts={pts_factor:.4f}*PTS"]
 
-    # BUG 2 FIX: Only use minterpolate (CPU-heavy frame interpolation) when
-    # a GPU is detected. minterpolate is extremely slow on CPU-only systems
-    # and can cause 120s+ timeouts. When no GPU is available, skip interpolation
-    # and rely on setpts alone (still produces smooth slow-mo, just without
-    # motion-compensated intermediate frames).
-    from src.core.feature_flags import FEATURE_FLAGS
-    has_gpu = FEATURE_FLAGS.get("gpu_encode", False)
+    # BUG 3 FIX: Use NVENC detection via FFmpeg instead of FEATURE_FLAGS/gpu_utils.
+    # The system has h264_nvenc active for clip rendering but gpu_utils may use
+    # a different detection method (CUDA/torch) that fails. _is_nvenc_available()
+    # checks FFmpeg's encoder list directly, which is more reliable.
+    has_gpu = _is_nvenc_available()
     if use_interpolation and speed <= 0.7 and has_gpu:
         # minterpolate: motion-compensated interpolation for smooth slo-mo
         # mi_mode=mci is highest quality; fps is output frame rate

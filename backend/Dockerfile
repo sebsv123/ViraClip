@@ -160,6 +160,7 @@ RUN uv venv --seed .venv
 # COPY pyproject.toml + uv.lock triggers rebuild only when deps change.
 # uv sync installs the project's declared dependencies.
 COPY pyproject.toml uv.lock* ./
+RUN pip install "protobuf>=3.20.0,<4.0.0" --force-reinstall
 RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu132 \
     && rm -rf /root/.cache/uv
 
@@ -169,6 +170,7 @@ RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/
 RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
     "faster-whisper==1.1.1" \
     "sentence-transformers" \
+    "librosa" \
     "mediapipe==0.10.5" \
     "opencv-python-headless" \
     "moviepy>=2.0.0" \
@@ -332,6 +334,21 @@ RUN curl -fsSL \
     -o /app/fonts/Inter-Regular.ttf \
     && fc-cache -fv \
     || echo "Font download skipped — Arial fallback"
+
+# Download CC0 background music tracks (YouTube Audio Library / Free Music Archive)
+# These are the 5 most-used tracks from the 31-track library
+RUN curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/Sly%20Sky%20-%20Telecasted.mp3" \
+    -o /app/assets/sounds/bgm/Sly\ Sky\ -\ Telecasted.mp3 \
+    && curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/No.2%20Remembering%20Her%20-%20Esther%20Abrami.mp3" \
+    -o /app/assets/sounds/bgm/No.2\ Remembering\ Her\ -\ Esther\ Abrami.mp3 \
+    && curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/Champion%20-%20Telecasted.mp3" \
+    -o /app/assets/sounds/bgm/Champion\ -\ Telecasted.mp3 \
+    && curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/Oh%20Please%20-%20Telecasted.mp3" \
+    -o /app/assets/sounds/bgm/Oh\ Please\ -\ Telecasted.mp3 \
+    && curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/Jetski%20-%20Telecasted.mp3" \
+    -o /app/assets/sounds/bgm/Jetski\ -\ Telecasted.mp3 \
+    && echo "✓ CC0 background music tracks downloaded" \
+    || echo "⚠ Music download skipped — will use runtime fallback"
 
 # Health check — runs healthcheck.sh which verifies NVENC, ffmpeg version, torchcodec
 # Uses -S flag to bypass OpenTelemetry auto-instrumentation (avoids grpcio/mediapipe issues)
