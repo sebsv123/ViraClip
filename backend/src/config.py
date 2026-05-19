@@ -16,6 +16,7 @@ class Config:
         self.anthropic_api_key = self._get_optional_env("ANTHROPIC_API_KEY")
         self.google_api_key = self._get_optional_env("GOOGLE_API_KEY")
         self.groq_api_key = self._get_optional_env("GROQ_API_KEY")
+        self.deepseek_api_key = self._get_optional_env("DEEPSEEK_API_KEY")
         self.youtube_data_api_key = self._get_optional_env("YOUTUBE_DATA_API_KEY")
         self.ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://ollama:11434")
         self.ollama_api_key = self._get_optional_env("OLLAMA_API_KEY")
@@ -26,6 +27,8 @@ class Config:
 
         self.whisper_model = os.getenv("WHISPER_MODEL_SIZE", "medium")
         self.llm = self._get_optional_env("LLM") or self._infer_default_llm()
+        self.viral_scoring_llm = os.getenv("VIRAL_SCORING_LLM") or self.llm
+        self.llm_fallback = self._get_optional_env("LLM_FALLBACK") or ""
         self.hf_token = self._get_optional_env("HF_TOKEN")
         self.assembly_ai_api_key = os.getenv("ASSEMBLY_AI_API_KEY")
         self.pexels_api_key = os.getenv("PEXELS_API_KEY")
@@ -234,13 +237,14 @@ class Config:
             self.google_api_key,
             self.anthropic_api_key,
             self.groq_api_key,
+            self.deepseek_api_key,
         ])
         
         if not has_llm:
             logger.warning(
                 "[WARN] No LLM API key found! Pipeline will use fallback text-based analysis. "
-                "Set GROQ_API_KEY (recommended), OPENAI_API_KEY, GOOGLE_API_KEY, or ANTHROPIC_API_KEY "
-                "for best quality."
+                "Set GROQ_API_KEY (recommended), OPENAI_API_KEY, GOOGLE_API_KEY, ANTHROPIC_API_KEY, "
+                "or DEEPSEEK_API_KEY for best quality."
             )
         
         # Check Whisper device configuration
@@ -254,6 +258,7 @@ class Config:
         
         # Log configured LLM
         logger.info(f"[LLM] configured: {self.llm}")
+        logger.info(f"[LLM] viral_scoring_llm: {self.viral_scoring_llm}")
 
     @staticmethod
     def _get_optional_env(name: str):
@@ -312,6 +317,8 @@ class Config:
             return "openai:gpt-4o-mini"
         if self.anthropic_api_key:
             return "anthropic:claude-3-5-haiku-latest"
+        if self.deepseek_api_key:
+            return "deepseek:deepseek-chat"
         if self.groq_api_key:
             return "groq:llama-3.3-70b-versatile"
         if self.ollama_base_url:

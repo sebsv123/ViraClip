@@ -156,6 +156,7 @@ interface TaskDetails {
   source_id: string;
   source_title: string;
   source_type: string;
+  source_url?: string;
   status: string;
   progress?: number;
   progress_message?: string;
@@ -198,6 +199,8 @@ export default function TaskPage() {
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deletingClipId, setDeletingClipId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [reprocessError, setReprocessError] = useState("");
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [editingClipId, setEditingClipId] = useState<string | null>(null);
   const [startOffset, setStartOffset] = useState("0");
@@ -679,6 +682,47 @@ export default function TaskPage() {
     }
   };
 
+  const handleReprocess = async (forceReprocess = false) => {
+    const sourceUrl = task?.source_url || task?.source_title;
+    if (!sourceUrl || !task?.source_type) return;
+    setIsReprocessing(true);
+    setReprocessError("");
+    console.log(`[UI] reprocess task ${params.id} from same source`);
+    try {
+      const payload: Record<string, unknown> = {
+        source_url: sourceUrl,
+        niche: "auto",
+        target_platform: "tiktok",
+        max_clips: 5,
+        jump_cut: true,
+        denoise_audio: false,
+        auto_publish: false,
+      };
+      if (forceReprocess) {
+        payload.force_reprocess = true;
+      }
+      const res = await fetch("/api/autopilot/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      const newId = data.workflow_id || data.task_id;
+      if (!newId) throw new Error("No workflow_id in response");
+      console.log(`[UI] created new task ${newId}`);
+      router.push(`/tasks/${newId}`);
+    } catch (err) {
+      console.error("[UI] reprocess failed", err);
+      setReprocessError(err instanceof Error ? err.message : "Reprocess failed");
+    } finally {
+      setIsReprocessing(false);
+    }
+  };
+
   const handleDeleteClip = async (clipId: string) => {
     if (!session?.user?.id || !params.id) return;
 
@@ -973,6 +1017,22 @@ export default function TaskPage() {
                     </h1>
                     <div className="flex items-center gap-1">
                       <button
+                        onClick={() => handleReprocess(false)}
+                        disabled={isReprocessing}
+                        className="p-2 rounded-lg hover:bg-cyan-500/10 text-cyan-400 hover:text-cyan-300 transition-colors disabled:opacity-50"
+                        title="Re-process with same source"
+                      >
+                        {isReprocessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      </button>
+                      <button
+                        onClick={() => handleReprocess(true)}
+                        disabled={isReprocessing}
+                        className="p-2 rounded-lg hover:bg-amber-500/10 text-amber-400 hover:text-amber-300 transition-colors disabled:opacity-50"
+                        title="Force re-process (skip cache)"
+                      >
+                        {isReprocessing ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                      </button>
+                      <button
                         onClick={() => {
                           setIsEditing(true);
                           setEditedTitle(task.source_title);
@@ -988,6 +1048,9 @@ export default function TaskPage() {
                         <Trash2 className="w-4 h-4" />
                       </button>
                     </div>
+                    {reprocessError && (
+                      <p className="text-xs text-red-400 mt-1">{reprocessError}</p>
+                    )}
                   </>
                 )}
               </div>

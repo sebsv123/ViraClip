@@ -20,6 +20,8 @@ class PipelineMetrics:
     task_id: str
     start_time: float
     end_time: Optional[float] = None
+    analysis_end_time: Optional[float] = None
+    render_start_time: Optional[float] = None
     stages: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     success: bool = False
     errors: List[str] = field(default_factory=list)
@@ -32,6 +34,14 @@ class PipelineMetrics:
             "timestamp": datetime.now().isoformat(),
             "metadata": metadata or {},
         }
+    
+    def finish_analysis(self):
+        """Mark analysis phase as complete."""
+        self.analysis_end_time = time.time()
+    
+    def start_render(self):
+        """Mark render phase as started."""
+        self.render_start_time = time.time()
     
     def finish(self, success: bool = True, error: Optional[str] = None):
         """Mark pipeline as complete."""
@@ -47,12 +57,28 @@ class PipelineMetrics:
             return self.end_time - self.start_time
         return time.time() - self.start_time
     
+    @property
+    def analysis_duration(self) -> Optional[float]:
+        """Get analysis phase duration in seconds."""
+        if self.analysis_end_time:
+            return self.analysis_end_time - self.start_time
+        return None
+    
+    @property
+    def render_duration(self) -> Optional[float]:
+        """Get render phase duration in seconds."""
+        if self.render_start_time and self.end_time:
+            return self.end_time - self.render_start_time
+        return None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "task_id": self.task_id,
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "analysis_duration_sec": self.analysis_duration,
+            "render_duration_sec": self.render_duration,
             "total_duration_sec": self.total_duration,
             "success": self.success,
             "stages": self.stages,
@@ -85,6 +111,32 @@ class MetricsCollector:
     def get_pipeline(self, task_id: str) -> Optional[PipelineMetrics]:
         """Get active pipeline metrics."""
         return self._active_pipelines.get(task_id)
+    
+    def finish_analysis(self, task_id: str):
+        """Mark analysis phase as complete for a pipeline."""
+        metrics = self._active_pipelines.get(task_id)
+        if metrics:
+            metrics.finish_analysis()
+            logger.info(
+                f"[METRICS] Analysis completed for {task_id} in {metrics.analysis_duration:.1f}s"
+            )
+    
+    def start_render(self, task_id: str):
+        """Mark render phase as started for a pipeline."""
+        metrics = self._active_pipelines.get(task_id)
+        if metrics:
+            metrics.start_render()
+    
+    def finish_render(self, task_id: str):
+        """Mark render phase as complete and log render duration."""
+        metrics = self._active_pipelines.get(task_id)
+        if metrics:
+            metrics.end_time = time.time()
+            rd = metrics.render_duration
+            if rd is not None:
+                logger.info(
+                    f"[METRICS] Render completed for {task_id} in {rd:.1f}s"
+                )
     
     def finish_pipeline(self, task_id: str, success: bool = True, error: Optional[str] = None):
         """Finish tracking a pipeline."""
@@ -119,9 +171,13 @@ class MetricsCollector:
         
         # Log summary
         status = "✅ SUCCESS" if success else "❌ FAILED"
+        _ad = metrics.analysis_duration
+        _rd = metrics.render_duration
+        _ad_str = f"{_ad:.1f}" if _ad is not None else "N/A"
+        _rd_str = f"{_rd:.1f}" if _rd is not None else "N/A"
         logger.info(
-            f"Pipeline {task_id} {status} in {metrics.total_duration:.1f}s "
-            f"({len(metrics.stages)} stages)"
+            f"[METRICS] Workflow {status} for {task_id} in {metrics.total_duration:.1f}s "
+            f"(analysis={_ad_str}s, render={_rd_str}s)"
         )
     
     def record_stage(
