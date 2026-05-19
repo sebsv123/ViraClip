@@ -1130,9 +1130,12 @@ async def create_single_clip(
         _ep_out = output_path.with_name(f"ep_{output_path.name}")
         _ep_segment_text = segment.get("text", "")[:60] if segment else ""
         # Resolve LUT filter string here so EP can bake it in one pass
+        # Rotate LUT per clip index when processing a batch to avoid repetition
+        from .lut_service import select_lut as _select_lut
+        _total_clips = max(1, segment.get("_total_clips", 1))
         _lut_preset_ep = (
             (_clip_profile.lut if _clip_profile else None)
-            or os.environ.get("LUT_PRESET", "teal_orange")
+            or _select_lut(clip_index=clip_index, total_clips=_total_clips)
         )
         _lut_vf_ep = ""
         if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):

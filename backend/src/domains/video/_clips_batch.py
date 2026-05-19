@@ -123,6 +123,8 @@ async def create_video_clips_parallel(
     async def render_single_clip(segment_with_idx: tuple) -> Optional[Dict[str, Any]]:
         idx, segment = segment_with_idx
         try:
+            # Inject total clip count so create_single_clip can rotate LUTs etc.
+            segment = {**segment, "_total_clips": len(segments)}
             clip_info = await create_single_clip(
                 video_path=video_path,
                 segment=segment,
