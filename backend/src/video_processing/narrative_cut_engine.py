@@ -7,9 +7,47 @@ import re
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
+import threading
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# ── Module-level LangGraph singleton (thread-safe) ──────────────────────────
+# Building the graph compiles it via LangGraph's VariableBuilder, which
+# registers built-in functions. If multiple threads compile simultaneously,
+# the same built-in gets registered twice → "Duplicate dispatch rule".
+# Using a threading.Lock ensures exactly one compilation per process.
+
+_graph_instance = None
+_graph_lock = threading.Lock()
+
+
+def _get_or_build_graph():
+    """Return the compiled LangGraph, building it exactly once (thread-safe).
+    
+    Uses double-checked locking. On any error, logs WARNING and returns None.
+    The caller should handle None gracefully (skip narrative cuts for that clip).
+    """
+    global _graph_instance
+    if _graph_instance is not None:
+        logger.debug("[NarrativeCut] Reusing compiled graph singleton")
+        return _graph_instance
+    with _graph_lock:
+        if _graph_instance is not None:
+            logger.debug("[NarrativeCut] Reusing compiled graph singleton")
+            return _graph_instance
+        try:
+            from langgraph.graph import StateGraph, START
+            graph = StateGraph(dict)
+            graph.add_node("entry", lambda state: state)
+            graph.add_edge(START, "entry")
+            _graph_instance = graph.compile()
+            logger.info("[NarrativeCut] Building graph singleton")
+        except Exception as exc:
+            logger.warning("[NarrativeCut] Failed to build graph: %s", exc)
+            _graph_instance = None
+    return _graph_instance
 
 # Module-level singleton for SentenceTransformer (CPU-only to preserve VRAM for Whisper)
 _SENTENCE_MODEL = None
@@ -60,45 +98,16 @@ class NarrativeCutEngine:
     - Hesitation markers ("um", "eh")
     - Energy drops in audio
 
-    BUG FIX: LangGraph CompiledStateGraph / VariableBuilder singleton.
-    The error "Duplicate dispatch rule for <built-in function intern>" occurs
-    when LangGraph's VariableBuilder registers the same built-in function
-    multiple times across repeated graph compilations. By caching the compiled
-    graph at the class level, we ensure it is only built once.
+    The compiled LangGraph is built once at module level with a threading.Lock
+    to prevent "Duplicate dispatch rule for <built-in function intern>" when
+    multiple threads create NarrativeCutEngine instances simultaneously.
     """
 
-    _compiled_graph = None
-
-    @classmethod
-    def _get_graph(cls):
-        """Return the cached compiled LangGraph, building it once."""
-        if cls._compiled_graph is None:
-            cls._compiled_graph = cls._build_graph()
-        return cls._compiled_graph
-
-    @classmethod
-    def _build_graph(cls):
-        """Build and compile the LangGraph for narrative cut processing.
-        
-        This method constructs the StateGraph, adds nodes and edges, and
-        compiles it. It is called at most once per process lifetime thanks
-        to the _compiled_graph class-level cache.
-        """
-        from langgraph.graph import StateGraph
-        # Import here to avoid circular imports at module level
-        graph = StateGraph(dict)
-        # Add nodes and edges as needed by the pipeline
-        # (This is a placeholder — the actual graph construction
-        #  depends on the specific pipeline version. The singleton
-        #  pattern ensures it only compiles once regardless.)
-        compiled = graph.compile()
-        return compiled
-    
     def __init__(self, min_silence_duration: float = 0.5):
         self.min_silence_duration = min_silence_duration
         self.sentence_transformers = None
-        # Ensure the graph is compiled once (idempotent)
-        self._graph = self._get_graph()
+        # Reference the module-level singleton graph (built once, thread-safe)
+        self._graph = _get_or_build_graph()
     
     def _load_embeddings(self):
         """Lazy load sentence-transformers for topic detection via singleton"""

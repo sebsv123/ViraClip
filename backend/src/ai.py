@@ -11,6 +11,7 @@ AI-related functions for transcript analysis with enhanced precision and viralit
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Literal
 import asyncio
+import json
 import logging
 import re
 
@@ -303,6 +304,174 @@ Requirements:
 Return your analysis as a structured JSON response matching the TranscriptAnalysis schema."""
 
 
+def _extract_json_payload(raw: str) -> str:
+    """
+    Extract JSON payload from LLM response that may be wrapped in function call
+    tags, markdown code blocks, or have surrounding text.
+    
+    Handles:
+    - <function=final_result>{...}</function>
+    - ```json ... ```
+    - Text before first { or [ and after last } or ]
+    """
+    text = raw.strip()
+    
+    # Remove <function=...> and </function> tags
+    if text.startswith("<function"):
+        text = re.sub(r"<function[^>]*>", "", text)
+        text = text.replace("</function>", "")
+        text = text.strip()
+    
+    # Remove ```json ... ``` blocks
+    if text.startswith("```"):
+        text = re.sub(r"```(?:json)?\s*", "", text)
+        text = text.strip()
+    
+    # Find first { or [ and last } or ]
+    first_brace = -1
+    for ch in ("{", "["):
+        idx = text.find(ch)
+        if idx != -1 and (first_brace == -1 or idx < first_brace):
+            first_brace = idx
+    
+    last_brace = -1
+    for ch in ("}", "]"):
+        idx = text.rfind(ch)
+        if idx != -1 and idx > last_brace:
+            last_brace = idx
+    
+    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        text = text[first_brace:last_brace + 1]
+    
+    return text.strip()
+
+
+def _parse_timestamp(ts: str) -> float:
+    """Parse HH:MM:SS or MM:SS to seconds. Returns 0 on failure."""
+    try:
+        parts = str(ts).strip().split(":")
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def _format_timestamp(seconds: float) -> str:
+    """Format seconds as MM:SS."""
+    m = int(seconds) // 60
+    s = int(seconds) % 60
+    return f"{m:02d}:{s:02d}"
+
+
+def _normalize_segment(seg: dict, next_seg: Optional[dict] = None) -> dict:
+    """
+    Normalize a single segment dict to the expected TranscriptSegment schema.
+    
+    Handles:
+    - timestamp → start_time + end_time
+    - Missing text, relevance_score, reasoning, virality → defaults
+    """
+    result = dict(seg)
+    changed = []
+
+    # timestamp → start_time
+    if "start_time" not in result and "timestamp" in result:
+        result["start_time"] = result["timestamp"]
+        changed.append("timestamp->start_time")
+
+    # Infer end_time from next segment or default +30s
+    if "end_time" not in result and "start_time" in result:
+        st = _parse_timestamp(result["start_time"])
+        if next_seg and "start_time" in next_seg:
+            nt = _parse_timestamp(next_seg["start_time"])
+            if nt > st:
+                result["end_time"] = _format_timestamp(nt)
+                changed.append(f"end_time inferred from next segment ({result['end_time']})")
+            else:
+                result["end_time"] = _format_timestamp(st + 30)
+                changed.append(f"end_time default +30s ({result['end_time']})")
+        elif st > 0:
+            result["end_time"] = _format_timestamp(st + 30)
+            changed.append(f"end_time default +30s ({result['end_time']})")
+
+    # text fallback
+    if "text" not in result:
+        for key in ("quote", "content", "segment_text", "transcript_excerpt"):
+            if key in result and result[key]:
+                result["text"] = result[key]
+                changed.append(f"text from '{key}'")
+                break
+        if "text" not in result:
+            result["text"] = ""
+            changed.append("text default ''")
+
+    # relevance_score
+    if "relevance_score" not in result:
+        result["relevance_score"] = 0.5
+        changed.append("relevance_score default 0.5")
+
+    # reasoning
+    if "reasoning" not in result:
+        result["reasoning"] = ""
+        changed.append("reasoning default ''")
+
+    # virality
+    if "virality" not in result:
+        result["virality"] = {
+            "hook_score": 12, "engagement_score": 12, "value_score": 12,
+            "shareability_score": 12, "total_score": 48,
+            "hook_type": "statement", "virality_reasoning": "",
+        }
+        changed.append("virality default")
+
+    if changed:
+        logger.info("[AI] Normalized segment fields: %s", changed)
+
+    return result
+
+
+def _normalize_segments_payload(data: dict) -> dict:
+    """
+    Normalize variant LLM schemas to the expected TranscriptAnalysis format.
+    
+    Handles:
+    - {"segments": [...]} → {"most_relevant_segments": [...], "summary": "", "key_topics": []}
+    - Missing summary / key_topics → defaults
+    - Per-segment: timestamp→start_time, missing fields→defaults
+    """
+    result = dict(data)
+    
+    # Normalize segments → most_relevant_segments
+    if "segments" in result and "most_relevant_segments" not in result:
+        result["most_relevant_segments"] = result.pop("segments")
+        logger.info("[AI] Normalized legacy/variant LLM schema: segments -> most_relevant_segments")
+    
+    # Normalize each segment
+    if "most_relevant_segments" in result and isinstance(result["most_relevant_segments"], list):
+        segs = result["most_relevant_segments"]
+        normalized = []
+        for i, seg in enumerate(segs):
+            if isinstance(seg, dict):
+                next_seg = segs[i + 1] if i + 1 < len(segs) and isinstance(segs[i + 1], dict) else None
+                normalized.append(_normalize_segment(seg, next_seg))
+            else:
+                normalized.append(seg)
+        result["most_relevant_segments"] = normalized
+    
+    # Fill missing optional fields
+    if "summary" not in result:
+        result["summary"] = ""
+        logger.debug("[AI] Filled missing summary field with default")
+    if "key_topics" not in result:
+        result["key_topics"] = []
+        logger.debug("[AI] Filled missing key_topics field with default")
+    
+    return result
+
+
 async def get_validated_segments(
     transcript: str,
     video_duration: float,
@@ -331,9 +500,10 @@ async def get_validated_segments(
             "Install it with: pip install pydantic-ai"
         )
 
-    agent = Agent(
+    # Step 1: get raw text from the LLM (no output_type validation yet)
+    _raw_agent = Agent(
         model=model,
-        output_type=TranscriptAnalysis,
+        output_type=str,
         system_prompt=VIRAL_SCORER_SYSTEM_PROMPT,
     )
 
@@ -345,11 +515,58 @@ async def get_validated_segments(
         min_score=min_score,
     )
 
-    result = await agent.run(user_prompt)
-    # pydantic-ai moderno usa .output; fallback a .data para compatibilidad
-    analysis = getattr(result, "output", None) or getattr(result, "data", None)
-    if analysis is None:
+    try:
+        _raw_result = await _raw_agent.run(user_prompt)
+    except Exception as _llm_err:
+        _err_str = str(_llm_err)
+        _is_429 = "429" in _err_str or "rate_limit" in _err_str.lower() or "RateLimitError" in type(_llm_err).__name__
+        if _is_429:
+            logger.warning("[AI] Groq 429 rate limit hit — checking for fallback provider")
+            # Try fallback model if configured
+            _fallback_model = config.llm_fallback or ""
+            if _fallback_model and _fallback_model != model:
+                logger.info(f"[AI] Falling back to {_fallback_model}")
+                _raw_agent = Agent(
+                    model=_fallback_model,
+                    output_type=str,
+                    system_prompt=VIRAL_SCORER_SYSTEM_PROMPT,
+                )
+                _raw_result = await _raw_agent.run(user_prompt)
+            else:
+                logger.error("[AI] Groq 429 and no fallback configured — failing fast")
+                raise RuntimeError(
+                    f"Groq rate limit exceeded and no fallback LLM configured. "
+                    f"Set LLM_FALLBACK in .env or wait for quota reset."
+                ) from _llm_err
+        else:
+            raise
+    _raw_text = getattr(_raw_result, "output", None) or getattr(_raw_result, "data", None)
+    if _raw_text is None:
         raise ValueError("AgentRunResult has neither 'output' nor 'data' attribute")
+
+    # Step 2: sanitize function-wrapped / markdown-wrapped JSON
+    _clean = _extract_json_payload(str(_raw_text))
+    if _clean != str(_raw_text):
+        logger.debug("[AI] Sanitized function-wrapped JSON response before validation")
+
+    # Step 3: normalize variant schemas before pydantic validation
+    try:
+        _parsed = json.loads(_clean)
+        if isinstance(_parsed, dict):
+            _parsed = _normalize_segments_payload(_parsed)
+            _clean = json.dumps(_parsed)
+    except json.JSONDecodeError:
+        pass
+
+    # Step 4: parse with pydantic
+    try:
+        analysis = TranscriptAnalysis.model_validate_json(_clean)
+    except Exception as _parse_e:
+        logger.error(
+            "[AI] Failed to parse LLM response after sanitization: %s | raw_preview=%s",
+            _parse_e, str(_raw_text)[:200],
+        )
+        raise
 
     # Filter segments below minimum score
     filtered_segments = [
@@ -382,7 +599,12 @@ async def get_most_relevant_parts_by_transcript(
     Returns a list of dicts compatible with the legacy segment format used
     throughout the codebase.
     """
-    effective_model = model or config.llm or "groq:llama-3.3-70b-versatile"
+    effective_model = (
+        model
+        or config.viral_scoring_llm
+        or config.llm
+        or "groq:llama-3.3-70b-versatile"
+    )
 
     try:
         analysis = await get_validated_segments(

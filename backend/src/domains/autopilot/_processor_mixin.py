@@ -273,6 +273,10 @@ class _ProcessorMixin:
             else:
                 logger.info(f"[TASK {task_id}] ✅ {total_clips} segments ready to render")
             
+            # Mark render phase start in metrics
+            from ...core.metrics_service import get_metrics_collector
+            get_metrics_collector().start_render(task_id)
+            
             clips_output_dir = Path(self.config.temp_dir) / "clips" / task_id
             clips_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -939,6 +943,10 @@ class _ProcessorMixin:
                 f"Task {task_id} render complete: {len(clip_ids)} clips in "
                 f"{render_elapsed:.1f}s (avg {avg_clip_time:.1f}s/clip)"
             )
+            
+            # Mark render phase complete in metrics
+            from ...core.metrics_service import get_metrics_collector
+            get_metrics_collector().finish_render(task_id)
             
             # Cleanup temporary extracted segments to free disk space
             cleanup_extracted_segments(extracted_segment_paths)

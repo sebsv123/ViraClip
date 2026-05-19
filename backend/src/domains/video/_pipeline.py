@@ -31,6 +31,24 @@ from ._helpers import get_service_config
 
 logger = logging.getLogger(__name__)
 
+# ── Filler / weak-start phrases to penalise in hook selection ──────────────
+# Segments whose text starts with any of these (case-insensitive, stripped)
+# get a severe virality penalty so they sink to the bottom of the sort.
+_WEAK_HOOK_PREFIXES: tuple = (
+    # Spanish fillers
+    "bueno", "pues", "entonces", "o sea", "este", "eh", "ah", "mm",
+    "vale", "venga", "claro", "sí", "no", "ya", "bien",
+    # Greetings / pleasantries
+    "hola", "hey", "hello", "hi", "qué tal", "cómo están", "cómo estáis",
+    "buenos días", "buenas tardes", "buenas noches", "saludos",
+    "gracias", "muchas gracias", "bienvenidos", "bienvenidas",
+    # English fillers
+    "uh", "um", "like", "so", "and", "but", "well", "okay", "ok",
+    "right", "you know", "actually", "basically", "literally",
+    "i mean", "you see", "the thing is",
+)
+_WEAK_HOOK_PENALTY = 50  # subtracted from virality_score when matched
+
 def determine_source_type(url: str) -> str:
     """Determine if source is YouTube or uploaded file."""
     video_id = get_youtube_video_id(url)
@@ -276,24 +294,15 @@ async def process_video_complete(
                     "a creative plan with the best viral clips. Return JSON with 'clips' array "
                     "where each clip has: start_time, end_time, text, hook, virality_score, theme."
                 )
-                _llm_result = await _router.route_and_generate(
-                    system_prompt=_prompt,
-                    user_message=transcript[:3000],
+                _llm_result = await _router.score_segments(
+                    transcript=transcript[:3000],
+                    language="en",
+                    num_clips=3,
                 )
-                if _llm_result and isinstance(_llm_result, dict):
-                    _clips_data = _llm_result.get("clips", [])
-                    if _clips_data:
-                        elite_plan = _EliteCreativePlan(
-                            clips=[_EliteCreativePlan.Clip(**c) for c in _clips_data],
-                            global_vibe=_llm_result.get("global_vibe", "Standard"),
-                            brand_consistency_plan=_llm_result.get("brand_plan", "Default brand voice"),
-                            custom_hashtags=_llm_result.get("hashtags", ["viral", "trending"]),
-                        )
-                        logger.info(f"EliteAI: {_llm_provider} fallback generated {len(elite_plan.clips)} clips")
-                    else:
-                        raise RuntimeError("LLM returned no clips")
+                if _llm_result:
+                    logger.info(f"EliteAI: LLM fallback generated plan")
                 else:
-                    raise RuntimeError(f"LLM returned unexpected type: {type(_llm_result)}")
+                    raise RuntimeError("LLM returned no clips")
             except Exception as _elite_fb_e:
                 logger.warning(f"EliteAI: all providers failed — using empty plan ({_elite_fb_e})")
                 elite_plan = _fallback_plan
@@ -585,6 +594,23 @@ async def process_video_complete(
                 if not segment.get("hook_type") and hook_result["hook_analysis"]["primary_hook_type"]:
                     segment["hook_type"] = hook_result["hook_analysis"]["primary_hook_type"]
         
+        # ── Apply weak-hook penalty: segments starting with filler / greeting
+        # words get a severe virality penalty so they sink to the bottom.
+        for _seg in segments_json:
+            _text = (_seg.get("text") or "").strip().lower()
+            if _text:
+                _first_word = _text.split()[0] if _text.split() else ""
+                # Check if the segment starts with any weak prefix
+                for _prefix in _WEAK_HOOK_PREFIXES:
+                    if _text.startswith(_prefix):
+                        old = _seg.get("virality_score", 0)
+                        _seg["virality_score"] = max(0, old - _WEAK_HOOK_PENALTY)
+                        logger.info(
+                            f"[HOOK-FILTER] Penalised segment starting with '{_prefix}' "
+                            f"(virality {old} → {_seg['virality_score']})"
+                        )
+                        break
+
         # Re-sort segments by enhanced virality score
         segments_json.sort(key=lambda x: x.get("virality_score", 0), reverse=True)
         
@@ -617,8 +643,10 @@ async def process_video_complete(
         if progress_callback:
             await progress_callback(80, "Preparing clip render...", "processing")
 
-        # Record pipeline success metrics
-        get_metrics_collector().finish_pipeline(task_id or "unknown", success=True)
+        # Record analysis phase completion (render happens later in _processor_mixin.py)
+        _metrics = get_metrics_collector()
+        _metrics.finish_analysis(task_id or "unknown")
+        _metrics.finish_pipeline(task_id or "unknown", success=True)
         
         # DEFENSIVE: Ensure video_path is valid before returning
         if video_path is None:

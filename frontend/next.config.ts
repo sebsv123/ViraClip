@@ -20,6 +20,10 @@ const nextConfig: NextConfig = {
         source: "/api/events",
         destination: "https://datafa.st/api/events",
       },
+      {
+        source: "/api/autopilot/:path*",
+        destination: "http://localhost:8000/autopilot/:path*",
+      },
     ];
   },
 };
