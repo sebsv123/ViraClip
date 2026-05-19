@@ -1,0 +1,60 @@
+name: Create repo labels
+
+on:
+  workflow_dispatch:  # run manually from Actions tab
+
+permissions:
+  issues: write
+
+jobs:
+  labels:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create labels via GitHub API
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const labels = [
+              { name: 'backend',       color: '0075ca', description: 'Changes to backend Python code' },
+              { name: 'frontend',      color: 'f9d0c4', description: 'Changes to Next.js frontend' },
+              { name: 'docker',        color: 'e4e669', description: 'Docker / infrastructure changes' },
+              { name: 'ci',            color: '6e5494', description: 'CI/CD workflows' },
+              { name: 'documentation', color: '0052cc', description: 'Documentation updates' },
+              { name: 'dependencies',  color: 'cfd3d7', description: 'Dependency bumps' },
+              { name: 'comfyui',       color: 'd93f0b', description: 'ComfyUI pipeline changes' },
+              { name: 'scripts',       color: 'bfd4f2', description: 'Dev scripts and tooling' },
+              { name: 'pipeline',      color: 'e11d48', description: 'Core video pipeline changes' },
+              { name: 'good first issue', color: '7057ff', description: 'Good for newcomers' },
+              { name: 'bug',           color: 'd73a4a', description: 'Something is not working' },
+              { name: 'enhancement',   color: 'a2eeef', description: 'New feature or request' },
+              { name: 'audio',         color: 'fbca04', description: 'Audio processing changes' },
+              { name: 'subtitles',     color: '0e8a16', description: 'Caption / subtitle changes' },
+              { name: 'b-roll',        color: 'b60205', description: 'B-roll selection and insertion' },
+              { name: 'performance',   color: 'e4e669', description: 'Performance improvements' },
+              { name: 'security',      color: 'ee0701', description: 'Security fixes' },
+              { name: 'wontfix',       color: 'ffffff', description: 'This will not be worked on' },
+            ];
+
+            for (const label of labels) {
+              try {
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ...label,
+                });
+                console.log(`✓ Created: ${label.name}`);
+              } catch (e) {
+                if (e.status === 422) {
+                  // Label already exists — update it
+                  await github.rest.issues.updateLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ...label,
+                  });
+                  console.log(`↻ Updated: ${label.name}`);
+                } else {
+                  console.error(`✗ Failed ${label.name}: ${e.message}`);
+                }
+              }
+            }

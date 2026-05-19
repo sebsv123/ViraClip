@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Extract changelog entry
+        id: changelog
+        run: |
+          VERSION=${{ steps.version.outputs.VERSION }}
+          # Extract the section for this version from CHANGELOG.md
+          NOTES=$(awk "/^## \\[?${VERSION#v}/,/^## \\[?[0-9]/{if(/^## \\[?[0-9]/ && !/^## \\[?${VERSION#v}/)exit; print}" CHANGELOG.md | tail -n +2)
+          echo "NOTES<<EOF" >> $GITHUB_OUTPUT
+          echo "$NOTES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ViraClip ${{ steps.version.outputs.VERSION }}
+          body: |
+            ${{ steps.changelog.outputs.NOTES }}
+
+            ---
+            **Full Changelog**: https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

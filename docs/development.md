@@ -1,322 +1,219 @@
-# Development
+# Local Development Guide
 
-This guide is for contributors working on SupoClip locally.
+## Prerequisites
 
-## Repository Layout
+| Tool | Min version | Install |
+|---|---|---|
+| Docker + Compose | 24+ | [docs.docker.com](https://docs.docker.com/get-docker/) |
+| Node.js | 20+ | [nodejs.org](https://nodejs.org/) |
+| Python | 3.11+ | [python.org](https://www.python.org/) |
+| `uv` | latest | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Git | 2.40+ | system package manager |
 
-Current repository structure:
+Optional but recommended:
+- **NVIDIA GPU + Container Toolkit** — 5-10× faster transcription and rendering
+- **fish / zsh** — the scripts are POSIX-compatible but fish gives nicer UX
 
-- `backend/`
-  - FastAPI app
-  - ARQ worker
-  - services, repositories, route modules, and media-processing code
-- `frontend/`
-  - Next.js app
-  - App Router pages, API routes, auth, Prisma schema, UI components
-- Root files
-  - `docker-compose.yml`
-  - `init.sql`
-  - `.env.example`
-  - `start.sh`
+---
 
-Note: older repo guidance references a `waitlist/` app, but it is not present in this checkout.
-
-## Main Commands
-
-## Full stack with Docker
+## Quick Start (Docker — recommended)
 
 ```bash
-docker-compose up -d --build
-docker-compose logs -f
-docker-compose down
+git clone https://github.com/sebsv123/ViraClip.git
+cd ViraClip
+
+# Copy and fill in your API keys
+cp .env.example .env
+$EDITOR .env  # add at minimum ASSEMBLY_AI_API_KEY + one LLM key
+
+# Build and start everything
+make build
+make dev
 ```
 
-## Frontend
+Services available at:
+
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:3000 |
+| API + Swagger | http://localhost:8000/docs |
+| Postgres | localhost:5432 |
+| Redis | localhost:6379 |
+| ComfyUI | http://localhost:8188 |
+
+Watch logs: `make logs` · Backend only: `make logs-backend` · Worker only: `make logs-worker`
+
+---
+
+## Local Development (without Docker)
+
+Useful when you want hot-reload on backend/frontend changes without rebuilding images.
+
+### Backend
+
+```bash
+cd backend
+uv sync --all-groups        # installs all deps into .venv
+
+# Requires local Postgres + Redis (or start them via Docker)
+docker compose up -d postgres redis
+
+uv run uvicorn src.main:app --reload --port 8000
+```
+
+### Worker
+
+```bash
+cd backend
+uv run arq src.workers.tasks.WorkerSettings
+```
+
+### Frontend
 
 ```bash
 cd frontend
 npm install
-npm run dev
-npm run build
-npm run start
-npm run lint
+npm run dev   # http://localhost:3000
 ```
 
-## Backend
+---
+
+## Pre-commit Hooks
+
+We use `pre-commit` for automated checks on every commit:
 
 ```bash
-cd backend
-uv venv .venv
-source .venv/bin/activate
-uv sync
-uvicorn src.main_refactored:app --reload --host 0.0.0.0 --port 8000
+pip install pre-commit
+pre-commit install --hook-type pre-commit --hook-type commit-msg
 ```
 
-Run the worker separately:
+Hooks run:
+- **ruff** — Python linting + formatting
+- **prettier** — JS/TS/JSON/YAML formatting  
+- **detect-secrets** — prevents accidental secret commits
+- **conventional-commits** — enforces commit message format
 
-```bash
-cd backend
-source .venv/bin/activate
-arq src.workers.tasks.WorkerSettings
+Run manually: `pre-commit run --all-files`
+
+---
+
+## Commit Convention
+
+We follow [Conventional Commits](https://www.conventionalcommits.org/):
+
+```
+<type>(<scope>): <short description>
+
+Types:  feat | fix | chore | docs | refactor | test | ci | perf
+Scopes: backend | frontend | worker | docker | pipeline | captions | broll | audio
+
+Examples:
+  feat(pipeline): add face autocrop service with MediaPipe tracking
+  fix(captions): prevent triple subtitle overlay on re-render
+  chore(docker): upgrade CUDA base image to 12.4
+  docs(api): document segment scoring endpoint
 ```
 
-## Frontend Development Notes
+---
 
-Important locations:
-
-- `frontend/src/app`
-  - App pages and API routes
-- `frontend/src/components`
-  - Reusable UI and product components
-- `frontend/src/lib`
-  - Auth, API helpers, backend proxy helpers, Stripe wiring
-- `frontend/prisma`
-  - Prisma schema and migrations, if present in your branch
-- `frontend/src/generated/prisma`
-  - Generated Prisma client output
-
-### Build behavior
-
-The frontend build runs:
+## Running Tests
 
 ```bash
-prisma generate && next build
+make test             # backend + frontend
+make test-backend     # pytest (requires Postgres + Redis)
+make test-frontend    # Vitest + React Testing Library + coverage
+make test-e2e         # Playwright smoke flows
 ```
 
-`postinstall` also runs Prisma generation.
-
-### Frontend patterns
-
-- App Router
-- Mostly client-side product pages
-- Better Auth sessions
-- No dedicated global state library
-
-## Backend Development Notes
-
-Important locations:
-
-- `backend/src/main_refactored.py`
-  - Active entry point
-- `backend/src/api/routes`
-  - Route modules
-- `backend/src/services`
-  - Business logic
-- `backend/src/repositories`
-  - Data access
-- `backend/src/workers`
-  - Queue processing
-- `backend/src/video_utils.py`
-  - Clip rendering pipeline
-- `backend/src/ai.py`
-  - LLM prompt and validation logic
-
-### Layering guideline
-
-When possible:
-
-- keep HTTP concerns in route modules
-- keep orchestration in services
-- keep SQL and persistence in repositories
-
-## Database Notes
-
-The primary database bootstrap file is:
-
-- `init.sql`
-
-It defines:
-
-- users
-- sessions
-- auth support tables
-- tasks
-- sources
-- generated clips
-- processing cache
-- Stripe webhook tracking
-
-The frontend also uses Prisma for auth and admin-related access patterns.
-
-## Common Development Workflows
-
-### Modify clip selection behavior
-
-Primary files:
-
-- `backend/src/ai.py`
-- `backend/src/services/video_service.py`
-
-Use this area when changing:
-
-- segment selection rules
-- LLM prompts
-- output validation
-- clip count heuristics
-
-### Modify rendering or subtitle behavior
-
-Primary files:
-
-- `backend/src/video_utils.py`
-- `backend/src/caption_templates.py`
-- `backend/src/clip_editor.py`
-
-Use this area when changing:
-
-- subtitle layout
-- font rendering
-- cropping
-- export presets
-- clip edits after generation
-
-### Modify task orchestration
-
-Primary files:
-
-- `backend/src/api/routes/tasks.py`
-- `backend/src/services/task_service.py`
-- `backend/src/workers/tasks.py`
-- `backend/src/workers/job_queue.py`
-
-Use this area when changing:
-
-- status transitions
-- background job behavior
-- cancellation and resume logic
-- progress reporting
-
-### Modify uploads, fonts, transitions, or media listings
-
-Primary files:
-
-- `backend/src/api/routes/media.py`
-- `backend/src/font_registry.py`
-- `backend/fonts/`
-- `backend/transitions/`
-
-### Modify auth or user roles
-
-Primary files:
-
-- `frontend/src/lib/auth.ts`
-- `frontend/src/app/api/auth/[...all]/route.ts`
-- `init.sql`
-
-### Modify billing behavior
-
-Primary files:
-
-- `frontend/src/app/api/billing/*`
-- `frontend/src/lib/stripe.ts`
-- `backend/src/api/routes/billing.py`
-- `backend/src/services/billing_service.py`
-- `backend/src/services/subscription_email_service.py`
-
-### Modify the admin dashboard
-
-Primary files:
-
-- `frontend/src/app/admin/page.tsx`
-- `backend/src/api/routes/admin.py`
-
-## Testing and Verification
-
-The repository now uses a three-layer automated test setup:
-
-- backend `pytest` for unit and integration coverage
-- frontend `Vitest` plus Testing Library for route handlers and client UI
-- frontend `Playwright` for seeded browser smoke tests against real frontend and backend processes
-
-Primary repo-level commands:
-
+Backend tests run against a real Postgres/Redis — make sure they're up:
 ```bash
-make test
+docker compose up -d postgres redis
 make test-backend
-make test-frontend
-make test-e2e
-make test-ci
 ```
 
-Direct app-level commands:
+---
+
+## Linting
 
 ```bash
-cd backend && uv sync --all-groups && .venv/bin/pytest
-cd frontend && npm install && npm run test:coverage
-cd frontend && npm run test:e2e
+make lint             # ruff + ESLint
+make fmt              # ruff format + prettier
+make lint-backend     # Python only
+make lint-frontend    # JS/TS only
 ```
 
-### Local Test Environment
+---
 
-- Start PostgreSQL and Redis locally before running integration or e2e flows.
-- `docker-compose up -d postgres redis` is enough for backend and frontend test runs.
-- `docker-compose up -d` is the simplest full-stack option when you also want manual smoke testing.
-
-Useful backend test env vars:
+## Database
 
 ```bash
-DATABASE_URL=postgresql+asyncpg://localhost:5432/supoclip
-TEST_DATABASE_URL=postgresql+asyncpg://localhost:5432/supoclip
-REDIS_HOST=127.0.0.1
-REDIS_PORT=6379
-BACKEND_AUTH_SECRET=supoclip_test_secret
-BETTER_AUTH_SECRET=supoclip_better_auth_test_secret
+make shell-db         # opens psql inside the postgres container
+make migrate-status   # shows Alembic current revision
+
+# Apply pending migrations
+docker compose exec backend uv run alembic upgrade head
+
+# Create a new migration
+docker compose exec backend uv run alembic revision --autogenerate -m "add_clip_health_score"
 ```
 
-### Coverage and CI
+---
 
-- Backend coverage thresholds are enforced during `pytest`.
-- Frontend coverage thresholds are enforced during `npm run test:coverage`.
-- GitHub Actions runs separate `backend`, `frontend`, and `e2e` jobs with Postgres and Redis service containers.
-- Playwright failures retain traces, screenshots, and videos for debugging.
+## Project Structure
 
-### Recommended Manual Smoke Test
+```
+ViraClip/
+├── backend/
+│   ├── src/
+│   │   ├── domains/      # Business domains (ai, audio, broll, captions, video…)
+│   │   ├── services/     # Orchestration (coordinator.py is the main pipeline)
+│   │   ├── workers/      # arq task definitions
+│   │   ├── api/          # FastAPI routers
+│   │   └── main.py
+│   ├── tests/
+│   └── pyproject.toml
+├── frontend/
+│   ├── src/
+│   │   ├── app/          # Next.js 15 App Router pages
+│   │   ├── components/   # UI components
+│   │   └── lib/          # API clients, hooks, utils
+│   └── package.json
+├── comfyui/              # ComfyUI workflows for generative B-roll
+├── nginx/                # Reverse proxy config
+├── rust-agent/           # High-perf task runner (optional)
+├── scripts/              # Dev utilities
+├── docs/                 # Documentation
+├── docker-compose.yml
+└── Makefile
+```
 
-Automated tests cover the main seams, but manual smoke testing is still useful for high-risk media flows:
+---
 
-1. Start the stack.
-2. Sign in.
-3. Create a task from a YouTube URL.
-4. Confirm progress updates arrive.
-5. Confirm clips are generated.
-6. Confirm clip editing and export actions still work.
-
-## Helpful Logs
+## Useful Commands
 
 ```bash
-docker-compose logs -f backend
-docker-compose logs -f worker
-docker-compose logs -f frontend
-docker-compose logs -f postgres
-docker-compose logs -f redis
+make help             # full list of make targets
+make shell-backend    # bash inside backend container
+make shell-worker     # bash inside worker container
+make clean            # nuclear option: removes volumes too
+
+# Watch a specific task
+docker compose logs -f worker | grep <task-id>
+
+# Manually trigger a task via API
+curl -X POST http://localhost:8000/api/tasks \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://youtu.be/..."}'
 ```
 
-## Codebase Conventions
+---
 
-### Backend
+## Troubleshooting
 
-- Python 3.11+
-- 4-space indentation
-- Prefer type hints where practical
-- `snake_case` naming
+See [`TROUBLESHOOTING.md`](../TROUBLESHOOTING.md) for common issues.
 
-### Frontend
-
-- TypeScript and React
-- 2-space indentation
-- `PascalCase` components
-- `camelCase` variables and functions
-- Use `@/*` imports where practical
-
-## Safe Defaults for New Work
-
-- Prefer `backend/src/main_refactored.py` over `main.py`
-- Keep auth-sensitive browser requests behind frontend API routes
-- Preserve async behavior by keeping blocking work out of FastAPI request handlers
-- Use the worker for long-running media processing
-
-## Related Reading
-
-- [Architecture](./architecture.md)
-- [API Reference](./api-reference.md)
-- [Troubleshooting](./troubleshooting.md)
+Most frequent:
+- **Port conflicts** — check nothing else runs on 3000/8000/5432/6379
+- **GPU not found** — ensure NVIDIA Container Toolkit is installed: `nvidia-smi` inside container should work
+- **Build failures** — `make clean && make build` usually fixes stale layer issues
+- **Worker not picking up tasks** — verify Redis is healthy: `docker compose ps redis`
