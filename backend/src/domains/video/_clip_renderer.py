@@ -1021,8 +1021,9 @@ async def create_single_clip(
     hook_delay = _cfg_hook.hook_visual_delay_if_captions if captions_enabled else 0.0
     try:
         hook_service = HookVisualService()
-        hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
+        hook = hook_service.generate_hook_from_segment(segment, duration=2.0, clip_index=clip_index)
         hook.start_time = hook_delay
+
         hooked_path = output_path.with_name(f"hook_{output_path.name}")
         await hook_service.add_hook_to_video(
             str(output_path),
@@ -1254,7 +1255,9 @@ async def create_single_clip(
                 style=_cap_style,
                 platform=target_platform,
                 caption_offset_y=caption_offset_y,
+                clip_index=clip_index,
             )
+
             if _cap_ok and subtitled_path.exists():
                 output_path = subtitled_path
                 _caption_system_used = "captionservice"

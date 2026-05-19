@@ -50,6 +50,23 @@ class HookOverlay:
     background_blur: bool = True
 
 
+# ── Clip-index hook preset rotation ──────────────────────────────────────────
+# Rotate hook visual layout per clip_index so consecutive clips in a batch
+# look different.
+
+HOOK_PRESETS: List[Dict[str, Any]] = [
+    # layout_0 — centred text, no background, large font
+    {"position": "center", "background_blur": False, "font_size": 72,
+     "animation": "fade_zoom", "stroke_width": 3},
+    # layout_1 — semi-transparent black background, slide-up feel (bottom)
+    {"position": "bottom", "background_blur": True, "font_size": 64,
+     "animation": "slide_in", "stroke_width": 4},
+    # layout_2 — text with emoji at end, slightly smaller, top position
+    {"position": "top", "background_blur": False, "font_size": 58,
+     "animation": "typewriter", "stroke_width": 2},
+]
+
+
 class HookVisualService:
     """
     Servicio de hook visual para los primeros segundos del clip
@@ -59,6 +76,7 @@ class HookVisualService:
     def __init__(self):
         self.default_duration = 2.0  # 2 segundos estándar
         logger.info("✓ Hook Visual Service initialized")
+
     
     def extract_hook_text(
         self,
@@ -241,14 +259,19 @@ class HookVisualService:
     def generate_hook_from_segment(
         self,
         segment: Dict,
-        duration: float = 2.0
+        duration: float = 2.0,
+        clip_index: int = 0,
     ) -> HookOverlay:
         """
         Genera hook automáticamente desde datos del segmento
         
+        When clip_index is provided, rotates through HOOK_PRESETS to vary
+        the visual layout across consecutive clips in a batch.
+        
         Args:
             segment: Diccionario con text, hook_type, etc.
             duration: Duración del hook en segundos
+            clip_index: Índice del clip para rotación de presets visuales
             
         Returns:
             HookOverlay configurado
@@ -271,17 +294,21 @@ class HookVisualService:
             ("#FFFFFF", "#000000")
         )
         
+        # Apply clip-index-based preset rotation for layout
+        preset = HOOK_PRESETS[clip_index % len(HOOK_PRESETS)]
+        
         return HookOverlay(
             text=hook_text,
             start_time=0.0,
             duration=duration,
-            font_size=68,
+            font_size=preset["font_size"],
             font_color=font_color,
             stroke_color=stroke_color,
-            stroke_width=4,
-            position="center",
-            animation="fade_zoom"
+            stroke_width=preset["stroke_width"],
+            position=preset["position"],
+            animation=preset["animation"],
         )
+
 
 
 # Funciones de conveniencia

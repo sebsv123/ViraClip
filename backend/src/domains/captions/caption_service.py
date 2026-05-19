@@ -136,6 +136,16 @@ _STYLE_DEFS: Dict[str, str] = {
         f"{_CYAN},{_WHITE},{_CYAN},{_SEMI_BG},"
         "-1,0,0,0,100,100,2,0,1,2,3,2,10,10,MARGINV,1"
     ),
+    "clean_podcast": (
+        "Default,Montserrat-Bold,64,"
+        f"{_WHITE},{_YELLOW},{_BLACK},{_SEMI_BG},"
+        "-1,0,0,0,100,100,0,0,3,2,0,2,10,10,MARGINV,1"
+    ),
+    "tiktok_loud": (
+        "Default,Poppins-Bold,80,"
+        f"{_WHITE},{_YELLOW},{_BLACK},{_SEMI_BG},"
+        "-1,0,0,0,100,100,0,0,1,4,2,2,10,10,MARGINV,1"
+    ),
 }
 
 # Template → caption style auto-mapping
@@ -147,6 +157,9 @@ _TEMPLATE_STYLE_MAP: Dict[str, str] = {
     "tutorial":       "highlight",  # minimal era invisible - cambiado
     "interview":      "highlight",  # minimal era invisible - cambiado
     "education":      "highlight",  # minimal era invisible - cambiado
+    "clean_podcast":  "clean_podcast",
+    "tiktok_loud":    "tiktok_loud",
+    "minimal":        "minimal",
 }
 
 
@@ -324,6 +337,20 @@ def segment_words_into_lines(
     return lines
 
 
+# ── Clip-index preset rotation ────────────────────────────────────────────────
+# Rotate caption visual style per clip_index so consecutive clips in a batch
+# look different (colour, size, animation feel).
+
+CAPTION_PRESETS: List[Dict[str, Any]] = [
+    # preset 0 — default TikTok look (white text, yellow highlight, large)
+    {"color": _WHITE, "font_size_multiplier": 1.0, "animation": "karaoke"},
+    # preset 1 — cyan text, slightly smaller, highlight-style
+    {"color": _CYAN, "font_size_multiplier": 0.85, "animation": "highlight"},
+    # preset 2 — golden text, bigger, neon-style
+    {"color": _YELLOW, "font_size_multiplier": 1.15, "animation": "neon"},
+]
+
+
 # ── FFmpeg burn-in ────────────────────────────────────────────────────────────
 
 async def burn_captions(
@@ -337,13 +364,21 @@ async def burn_captions(
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
     caption_offset_y: int = 0,
+    clip_index: int = 0,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
     using FFmpeg's `subtitles` filter (libass rendering).
 
+    When clip_index is provided, rotates through CAPTION_PRESETS to vary
+    the visual style across consecutive clips in a batch.
+
     Returns True on success, False on failure (video is still written as-is).
     """
+    # Rotate caption preset based on clip_index
+    preset = CAPTION_PRESETS[clip_index % len(CAPTION_PRESETS)]
+    style = preset["animation"]
+
     lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line)
     if not lines:
         logger.warning("[caption] No words provided — skipping caption burn-in")
