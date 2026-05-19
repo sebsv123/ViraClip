@@ -207,6 +207,9 @@ class Config:
         self.optimization_loop_min_samples = int(os.getenv("OPTIMIZATION_LOOP_MIN_SAMPLES", "10"))
         self.optimization_loop_min_delta = float(os.getenv("OPTIMIZATION_LOOP_MIN_DELTA", "0.05"))
 
+        # Hook visual delay when captions are active (avoids text overlap)
+        self.hook_visual_delay_if_captions = float(os.getenv("HOOK_VISUAL_DELAY_IF_CAPTIONS", "2.0"))
+
         # Subtitle Re-alignment
         self.subtitle_realign_enabled = self._get_bool_env("SUBTITLE_REALIGN_ENABLED", True)
         self.subtitle_realign_model = os.getenv("SUBTITLE_REALIGN_MODEL", "small")

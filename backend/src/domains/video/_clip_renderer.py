@@ -486,40 +486,83 @@ async def create_single_clip(
     # Emit one entry per word so the ASS karaoke grouper (3 words / line) works
     # correctly; even spacing is imprecise but still watchable.
     if not words_with_confidence and segment.get("text"):
-        logger.warning("[SUBTITLE-FALLBACK] No cache / Whisper — building from segment.text")
-        _words_list = [w for w in segment["text"].split() if w.strip()]
-        if _words_list:
-            # Use ORIGINAL speech duration (not extended clip duration) to avoid
-            # subtitles appearing 2-3x slower than the speaker when clips are padded.
-            _orig_speech_dur = (
-                parse_timestamp_to_seconds(segment["end_time"])
-                - parse_timestamp_to_seconds(segment["start_time"])
+        # Try Whisper tiny on the extracted audio for real timings
+        _whisper_timings = None
+        try:
+            import subprocess as _sp
+            import json as _json
+            import tempfile as _tf
+            # Extract audio segment for Whisper
+            _audio_tmp = Path(_tf.mktemp(suffix=".wav"))
+            _extract = _sp.run(
+                ["ffmpeg", "-y", "-i", str(temp_segment_path or video_path),
+                 "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                 str(_audio_tmp)],
+                capture_output=True, text=True, timeout=30,
             )
-            # Proportional timing: distribute duration by character length.
-            # Short filler words (a, the, in…) get 50% of their share.
-            _FILLER = {"a","an","the","is","in","at","to","of","i","and",
-                       "or","but","on","it","he","she","we","so","do","be"}
-            _char_weights = [
-                max(1, len(_w)) * (0.5 if _w.lower() in _FILLER else 1.0)
-                for _w in _words_list
-            ]
-            _total_weight = sum(_char_weights) or 1
-            _cursor = 0.0
-            _EMPHASIS_RE = {"secret","truth","never","always","stop","wrong",
-                            "hack","real","exposed","shocking","actually"}
-            for _w, _cw in zip(_words_list, _char_weights):
-                _wdur = max(0.06, _orig_speech_dur * _cw / _total_weight)
-                words_with_confidence.append({
-                    "word":       _w,
-                    "start":      round(_cursor, 3),
-                    "end":        round(_cursor + _wdur, 3),
-                    "confidence": 0.9,
-                    "is_emphasis": _w.lower().strip(".,!?") in _EMPHASIS_RE,
-                })
-                _cursor += _wdur
+            if _extract.returncode == 0 and _audio_tmp.exists():
+                # Use faster-whisper if available (already installed)
+                try:
+                    from faster_whisper import WhisperModel
+                    _model = WhisperModel("tiny", device="cpu", compute_type="int8")
+                    _segments, _info = _model.transcribe(str(_audio_tmp), language="es")
+                    _whisper_timings = []
+                    for _seg in _segments:
+                        for _word in _seg.words:
+                            _whisper_timings.append({
+                                "word": _word.word.strip(),
+                                "start": round(_word.start, 3),
+                                "end": round(_word.end, 3),
+                                "confidence": round(_word.probability, 3),
+                            })
+                    del _model  # free memory
+                except ImportError:
+                    logger.debug("[SUBTITLE] faster-whisper not available for fallback")
+            _audio_tmp.unlink(missing_ok=True)
+        except Exception as _whisper_e:
+            logger.debug("[SUBTITLE] Whisper tiny fallback failed: %s", _whisper_e)
+
+        if _whisper_timings:
+            words_with_confidence = _whisper_timings
             logger.info(
-                f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
+                "[SUBTITLE-FALLBACK] ✅ %d words from Whisper tiny",
+                len(words_with_confidence),
             )
+        else:
+            logger.warning("[SUBTITLE-FALLBACK] No cache / Whisper — building from segment.text")
+            _words_list = [w for w in segment["text"].split() if w.strip()]
+            if _words_list:
+                # Use ORIGINAL speech duration (not extended clip duration) to avoid
+                # subtitles appearing 2-3x slower than the speaker when clips are padded.
+                _orig_speech_dur = (
+                    parse_timestamp_to_seconds(segment["end_time"])
+                    - parse_timestamp_to_seconds(segment["start_time"])
+                )
+                # Proportional timing: distribute duration by character length.
+                # Short filler words (a, the, in…) get 50% of their share.
+                _FILLER = {"a","an","the","is","in","at","to","of","i","and",
+                           "or","but","on","it","he","she","we","so","do","be"}
+                _char_weights = [
+                    max(1, len(_w)) * (0.5 if _w.lower() in _FILLER else 1.0)
+                    for _w in _words_list
+                ]
+                _total_weight = sum(_char_weights) or 1
+                _cursor = 0.0
+                _EMPHASIS_RE = {"secret","truth","never","always","stop","wrong",
+                                "hack","real","exposed","shocking","actually"}
+                for _w, _cw in zip(_words_list, _char_weights):
+                    _wdur = max(0.06, _orig_speech_dur * _cw / _total_weight)
+                    words_with_confidence.append({
+                        "word":       _w,
+                        "start":      round(_cursor, 3),
+                        "end":        round(_cursor + _wdur, 3),
+                        "confidence": 0.9,
+                        "is_emphasis": _w.lower().strip(".,!?") in _EMPHASIS_RE,
+                    })
+                    _cursor += _wdur
+                logger.info(
+                    f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
+                )
     
     # When using pre-extracted segment, timestamps are relative to segment start (0)
     # Otherwise, use original timestamps from full video
@@ -970,25 +1013,28 @@ async def create_single_clip(
         except Exception as _bl_e:
             logger.debug("  Background blur skipped: %s", _bl_e)
 
-    # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
-    # When subtitles are active both layers appear simultaneously (0-2s) causing
-    # a double-text overlap. The karaoke subtitle already serves as the visual hook.
-    if not words_with_confidence:
-        try:
-            hook_service = HookVisualService()
-            hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
-            hooked_path = output_path.with_name(f"hook_{output_path.name}")
-            await hook_service.add_hook_to_video(
-                str(output_path),
-                str(hooked_path),
-                hook,
-                subtitle_path=segment.get("colored_subtitle_path")
-            )
-            if Path(hooked_path).exists():
-                output_path = hooked_path
-                logger.info(f"  ✓ Hook overlay added: {hook.text[:30]}...")
-        except Exception as hook_e:
-            logger.warning(f"  Hook overlay failed: {hook_e}")
+    # Step 4.7: Hook Visual Overlay — delayed when captions are active to avoid
+    # text overlap between the hook text and the karaoke subtitle.
+    from ...config import get_config as _get_cfg_hook
+    _cfg_hook = _get_cfg_hook()
+    captions_enabled = bool(add_subtitles and words_with_confidence)
+    hook_delay = _cfg_hook.hook_visual_delay_if_captions if captions_enabled else 0.0
+    try:
+        hook_service = HookVisualService()
+        hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
+        hook.start_time = hook_delay
+        hooked_path = output_path.with_name(f"hook_{output_path.name}")
+        await hook_service.add_hook_to_video(
+            str(output_path),
+            str(hooked_path),
+            hook,
+            subtitle_path=segment.get("colored_subtitle_path")
+        )
+        if Path(hooked_path).exists():
+            output_path = hooked_path
+            logger.info(f"  ✓ Hook overlay added (delay={hook_delay}s): {hook.text[:30]}...")
+    except Exception as hook_e:
+        logger.warning(f"  Hook overlay failed: {hook_e}")
 
     # Step 4.5b: Beat-sync BPM detection — derive beat timestamps for
     # edit-point alignment BEFORE EditingPipeline so zoom punches land on beats.
@@ -1181,6 +1227,14 @@ async def create_single_clip(
                 logger.info(f"  ✓ Viral effects profile: {_content_type} ({len(_fx_list)} effects queued)")
         except Exception as _vfx_e:
             logger.debug(f"  Viral effects skipped: {_vfx_e}")
+
+    # ── Hook subtitle from frame 0: force first word to start at t=0 ──
+    if words_with_confidence and words_with_confidence[0]["start"] > 0:
+        logger.info(
+            "[HOOK-SUB] Forcing first word start from "
+            f"{words_with_confidence[0]['start']:.3f}s → 0.0s"
+        )
+        words_with_confidence[0]["start"] = 0.0
 
     # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
     _caption_system_used: str = "none"
