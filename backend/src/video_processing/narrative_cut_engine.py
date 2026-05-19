@@ -37,12 +37,16 @@ def _get_or_build_graph():
         if _graph_instance is not None:
             logger.debug("[NarrativeCut] Reusing compiled graph singleton")
             return _graph_instance
+        if NarrativeCutEngine._graph_compiled:
+            logger.debug("[NarrativeCut] Graph already compiled (class flag)")
+            return _graph_instance
         try:
             from langgraph.graph import StateGraph, START
             graph = StateGraph(dict)
             graph.add_node("entry", lambda state: state)
             graph.add_edge(START, "entry")
             _graph_instance = graph.compile()
+            NarrativeCutEngine._graph_compiled = True
             logger.info("[NarrativeCut] Building graph singleton")
         except Exception as exc:
             logger.warning("[NarrativeCut] Failed to build graph: %s", exc)
@@ -102,6 +106,8 @@ class NarrativeCutEngine:
     to prevent "Duplicate dispatch rule for <built-in function intern>" when
     multiple threads create NarrativeCutEngine instances simultaneously.
     """
+
+    _graph_compiled = False
 
     def __init__(self, min_silence_duration: float = 0.5):
         self.min_silence_duration = min_silence_duration
