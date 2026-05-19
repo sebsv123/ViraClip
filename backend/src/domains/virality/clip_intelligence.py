@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import os
+
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -79,16 +79,29 @@ _MOOD_BGM: Dict[str, str] = {
     "inspirational": "upbeat",
 }
 
-# ── Mood → B-roll interval (seconds between insertions) ──────────────────────
+# ── Adaptive B-roll density ──────────────────────────────────────────────────
 
-_MOOD_BROLL_INTERVAL: Dict[str, float] = {
-    "energetic":     5.5,
-    "dramatic":      6.0,
-    "warm":          7.0,
-    "chill":         8.0,
-    "educational":   7.5,
-    "inspirational": 7.0,
-}
+def calculate_max_broll(clip_duration: float, virality_score: float, hook_type: str) -> int:
+    """
+    Determine the number of B-roll overlays for a clip based on virality and hook type.
+
+    - High-virality clips (>=80) get only 1 B-roll to let the content breathe.
+    - Otherwise the hook type determines the base interval (seconds between inserts):
+        statistic=12, contrast=15, question=18, story=25, statement=20, default=18.
+    - Result is clamped to [1, 4].
+    """
+    if virality_score >= 80:
+        return 1
+    base_interval = {
+        "statistic": 12,
+        "contrast": 15,
+        "question": 18,
+        "story": 25,
+        "statement": 20,
+        "none": 18,
+    }.get(hook_type, 18)
+    return max(1, min(4, int(clip_duration / base_interval)))
+
 
 # ── Template explicit overrides ───────────────────────────────────────────────
 
@@ -215,9 +228,9 @@ def build_clip_profile(
     )
 
     # ── 6. B-roll density ─────────────────────────────────────────────────────
-    interval      = _MOOD_BROLL_INTERVAL.get(mood, 7.0)
-    broll_count   = max(1, min(5, math.ceil(duration / interval)))
+    broll_count   = calculate_max_broll(duration, virality, hook_type)
     broll_dur     = 3.5 if energy < 0.4 else (2.8 if energy < 0.7 else 2.2)
+
 
     # ── 7. BGM category ───────────────────────────────────────────────────────
     bgm_category = _MOOD_BGM.get(mood, "upbeat")
@@ -376,10 +389,10 @@ async def _build_clip_profile_ai(
 
         ai_keywords   = [str(k) for k in (parsed.get("broll_keywords") or []) if k][:5]
 
-        # Derive broll count from mood interval
-        interval    = _MOOD_BROLL_INTERVAL.get(mood, 7.0)
-        broll_count = max(1, min(5, math.ceil(duration / interval)))
+        # Derive broll count from virality score and hook type
+        broll_count = calculate_max_broll(duration, virality, hook_type)
         broll_dur   = 3.5 if energy < 0.4 else (2.8 if energy < 0.7 else 2.2)
+
         wps         = len(text.split()) / max(1.0, duration)
         pace        = "fast" if wps > 3.5 else ("medium" if wps > 2.0 else "slow")
 
