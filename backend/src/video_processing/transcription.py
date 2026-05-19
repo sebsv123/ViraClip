@@ -426,6 +426,8 @@ def _hash_cache_path(video_hash: str) -> Path:
 
 
 def cache_transcript_data(video_path: Path, transcript) -> None:
+    if not video_path or not video_path.name or video_path == Path("."):
+        raise FileNotFoundError(f"Invalid video_path for transcript cache: {video_path!r}")
     cache_path = video_path.with_suffix(".transcript_cache.json")
 
     words_data = []
