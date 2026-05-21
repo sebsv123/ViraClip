@@ -933,8 +933,11 @@ class OrchestratedEditingPipeline:
         enable_broll: bool = True,
         enable_transitions: bool = False,  # For standalone clips, usually False
         enable_music: bool = True,
+        enable_sfx: bool = True,
         video_style: str = "default",
         music_volume: float = 0.35,
+        jump_cuts: Optional[List[float]] = None,
+        clip_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Path]:
         """
         Process a single clip through the full pipeline.
@@ -942,7 +945,8 @@ class OrchestratedEditingPipeline:
         Pipeline steps (in order):
         1. Apply visual enhancement (EditingPipeline.apply)
         2. Insert B-roll (if enabled and keywords available)
-        3. Mix background music (if enabled)
+        3. Insert SFX (if enabled — after B-roll, before music)
+        4. Mix background music (if enabled)
         
         Args:
             clip_path: Source clip
@@ -955,8 +959,11 @@ class OrchestratedEditingPipeline:
             enable_broll: Enable B-roll insertion
             enable_transitions: Enable transitions (usually for multi-clip)
             enable_music: Enable background music
+            enable_sfx: Enable SFX insertion (after B-roll, before music)
             video_style: 'viral_fast', 'cinematic', 'minimal', 'default'
             music_volume: Background music volume (0.0-1.0)
+            jump_cuts: Timestamps of jump cuts for SFX placement
+            clip_metadata: Clip metadata (duration, energy, etc.) for SFX
         
         Returns:
             Path to processed clip or None on failure
@@ -1023,6 +1030,35 @@ class OrchestratedEditingPipeline:
                         self.logger.warning(f"[Pipeline] Step 2 failed, continuing without B-roll")
                 else:
                     self.logger.info(f"[Pipeline] Step 2: No B-roll decisions")
+            
+            # ─────────────────────────────────────────────────────────────────
+            # STEP 2.5: SFX Insertion (optional — after B-roll, before music)
+            # ─────────────────────────────────────────────────────────────────
+            if enable_sfx:
+                self.logger.info(f"[Pipeline] Step 2.5: SFX insertion")
+                try:
+                    from ..domains.sfx.sfx_orchestrator import SFXOrchestrator
+                    _sfx = SFXOrchestrator()
+                    _sfx_enabled = os.getenv("SFX_PROFILE", "subtle").lower() != "none"
+                    if _sfx_enabled:
+                        step_sfx_output = Path(tempfile.mktemp(suffix=".mp4"))
+                        temp_files.append(step_sfx_output)
+                        _sfx_result = await _sfx.process_clip(
+                            input_path=str(current_path),
+                            output_path=str(step_sfx_output),
+                            transcript_segments=[],
+                            jump_cuts=jump_cuts or [],
+                            clip_metadata=clip_metadata,
+                        )
+                        if _sfx_result and Path(_sfx_result).exists():
+                            current_path = Path(_sfx_result)
+                            self.logger.info(f"[Pipeline] ✅ Step 2.5 (SFX) complete")
+                        else:
+                            self.logger.warning(f"[Pipeline] Step 2.5 (SFX) returned no output — continuing without SFX")
+                    else:
+                        self.logger.info(f"[Pipeline] Step 2.5 (SFX): disabled (SFX_PROFILE=none)")
+                except Exception as _sfx_e:
+                    self.logger.warning(f"[Pipeline] Step 2.5 (SFX) failed: {_sfx_e} — continuing without SFX")
             
             # ─────────────────────────────────────────────────────────────────
             # STEP 3: Audio Mixing (optional)

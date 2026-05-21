@@ -496,7 +496,7 @@ class LLMRouter:
                 "viral_score": viral_score,
                 "reason": f"[heuristic] {block[:80]}",
             })
-        return json.dumps({"segments": segments, "viral_potential": "medium"})
+        return json.dumps({"segments": segments, "viral_potential": "medium", "fallback_mode": "heuristic"})
 
     def _language_supported(self, language: str) -> bool:
         """Check if language is supported by local models."""

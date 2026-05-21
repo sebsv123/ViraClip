@@ -261,48 +261,62 @@ async def process_video_complete(
                 await cache_manager.set("ai_analysis", cache_key_mode, cache_payload)
                 logger.info(f"[CACHE] Saved AI analysis to smart cache ({processing_mode})")
 
-        # Step 3.1: Elite Creative Direction — try Groq first, fall back to configured LLM
+        # Step 3.1: Elite Creative Direction — try DeepSeek first (via LLMRouter), fall back to Groq
         if progress_callback:
             await progress_callback(55, "Preparing creative plan...", "processing")
         from ...domains.ai.elite_ai_service import EliteAIService, EliteCreativePlan as _EliteCreativePlan
+        from ...domains.ai.llm_router import LLMRouter, LLMBackend
         _fallback_plan = _EliteCreativePlan(
             clips=[], global_vibe="Standard", brand_consistency_plan="Default brand voice",
             custom_hashtags=[]
         )
         elite_plan = _fallback_plan
         try:
-            _elite_svc = EliteAIService()
-            elite_plan = await _elite_svc.generate_creative_plan(
-                transcript=transcript,
-                video_path=video_path,
-                duration=file_duration or 0.0,
+            # Use LLMRouter to select backend (DeepSeek primary, Groq fallback)
+            _router = LLMRouter()
+            _backend = await _router.select_backend(
+                dataset_size=0,
+                language="es",
             )
-            if elite_plan and elite_plan.clips:
-                logger.info(f"EliteAI: Groq plan generated with {len(elite_plan.clips)} clips")
-            else:
-                raise RuntimeError("Groq returned empty plan")
-        except Exception as _elite_groq_e:
-            logger.warning(f"EliteAI: Groq failed ({_elite_groq_e}), trying configured LLM fallback")
-            try:
-                from ...domains.ai.llm_router import LLMRouter
-                from ...config import get_config as _get_cfg_elite
-                _cfg_elite = _get_cfg_elite()
-                _router = LLMRouter()
-                _llm_provider = _cfg_elite.llm or "openai"
-                _prompt = (
-                    "You are an elite creative director. Analyze this transcript and produce "
-                    "a creative plan with the best viral clips. Return JSON with 'clips' array "
-                    "where each clip has: start_time, end_time, text, hook, virality_score, theme."
-                )
+            logger.info(f"EliteAI: LLMRouter selected backend={_backend.value}")
+            if _backend == LLMBackend.DEEPSEEK:
+                # DeepSeek is primary — use LLMRouter.score_segments with DeepSeek
                 _llm_result = await _router.score_segments(
                     transcript=transcript[:3000],
-                    language="en",
+                    language="es",
+                    num_clips=3,
+                    backend=LLMBackend.DEEPSEEK,
+                )
+                if _llm_result:
+                    logger.info(f"EliteAI: DeepSeek plan generated")
+                else:
+                    raise RuntimeError("DeepSeek returned empty plan")
+            else:
+                # Groq fallback — use EliteAIService (which calls Groq directly)
+                _elite_svc = EliteAIService()
+                elite_plan = await _elite_svc.generate_creative_plan(
+                    transcript=transcript,
+                    video_path=video_path,
+                    duration=file_duration or 0.0,
+                )
+                if elite_plan and elite_plan.clips:
+                    logger.info(f"EliteAI: Groq plan generated with {len(elite_plan.clips)} clips")
+                else:
+                    raise RuntimeError("Groq returned empty plan")
+        except Exception as _elite_primary_e:
+            logger.warning(f"EliteAI: primary backend failed ({_elite_primary_e}), trying fallback")
+            try:
+                # Fallback: try the other backend
+                _router = LLMRouter()
+                _llm_result = await _router.score_segments(
+                    transcript=transcript[:3000],
+                    language="es",
                     num_clips=3,
                 )
                 if _llm_result:
-                    logger.info(f"EliteAI: LLM fallback generated plan")
+                    logger.info(f"EliteAI: fallback plan generated")
                 else:
-                    raise RuntimeError("LLM returned no clips")
+                    raise RuntimeError("Fallback returned no clips")
             except Exception as _elite_fb_e:
                 logger.warning(f"EliteAI: all providers failed — using empty plan ({_elite_fb_e})")
                 elite_plan = _fallback_plan
@@ -536,11 +550,12 @@ async def process_video_complete(
                     "text": "",
                     "relevance_score": 0.5,
                     "reasoning": "Synthetic fallback segment (AI returned too few)",
-                    "virality_score": 40 + _pi * 5,
-                    "hook_score": 10, "engagement_score": 10,
-                    "value_score": 10, "shareability_score": 10,
-                    "hook_strength": "Low",
-                    "hook_type": "content",
+                    "virality_score": 0,
+                    "hook_score": 0, "engagement_score": 0,
+                    "value_score": 0, "shareability_score": 0,
+                    "hook_strength": "None",
+                    "hook_type": "none",
+                    "is_synthetic": True,
                     "suggested_title": f"Clip {len(segments_json) + 1}",
                     "suggested_hashtags": [],
                     "split_screen": split_screen,
@@ -549,6 +564,45 @@ async def process_video_complete(
             logger.info(
                 f"[SEGMENT-PAD] Now have {len(segments_json)} segments after padding"
             )
+        # ── Diversity penalty: penalize segments near previously used ones ──
+        # Uses a simple JSON file cache keyed by video URL. No DB needed.
+        DIVERSITY_WINDOW_S = 60.0  # penalize if within 60s of a previous clip
+        DIVERSITY_PENALTY = 0.3    # multiply score by 0.3 (70% reduction)
+
+        import pathlib
+        diversity_cache_path = pathlib.Path("/tmp/viraclip_diversity_cache.json")
+        diversity_cache = {}
+        if diversity_cache_path.exists():
+            try:
+                diversity_cache = json.loads(diversity_cache_path.read_text())
+            except Exception:
+                diversity_cache = {}
+
+        video_key = str(url)  # use the video URL as key
+        previously_used = diversity_cache.get(video_key, [])
+
+        for segment in segments_json:
+            seg_start_str = segment.get("start_time", "00:00")
+            # Parse MM:SS to seconds
+            try:
+                parts = seg_start_str.strip().split(":")
+                seg_start = int(parts[0]) * 60 + float(parts[1]) if len(parts) == 2 else float(parts[0])
+            except Exception:
+                seg_start = 0.0
+            for prev_start in previously_used:
+                if abs(seg_start - prev_start) < DIVERSITY_WINDOW_S:
+                    old_score = segment.get("virality_score", 50)
+                    segment["virality_score"] = int(old_score * DIVERSITY_PENALTY)
+                    logger.info(
+                        "[SCORER] Diversity penalty applied to segment at t=%.1fs "
+                        "(within %.0fs of previously used t=%.1fs)",
+                        seg_start, DIVERSITY_WINDOW_S, prev_start,
+                    )
+                    break
+
+        # Re-sort after penalty
+        segments_json.sort(key=lambda s: s.get("virality_score", 0), reverse=True)
+
         # ── Render a buffer of +2 extra segments so that if 1-2 clips fail to
         # render the save loop can still fill the requested quota.
         # The save loop in task_service.py caps successful saves at num_clips.
@@ -613,7 +667,26 @@ async def process_video_complete(
 
         # Re-sort segments by enhanced virality score
         segments_json.sort(key=lambda x: x.get("virality_score", 0), reverse=True)
-        
+
+        # Save selected segment start times to diversity cache
+        selected_starts = []
+        for s in segments_json:
+            try:
+                parts = s.get("start_time", "00:00").strip().split(":")
+                seg_s = int(parts[0]) * 60 + float(parts[1]) if len(parts) == 2 else float(parts[0])
+                selected_starts.append(seg_s)
+            except Exception:
+                pass
+        diversity_cache[video_key] = previously_used + selected_starts
+        try:
+            diversity_cache_path.write_text(json.dumps(diversity_cache))
+            logger.info(
+                "[SCORER] Saved %d segment starts to diversity cache for url=%s",
+                len(selected_starts), video_key,
+            )
+        except Exception as _save_e:
+            logger.debug("[SCORER] Failed to save diversity cache: %s", _save_e)
+
         # Add niche info to segments
         for segment in segments_json:
             segment["niche_info"] = niche_info

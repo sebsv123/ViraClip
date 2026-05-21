@@ -1716,9 +1716,14 @@ async def export_clip(
     clip_id: str,
     request: Request,
     preset: str = "tiktok",
+    force: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
-    """Export clip with a social platform preset."""
+    """Export clip with a social platform preset.
+
+    Args:
+        force: If True, bypass the export quality gate (requires explicit approval).
+    """
     try:
         config = get_config()
         preset_name = preset.lower().strip()
@@ -1733,6 +1738,41 @@ async def export_clip(
         clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
         if not clip or clip.get("task_id") != task_id:
             raise HTTPException(status_code=404, detail="Clip not found")
+
+        # ── Export Gate: block weak clips from being published ──────────────
+        from ...domains.validation.export_gate import check_export_readiness
+        gate_result = check_export_readiness(
+            clip_data={
+                "hook_score": clip.get("hook_score", 0),
+                "virality_score": clip.get("virality_score", 0),
+                "hook_type": clip.get("hook_type", ""),
+                "words": clip.get("words", []),
+                "duration": clip.get("duration", 30),
+                "broll_count": clip.get("broll_count", 0),
+                "loudnorm_applied": clip.get("loudnorm_applied", False),
+                "audio_ducking_applied": clip.get("audio_ducking_applied", False),
+                "has_cta": clip.get("has_cta", False),
+                "closing_score": clip.get("closing_score", 0),
+                "is_insurance_content": clip.get("is_insurance_content", False),
+                "insurance_keywords_kept": clip.get("insurance_keywords_kept", []),
+            },
+            force=force,
+        )
+
+        if not gate_result.passed:
+            logger.warning(
+                "[ExportGate] ❌ Export blocked for clip %s — %d dimension(s) failed: %s",
+                clip_id, len(gate_result.blocked_by), gate_result.blocked_by,
+            )
+            raise HTTPException(
+                status_code=412,  # Precondition Failed
+                detail={
+                    "error": "Export blocked by quality gate",
+                    "export_allowed": False,
+                    "gate_result": gate_result.to_dict(),
+                    "fix": "Fix the failing dimensions or use ?force=true to override.",
+                },
+            )
 
         from pathlib import Path
 

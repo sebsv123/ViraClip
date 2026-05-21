@@ -1,8 +1,11 @@
-"""
-Worker tasks - background jobs processed by arq workers.
-"""
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+# Worker tasks - background jobs processed by arq workers.
 
 import logging
+
+
 from typing import Dict, Any, Optional
 import json
 
@@ -564,6 +567,49 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
         f"downloads={dl_deleted} files freed "
         f"({(clips_freed + dl_freed) // (1024 * 1024):.1f}MB total)"
     )
+
+    # ── Background music file check ──────────────────────────────────────────
+    # Verify the 5 most-used CC0 tracks exist on disk; warn if any are missing
+    # so the operator can re-download or mount them.
+    try:
+        from ..services.background_music_service import BackgroundMusicService
+        _bgm_svc = BackgroundMusicService()
+        _missing = _bgm_svc.ensure_music_files_exist()
+        if _missing:
+            logger.warning(
+                "[Startup] %d background music file(s) missing: %s — "
+                "tracks will fall back to silence at runtime",
+                len(_missing), _missing[:5],
+            )
+        else:
+            logger.info("[Startup] ✓ All 31 background music tracks present")
+    except Exception as _bgm_err:
+        logger.warning("[Startup] Background music check skipped: %s", _bgm_err)
+
+    # ── Font file check ─────────────────────────────────────────────────────
+    # Verify the 5 caption template fonts exist on disk; warn if any are missing
+    # so the operator can mount them. Missing fonts cause drawtext to fail silently.
+    try:
+        from pathlib import Path
+        _FONTS_DIR = Path("/app/fonts")
+        _REQUIRED_FONTS = [
+            "THEBOLDFONT.ttf",
+            "TikTokSans-Regular.ttf",
+            "Montserrat-Bold.ttf",
+            "Poppins-Bold.ttf",
+            "Inter-Regular.ttf",
+        ]
+        _missing_fonts = [f for f in _REQUIRED_FONTS if not (_FONTS_DIR / f).exists()]
+        if _missing_fonts:
+            logger.warning(
+                "[Startup] %d caption font(s) missing from %s: %s — "
+                "drawtext captions may fail silently at runtime",
+                len(_missing_fonts), _FONTS_DIR, _missing_fonts,
+            )
+        else:
+            logger.info("[Startup] ✓ All 5 caption template fonts present in %s", _FONTS_DIR)
+    except Exception as _font_err:
+        logger.warning("[Startup] Font file check skipped: %s", _font_err)
 
 
 async def cleanup_stale_tasks(ctx: dict) -> None:
