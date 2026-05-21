@@ -210,15 +210,20 @@ class EliteAIService:
             custom_hashtags=["viral", "trending"],
         )
 
-        # Step 0: Trend Intelligence (opt-in via ELITE_AI_TRENDS_ENABLED=true)
-        if os.getenv("ELITE_AI_TRENDS_ENABLED", "false").lower() == "true":
-            try:
-                trend_context = await trend_researcher_agent.run("Provide latest viral aesthetics for video content")
-                logger.info(f"📈 EliteAIService: Trend Data acquired")
-                trend_output = trend_context.output
-            except Exception as trend_err:
-                logger.warning(f"⚠️ EliteAIService: Trend agent failed ({trend_err}). Continuing without trend data.")
+        # Step 0: Trend Intelligence (opt-in via ELITEAI_TRENDS_ENABLED=true)
+        _trends_enabled = os.getenv("ELITEAI_TRENDS_ENABLED", os.getenv("ELITE_AI_TRENDS_ENABLED", "false")).lower() == "true"
+        if _trends_enabled:
+            if trend_researcher_agent is None:
+                logger.info("[Trends] EliteAI Trends disabled — pydantic_ai not available (trend_researcher_agent is None)")
                 trend_output = {"presets": [], "hashtags": []}
+            else:
+                try:
+                    trend_context = await trend_researcher_agent.run("Provide latest viral aesthetics for video content")
+                    logger.info(f"📈 EliteAIService: Trend Data acquired")
+                    trend_output = trend_context.output
+                except Exception as trend_err:
+                    logger.warning(f"⚠️ EliteAIService: Trend agent failed ({trend_err}). Continuing without trend data.")
+                    trend_output = {"presets": [], "hashtags": []}
         else:
             logger.info("[Trends] EliteAI disabled via env var (ELITE_AI_TRENDS_ENABLED != true)")
             trend_output = {"presets": [], "hashtags": []}
