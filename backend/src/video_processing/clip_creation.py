@@ -605,8 +605,8 @@ def _render_segment_task(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         
         result = create_optimized_clip(
             video_path=task["video_path"],
-            start_seconds=task["start_seconds"],
-            end_seconds=task["end_seconds"],
+            start_time=task["start_seconds"],
+            end_time=task["end_seconds"],
             output_path=task["clip_path"],
             add_subtitles=task["add_subtitles"],
             font_family=task["font_family"],
@@ -614,7 +614,6 @@ def _render_segment_task(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             font_color=task["font_color"],
             caption_template=task["caption_template"],
             output_format=task["output_format"],
-            task_id=task["task_id"],
         )
         
         if result:

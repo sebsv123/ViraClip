@@ -465,7 +465,9 @@ def _mix_bgm_fallback(video_path: Path, music_path: Path, output_path: Path) -> 
         "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        "-shortest",
+        # NOTE: -shortest intentionally removed. amix=duration=first already
+        # guarantees output duration matches first input (video). -shortest was
+        # redundant and could truncate if loudnorm produced shorter audio.
         str(output_path),
     ]
 
@@ -564,7 +566,9 @@ def mix_background_music(
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",
-            "-shortest",
+            # NOTE: -shortest intentionally removed. apad=whole_dur=9999 already
+            # guarantees music is long enough. -shortest could truncate video if
+            # loudnorm on [0:a] produced shorter audio than the video stream.
             str(output_path),
         ]
         logger.error(f"[BGM_DEBUG] cmd: {' '.join(str(x) for x in cmd)}")
@@ -584,6 +588,37 @@ def mix_background_music(
             logger.warning(f"Music mix produced 0-byte output: {output_path}")
             output_path.unlink(missing_ok=True)
             return False
+        
+        # ── Duration guard: verify output is at least 80% of input duration ──
+        try:
+            _input_dur = float(
+                subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(video_path)],
+                    capture_output=True, text=True, timeout=15
+                ).stdout.strip()
+            )
+            _output_dur = float(
+                subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(output_path)],
+                    capture_output=True, text=True, timeout=15
+                ).stdout.strip()
+            )
+            if _output_dur < _input_dur * 0.8:
+                logger.warning(
+                    "[DURATION GUARD] mix_background_music truncated output: "
+                    "input=%.1fs output=%.1fs (%.0f%% of input) — returning False",
+                    _input_dur, _output_dur, _output_dur / _input_dur * 100
+                )
+                output_path.unlink(missing_ok=True)
+                return False
+            logger.info(
+                "[DURATION GUARD] mix_background_music OK: input=%.1fs output=%.1fs",
+                _input_dur, _output_dur
+            )
+        except Exception as _dur_e:
+            logger.debug("[DURATION GUARD] Duration check skipped: %s", _dur_e)
         
         # Phase 1C: Post-process audio RMS check
         try:
