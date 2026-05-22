@@ -46,8 +46,10 @@ except ImportError:
         raise RuntimeError("phi3_virality_service not available — LLMRouter fallback will handle scoring")
 from ...domains.audio.sound_design_service import SoundDesignService, add_viral_sound_effects
 from ...domains.broll.broll_service import BrollService
+from ...core.job_context import JobContext
 from ...domains.broll.hook_visual_service import HookVisualService
 from ...domains.broll.semantic_broll_service import SemanticBrollService
+
 from ...domains.detection.face_detection_service import FaceDetectionService
 from ...domains.publishing.social_distribution_service import SocialDistributionService
 from ...domains.virality.viral_metadata_service import generate_viral_metadata
@@ -103,6 +105,18 @@ from .vfx_service import VFXService
 
 logger = logging.getLogger(__name__)
 
+# ── RULE 4: Concept-level tracking across clips ──
+# Persists seen b-roll concepts per task_id so repeated concepts are avoided
+# across multiple clips of the same task.
+_seen_concepts_per_task: Dict[str, set] = {}
+
+def _get_seen_concepts(task_id: str) -> set:
+    """Get or create the seen_concepts set for a given task_id."""
+    if task_id not in _seen_concepts_per_task:
+        _seen_concepts_per_task[task_id] = set()
+    return _seen_concepts_per_task[task_id]
+
+
 async def create_single_clip(
     video_path: Path,
     segment: Dict[str, Any],
@@ -131,7 +145,9 @@ async def create_single_clip(
     target_platform: str = "tiktok",
     preferred_music_category: Optional[str] = None,
     jump_cut: bool = True,
+    job_ctx: Optional[JobContext] = None,
 ) -> Optional[Dict[str, Any]]:
+
     """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
     # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
     _broll_prefetch_task = None
@@ -161,12 +177,12 @@ async def create_single_clip(
     # Only extend clips that are genuinely too short (< 30s); never pad a
     # well-bounded segment just because it has a high virality score.
     _vscore_pre = segment.get("virality_score", 50)
-    _FLOOR = 30.0  # hard platform minimum
+    _FLOOR = 30.0  # hard platform minimum — 30s minimum for viable short-form content
     if duration < _FLOOR:
         if _vscore_pre >= 70:
-            _target_dur = min(60.0, duration * 2)
+            _target_dur = 60.0
         elif _vscore_pre >= 50:
-            _target_dur = min(45.0, duration * 2)
+            _target_dur = 45.0
         else:
             _target_dur = _FLOOR
         end_seconds = start_seconds + _target_dur
@@ -622,11 +638,31 @@ async def create_single_clip(
     # ── Step 4.0b: Re-alineacion precisa de subtitulos ──────────────
     # Re-transcribir el clip ya cortado para eliminar drift acumulado
     # del video original. Solo si hay words_with_confidence disponibles.
+    #
+    # TIMING PATH (exact flow for subtitle timestamps):
+    #   1. Original transcript → words_with_confidence (from AssemblyAI/Groq/faster-whisper)
+    #   2. Re-alignment via ConfidenceSubtitleGenerator.realign_on_segment():
+    #      a. Extract audio from the cut clip (16kHz mono WAV)
+    #      b. Re-transcribe with faster-whisper (small model by default)
+    #      c. Compare similarity between original and re-transcribed text
+    #      d. FALLBACK RULE:
+    #         - similarity >= 70% (SIMILARITY_SAFE_THRESHOLD): use re-transcription (text + timestamps)
+    #         - 30% <= similarity < 70%: use original texts (preserves accents/punctuation) + re-transcription timestamps
+    #         - similarity < 30% (SIMILARITY_CRITICAL_THRESHOLD): ⛔ REJECT re-transcription entirely
+    #           → return original_words with original timestamps
+    #           → caller applies cumulative offsets for jump-cuts/silence removal
+    #   3. Cumulative offset adjustment (lines 1365-1399): shift word timestamps for removed intervals
+    #   4. Word-level cut-point snapping (lines 1405-1439): fix words straddling cut boundaries
+    #   5. Phrase-aware grouping (lines 1444-1477): merge isolated words
+    #   6. Final timing pass (lines 1279-1356): probe rendered clip audio for speech segments
+    #   7. ASS caption burn-in with clip_start=0.0 (words already rebased to clip timeline)
     _realign_enabled = os.environ.get("SUBTITLE_REALIGN_ENABLED", "true").lower() == "true"
     logger.info(
         f"[RE-ALIGN] Check: enabled={_realign_enabled} "
         f"words={len(words_with_confidence) if words_with_confidence else 0} "
-        f"path_exists={os.path.exists(str(output_path))}"
+        f"path_exists={os.path.exists(str(output_path))} "
+        f"| TIMING PATH: original_transcript → re-align → cumulative_offset → "
+        f"cut_snapping → phrase_grouping → final_timing_pass → ASS_burn"
     )
     if _realign_enabled and words_with_confidence and os.path.exists(str(output_path)):
         try:
@@ -643,11 +679,22 @@ async def create_single_clip(
                 segment_video_path=str(output_path),
                 original_words=words_with_confidence,
                 language=target_language,
-                anticipation_offset_ms=_anticipation_ms
+                anticipation_offset_ms=_anticipation_ms,
+                clip_start=start_seconds
             )
             if _realigned:
+                # Log the exact timing path decision
+                _orig_text_preview = ' '.join(
+                    w.get('word', w.get('text', '')) for w in words_with_confidence[:5]
+                )
+                _real_text_preview = ' '.join(
+                    w.get('word', w.get('text', '')) for w in _realigned[:5]
+                )
                 logger.info(
-                    f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras"
+                    f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras | "
+                    f"FALLBACK RULE applied by realign_on_segment() | "
+                    f"Original preview: '{_orig_text_preview}...' | "
+                    f"Realigned preview: '{_real_text_preview}...'"
                 )
                 words_with_confidence = _realigned
             else:
@@ -823,8 +870,13 @@ async def create_single_clip(
     # Step 4.2-jc: Silence handling — jump-cut OR speed-ramp based on SILENCE_MODE.
     # Must happen BEFORE subtitle burn so ASS timestamps stay in sync.
     # Only activate for talking_head (high speech ratio, few scene changes).
+    # Initialize _jc_keep to safe default BEFORE any conditional logic so that
+    # downstream code (cumulative offset, cut-point snapping) never crashes with
+    # UnboundLocalError when jump cuts are disabled, skipped, or produce no intervals.
+    _jc_keep: Optional[List[Tuple[float, float]]] = None
     _jump_cut_active = jump_cut and _content_profile.get("recommended_jump_cuts", True)
     if words_with_confidence and _jump_cut_active:
+        logger.info("  [JC] Jump-cut active — attempting silence removal")
         try:
             _silence_thresh = float(
                 os.environ.get("SILENCE_THRESHOLD_SECONDS", str(SILENCE_THRESHOLD))
@@ -1131,20 +1183,32 @@ async def create_single_clip(
         _ep_out = output_path.with_name(f"ep_{output_path.name}")
         _ep_segment_text = segment.get("text", "")[:60] if segment else ""
         # Resolve LUT filter string here so EP can bake it in one pass
-        # Rotate LUT per clip index when processing a batch to avoid repetition
+        # Use JobContext-based rotation when available, otherwise fall back
+        # to the legacy clip_index rotation.
+        from .lut_service import select_lut_by_context as _select_lut_ctx
         from .lut_service import select_lut as _select_lut
         _total_clips = max(1, segment.get("_total_clips", 1))
-        _lut_preset_ep = (
-            (_clip_profile.lut if _clip_profile else None)
-            or _select_lut(clip_index=clip_index, total_clips=_total_clips)
-        )
-        _lut_vf_ep = ""
-        if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
-            try:
-                from .lut_service import get_lut_vf_filter as _get_lut_vf
-                _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
-            except Exception:
-                _lut_vf_ep = ""
+        _visual_style = segment.get("visual_style", "")
+        if job_ctx is not None:
+            _lut_vf_ep = _select_lut_ctx(
+                ctx=job_ctx,
+                clip_index=clip_index,
+                visual_style=_visual_style,
+            )
+            _lut_preset_ep = _lut_vf_ep  # store the filter string directly
+        else:
+            _lut_preset_ep = (
+                (_clip_profile.lut if _clip_profile else None)
+                or _select_lut(clip_index=clip_index, total_clips=_total_clips)
+            )
+            _lut_vf_ep = ""
+            if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
+                try:
+                    from .lut_service import get_lut_vf_filter as _get_lut_vf
+                    _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
+                except Exception:
+                    _lut_vf_ep = ""
+
 
         _ep_result = await _ep.apply(
             video_path=output_path,
@@ -1171,8 +1235,14 @@ async def create_single_clip(
         logger.info(f"  ✓ LUT '{_lut_preset_ep}' baked into EditingPipeline pass")
 
     # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
+    # This is the SINGLE authoritative B-roll path. If it succeeds, Step 4.3b
+    # (ContextualOverlayEngine) is skipped to prevent duplicate independent
+    # planners writing conflicting visuals to the same clip.
+    _broll_planned = False
     from ...config import get_config as _get_cfg_broll
-    if _get_cfg_broll().broll_enabled:
+    _broll_cfg = _get_cfg_broll()
+    logger.info(f"[BRoll] Gate check: broll_enabled={_broll_cfg.broll_enabled}")
+    if _broll_cfg.broll_enabled:
         try:
             from ...domains.broll.broll_service import BrollService
             _broll_svc = BrollService()
@@ -1180,6 +1250,10 @@ async def create_single_clip(
             _broll_kw_override = (_clip_profile.ai_keywords
                                   if _clip_profile and _clip_profile.ai_keywords
                                   else None)
+            # RULE 4: Get or create seen_concepts set for this task
+            _seen_concepts = _get_seen_concepts(task_id)
+            # Snapshot pre-clip concepts to distinguish within-task vs cross-clip repeats
+            _pre_clip_concepts = set(_seen_concepts)
             _broll_result = await _broll_svc.process_clip(
                 video_path=str(output_path),
                 output_path=str(_broll_out),
@@ -1191,16 +1265,21 @@ async def create_single_clip(
                 precomputed_keywords=_broll_kw_override,
                 broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.6,
                 lut_vf=_lut_vf_ep,  # Apply same LUT grade to B-roll for visual consistency
+                task_id=task_id,  # Pass task_id for anti-repetition across clips
+                seen_concepts=_seen_concepts,  # RULE 4: concept-level tracking across clips
+                pre_clip_concepts=_pre_clip_concepts,  # RULE 4: snapshot for within-task vs cross-clip logging
             )
             if Path(_broll_result).exists() and _broll_result != str(output_path):
                 output_path = Path(_broll_result)
+                _broll_planned = True  # Mark as planned so Step 4.3b is skipped
                 logger.info(f"  ✓ B-roll overlay applied (post-EP)")
         except Exception as _broll_e:
             logger.warning(f"  B-roll overlay failed: {_broll_e}")
 
     # Step 4.3b: Contextual Overlay Engine — keyword→image/video overlays (viral TikTok feature)
+    # Only runs if Step 4.3 did NOT place any B-roll (single authoritative planner).
     _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
-    if _ctx_overlays_env and segment and words_with_confidence:
+    if _ctx_overlays_env and not _broll_planned and segment and words_with_confidence:
         try:
             from ...domains.broll.contextual_overlay_engine import ContextualOverlayEngine
             _ctx_engine = ContextualOverlayEngine()
@@ -1232,17 +1311,182 @@ async def create_single_clip(
         except Exception as _vfx_e:
             logger.debug(f"  Viral effects skipped: {_vfx_e}")
 
-    # ── Hook subtitle from frame 0: force first word to start at t=0 ──
-    if words_with_confidence and words_with_confidence[0]["start"] > 0:
-        logger.info(
-            "[HOOK-SUB] Forcing first word start from "
-            f"{words_with_confidence[0]['start']:.3f}s → 0.0s"
-        )
-        words_with_confidence[0]["start"] = 0.0
+        # ── Hook subtitle from frame 0: force first word to start at t=0 ──
+        if words_with_confidence and words_with_confidence[0]["start"] > 0:
+            logger.info(
+                "[HOOK-SUB] Forcing first word start from "
+                f"{words_with_confidence[0]['start']:.3f}s → 0.0s"
+            )
+            words_with_confidence[0]["start"] = 0.0
 
-    # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
+        # ── Final subtitle timing pass using the rendered clip timeline ──
+        # After all cuts, silence removal, and overlays, probe the rendered
+        # clip to find actual word boundaries. Shift subtitles that are too
+        # early or too late relative to the visual cue.
+        if words_with_confidence and output_path.exists():
+            try:
+                import subprocess as _sp_final
+                import json as _json_final
+                import re as _re_final
+                
+                # Probe the rendered clip's audio to find speech segments
+                _probe_cmd = [
+                    "ffmpeg", "-v", "quiet", "-i", str(output_path),
+                    "-af", "silencedetect=noise=-30dB:d=0.3,ametadata=mode=print:file=-",
+                    "-f", "null", "-",
+                ]
+                _probe_res = _sp_final.run(_probe_cmd, capture_output=True, text=True, timeout=30)
+                _probe_out = _probe_res.stderr
+                
+                # Parse silence start/end timestamps
+                _speech_segments = []
+                _silence_starts = []
+                _silence_ends = []
+                for _line in _probe_out.splitlines():
+                    _m = _re_final.search(r"silence_start: ([0-9.]+)", _line)
+                    if _m:
+                        _silence_starts.append(float(_m.group(1)))
+                    _m = _re_final.search(r"silence_end: ([0-9.]+)", _line)
+                    if _m:
+                        _silence_ends.append(float(_m.group(1)))
+                
+                # Build speech segments (inverse of silence)
+                _speech_segments = []
+                _cursor = 0.0
+                for _ss, _se in zip(_silence_starts, _silence_ends):
+                    if _ss > _cursor:
+                        _speech_segments.append((_cursor, _ss))
+                    _cursor = _se
+                if _cursor < duration:
+                    _speech_segments.append((_cursor, duration))
+                
+                if _speech_segments:
+                    # Adjust each word to align with the nearest speech segment
+                    _final_words = []
+                    for _w in words_with_confidence:
+                        _ws = float(_w.get("start", 0))
+                        _we = float(_w.get("end", 0))
+                        
+                        # Find the speech segment this word belongs to
+                        for _seg_start, _seg_end in _speech_segments:
+                            if _seg_start <= _ws <= _seg_end:
+                                # Word is inside a speech segment — keep as-is
+                                break
+                            elif _ws < _seg_start and _we > _seg_start:
+                                # Word starts before speech but overlaps — shift forward
+                                _shift = _seg_start - _ws
+                                if _shift < 0.3:  # safe margin
+                                    _ws = _seg_start + 0.02
+                                    _we = min(_we + _shift, _seg_end)
+                                    logger.debug(
+                                        "[SUBTITLE] Final timing: shifted word '%s' forward by %.2fs",
+                                        _w.get("word", ""), _shift,
+                                    )
+                                break
+                            elif _ws > _seg_end and _seg_end < duration:
+                                # Word is after this speech segment — check next
+                                continue
+                    
+                        _final_words.append({
+                            "word": _w.get("word", ""),
+                            "start": max(0, _ws),
+                            "end": max(0, _we),
+                        })
+                    
+                    if len(_final_words) == len(words_with_confidence):
+                        words_with_confidence = _final_words
+                        logger.info(
+                            "[SUBTITLE] Final timing pass: adjusted %d words using rendered clip timeline",
+                            len(words_with_confidence),
+                        )
+            except Exception as _final_e:
+                logger.debug("[SUBTITLE] Final timing pass skipped: %s", _final_e)
+
+        # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
     _caption_system_used: str = "none"
     if add_subtitles and words_with_confidence:
+        # ── FIX: Cumulative offset removed — words are already clip-relative ──
+        # After realign_on_segment() rebases timestamps to clip-relative, applying
+        # cumulative offset again causes double-subtraction and subtitle drift.
+        # The cut_snapping and phrase_grouping steps below handle boundary alignment.
+        
+        # ── Word-level cut-point snapping ──
+        # If a word overlaps a cut point, snap the word start/end to the
+        # nearest valid boundary. Keep word groups together when they
+        # belong to the same phrase. Do not leave a single word isolated.
+        if _jc_keep and len(_jc_keep) > 1:
+            _cut_boundaries = [_ke for _, _ke in _jc_keep[:-1]]  # cut points between keep segments
+            if _cut_boundaries:
+                _snapped_words = []
+                for _w in words_with_confidence:
+                    _ws = float(_w.get("start", 0))
+                    _we = float(_w.get("end", 0))
+                    _word_text = _w.get("word", "")
+                    
+                    # Check if this word overlaps a cut boundary
+                    for _cb in _cut_boundaries:
+                        if _ws < _cb < _we:
+                            # Word straddles a cut — snap to nearest side
+                            _dist_to_start = _cb - _ws
+                            _dist_to_end = _we - _cb
+                            if _dist_to_start < _dist_to_end:
+                                # Snap start to cut boundary
+                                _ws = _cb + 0.02
+                            else:
+                                # Snap end to cut boundary
+                                _we = _cb - 0.02
+                            logger.debug(
+                                "[SUBTITLE] Snapped word '%s' at cut t=%.2fs (start=%.2f→%.2f, end=%.2f→%.2f)",
+                                _word_text, _cb,
+                                float(_w.get("start", 0)), _ws,
+                                float(_w.get("end", 0)), _we,
+                            )
+                            break
+                    
+                    _snapped_words.append({
+                        "word": _word_text,
+                        "start": max(0, _ws),
+                        "end": max(0, _we),
+                    })
+                words_with_confidence = _snapped_words
+        
+        # ── Phrase-aware grouping: merge single isolated words ──
+        # If a word is the only one in its line (gap > 0.8s on both sides),
+        # merge it with the previous or next group.
+        if len(words_with_confidence) > 2:
+            _merged_words = []
+            for i, _w in enumerate(words_with_confidence):
+                _ws = float(_w.get("start", 0))
+                _we = float(_w.get("end", 0))
+                _prev_end = float(words_with_confidence[i-1].get("end", 0)) if i > 0 else -1
+                _next_start = float(words_with_confidence[i+1].get("start", 0)) if i < len(words_with_confidence) - 1 else 999
+                
+                # Check if this word is isolated (gap > 0.8s on both sides)
+                _gap_prev = _ws - _prev_end if i > 0 else 999
+                _gap_next = _next_start - _we if i < len(words_with_confidence) - 1 else 999
+                
+                if _gap_prev > 0.8 and _gap_next > 0.8 and len(words_with_confidence) > 2:
+                    # Merge with the closer neighbor
+                    if _gap_prev < _gap_next and i > 0:
+                        # Merge with previous word
+                        _merged_words[-1]["end"] = _we
+                        logger.debug(
+                            "[SUBTITLE] Merged isolated word '%s' with previous (gap=%.2fs)",
+                            _w.get("word", ""), _gap_prev,
+                        )
+                    elif i < len(words_with_confidence) - 1:
+                        # Merge with next word by extending this word's end
+                        _w["end"] = _next_start + 0.1
+                        _merged_words.append(_w)
+                        logger.debug(
+                            "[SUBTITLE] Extended isolated word '%s' to next (gap=%.2fs)",
+                            _w.get("word", ""), _gap_next,
+                        )
+                    else:
+                        _merged_words.append(_w)
+                else:
+                    _merged_words.append(_w)
+            words_with_confidence = _merged_words
         try:
             from ...domains.captions.caption_service import CaptionService as _CS, burn_captions as _burn_caps
             logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
@@ -1256,6 +1500,7 @@ async def create_single_clip(
                 platform=target_platform,
                 caption_offset_y=caption_offset_y,
                 clip_index=clip_index,
+                clip_start=0.0,  # Words already rebased to clip-relative timeline after cumulative offset adjustments (lines 1346-1384)
             )
 
             if _cap_ok and subtitled_path.exists():
@@ -1350,8 +1595,10 @@ async def create_single_clip(
 
     # Step 4.10: Platform export — only re-encode when burning hardsubs.
     # When no subtitle file exists use stream copy (near-instant, no quality loss).
+    # IMPORTANT: Skip if captions were already burned in Step 4.4 (ASS karaoke)
+    # to prevent double-subtitle rendering.
     _sub_path = segment.get("colored_subtitle_path")
-    if _sub_path and Path(str(_sub_path)).exists():
+    if _sub_path and Path(str(_sub_path)).exists() and _caption_system_used == "none":
         try:
             platform_enum = Platform.TIKTOK if target_platform in ["all", "tiktok"] else \
                             Platform.REELS if target_platform == "reels" else \
@@ -1374,7 +1621,14 @@ async def create_single_clip(
         logger.info("  ✓ Platform export: skipped (no hardsubs) — stream copy used in BGM pass")
 
     # Step 4.6: Translation & Dubbing
-    output_path = await _polish.apply_translation_dubbing(output_path, target_language)
+    try:
+        output_path = await _polish.apply_translation_dubbing(
+            output_path, target_language,
+            absolute_offset_ms=int(start_seconds * 1000),
+        )
+    except Exception as _trans_e:
+        logger.warning(f"Translation/dubbing failed: {_trans_e}. Skipping.")
+
 
     # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
     # Falls back to niche-based static track when BGM library is empty.
@@ -1435,21 +1689,33 @@ async def create_single_clip(
             logger.warning(f"  All music paths skipped: {_fb_music_e}")
 
     # Step 4.10b: Audio ducking
-    output_path = await _polish.apply_audio_ducking(output_path, words_with_confidence)
+    try:
+        output_path = await _polish.apply_audio_ducking(output_path, words_with_confidence)
+    except Exception as _duck_e:
+        logger.warning(f"Audio ducking failed: {_duck_e}. Skipping.")
 
     # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task)
-    output_path = await _polish.apply_pexels_broll(
-        output_path, segment, _broll_prefetch_task,
-        broll_already_applied=_get_cfg_broll().broll_enabled,
-    )
+    try:
+        output_path = await _polish.apply_pexels_broll(
+            output_path, segment, _broll_prefetch_task,
+            broll_already_applied=_get_cfg_broll().broll_enabled,
+        )
+    except Exception as _pexels_e:
+        logger.warning(f"Pexels B-Roll overlay failed: {_pexels_e}. Skipping.")
 
     logger.info(f"Created clip {clip_index + 1}: {duration:.1f}s")
 
     # ClipValidator: post-render A/V sync + quality check
-    await _polish.validate_clip_output(output_path, duration, words_with_confidence)
+    try:
+        await _polish.validate_clip_output(output_path, duration, words_with_confidence)
+    except Exception as _val_e:
+        logger.warning(f"Clip validation failed: {_val_e}. Skipping.")
 
     # Phase 3.5: Hook slow-motion (opt-in)
-    _polish.apply_hook_slowmo(output_path, segment.get("virality_score", 0), clip_index)
+    try:
+        _polish.apply_hook_slowmo(output_path, segment.get("virality_score", 0), clip_index)
+    except Exception as _slowmo_e:
+        logger.warning(f"Hook slow-motion failed: {_slowmo_e}. Skipping.")
 
     # ── V4 Elite: Visual scoring + Scene rhythm ──────────────────────
     text_virality = segment.get("virality_score", 0)
@@ -1458,7 +1724,11 @@ async def create_single_clip(
     rhythm_data: dict = {}
 
     # Scene rhythm analysis (PySceneDetect)
-    rhythm_data = _polish.analyze_scene_rhythm(output_path)
+    try:
+        rhythm_data = _polish.analyze_scene_rhythm(output_path)
+    except Exception as _rhythm_e:
+        logger.warning(f"Scene rhythm analysis failed: {_rhythm_e}. Skipping.")
+
 
     # ViralityEngine: unified hook+pacing+emotion+phi3 score (replaces manual blend)
     try:
@@ -1582,12 +1852,21 @@ async def create_single_clip(
             logger.debug(f"  AI Thumbnail skipped: {_aith_e}")
 
     # Viral metadata: LLM-generated hashtags + SEO title
-    viral_meta = await _polish.generate_viral_metadata_safe(segment, target_platform)
+    try:
+        viral_meta = await _polish.generate_viral_metadata_safe(segment, target_platform)
+    except Exception as _meta_e:
+        logger.warning(f"Viral metadata generation failed: {_meta_e}. Skipping.")
+        viral_meta = {}
 
     # Phase 8.3: LSTM/CNN engagement prediction (drop-off curve)
-    engagement_data = await _polish.predict_engagement(
-        words_with_confidence or [], audio_features or {}, duration,
-    )
+    try:
+        engagement_data = await _polish.predict_engagement(
+            words_with_confidence or [], audio_features or {}, duration,
+        )
+    except Exception as _eng_e:
+        logger.warning(f"Engagement prediction failed: {_eng_e}. Skipping.")
+        engagement_data = {}
+
 
     # ── Recommendation Engine — personalized suggestions per user ─────
     _recommendations: list = []
@@ -1642,10 +1921,19 @@ async def create_single_clip(
         except Exception as _pub_e:
             logger.debug(f"  Auto-publish skipped: {_pub_e}")
     # ── Quality Validator ─────────────────────────────────────────────
-    _quality_report = _polish.validate_quality(output_path, duration, final_virality)
+    try:
+        _quality_report = _polish.validate_quality(output_path, duration, final_virality)
+    except Exception as _qual_e:
+        logger.warning(f"Quality validation failed: {_qual_e}. Skipping.")
+        _quality_report = {}
 
     # ── Audio Recommendation ──────────────────────────────────────────
-    _audio_recs = await _polish.recommend_audio(output_path)
+    try:
+        _audio_recs = await _polish.recommend_audio(output_path)
+    except Exception as _aud_e:
+        logger.warning(f"Audio recommendation failed: {_aud_e}. Skipping.")
+        _audio_recs = {}
+
 
     # ── Variant Generator — generar variante A/B automática ────────────
     _variants: list = []
@@ -1665,13 +1953,21 @@ async def create_single_clip(
             logger.debug(f"  Variant generator skipped: {_var_e}")
 
     # ── Clip Health Service ───────────────────────────────────────────
-    _clip_health = _polish.generate_clip_health_report(
-        clip_index, final_virality, segment, duration, target_platform, viral_meta,
-    )
+    try:
+        _clip_health = _polish.generate_clip_health_report(
+            clip_index, final_virality, segment, duration, target_platform, viral_meta,
+        )
+    except Exception as _health_e:
+        logger.warning(f"Clip health report failed: {_health_e}. Skipping.")
+        _clip_health = {}
     # ─────────────────────────────────────────────────────────────────
 
     # LTXV Intro (opt-in via LTXV_INTRO_ENABLED=true)
-    output_path = await _polish.maybe_prepend_intro(output_path, segment, final_virality)
+    try:
+        output_path = await _polish.maybe_prepend_intro(output_path, segment, final_virality)
+    except Exception as _intro_e:
+        logger.warning(f"LTXV intro failed: {_intro_e}. Skipping.")
+
 
     # Cancel B-roll prefetch if still running (must be before return)
     if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
