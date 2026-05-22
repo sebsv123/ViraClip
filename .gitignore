@@ -1,27 +1,17 @@
-# Datos y modelos
-backend/temp/
-backend/uploads/
-backend/clips/
-*.mp4
-*.wav
-*.m4a
-
-# Entorno
-.env
-*.env
-**/.env
-.env.local
-
-# Python
+# ==============================
+# GENERATED / BUILD
+# ==============================
 __pycache__/
-*.pyc
 *.py[cod]
-*$py.class
-.venv/
-env/
-venv/
-*.egg-info
-.Python
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+*.dylib
 
 # Node
 node_modules/
@@ -29,99 +19,120 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Frontend build
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/.nuxt/
+
+# ==============================
+# ENVIRONMENT & SECRETS
+# ==============================
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# ==============================
+# DOCKER / RUNTIME
+# ==============================
+docker-compose.override.local.yml
+
+# ==============================
+# DATABASE
+# ==============================
+*.sql
+!init.sql
+*.sqlite
+*.sqlite3
+*.db
+
+# ==============================
+# LOGS
+# ==============================
+*.log
+logs/
+*.log.*
+
+# ==============================
+# MEDIA / UPLOADS
+# ==============================
+uploads/
+media/
+output/
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+
+# ==============================
+# OS
+# ==============================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ==============================
 # IDE
+# ==============================
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
 
-# OS
-.DS_Store
-.DS_Store?
-._*
-Thumbs.db
+# ==============================
+# SECURITY — NEVER COMMIT THESE
+# ==============================
+# Accidental shell output files
+tatus
+status
+psql
 
-# Git
-.git/
+# Backups
+backups/
+backup*/
+*.bak
+*.tgz
+*.tar.gz
+*.zip
 
-# Proyecto específico
-logs/
-temp/
-exports/
-downloads/
-output/
-outputs/
-uploads/
-.archive/
-backend-old/
-.cleanup-backup/
-.claude/
+# Test scripts with hardcoded data
+_test_*.py
+_test_*.mjs
+_test_*.js
+_test_*.json
 
-# Log files generados en runtime
-worker_logs.txt
-worker_progress.txt
-backend/worker_logs.txt
-backend/worker_progress.txt
+# Cloudflare / tunnel credentials
+.cloudflared/
+*.pem
+*.key
+*.cert
 
-# Audio files (download on setup)
-*.mp3
-backend/music/
-backend/assets/sounds/bgm/*.mp3
-backend/assets/sounds/sfx/*.mp3
+# ==============================
+# PYTHON VENV
+# ==============================
+venv/
+.venv/
+env/
+.env/
+*.virtualenv
 
-# Storage and cache
-backend/storage/
-frontend/.next/
-frontend/out/
-backend/overlay_cache/
-
-# Database
-*.db
-*.sqlite
-*.sqlite3
-postgres-data/
-
-# Docker volumes
-.docker/
-
-# Debug/temp scripts (not part of the project)
-_clip_renderer.py
-fix_clip_renderer.py
-fix_indent.py
-
-# Test artifacts
-htmlcov/
-.coverage
+# ==============================
+# MISC
+# ==============================
+*.tmp
+*.temp
+.cache/
 .pytest_cache/
-test-results/
-backend/test_report_*.json
-backend/test_run_*.log
-backend/test_output.txt
-test_ltx_workflow.json
-test_sam2_workflow.json
-
-# Lockfiles (regenerate on install)
-frontend/bun.lockb
-backend/uv.lock
-
-# Windows scripts (not applicable on Linux server)
-*.bat
-*.ps1
-models/*.safetensors
-models/*.pth
-models/*.pt
-models/**/*.safetensors
-models/**/*.pth
-models/**/*.pt
-
-# Generated runtime outputs (not versioned)
-exports/
-uploads/
-
-# Separate projects living in the same parent folder (not part of ViraClip)
-genmail/
-
-# Ignore all embedded git repos in comfyui custom_nodes (prevents submodule warnings)
-comfyui/custom_nodes/
-comfyui/.git/
-watch_*
+.mypy_cache/
+.ruff_cache/
+coverage/
+.coverage
+htmlcov/
