@@ -50,7 +50,9 @@ class ContextualOverlayEngine:
         word_timings: List[dict],
         audio_features: dict = None,
         virality_score: float = 50.0,
-        overlay_frequency: str = "adaptive"
+        overlay_frequency: str = "adaptive",
+        mood: str = "neutral",
+        broll_keywords: Optional[List[str]] = None,
     ) -> OverlayEngineResult:
         """
         Apply contextual overlays to a video clip.
@@ -63,6 +65,8 @@ class ContextualOverlayEngine:
             audio_features: Audio analysis features
             virality_score: Clip virality score (0-100)
             overlay_frequency: "low", "medium", "high", "very_high", or "adaptive"
+            mood: Clip mood ("serious", "neutral", "fun", etc.)
+            broll_keywords: Fallback keywords from B-roll selection
             
         Returns:
             OverlayEngineResult with success status and metadata
@@ -74,33 +78,41 @@ class ContextualOverlayEngine:
         if not video_path.exists():
             return OverlayEngineResult(success=False, error=f"Video not found: {video_path}")
         
+        # Skip overlays on serious/low-energy clips
+        _energy = (audio_features or {}).get("energy", 0.5)
+        if mood == "serious" or _energy < 0.3:
+            logger.info("[Overlay] Skipping — mood=%s energy=%.2f (serious/low-energy clip)", mood, _energy)
+            return OverlayEngineResult(success=False, error="Serious/low-energy clip")
+        
         if not word_timings:
             logger.debug("No word timings, skipping overlays")
             return OverlayEngineResult(success=False, error="No word timings")
         
         try:
             # Step 1: Detect visual keywords
-            from ...domains.detection.visual_keyword_detector import get_visual_keyword_detector
+            from ...detection.visual_keyword_detector import get_visual_keyword_detector
             
             detector = get_visual_keyword_detector()
             
             # Determine max keywords based on frequency
             max_kw = self._get_max_keywords(overlay_frequency)
             
-            # Detect with virality filter
+            # Detect with virality filter, passing broll_keywords as fallback
             if overlay_frequency == "adaptive":
                 keywords = detector.detect_with_virality_filter(
                     transcript=transcript,
                     word_timings=word_timings,
                     audio_features=audio_features or {},
                     virality_score=virality_score,
-                    max_keywords=max_kw
+                    max_keywords=max_kw,
+                    broll_keywords=broll_keywords,
                 )
             else:
                 keywords = detector.detect(
                     transcript=transcript,
                     word_timings=word_timings,
-                    max_keywords=max_kw
+                    max_keywords=max_kw,
+                    broll_keywords=broll_keywords,
                 )
             
             if not keywords:

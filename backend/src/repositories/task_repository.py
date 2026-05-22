@@ -26,7 +26,7 @@ class TaskRepository:
         font_size: int = 24,
         font_color: str = "#FFFFFF",
         caption_template: str = "default",
-        include_broll: bool = False,
+        include_broll: bool = True,
         processing_mode: str = "fast",
         target_language: str = "eng",
         auto_center_face: bool = False,

@@ -2322,7 +2322,7 @@ class BrollService:
         _MAX_COVERAGE = 0.40  # max 40% of clip covered by B-roll
         # ── HARD RULES (enforced before all other rules) ──────────────────────
         _MIN_CUE_DURATION = 3.0       # Rule A: reject cues shorter than 3s
-        _SEMANTIC_THRESHOLD = 0.65    # Rule B: reject cues below semantic score
+        _SEMANTIC_THRESHOLD = 0.35    # Rule B: reject cues below semantic score
         _CONCEPT_COOLDOWN = 8.0       # Rule D: block same concept within 8s
         _MAX_PER_5S_WINDOW = 1        # Rule E: max 1 cue per 5s window
         
@@ -4825,15 +4825,27 @@ class BrollService:
                 _visual_kws = list(set(k.keyword for k in _vk_result))
             except Exception:
                 pass
-            _scored_assets: List[Tuple[float, Path]] = []
-            for _asset in broll_assets:
-                _tags = _asset.stem.replace("_", " ")
-                _score = self._score_broll_candidate(segment_text, _visual_kws, _tags)
-                _scored_assets.append((_score, _asset))
-            _scored_assets.sort(key=lambda x: x[0], reverse=True)
-            _threshold = 0.50 if os.getenv("BROLL_USE_EMBEDDINGS", "true").lower() == "true" else 0.35
-            _before = len(broll_assets)
-            broll_assets = [a for s, a in _scored_assets if s >= _threshold]
+            # ── Skip semantic scoring when visual keyword detector is unavailable ──
+            # _visual_kws will be empty when the visual_keyword_detector import fails
+            # (ModuleNotFoundError: No module named 'src.detection'). Without visual
+            # keywords, _score_broll_candidate() returns 0.00 for every asset, which
+            # causes ALL assets to be rejected. Skip scoring entirely in this case.
+            if not _visual_kws:
+                logger.info(
+                    "[BRoll] Skipping semantic scoring — visual_keyword_detector unavailable "
+                    "(_visual_kws is empty). Passing all %d assets through.",
+                    len(broll_assets),
+                )
+            else:
+                _scored_assets: List[Tuple[float, Path]] = []
+                for _asset in broll_assets:
+                    _tags = _asset.stem.replace("_", " ")
+                    _score = self._score_broll_candidate(segment_text, _visual_kws, _tags)
+                    _scored_assets.append((_score, _asset))
+                _scored_assets.sort(key=lambda x: x[0], reverse=True)
+                _threshold = 0.35 if os.getenv("BROLL_USE_EMBEDDINGS", "true").lower() == "true" else 0.35
+                _before = len(broll_assets)
+                broll_assets = [a for s, a in _scored_assets if s >= _threshold]
             if len(broll_assets) < _before:
                 for s, a in _scored_assets:
                     if s < _threshold:

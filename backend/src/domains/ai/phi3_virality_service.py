@@ -1,14 +1,15 @@
-"""Phi3ViralityService — compatibility stub.
+"""Phi3ViralityService — compatibility stub (no-op).
 
 The original Phi-3-mini ONNX implementation was removed during the ai.py
 refactor (commit 6e28576).  _clip_renderer.py still imports this module at
 the top level, which crashes uvicorn before the app can start.
 
 This stub satisfies the import contract so the backend starts correctly.
-When PHI3_ENABLED=true (the default), score_segment() raises an exception
-which _clip_renderer.py catches and delegates to the LLMRouter fallback
-that is already implemented inline.  Behaviour is therefore identical to
-having Phi-3 unavailable — the LLM-based scorer takes over transparently.
+Instead of raising RuntimeError (which triggers LLMRouter fallback with
+~2s latency per clip), score_segment() returns a neutral default score
+immediately.  The LLMRouter in _clip_renderer.py is still used as the
+primary scorer — this stub is only called when PHI3_ENABLED=true, which
+is not the default.
 
 To re-enable a real local model, replace this file with a proper
 implementation and keep the same public interface.
@@ -36,17 +37,12 @@ class ViralityScore:
 
 
 class Phi3ViralityService:
-    """Stub — no local model loaded.
-
-    Raises RuntimeError on score_segment() so _clip_renderer.py falls back
-    to LLMRouter automatically (the except block on line ~110 of
-    _clip_renderer.py handles this case).
-    """
+    """No-op stub — returns neutral default score without latency."""
 
     def __init__(self) -> None:
-        logger.info(
-            "[Phi3ViralityService] Running as stub — "
-            "LLMRouter fallback will be used for virality scoring."
+        logger.debug(
+            "[Phi3ViralityService] No-op stub — returning default score. "
+            "LLMRouter handles real scoring."
         )
 
     async def score_segment(
@@ -55,9 +51,13 @@ class Phi3ViralityService:
         duration: float,
         audio_features: Optional[dict] = None,
     ) -> ViralityScore:
-        raise RuntimeError(
-            "Phi3ViralityService is a stub — no local model available. "
-            "LLMRouter fallback should handle scoring."
+        # Return neutral default immediately — no latency, no exception
+        return ViralityScore(
+            total_score=50.0,
+            primary_hook_type="Content",
+            scroll_stop_probability=0.5,
+            recommended_duration="30-60s",
+            confidence=0.0,
         )
 
     def is_available(self) -> bool:

@@ -28,6 +28,56 @@ from .config import get_config
 logger = logging.getLogger(__name__)
 config = get_config()
 
+# ── Filler word lists — neutral speech patterns with no viral signal ──────
+# These words are ignored by the viral scorer. They carry no viral signal.
+# Do NOT add words with viral signal here (never, always, secret, etc.)
+
+SPANISH_FILLERS = frozenset({
+    # Universal muletillas
+    "bueno", "pues", "entonces", "o sea", "es que", "claro", "vale",
+    "venga", "mira", "oye", "hombre", "mujer",
+    # Relleno de pensamiento
+    "básicamente", "literalmente", "evidentemente", "obviamente",
+    "simplemente", "exactamente", "perfectamente", "prácticamente",
+    "fundamentalmente", "esencialmente", "generalmente",
+    # Conectores vacíos
+    "y tal", "y eso", "y demás", "y todo eso", "y esas cosas",
+    "etcétera", "y demás cosas", "entre otras cosas",
+    # España
+    "tío", "tía", "macho", "joder", "hostia", "coño", "venga va",
+    "en plan", "a ver", "o sea tío",
+    # Latinoamérica
+    "ósea", "o sea que", "digamos", "me entiendes", "¿sabes?",
+    "¿verdad?", "¿no?", "¿cachai?", "¿me explico?", "¿sí?",
+    "de alguna manera", "de alguna forma", "en cierta forma",
+    "como que", "o algo así", "más o menos", "por así decirlo",
+})
+
+ENGLISH_FILLERS = frozenset({
+    # Classic fillers
+    "um", "uh", "uhh", "umm", "hmm", "hm", "ah", "er",
+    # Discourse markers
+    "like", "you know", "you know what i mean", "i mean",
+    "basically", "literally", "obviously", "clearly", "right",
+    "so", "well", "anyway", "anyways", "actually", "honestly",
+    "totally", "exactly", "absolutely", "definitely", "essentially",
+    "fundamentally", "generally", "practically", "simply",
+    # Connectors
+    "and stuff", "and things", "and all that", "and so on",
+    "et cetera", "and everything", "or whatever", "or something",
+    "kind of", "sort of", "more or less", "in a way", "in a sense",
+    # Informal
+    "dude", "man", "bro", "guys", "okay so", "so yeah",
+    "i guess", "i think", "i feel like", "to be honest",
+    "at the end of the day", "you see", "does that make sense",
+})
+
+# Words with viral signal — NEVER add these to filler lists:
+# never, always, secret, error, mistake, incredible, insane,
+# nobody, everyone, truth, lie, hack, shocking, surprised,
+# nunca, siempre, secreto, error, increíble, nadie, todos,
+# verdad, mentira, sorprendente, impresionante, brutal, alucinante
+
 
 class CampaignStrategy(BaseModel):
     """V3 Phase 5: Holistic social media strategy for a collection of clips."""
@@ -426,6 +476,47 @@ def _normalize_segment(seg: dict, next_seg: Optional[dict] = None) -> dict:
             "hook_type": "statement", "virality_reasoning": "",
         }
         changed.append("virality default")
+
+    # Normalize virality_score if it's a dict (DeepSeek variant schema)
+    # Some LLMs return virality_score as {"hook_strength": 20, "engagement": 23, ...}
+    # instead of a plain float. Extract the first numeric value or default to 0.
+    if "virality_score" in result and isinstance(result["virality_score"], dict):
+        _vs = result["virality_score"]
+        logger.warning(
+            "[AI] Normalizing virality_score from dict to float: %s",
+            _vs,
+        )
+        # Try common keys in order of preference
+        for _key in ("total_score", "score", "virality", "hook_strength", "hook_score"):
+            if isinstance(_vs.get(_key), (int, float)):
+                result["virality_score"] = float(_vs[_key])
+                changed.append(f"virality_score normalized from dict['{_key}']")
+                break
+        else:
+            # Fallback: take the first numeric value found
+            for _v in _vs.values():
+                if isinstance(_v, (int, float)):
+                    result["virality_score"] = float(_v)
+                    changed.append("virality_score normalized from first dict value")
+                    break
+            else:
+                result["virality_score"] = 0.0
+                changed.append("virality_score default 0 (dict had no numeric values)")
+
+    # Normalize suggested_edits if it's a list (DeepSeek variant schema)
+    # Some LLMs return suggested_edits as a list of strings instead of a single string.
+    if "suggested_edits" in result and isinstance(result["suggested_edits"], list):
+        _se = result["suggested_edits"]
+        logger.warning(
+            "[AI] Normalizing suggested_edits from list to string: %s",
+            _se,
+        )
+        # Join list items into a single string
+        if _se:
+            result["suggested_edits"] = " | ".join(str(item) for item in _se if item)
+        else:
+            result["suggested_edits"] = "Standard viral zoom and captions"
+        changed.append("suggested_edits normalized from list to string")
 
     if changed:
         logger.info("[AI] Normalized segment fields: %s", changed)

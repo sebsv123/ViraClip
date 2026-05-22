@@ -31,15 +31,27 @@ logger = logging.getLogger(__name__)
 async def apply_translation_dubbing(
     output_path: Path,
     target_language: Optional[str],
+    absolute_offset_ms: int = 0,
 ) -> Path:
-    """Replace audio with target-language dub if `target_language` is non-eng."""
+    """Replace audio with target-language dub if `target_language` is non-eng.
+
+    Args:
+        output_path: Path to the rendered clip.
+        target_language: Target language code (e.g. "spa", "fra"). None or "eng" skips.
+        absolute_offset_ms: Absolute start time (ms) of this clip within the
+            original source video. Passed through to TranslationService so it
+            can correctly filter words from the full transcript cache.
+    """
     if not target_language or target_language == "eng":
         return output_path
     try:
         from ...domains.captions.translation_service import TranslationService
         translator = TranslationService()
         dubbed_path = output_path.with_name(f"dubbed_{output_path.name}")
-        await translator.dub_clip(output_path, dubbed_path, target_language)
+        await translator.dub_clip(
+            output_path, dubbed_path, target_language,
+            absolute_offset_ms=absolute_offset_ms,
+        )
         if dubbed_path.exists() and dubbed_path.stat().st_size > 0:
             logger.info(f"  ✓ Translation/dub applied ({target_language})")
             return dubbed_path

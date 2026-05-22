@@ -44,7 +44,7 @@ async def process_video_task(
     target_language: str = "eng",
     auto_center_face: bool = False,
     eye_contact_correction: bool = False,
-    include_broll: bool = False,
+    include_broll: bool = True,
     split_screen: bool = False,
     target_platform: str = "all",
     url_secondary: Optional[str] = None,

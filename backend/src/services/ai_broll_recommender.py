@@ -33,8 +33,172 @@ from src.services.metrics_aggregator import record_event
 _LLM_TIMEOUT = 20.0
 _MAX_SEGMENT_WORDS = 200
 _MAX_KEYWORDS_PER_SEGMENT = 3
-_DEFAULT_DURATION_S = 4.5
+_DEFAULT_DURATION_S = 5.0
 _TFIDF_FALLBACK_TOP_K = 5
+
+# ── Insurance content detection keywords (Spanish) ────────────────────────────
+# Matches the same pattern used in broll_service.py and broll_recommender.py
+_INSURANCE_TRIGGER_WORDS: List[str] = [
+    "seguro", "seguros", "aseguradora", "póliza", "cobertura",
+    "prima", "siniestro", "indemnización", "reclamación",
+    "vida", "coche", "hogar", "mutua", "protección",
+    "ahorro", "tranquilidad", "contrato", "fallecimiento",
+    "accidente", "precio", "presupuesto", "asegurado",
+    "beneficiario", "deducible", "franquicia", "renovación",
+    "cancelación", "asistencia", "defensa jurídica",
+    "responsabilidad civil", "todo riesgo", "daños",
+    "robo", "incendio", "inundación", "desempleo",
+    "enfermedad", "hospitalización", "cirugía",
+    "medicamentos", "reembolso", "copago",
+    "pensión", "jubilación", "inversión",
+    "hipoteca", "préstamo", "crédito",
+]
+
+# ── Insurance-native b-roll concepts ──────────────────────────────────────────
+# These are the ONLY acceptable b-roll concepts for insurance/finance content.
+# Each concept is a concrete, visual, insurance-domain idea that can be searched
+# on stock video sites. Generic motivational or unrelated concepts are rejected.
+_INSURANCE_NATIVE_CONCEPTS: List[str] = [
+    "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "risk", "responsibility",
+    "payments", "approval", "documents", "contracts",
+    "advisor", "customer", "office", "calculator",
+    "forms", "phone call", "consultation",
+    # Additional concrete insurance visuals
+    "insurance", "life insurance", "health insurance",
+    "car insurance", "home insurance", "insurance agent",
+    "insurance broker", "insurance document", "insurance policy",
+    "claim form", "claim approval", "coverage plan",
+    "financial advisor", "financial planning", "retirement planning",
+    "family protection", "safety concept", "peace of mind",
+    "signing contract", "agreement handshake", "handshake deal",
+    "doctor consultation", "medical support", "hospital",
+    "car accident", "road accident", "accident scene",
+    "budget planning", "money savings", "piggy bank",
+    "modern family home", "family home", "house",
+    "office desk", "office meeting", "business meeting",
+    "professional", "businessman", "businesswoman",
+    "customer service", "help desk", "support",
+    "paperwork", "filing documents", "document signing",
+    "calculator counting", "counting money", "finance graph",
+    "chart", "graph", "statistics", "data analysis",
+    "approval stamp", "approved", "signature",
+    "phone consultation", "phone call", "calling",
+    "online banking", "laptop finance", "digital insurance",
+]
+
+# ── Generic concepts REJECTED for insurance content ──────────────────────────
+# These concepts are never acceptable when the transcript is about insurance.
+_GENERIC_REJECTED_CONCEPTS: List[str] = [
+    "success", "achievement", "determination", "winner", "champion",
+    "sunrise", "mountains", "nature", "landscape", "people",
+    "ocean", "beach", "sunset", "forest", "waterfall",
+    "meditation", "yoga", "fitness", "workout", "gym",
+    "party", "celebration", "fireworks", "confetti",
+    "travel", "vacation", "holiday", "adventure",
+    "space", "globe", "earth", "universe", "stars",
+    "abstract", "colorful", "animation", "background",
+    "motivation", "inspiration", "dream", "goal",
+    "team building", "leadership", "seminar", "training",
+    "podcast", "microphone", "recording studio",
+    "dance", "music", "concert", "festival",
+    "food", "cooking", "restaurant", "kitchen",
+    "fashion", "shopping", "clothes", "model",
+    "sports", "running", "cycling", "swimming",
+    "gaming", "video game", "esports",
+    "pets", "dogs", "cats", "animals",
+    "wedding", "romance", "dating", "love",
+    "technology abstract", "circuit board", "coding",
+    "city skyline", "night city", "street photography",
+]
+
+
+def _is_insurance_content(transcript: str) -> bool:
+    """Detect if the transcript is about insurance content using trigger words."""
+    if not transcript:
+        return False
+    transcript_lower = transcript.lower()
+    for trigger in _INSURANCE_TRIGGER_WORDS:
+        if trigger.lower() in transcript_lower:
+            logger.info("[AiBroll] Insurance content detected via trigger word '%s'", trigger)
+            return True
+    return False
+
+
+def _filter_insurance_keywords(keywords: List[str], is_insurance: bool) -> List[str]:
+    """
+    Harden keyword selection for insurance content.
+
+    When *is_insurance* is True:
+    1. Prefer keywords matching _INSURANCE_NATIVE_CONCEPTS.
+    2. Reject keywords matching _GENERIC_REJECTED_CONCEPTS.
+    3. If ALL keywords rejected, return empty list (no b-roll > irrelevant b-roll).
+
+    When *is_insurance* is False, returns keywords unchanged.
+    """
+    if not is_insurance or not keywords:
+        return keywords
+
+    _native_lower = [c.lower() for c in _INSURANCE_NATIVE_CONCEPTS]
+    _rejected_lower = [c.lower() for c in _GENERIC_REJECTED_CONCEPTS]
+
+    kept: List[str] = []
+    rejected: List[str] = []
+
+    for kw in keywords:
+        kw_lower = kw.lower().strip()
+
+        # Check if keyword matches any rejected concept (substring match)
+        _is_rejected = False
+        for _rej in _rejected_lower:
+            if _rej in kw_lower or kw_lower in _rej:
+                _is_rejected = True
+                rejected.append(kw)
+                logger.info(
+                    "[AiBroll/InsuranceFilter] ⛔ REJECTED keyword '%s' — "
+                    "matches generic rejected concept '%s'. "
+                    "Insurance content requires insurance-native visuals.",
+                    kw, _rej,
+                )
+                break
+
+        if _is_rejected:
+            continue
+
+        # Check if keyword matches any native concept (substring match)
+        _is_native = False
+        for _nat in _native_lower:
+            if _nat in kw_lower or kw_lower in _nat:
+                _is_native = True
+                break
+
+        if _is_native:
+            kept.append(kw)
+        else:
+            # Borderline — not rejected, not native, but keep as it may support the message
+            logger.info(
+                "[AiBroll/InsuranceFilter] ⚠️ BORDERLINE keyword '%s' — "
+                "not in insurance-native concepts list, but not rejected either. "
+                "Keeping it as it may still support the insurance message.",
+                kw,
+            )
+            kept.append(kw)
+
+    if rejected:
+        logger.info(
+            "[AiBroll/InsuranceFilter] Filtered %d/%d keywords for insurance content: "
+            "kept=%s, rejected=%s",
+            len(rejected), len(keywords), kept, rejected,
+        )
+
+    if not kept:
+        logger.warning(
+            "[AiBroll/InsuranceFilter] ⛔ ALL %d keywords rejected for insurance content. "
+            "Returning empty list — no b-roll is better than irrelevant b-roll.",
+            len(keywords),
+        )
+
+    return kept
 
 # ── Data types ─────────────────────────────────────────────────────────────────
 
@@ -65,6 +229,32 @@ Rules:
 - Keywords must be in English for Pexels search compatibility.
 - Suggest a shot type for each keyword: "wide", "medium", or "closeup".
 - Optionally suggest a mood (e.g., "serious", "uplifting", "dramatic", "neutral").
+
+INSURANCE CONTENT RULES (apply when transcript is about insurance/finance):
+- If the transcript mentions insurance, finance, policies, claims, coverage,
+  premiums, protection, savings, or related topics, you MUST select keywords
+  that are INSURANCE-NATIVE and CONCRETE.
+- ACCEPTABLE insurance-native keywords: policy, claim, coverage, premium,
+  protection, family, savings, risk, responsibility, payments, approval,
+  documents, contracts, advisor, customer, office, calculator, forms,
+  phone call, consultation, insurance agent, handshake, signing contract,
+  financial planning, family protection, safety concept, peace of mind,
+  doctor consultation, car accident, budget planning, piggy bank,
+  modern family home, office meeting, business meeting, professional,
+  customer service, paperwork, filing documents, document signing,
+  counting money, finance graph, chart, graph, statistics, data analysis,
+  approval stamp, signature, phone consultation, online banking.
+- REJECTED keywords for insurance content: success, achievement, determination,
+  winner, champion, sunrise, mountains, nature, landscape, ocean, beach,
+  sunset, forest, meditation, yoga, fitness, party, celebration, fireworks,
+  travel, vacation, adventure, space, abstract, motivation, inspiration,
+  dream, goal, team building, leadership, seminar, training, podcast,
+  microphone, dance, music, concert, food, cooking, fashion, shopping,
+  sports, running, gaming, pets, animals, wedding, romance, dating, love,
+  technology abstract, circuit board, coding, city skyline.
+- If the transcript is about insurance, EVERY keyword MUST be insurance-native.
+  Do NOT suggest generic motivational or unrelated stock keywords.
+- Use concrete visual ideas, not abstract themes.
 
 Respond with ONLY valid JSON in this exact format:
 {{
@@ -169,10 +359,44 @@ class AiBrollRecommender:
         # Step 1: Try LLM extraction
         candidates = await self._extract_via_llm(transcript)
 
-        # Step 2: Fallback to TF-IDF if LLM fails
+        # Step 1.5: Insurance keyword filtering — reject generic concepts for insurance content
+        is_insurance = _is_insurance_content(transcript)
+        if is_insurance and candidates:
+            logger.info("[AiBroll] segment=%s: Insurance content detected, filtering %d LLM candidates", segment_id, len(candidates))
+            filtered_candidates: List[BrollCandidate] = []
+            for cand in candidates:
+                kept_keywords = _filter_insurance_keywords(cand.keywords, is_insurance)
+                if kept_keywords:
+                    cand.keywords = kept_keywords
+                    filtered_candidates.append(cand)
+                else:
+                    logger.info(
+                        "[AiBroll] segment=%s: Dropping candidate '%s' — all keywords rejected for insurance content",
+                        segment_id, cand.concept,
+                    )
+            candidates = filtered_candidates
+
+        # Step 2: Fallback to TF-IDF if LLM fails (or all candidates filtered)
         if not candidates:
             logger.info("[AiBroll] segment=%s: LLM returned no candidates, using TF-IDF fallback", segment_id)
             candidates = self._fallback_tfidf(transcript)
+
+            # Step 2.5: Insurance keyword filtering on TF-IDF fallback results
+            if is_insurance and candidates:
+                logger.info("[AiBroll] segment=%s: Filtering %d TF-IDF fallback candidates for insurance content", segment_id, len(candidates))
+                filtered_candidates = []
+                for cand in candidates:
+                    kept_keywords = _filter_insurance_keywords(cand.keywords, is_insurance)
+                    if kept_keywords:
+                        cand.keywords = kept_keywords
+                        filtered_candidates.append(cand)
+                    else:
+                        logger.info(
+                            "[AiBroll] segment=%s: Dropping TF-IDF candidate '%s' — all keywords rejected for insurance content",
+                            segment_id, cand.concept,
+                        )
+                candidates = filtered_candidates
+
             # [Metrics] broll_fallback
             record_event("broll_fallback", payload={"segment_id": segment_id, "engine": "tfidf"})
         else:
@@ -563,8 +787,10 @@ class AiBrollRecommender:
         base = _DEFAULT_DURATION_S
 
         if candidate.tipo_plano == "closeup":
-            base = 3.0
+            base = 5.0
         elif candidate.tipo_plano == "wide":
+            base = 6.0
+        else:  # medium
             base = 5.0
 
         # Extract segment index from segment_id (e.g., "clip_3" → 3)

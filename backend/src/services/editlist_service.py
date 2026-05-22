@@ -40,9 +40,11 @@ class EditOpType(str, Enum):
 
 class OverlayStyle(str, Enum):
     """Overlay visual styles."""
+    NONE = "none"
     FULL_SCREEN_BUBBLE = "full_screen_bubble"
     SPLIT_SCREEN = "split_screen"
     PICTURE_IN_PICTURE = "picture_in_picture"
+
 
 
 class TransitionType(str, Enum):
@@ -74,7 +76,8 @@ class ConcatParams:
 class OverlayParams:
     """Parameters for an OVERLAY operation."""
     overlay_path: str
-    style: OverlayStyle = OverlayStyle.PICTURE_IN_PICTURE
+    style: OverlayStyle = OverlayStyle.NONE
+
     start_time: float = 0.0
     duration: float = 5.0
     x: Optional[int] = None  # position override

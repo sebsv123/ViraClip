@@ -4,7 +4,8 @@ Añade texto grande impactante en los primeros 2 segundos para scroll-stop effec
 """
 import asyncio
 import logging
-from typing import Optional, Dict, List
+from typing import Any, Optional, Dict, List
+
 from src import gpu_utils
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,17 @@ HOOK_PRESETS: List[Dict[str, Any]] = [
     {"position": "top", "background_blur": False, "font_size": 58,
      "animation": "typewriter", "stroke_width": 2},
 ]
+
+# ── Hook visual styles (applied via FFmpeg drawtext / eq / zoompan) ──────────
+# Each style maps to a visual effect applied to the hook overlay.
+HOOK_STYLES: List[str] = [
+    "zoom_in",       # slow zoom into speaker face
+    "text_flash",    # bold text appears then fades
+    "color_pop",     # brief saturation spike in first frame
+    "freeze_frame",  # freeze first frame for 0.5s then play
+    "slide_in",      # frame slides in from bottom
+]
+
 
 
 class HookVisualService:
@@ -261,6 +273,7 @@ class HookVisualService:
         segment: Dict,
         duration: float = 2.0,
         clip_index: int = 0,
+        ctx: Any = None,  # JobContext
     ) -> HookOverlay:
         """
         Genera hook automáticamente desde datos del segmento
@@ -268,10 +281,15 @@ class HookVisualService:
         When clip_index is provided, rotates through HOOK_PRESETS to vary
         the visual layout across consecutive clips in a batch.
         
+        When ctx (JobContext) is provided, selects a hook visual style from
+        HOOK_STYLES using deterministic rotation, excluding styles already
+        used in ctx.clip_styles.
+        
         Args:
             segment: Diccionario con text, hook_type, etc.
             duration: Duración del hook en segundos
             clip_index: Índice del clip para rotación de presets visuales
+            ctx: JobContext for cross-clip style coordination.
             
         Returns:
             HookOverlay configurado
@@ -297,6 +315,19 @@ class HookVisualService:
         # Apply clip-index-based preset rotation for layout
         preset = HOOK_PRESETS[clip_index % len(HOOK_PRESETS)]
         
+        # Select hook visual style from HOOK_STYLES using JobContext
+        hook_style = preset["animation"]  # default from preset
+        if ctx is not None:
+            # Filter out styles already used in this job
+            available = [s for s in HOOK_STYLES if s not in ctx.clip_styles]
+            if not available:
+                available = list(HOOK_STYLES)
+                ctx.clip_styles.clear()
+            idx = (hash(ctx.job_id + str(ctx.clip_count)) % len(available))
+            hook_style = available[idx]
+            ctx.clip_styles.append(hook_style)
+            logger.info("✓ Hook style selected: %s (job=%s, clip=%d)", hook_style, ctx.job_id, ctx.clip_count)
+        
         return HookOverlay(
             text=hook_text,
             start_time=0.0,
@@ -306,8 +337,9 @@ class HookVisualService:
             stroke_color=stroke_color,
             stroke_width=preset["stroke_width"],
             position=preset["position"],
-            animation=preset["animation"],
+            animation=hook_style,
         )
+
 
 
 

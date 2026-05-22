@@ -85,82 +85,28 @@ def cuda_available() -> bool:
 
 @lru_cache(maxsize=1)
 def nvenc_available() -> bool:
-    """True if h264_nvenc is listed AND actually works (runtime encode test).
-    Falls back to hevc_nvenc if h264_nvenc fails."""
-    # Step 1: Check if any NVENC encoder is listed
+    """True if h264_nvenc is listed in ffmpeg encoders (compiled-in check only).
+    
+    NOTE: We intentionally skip the runtime FFmpeg probe (encoding a test frame)
+    because in containerized environments the subprocess FFmpeg cannot reliably
+    initialize CUDA from scratch via cuInit(0), even when the parent Python
+    process has working CUDA via PyTorch. The encoder being listed in
+    ffmpeg -encoders is sufficient evidence that NVENC is compiled in.
+    Actual encoding errors are caught downstream in the rendering pipeline."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=10,
         )
         has_nvenc = "h264_nvenc" in result.stdout
-        if not has_nvenc:
-            logger.warning("[GPU] No NVENC encoder found in ffmpeg encoders list")
-            return False
+        if has_nvenc:
+            logger.info("[GPU] h264_nvenc found in ffmpeg encoders list")
+            return True
+        logger.warning("[GPU] No NVENC encoder found in ffmpeg encoders list")
+        return False
     except Exception as e:
         logger.warning(f"[GPU] ffmpeg encoder list check failed: {e}")
         return False
-
-    # Step 2: Runtime test with color source (more reliable than nullsrc)
-    import tempfile
-    test_out = ""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            test_out = f.name
-        r = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=black:s=256x256:r=1",
-                "-t", "1",
-                "-c:v", "h264_nvenc", "-pix_fmt", "yuv420p", test_out,
-            ],
-            capture_output=True, timeout=15,
-        )
-        if r.returncode == 0:
-            try:
-                os.unlink(test_out)
-            except Exception:
-                pass
-            logger.info("[GPU] h264_nvenc runtime test PASSED")
-            return True
-
-        # Log failure reason
-        stderr = r.stderr.decode(errors="replace") if r.stderr else ""
-        logger.warning(f"[GPU] h264_nvenc runtime test FAILED: {stderr[:200]}")
-
-        # Step 3: Try hevc_nvenc as fallback
-        logger.info("[GPU] Trying hevc_nvenc as fallback...")
-        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
-            test_out = f.name
-        r2 = subprocess.run(
-            [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "color=black:s=256x256:r=1",
-                "-t", "1",
-                "-c:v", "hevc_nvenc", "-pix_fmt", "yuv420p", test_out,
-            ],
-            capture_output=True, timeout=15,
-        )
-        if r2.returncode == 0:
-            try:
-                os.unlink(test_out)
-            except Exception:
-                pass
-            logger.info("[GPU] hevc_nvenc runtime test PASSED (using as fallback)")
-            return True
-
-        stderr2 = r2.stderr.decode(errors="replace") if r2.stderr else ""
-        logger.warning(f"[GPU] hevc_nvenc also FAILED: {stderr2[:200]}")
-        return False
-    except Exception as e:
-        logger.warning(f"[GPU] NVENC runtime test error: {e}")
-        return False
-    finally:
-        if test_out and os.path.exists(test_out):
-            try:
-                os.unlink(test_out)
-            except Exception:
-                pass
 
 
 def clear_nvenc_cache() -> None:
@@ -263,9 +209,9 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
             "preset": "p4",
                 "extra_args": [
                     "-tune", "hq",
-                    "-b:v", "8M",
-                    "-maxrate", "10M",
-                    "-bufsize", "16M",
+                    "-b:v", "5M",
+                    "-maxrate", "7M",
+                    "-bufsize", "10M",
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "high",
                     "-level", "4.1",

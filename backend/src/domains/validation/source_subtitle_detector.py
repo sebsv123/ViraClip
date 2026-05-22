@@ -1,6 +1,7 @@
 """
 Source Subtitle Detector — Lightweight preflight check for burned-in subtitles.
 
+
 Detects whether the source video already has burned-in (hardsubbed) text in the
 bottom band of the frame — the same zone where ViraClip normally burns captions.
 
@@ -380,12 +381,14 @@ async def detect_source_subtitles(
 
         # Step 4: Determine strategy
         if presence_ratio >= SUBTITLE_PRESENCE_RATIO_ACTION:
-            caption_strategy = "skip_captions"
+            # Instead of skip_captions, use above_burned_in: keep ViraClip captions
+            # but shift them upward so they don't overlap with burned-in subs.
+            caption_strategy = "above_burned_in"
             caption_offset_y = CAPTION_OFFSET_ACTION
             logger.warning(
                 f"[subtitle_detector] ⚠️ Strong burned-in subtitle signal: "
                 f"{frames_with_text}/{frames_analyzed} frames ({presence_ratio:.1%}) — "
-                f"recommending caption skip"
+                f"shifting captions up by {CAPTION_OFFSET_ACTION}px"
             )
         elif presence_ratio >= SUBTITLE_PRESENCE_RATIO_WARN:
             caption_strategy = "offset_up"
@@ -454,13 +457,13 @@ async def check_source_subtitles_and_adjust(
     adjusted_add_subtitles = add_subtitles
     caption_offset_y = 0
 
-    if result.caption_strategy == "skip_captions" and add_subtitles:
+    if result.caption_strategy == "above_burned_in" and add_subtitles:
         logger.warning(
             "[preflight] Source has significant burned-in subtitles "
             f"({result.subtitle_presence_ratio:.1%} frames). "
-            "Disabling ViraClip captions to avoid double-subtitle clutter."
+            f"Keeping ViraClip captions shifted up by {result.caption_offset_y}px."
         )
-        adjusted_add_subtitles = False
+        # Keep add_subtitles=True, just offset upward
         caption_offset_y = result.caption_offset_y
     elif result.caption_strategy == "offset_up" and add_subtitles:
         logger.info(

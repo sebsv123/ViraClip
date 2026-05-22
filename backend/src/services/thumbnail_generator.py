@@ -51,42 +51,113 @@ async def _extract_frame_as_thumbnail(
         return False
 
 
-async def _find_expressive_frame(clip_path: Path, duration: float) -> float:
-    """Sample 12 frames, return offset with highest visual energy."""
-    sample_count = 12
-    offsets = [duration * i / sample_count for i in range(1, sample_count)]
+async def _find_best_thumbnail_frame(clip_path: Path, duration: float) -> float:
+    """Smart frame selection: sample 10 frames, pick the best one.
+    
+    Criteria (in order of priority):
+    1. Face detected with eyes open and mouth not wide open
+    2. Frame is not blurry (Laplacian variance > 100)
+    3. Fallback: frame at 30% of clip duration
+    
+    Returns the best offset in seconds.
+    """
+    import cv2
+    import numpy as np
+    
+    sample_count = 10
+    offsets = [duration * (i + 1) / (sample_count + 1) for i in range(sample_count)]
     best_offset = duration * 0.3
-    best_score = 0.0
-
+    best_score = -1.0
+    best_face_detected = False
+    
+    # Pre-load OpenCV face cascade
+    try:
+        face_cascade = cv2.CascadeClassifier(
+            cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        )
+    except Exception:
+        face_cascade = None
+    
     for offset in offsets:
-        tmp = Path(f"/tmp/viraclip_th_{os.getpid()}_{int(offset*10)}.jpg")
+        tmp = Path(f"/tmp/viraclip_th_{os.getpid()}_{int(offset*100)}.jpg")
         try:
+            # Extract frame
             cmd = [
                 "ffmpeg", "-y", "-ss", str(offset),
                 "-i", str(clip_path), "-frames:v", "1",
-                "-vf", "scale=270:480", str(tmp),
+                "-vf", "scale=540:960", str(tmp),
             ]
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
             await asyncio.wait_for(proc.communicate(), timeout=5.0)
-            if tmp.exists() and tmp.stat().st_size > 8000:
-                score = tmp.stat().st_size / 1000.0
-                if score > best_score:
-                    best_score = score
-                    best_offset = offset
+            
+            if not tmp.exists() or tmp.stat().st_size < 8000:
+                continue
+            
+            # Read frame with OpenCV
+            frame = cv2.imread(str(tmp))
+            if frame is None:
+                continue
+            
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            score = 0.0
+            face_detected = False
+            
+            # 1. Face detection
+            if face_cascade is not None:
+                faces = face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(50, 50)
+                )
+                if len(faces) > 0:
+                    face_detected = True
+                    score += 50.0
+                    
+                    # For each face, check eye region and mouth
+                    for (fx, fy, fw, fh) in faces:
+                        # Eye region: top 30-50% of face
+                        eye_region = gray[fy:fy + int(fh * 0.5), fx:fx + fw]
+                        if eye_region.size > 0:
+                            eye_mean = np.mean(eye_region)
+                            # Eyes open = lighter eye region (not too dark/closed)
+                            if eye_mean > 60:
+                                score += 25.0
+                        
+                        # Mouth region: bottom 20-40% of face
+                        mouth_region = gray[fy + int(fh * 0.6):fy + int(fh * 0.85), fx:fx + fw]
+                        if mouth_region.size > 0:
+                            mouth_std = np.std(mouth_region)
+                            # Wide open mouth = high contrast in mouth region (teeth vs dark)
+                            if mouth_std < 40:
+                                score += 15.0  # Closed/natural mouth
+            
+            # 2. Blur detection (Laplacian variance)
+            laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
+            if laplacian_var > 100:
+                score += 20.0
+            elif laplacian_var > 50:
+                score += 10.0
+            
+            # Prefer face-detected frames strongly
+            if face_detected and not best_face_detected:
+                best_offset = offset
+                best_score = score
+                best_face_detected = True
+            elif face_detected == best_face_detected and score > best_score:
+                best_offset = offset
+                best_score = score
+                
         except Exception:
             pass
         finally:
             tmp.unlink(missing_ok=True)
-
+    
+    logger.info(
+        "[THUMBNAIL] Selected frame at t=%.1fs (face detected: %s, score=%.1f)",
+        best_offset, best_face_detected, best_score,
+    )
     return best_offset
-
-
-async def _find_sharpest_frame(clip_path: Path, duration: float) -> float:
-    """Return frame at 25% of clip (heuristic for less motion)."""
-    return duration * 0.25
 
 
 async def generate_thumbnail_candidates(
@@ -99,14 +170,12 @@ async def generate_thumbnail_candidates(
     if duration < 0.5:
         return []
 
-    expressive_offset = await _find_expressive_frame(clip_path, duration)
-    sharp_offset = await _find_sharpest_frame(clip_path, duration)
+    best_offset = await _find_best_thumbnail_frame(clip_path, duration)
     representative_offset = duration * 0.4
 
     candidates = [
-        ("expressive", expressive_offset, "Más expresivo"),
-        ("sharp", sharp_offset, "Más nítido"),
-        ("representative", representative_offset, "Más representativo"),
+        ("best", best_offset, "Mejor frame"),
+        ("representative", representative_offset, "Representativo"),
     ]
 
     results = []

@@ -157,6 +157,42 @@ def _probe_duration(video_path: Path) -> float:
 # ── Input normalisation ────────────────────────────────────────────────────
 
 
+def _ensure_audio_stream(clip_path: Path, output_path: Path) -> Path:
+    """Add a silent audio stream to a clip if it has no audio.
+
+    B-roll clips from Pexels/Coverr often lack audio streams, which causes
+    the xfade filter's acrossfade to fail with "Stream specifier ':a' matches
+    no streams". This function probes the clip and adds anullsrc if needed.
+
+    Args:
+        clip_path: Input video path.
+        output_path: Output path for the video with guaranteed audio stream.
+
+    Returns:
+        Path to the clip with audio (same as clip_path if audio already present).
+    """
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a",
+         "-show_entries", "stream=codec_name",
+         "-of", "default=noprint_wrappers=1", str(clip_path)],
+        capture_output=True, text=True, timeout=15
+    )
+    if probe.stdout.strip():
+        return clip_path  # ya tiene audio
+
+    logger.info("[Transitions] Adding silent audio stream to %s", clip_path.name)
+    subprocess.run([
+        _get_ffmpeg_exe(), "-y",
+        "-i", str(clip_path),
+        "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        str(output_path),
+    ], capture_output=True, timeout=60)
+    return output_path
+
+
 async def _normalise_input(
     input_path: Path,
     output_path: Path,
@@ -168,10 +204,20 @@ async def _normalise_input(
 
     Uses a filter chain: scale → setsar → fps → format=yuv420p.
     Audio is re-encoded to AAC 128k 48kHz.
+
+    Before normalising, ensures the input has an audio stream (adds silent
+    audio if missing) to prevent xfade/acrossfade failures.
     """
+    # FIX 3: Ensure input has audio stream before normalising
+    tmp_audio = input_path.parent / f"_audiofix_{input_path.name}"
+    try:
+        input_with_audio = _ensure_audio_stream(input_path, tmp_audio)
+    except Exception:
+        input_with_audio = input_path
+
     cmd = [
         _get_ffmpeg_exe(), "-y",
-        "-i", str(input_path),
+        "-i", str(input_with_audio),
         "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,"
                f"fps={fps},format=yuv420p",
@@ -193,6 +239,9 @@ async def _normalise_input(
             input_path.name, rc, output_path.exists(),
             output_path.stat().st_size if output_path.exists() else -1,
         )
+    # Cleanup temp audio-fix file
+    if tmp_audio.exists():
+        tmp_audio.unlink(missing_ok=True)
     return ok
 
 
@@ -391,6 +440,33 @@ async def _fallback_concat(
         return False
 
 
+# ── QA Validation ──────────────────────────────────────────────────────────
+
+# Minimum transition duration enforced by QA (seconds)
+_QA_MIN_TRANSITION_DURATION = 0.6
+
+
+def _qa_validate_transition(
+    transition_type: str,
+    duration: float,
+) -> float:
+    """Validate and clamp transition parameters before returning timeline.
+
+    Checks:
+      - Transition duration >= 0.6s (clamp up + WARNING if violated)
+
+    Returns the (possibly clamped) duration.
+    """
+    if duration < _QA_MIN_TRANSITION_DURATION:
+        logger.warning(
+            "[Transitions QA] Clamping %s duration from %.2fs to %.2fs (min=%.1fs)",
+            transition_type, duration, _QA_MIN_TRANSITION_DURATION,
+            _QA_MIN_TRANSITION_DURATION,
+        )
+        duration = _QA_MIN_TRANSITION_DURATION
+    return duration
+
+
 # ── Public API ─────────────────────────────────────────────────────────────
 
 
@@ -443,6 +519,9 @@ async def apply_transition(
             f"Unknown transition type '{transition_type}'. "
             f"Supported: {', '.join(sorted(TRANSITION_TYPES))}"
         )
+
+    # ── QA: validate and clamp transition parameters ───────────────────
+    duration = _qa_validate_transition(transition_type, duration)
 
     if output_path is None:
         output_path = input_a.with_name(
@@ -539,21 +618,63 @@ async def apply_transition_batch(
     if clip_types is None:
         clip_types = ["talking_head"] * len(clips)
 
+    # ── Transition rotation system ────────────────────────────────────────────
+    # Rotate through available transitions to avoid repetitive look.
+    # Never repeat the same transition twice in a row.
+    _TRANSITION_ROTATION = ["crossfade", "slide_left", "fade_black"]
+    _last_transition = None
+    _rotation_index = 0
+
+    def _pick_transition(clip_idx: int, prev_clip_type: str) -> str:
+        """Pick the next transition in rotation with context awareness.
+        
+        If the previous clip ended on an emotional/loud moment (action/broll),
+        force a hard cut (no transition). Otherwise rotate through the list.
+        """
+        nonlocal _last_transition, _rotation_index
+        
+        # Context rule: if previous clip was action/broll, use hard cut
+        if prev_clip_type in ("action", "broll", "transition"):
+            _last_transition = None
+            return "crossfade"  # Will be treated as hard cut via 0.01s duration
+        
+        # Rotation: pick next, skip if same as last
+        for _ in range(len(_TRANSITION_ROTATION)):
+            candidate = _TRANSITION_ROTATION[_rotation_index % len(_TRANSITION_ROTATION)]
+            _rotation_index += 1
+            if candidate != _last_transition:
+                _last_transition = candidate
+                return candidate
+        
+        return "crossfade"  # fallback
+
     # Build the chain iteratively: merge clip[0] + clip[1], then result + clip[2], etc.
     current = clips[0]
     tmpdir = Path(tempfile.mkdtemp(prefix="viraclip_trans_batch_"))
     try:
         for i in range(1, len(clips)):
             ct = clip_types[i] if i < len(clip_types) else "talking_head"
+            prev_ct = clip_types[i - 1] if i - 1 < len(clip_types) else "talking_head"
+            
+            # Pick transition via rotation + context
+            trans_type = _pick_transition(i, prev_ct)
+            
+            # For action/broll clips, use very short duration (hard cut feel)
+            trans_dur = 0.01 if prev_ct in ("action", "broll", "transition") else duration
+            
             tmp_out = tmpdir / f"batch_{i:04d}.mp4"
             current = await apply_transition(
                 input_a=current,
                 input_b=clips[i],
-                transition_type=transition_type,
-                duration=duration,
+                transition_type=trans_type,
+                duration=trans_dur,
                 output_path=tmp_out,
                 preset=preset,
                 clip_type=ct,
+            )
+            logger.info(
+                "[TRANSITION] Applied %s between clip %d and clip %d",
+                trans_type, i, i + 1,
             )
 
         # Move final result to desired output path

@@ -87,14 +87,137 @@ except (ImportError, Exception):
     _confidence_subtitle_available = False
     ConfidenceSubtitleGenerator = None  # type: ignore
 
+from ...core.job_context import JobContext
 from . import _helpers, _subtitles, _transcript
 from ._clip_renderer import create_single_clip
 from ._helpers import get_ffmpeg_exe, get_service_config
 from .vfx_service import VFXService
 
+
 logger = logging.getLogger(__name__)
 
+
+# ── Post-render validation ────────────────────────────────────────────────────
+
+async def validate_clip_output(
+    clip_path: Path,
+    clip_index: int,
+    intended_duration: float,
+) -> Dict[str, Any]:
+    """
+    Run 4 post-render validation checks on a clip.
+
+    1. DURATION: within 2s of intended duration (warning only).
+    2. AUDIO: at least one audio stream present (error → skip).
+    3. VIDEO DIMENSIONS: must be 1080x1920 (error → skip).
+    4. FILE SIZE: must be >= 500KB (error → skip).
+
+    Returns a dict with check results and a "pass" boolean.
+    """
+    result: Dict[str, Any] = {
+        "clip_index": clip_index,
+        "path": str(clip_path),
+        "duration_check": {"pass": True, "actual": 0.0, "intended": intended_duration},
+        "audio_check": {"pass": True},
+        "dimensions_check": {"pass": True, "actual": ""},
+        "file_size_check": {"pass": True, "size_kb": 0},
+        "pass": True,
+    }
+
+    if not clip_path.exists():
+        result["pass"] = False
+        result["file_size_check"]["pass"] = False
+        result["file_size_check"]["error"] = "File does not exist"
+        logger.error("[Validate] Clip %d: file not found — %s", clip_index, clip_path)
+        return result
+
+    # 1. DURATION check
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "csv=p=0", str(clip_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        actual_dur = float(stdout.decode().strip())
+        result["duration_check"]["actual"] = actual_dur
+        diff = abs(actual_dur - intended_duration)
+        if diff > 2.0:
+            result["duration_check"]["pass"] = False
+            logger.warning(
+                "[Validate] Clip %d duration mismatch: intended=%.1fs, actual=%.1fs (diff=%.1fs)",
+                clip_index, intended_duration, actual_dur, diff,
+            )
+    except Exception as e:
+        result["duration_check"]["pass"] = False
+        result["duration_check"]["error"] = str(e)
+        logger.warning("[Validate] Clip %d duration probe failed: %s", clip_index, e)
+
+    # 2. AUDIO check
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=codec_type", str(clip_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        audio_streams = stdout.decode().strip()
+        if "codec_type" not in audio_streams:
+            result["audio_check"]["pass"] = False
+            result["pass"] = False
+            logger.error("[Validate] Clip %d has no audio stream", clip_index)
+    except Exception as e:
+        result["audio_check"]["pass"] = False
+        result["audio_check"]["error"] = str(e)
+        logger.warning("[Validate] Clip %d audio probe failed: %s", clip_index, e)
+
+    # 3. VIDEO DIMENSIONS check
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0", str(clip_path),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+        dims = stdout.decode().strip()
+        result["dimensions_check"]["actual"] = dims
+        if dims != "1080,1920":
+            result["dimensions_check"]["pass"] = False
+            result["pass"] = False
+            logger.error(
+                "[Validate] Clip %d wrong dimensions: expected 1080x1920, got %s",
+                clip_index, dims,
+            )
+    except Exception as e:
+        result["dimensions_check"]["pass"] = False
+        result["dimensions_check"]["error"] = str(e)
+        logger.warning("[Validate] Clip %d dimensions probe failed: %s", clip_index, e)
+
+    # 4. FILE SIZE check
+    try:
+        size_kb = clip_path.stat().st_size / 1024
+        result["file_size_check"]["size_kb"] = round(size_kb, 1)
+        if size_kb < 500:
+            result["file_size_check"]["pass"] = False
+            result["pass"] = False
+            logger.error(
+                "[Validate] Clip %d too small: %.1f KB < 500 KB — corrupt render",
+                clip_index, size_kb,
+            )
+    except Exception as e:
+        result["file_size_check"]["pass"] = False
+        result["file_size_check"]["error"] = str(e)
+        logger.warning("[Validate] Clip %d file size check failed: %s", clip_index, e)
+
+    return result
+
+
 async def create_video_clips_parallel(
+
     video_path: Path,
     segments: List[Dict[str, Any]],
     font_family: str = "TikTokSans-Regular",
@@ -117,9 +240,22 @@ async def create_video_clips_parallel(
     clips_output_dir = Path(cfg.temp_dir) / "clips"
     clips_output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Instantiate one JobContext for the entire job so services can coordinate
+    # asset selection, LUT rotation, etc. across all clips.
+    job_ctx = JobContext(job_id=task_id)
+
     # Use Concurrency Optimizer for parallel clip creation
     processor = ParallelBatchProcessor(max_concurrent=max_concurrent)
     
+    # Per-job validation summary
+    validation_summary: Dict[str, Any] = {
+        "total_clips": len(segments),
+        "passed": 0,
+        "skipped": 0,
+        "warnings": [],
+        "results": [],
+    }
+
     async def render_single_clip(segment_with_idx: tuple) -> Optional[Dict[str, Any]]:
         idx, segment = segment_with_idx
         try:
@@ -137,11 +273,40 @@ async def create_video_clips_parallel(
                 output_format=output_format,
                 add_subtitles=add_subtitles,
                 task_id=task_id,
+                job_ctx=job_ctx,
             )
+            if clip_info is None:
+                return None
+
+            # Post-render validation
+            clip_path = Path(clip_info["path"])
+            intended_dur = clip_info.get("duration", 0.0)
+            val_result = await validate_clip_output(clip_path, idx, intended_dur)
+
+            # Collect validation result
+            validation_summary["results"].append(val_result)
+
+            if not val_result["pass"]:
+                validation_summary["skipped"] += 1
+                logger.error(
+                    "[Validate] Clip %d failed validation — skipping export",
+                    idx,
+                )
+                return None
+
+            validation_summary["passed"] += 1
+            if not val_result["duration_check"]["pass"]:
+                validation_summary["warnings"].append(
+                    f"Clip {idx}: duration mismatch "
+                    f"(intended={val_result['duration_check']['intended']:.1f}s, "
+                    f"actual={val_result['duration_check']['actual']:.1f}s)"
+                )
+
             return clip_info
         except Exception as e:
             logger.error(f"Failed to render clip {idx + 1}: {e}")
             return None
+
     
     # Process clips in parallel
     segments_with_idx = list(enumerate(segments))
@@ -154,8 +319,72 @@ async def create_video_clips_parallel(
     # Filter out failed clips
     clips_info = [c for c in clips_results if c is not None]
     
-    logger.info(f"Successfully created {len(clips_info)}/{len(segments)} clips")
+    # Attach validation summary to each clip info
+    for clip_info in clips_info:
+        clip_info["validation_summary"] = validation_summary
+
+    logger.info(
+        "[Validate] %d/%d clips passed, %d skipped, %d warnings",
+        validation_summary["passed"],
+        validation_summary["total_clips"],
+        validation_summary["skipped"],
+        len(validation_summary["warnings"]),
+    )
+
+    # ── Write per-job debug log ───────────────────────────────────────────────
+    try:
+        _logs_dir = Path(__file__).resolve().parent.parent.parent / "logs" / "jobs"
+        _logs_dir.mkdir(parents=True, exist_ok=True)
+        _job_log: Dict[str, Any] = {
+            "job_id": task_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "clips_attempted": len(segments),
+            "clips_exported": len(clips_info),
+            "clips_skipped": [],
+            "per_clip": [],
+        }
+        # Collect skipped clip info from validation results
+        for _vr in validation_summary.get("results", []):
+            if not _vr.get("pass"):
+                _reason_parts = []
+                if not _vr.get("audio_check", {}).get("pass"):
+                    _reason_parts.append("no audio stream")
+                if not _vr.get("dimensions_check", {}).get("pass"):
+                    _reason_parts.append(f"wrong dimensions: {_vr.get('dimensions_check', {}).get('actual', '?')}")
+                if not _vr.get("file_size_check", {}).get("pass"):
+                    _reason_parts.append(f"file too small: {_vr.get('file_size_check', {}).get('size_kb', 0)}KB")
+                _job_log["clips_skipped"].append({
+                    "clip_index": _vr.get("clip_index"),
+                    "reason": "; ".join(_reason_parts) if _reason_parts else "validation failed",
+                })
+        # Collect per-clip info from clip_info dicts
+        for _ci in clips_info:
+            _seg = _ci.get("segment", {})
+            _job_log["per_clip"].append({
+                "clip_index": _ci.get("clip_id", 0) - 1,
+                "segment": {
+                    "start": _seg.get("start_time", "?"),
+                    "end": _seg.get("end_time", "?"),
+                },
+                "lut_applied": _ci.get("lut_preset", ""),
+                "broll_count": _ci.get("broll_overlays", 0),
+                "broll_assets": _ci.get("broll_asset_ids", []),
+                "hook_style": _ci.get("hook_style", ""),
+                "music_track": _ci.get("bgm_used", ""),
+                "services_failed": _ci.get("services_failed", []),
+                "output_duration": _ci.get("duration", 0),
+                "output_filesize_kb": _ci.get("output_filesize_kb", 0),
+                "validation_passed": _ci.get("validation_passed", True),
+            })
+        _log_path = _logs_dir / f"{task_id}.json"
+        _log_path.write_text(json.dumps(_job_log, indent=2, default=str))
+        logger.info("[JobLog] Written to %s", _log_path)
+    except Exception as _jl_e:
+        logger.debug("[JobLog] Failed to write job log: %s", _jl_e)
+
     return cast(List[Dict[str, Any]], clips_info)
+
+
 
 
 

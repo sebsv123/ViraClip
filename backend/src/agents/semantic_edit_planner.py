@@ -177,7 +177,7 @@ _VALID_SFX = {
 # Timing constants
 _BROLL_HOOK_GUARD = 2.0     # no B-roll in first 2s (protect hook)
 _BROLL_CTA_GUARD  = 2.0     # no B-roll in last 2s
-_BROLL_MIN_GAP    = 4.0     # minimum gap between B-rolls
+_BROLL_MIN_GAP    = MIN_GAP_BETWEEN_OVERLAYS_S  # minimum gap between B-rolls
 _BROLL_MAX        = 3       # max B-rolls per clip
 _SFX_MIN_GAP      = 1.5     # minimum gap between SFX
 _SFX_MAX          = 8       # max SFX per clip (raised for contextual rules)
@@ -193,9 +193,498 @@ _ZOOM_MAX           = 4     # max zoom cues per clip
 _ZOOM_MIN_GAP       = 4.0   # min seconds between zoom cues
 
 
+from ..domains.broll.broll_config import (
+    MIN_OVERLAY_DURATION_S,
+    MIN_GAP_BETWEEN_OVERLAYS_S,
+)
+
+# ── Shared minimum overlay duration (from canonical broll_config) ────────────
+BROLL_MIN_OVERLAY_DURATION_S = MIN_OVERLAY_DURATION_S
+
+
+# ── GENERIC CONCEPTS BLACKLIST ────────────────────────────────────────────────
+# Concepts that are too generic, motivational, abstract, or not clearly tied to
+# the spoken topic. These are rejected at every stage of the pipeline.
+# Every rejected concept is logged with a reason code.
+_GENERIC_CONCEPTS: set = {
+    # ── Motivational / abstract / self-help ──
+    "success", "achievement", "determination", "motivation", "inspiration",
+    "dream", "goal", "passion", "excellence", "greatness", "success achievement",
+    "winner", "winning", "champion", "victory", "triumph", "conquer",
+    "overcome", "perseverance", "persistence", "resilience", "grit",
+    "mindset", "growth mindset", "positive thinking", "positive attitude",
+    "self improvement", "self help", "personal development", "personal growth",
+    "empowerment", "empower", "believe", "belief", "faith",
+    "courage", "bravery", "confidence", "self confidence",
+    "potential", "unlock potential", "reach potential", "fulfillment",
+    "transformation", "life changing", "breakthrough", "break through",
+    "limitless", "unlimited", "infinite", "endless possibilities",
+    "abundance", "prosperity", "wealth mindset", "millionaire mindset",
+    "hustle", "grind", "work hard", "never give up", "keep going",
+    "rise", "rise up", "stand out", "shine", "sparkle",
+    "miracle", "magic", "extraordinary", "remarkable", "unbelievable",
+    "best version", "best self", "new you", "new beginning", "fresh start",
+    "second chance", "opportunity", "possibility", "possibilities",
+    "vision", "vision board", "manifest", "manifestation", "law of attraction",
+    "destiny", "fate", "purpose", "calling", "mission",
+    "legacy", "impact", "make a difference", "change the world",
+    "inspirational", "motivational", "uplifting", "encouraging",
+    "sunrise", "sunset", "mountains", "sunrise mountains", "nature landscape",
+    "ocean view", "beach sunset", "mountain top", "climbing mountain",
+    "horizon", "sky", "clouds", "sunshine", "sunlight",
+    # ── Generic people / objects ──
+    "person", "people", "camera", "man", "woman", "child", "group",
+    "hands", "face", "smile", "laugh", "celebration",
+    "crowd", "audience", "spectator", "onlooker", "bystander",
+    "portrait", "selfie", "photo", "photograph", "picture",
+    "silhouette", "shadow", "reflection", "mirror",
+    "handshake", "hand", "finger", "arm", "leg", "foot",
+    "eye", "eyes", "look", "stare", "gaze",
+    "walking", "running", "jumping", "dancing", "sitting", "standing",
+    # ── Generic tech / digital ──
+    "technology", "innovation", "digital", "future", "modern",
+    "tech", "high tech", "cutting edge", "state of the art",
+    "artificial intelligence", "ai", "machine learning", "deep learning",
+    "robot", "robotics", "automation", "automated",
+    "computer", "laptop", "screen", "monitor", "display",
+    "keyboard", "mouse", "typing", "coding", "programming",
+    "software", "hardware", "chip", "processor", "circuit",
+    "data", "big data", "cloud", "cloud computing", "server",
+    "network", "internet", "web", "online", "digital world",
+    "cyber", "cybersecurity", "encryption", "blockchain", "crypto",
+    "virtual", "virtual reality", "vr", "augmented reality", "ar",
+    "metaverse", "digital transformation", "industry 4.0",
+    "smart", "smartphone", "mobile", "app", "application",
+    "innovation lab", "startup", "scale up", "disruption", "disruptive",
+    # ── Generic business / corporate ──
+    "business", "corporate", "professional", "teamwork", "leadership",
+    "management", "manager", "executive", "ceo", "founder",
+    "entrepreneur", "entrepreneurship", "startup culture",
+    "strategy", "strategic", "planning", "business planning",
+    "growth", "scaling", "expansion", "global", "worldwide",
+    "enterprise", "organization", "company", "firm", "corporation",
+    "boardroom", "board meeting", "shareholder", "stakeholder",
+    "revenue", "profit", "profitability", "margin", "roi",
+    "synergy", "leverage", "optimize", "streamline", "efficiency",
+    "productivity", "performance", "results", "outcome",
+    "solution", "solutions", "end to end", "turnkey",
+    "consulting", "consultant", "advisor", "advisory",
+    "networking", "network event", "business card", "coffee meeting",
+    "pitch", "elevator pitch", "presentation", "slide deck",
+    "deal", "partnership", "collaboration", "cooperation",
+    "b2b", "b2c", "saas", "enterprise software",
+    # ── Generic abstract concepts ──
+    "concept", "idea", "solution", "change", "growth", "progress",
+    "power", "strength", "freedom", "peace", "love", "hope",
+    "future", "past", "present", "time", "moment",
+    "life", "death", "birth", "beginning", "end",
+    "world", "earth", "universe", "cosmos", "nature",
+    "energy", "force", "spirit", "soul", "mind",
+    "thought", "thinking", "knowledge", "wisdom", "intelligence",
+    "truth", "honesty", "integrity", "justice", "fairness",
+    "equality", "diversity", "inclusion", "belonging",
+    "sustainability", "environment", "eco", "green", "renewable",
+    "balance", "harmony", "unity", "togetherness", "solidarity",
+    "quality", "value", "excellence", "perfection", "precision",
+    "simplicity", "minimalism", "clarity", "focus", "awareness",
+    "consciousness", "mindfulness", "meditation", "zen", "calm",
+    "chaos", "order", "system", "process", "framework",
+    "journey", "path", "road", "way", "direction",
+    "secret", "mystery", "discovery", "exploration", "quest",
+    "revolution", "evolution", "transformation", "shift", "paradigm",
+    "advantage", "edge", "upper hand", "competitive edge",
+    "insight", "wisdom", "lesson", "teaching", "learning",
+    # ── Generic travel / lifestyle ──
+    "travel", "adventure", "lifestyle", "luxury", "beautiful",
+    "happy", "joy", "fun", "amazing", "wonderful",
+    "vacation", "holiday", "getaway", "escape", "retreat",
+    "explore", "exploration", "wanderlust", "journey", "trip",
+    "destination", "paradise", "heaven", "bliss", "serenity",
+    "relaxation", "relax", "chill", "chill out", "unwind",
+    "weekend", "weekend getaway", "road trip", "summer", "winter",
+    "spring", "autumn", "season", "weather", "climate",
+    "sunny", "rainy", "snowy", "windy", "stormy",
+    "cozy", "comfortable", "comfy", "snug", "warm",
+    "delicious", "tasty", "yummy", "food", "cuisine",
+    "fitness", "workout", "exercise", "gym", "yoga",
+    "health", "wellness", "wellbeing", "self care", "selfcare",
+    "beauty", "beautiful", "gorgeous", "stunning", "lovely",
+    "fashion", "style", "trendy", "chic", "elegant",
+    "shopping", "retail", "store", "mall", "boutique",
+    "party", "celebration", "festival", "event", "gathering",
+    "wedding", "marriage", "romance", "romantic", "love story",
+    "family", "friends", "friendship", "community", "together",
+    # ── Generic nature / scenery (unless transcript explicitly requires) ──
+    "nature", "landscape", "scenery", "view", "panorama",
+    "forest", "woods", "tree", "trees", "river", "lake",
+    "ocean", "sea", "beach", "coast", "shore",
+    "field", "meadow", "grass", "flower", "flowers",
+    "garden", "park", "trail", "path", "waterfall",
+    "rainbow", "stars", "moon", "night sky", "aurora",
+    "desert", "canyon", "valley", "hill", "cliff",
+    "island", "tropical", "palm tree", "coral reef",
+    "animal", "wildlife", "bird", "butterfly", "dolphin",
+    # ── Generic office / workspace (unless transcript explicitly requires) ──
+    "office", "workspace", "desk", "cubicle", "open office",
+    "meeting room", "conference room", "break room", "lobby",
+    "reception", "receptionist", "secretary", "assistant",
+    "water cooler", "coffee machine", "printer", "scanner",
+    "filing cabinet", "filing", "paperwork", "paper", "documents",
+    "stationery", "pen", "pencil", "notebook", "sticky note",
+    "whiteboard", "bulletin board", "calendar", "planner",
+    "briefcase", "suitcase", "bag", "backpack",
+    "badge", "id card", "keycard", "access card",
+    "headset", "headphones", "earpiece", "microphone",
+    "phone call", "telephone", "landline", "voicemail",
+    # ── Generic stock photo clichés ──
+    "diverse group", "diverse team", "multi ethnic", "multicultural",
+    "global team", "international team", "cross cultural",
+    "young professional", "young entrepreneur", "millennial",
+    "senior executive", "older professional", "grey hair",
+    "business casual", "suit and tie", "formal wear",
+    "tie", "suit", "blazer", "jacket", "uniform",
+    "hard hat", "safety vest", "safety gear", "protective gear",
+    "lab coat", "scrubs", "white coat", "surgical mask",
+    "glasses", "spectacles", "sunglasses", "reading glasses",
+    "coffee cup", "coffee mug", "tea cup", "water bottle",
+    "smart casual", "dressed up", "dressed down",
+    "office party", "team building", "corporate event",
+    "award", "trophy", "medal", "ribbon", "certificate",
+    "diploma", "degree", "graduation", "graduate",
+    "hand shake", "handshake deal", "signing deal", "closing deal",
+    "high five", "fist bump", "thumbs up", "ok sign",
+    "pointing", "pointing finger", "pointing hand",
+    "puzzle piece", "jigsaw", "lightbulb", "light bulb",
+    "gears", "cogs", "machinery", "engine", "motor",
+    "target", "bullseye", "dartboard", "arrow", "checkmark",
+    "checklist", "clipboard", "to do list", "task list",
+    "clock", "watch", "timer", "hourglass", "stopwatch",
+    "globe", "world map", "map", "compass", "direction sign",
+    "question mark", "exclamation mark", "info sign",
+    "up arrow", "down arrow", "growth chart", "trend line",
+    "pie chart", "bar chart", "line graph", "infographic",
+    "placeholder", "mockup", "template", "sample",
+    "generic", "stock photo", "royalty free", "shutterstock",
+    # ── Generic abstract art / backgrounds ──
+    "abstract", "abstract background", "geometric pattern",
+    "colorful background", "gradient", "bokeh", "blur",
+    "particle", "particles", "sparkle", "sparkles", "glitter",
+    "neon", "neon lights", "light trail", "light streak",
+    "motion blur", "slow motion", "time lapse", "hyperlapse",
+    "animation", "motion graphics", "lower third", "title card",
+    "transition", "wipe", "fade", "dissolve", "slide",
+    "background loop", "seamless loop", "tileable",
+    "green screen", "chroma key", "blue screen",
+    "texture", "wallpaper", "pattern", "design",
+    "wave", "waves", "ripple", "ripples", "flow",
+    "smoke", "fire", "flame", "flames", "explosion",
+    "water splash", "ink splash", "paint splash", "color splash",
+    "bubble", "bubbles", "foam", "froth", "mist",
+    "fog", "steam", "vapor", "haze", "dust",
+    "rain", "raindrop", "raindrops", "snow", "snowflake",
+    "lightning", "thunder", "storm", "hurricane", "tornado",
+    "earthquake", "volcano", "eruption", "flood", "tsunami",
+    # ── Generic success / achievement imagery ──
+    "success", "successful", "succeed", "achievement", "achieve",
+    "accomplish", "accomplishment", "complete", "completion",
+    "win", "winner", "winning", "champion", "championship",
+    "trophy", "medal", "gold", "silver", "bronze",
+    "first place", "number one", "top", "best", "leading",
+    "award", "award winning", "prize", "reward", "bonus",
+    "recognition", "honor", "accolade", "praise", "applause",
+    "standing ovation", "round of applause", "cheer", "cheering",
+    "confetti", "balloon", "balloons", "firework", "fireworks",
+    "celebrate", "celebration", "party", "festive", "festivity",
+    "raise the bar", "set the bar", "new height", "new level",
+    "next level", "take it to the next level", "level up",
+    "game changer", "game changing", "paradigm shift",
+    "breakthrough", "break through", "quantum leap",
+    "leap forward", "giant leap", "big step", "milestone",
+    "landmark", "turning point", "watershed moment",
+    "tipping point", "critical mass", "momentum",
+    "snowball effect", "domino effect", "ripple effect",
+    "chain reaction", "catalyst", "spark", "trigger",
+    "launch", "launchpad", "springboard", "stepping stone",
+    "cornerstone", "foundation", "bedrock", "backbone",
+    "pillar", "anchor", "keystone", "linchpin",
+    "driving force", "moving force", "prime mover",
+    "heart", "core", "essence", "soul", "spirit",
+    "secret sauce", "magic ingredient", "special ingredient",
+    "key ingredient", "essential element", "critical component",
+    "winning formula", "success formula", "recipe for success",
+    "road to success", "path to success", "journey to success",
+    "ladder of success", "steps to success", "keys to success",
+    "secrets of success", "habits of success", "success habits",
+    "morning routine", "daily routine", "daily habits",
+    "productive morning", "productive day", "productive routine",
+    "power of habit", "power of routine", "power of discipline",
+    "discipline", "self discipline", "willpower", "will power",
+    "focus", "concentration", "attention", "mindfulness",
+    "visualization", "mental imagery", "positive visualization",
+    "affirmation", "positive affirmation", "daily affirmation",
+    "gratitude", "thankful", "blessed", "grateful",
+    "abundance mindset", "scarcity mindset", "poverty mindset",
+    "rich mindset", "poor mindset", "money mindset",
+    "financial freedom", "financial independence", "financial literacy",
+    "passive income", "residual income", "multiple income streams",
+    "side hustle", "side business", "moonlighting",
+    "work from home", "remote work", "digital nomad",
+    "location independent", "time freedom", "financial freedom",
+    "early retirement", "retire early", "fire movement",
+    "financial education", "money management", "personal finance",
+    "budgeting", "saving money", "investing", "wealth building",
+    "asset", "liability", "cash flow", "net worth",
+    "real estate", "stock market", "index fund", "etf",
+    "dividend", "compound interest", "passive investing",
+    "active investing", "day trading", "swing trading",
+    "forex", "crypto", "bitcoin", "ethereum", "nft",
+    "defi", "web3", "blockchain", "distributed ledger",
+    "smart contract", "dapp", "dao", "token", "tokenomics",
+    "whale", "bull market", "bear market", "market cycle",
+    "hype", "fomo", "fud", "bag holder", "moon",
+    "to the moon", "hodl", "diamond hands", "paper hands",
+    "rug pull", "pump and dump", "scam", "ponzi",
+    "get rich quick", "get rich", "easy money", "fast money",
+    "make money online", "earn money", "money making",
+    "cash", "dollar", "dollar sign", "money bag",
+    "money pile", "money stack", "money rain", "money shower",
+    "gold coin", "gold bar", "gold ingot", "treasure",
+    "vault", "safe", "lock", "key", "combination lock",
+    "security camera", "surveillance", "monitoring",
+    "alarm", "siren", "warning light", "caution tape",
+    "do not enter", "restricted area", "authorized only",
+    "confidential", "classified", "top secret", "secret file",
+    "redacted", "blacked out", "censored", "blurred",
+    "magnifying glass", "search", "investigation", "inspection",
+    "audit", "review", "analysis", "assessment", "evaluation",
+    "report", "document", "file", "folder", "binder",
+    "spreadsheet", "database", "record", "log", "ledger",
+    "receipt", "invoice", "bill", "statement", "balance",
+    "check", "checkbook", "wallet", "purse", "coin purse",
+    "credit card", "debit card", "atm", "bank teller",
+    "bank vault", "safety deposit box", "lockbox",
+    "loan", "mortgage", "credit", "debt", "interest rate",
+    "apr", "annual percentage", "fixed rate", "variable rate",
+    "amortization", "depreciation", "appreciation",
+    "equity", "collateral", "down payment", "closing cost",
+    "escrow", "title", "deed", "lien", "foreclosure",
+    "bankruptcy", "insolvency", "liquidation", "restructuring",
+    "merger", "acquisition", "takeover", "ipo",
+    "valuation", "fundraising", "seed round", "series a",
+    "venture capital", "angel investor", "private equity",
+    "hedge fund", "mutual fund", "index", "benchmark",
+    "bull", "bear", "stag", "market maker", "liquidity",
+    "volatility", "correction", "crash", "rally", "recovery",
+    "recession", "depression", "inflation", "deflation",
+    "stagflation", "hyperinflation", "default", "bailout",
+    "stimulus", "quantitative easing", "tightening",
+    "interest", "dividend", "yield", "return", "gain",
+    "loss", "expense", "cost", "overhead", "operating cost",
+    "capital", "working capital", "cash reserve", "liquidity",
+    "solvency", "profitability", "efficiency", "leverage",
+    "goodwill", "intangible", "amortization", "depreciation",
+    "accrual", "deferral", "prepaid", "outstanding",
+    "receivable", "payable", "inventory", "supply chain",
+    "logistics", "distribution", "wholesale", "retail",
+    "ecommerce", "marketplace", "platform", "ecosystem",
+    "funnel", "pipeline", "sales pipeline", "lead generation",
+    "conversion", "acquisition", "retention", "churn",
+    "lifetime value", "customer value", "unit economics",
+    "cac", "ltv", "arpu", "mrr", "arr",
+    "kpi", "metric", "dashboard", "analytics", "insights",
+    "a/b test", "split test", "multivariate", "optimization",
+    "personalization", "segmentation", "targeting",
+    "campaign", "marketing campaign", "ad campaign",
+    "social media", "content marketing", "influencer",
+    "seo", "sem", "ppc", "cpm", "cpc", "ctr",
+    "landing page", "sales page", "opt in", "lead magnet",
+    "email list", "subscriber", "newsletter", "broadcast",
+    "automation", "workflow", "drip campaign", "sequence",
+    "webinar", "live stream", "podcast", "video series",
+    "masterclass", "workshop", "training", "course",
+    "coaching", "mentoring", "consulting", "advisory",
+    "speaking", "keynote", "presentation", "talk",
+    "book", "ebook", "guide", "handbook", "manual",
+    "blueprint", "playbook", "roadmap", "checklist",
+    "template", "worksheet", "workbook", "journal",
+    "planner", "calendar", "schedule", "timeline",
+    "system", "framework", "methodology", "approach",
+    "strategy", "tactic", "technique", "tool", "resource",
+    "hack", "life hack", "productivity hack", "time hack",
+    "shortcut", "cheat sheet", "quick tip", "pro tip",
+    "tip", "trick", "advice", "recommendation", "suggestion",
+    "best practice", "industry standard", "gold standard",
+    "benchmark", "baseline", "reference", "norm",
+    "average", "typical", "standard", "common", "usual",
+    "normal", "regular", "ordinary", "everyday", "routine",
+    "basic", "fundamental", "essential", "necessary", "required",
+    "important", "critical", "crucial", "vital", "key",
+    "major", "significant", "substantial", "considerable",
+    "massive", "huge", "enormous", "giant", "immense",
+    "incredible", "unbelievable", "amazing", "astonishing",
+    "astounding", "staggering", "stunning", "breathtaking",
+    "mind blowing", "mind boggling", "jaw dropping",
+    "eye opening", "thought provoking", "food for thought",
+    "game changing", "revolutionary", "groundbreaking",
+    "pioneering", "trailblazing", "cutting edge",
+    "state of the art", "world class", "best in class",
+    "top notch", "first rate", "a grade", "top tier",
+    "premium", "deluxe", "luxury", "high end", "high quality",
+    "quality", "excellence", "superior", "exceptional",
+    "outstanding", "remarkable", "notable", "noteworthy",
+    "impressive", "striking", "arresting", "captivating",
+    "engaging", "compelling", "convincing", "persuasive",
+    "powerful", "potent", "strong", "forceful", "dynamic",
+    "energetic", "vibrant", "lively", "animated", "spirited",
+    "enthusiastic", "passionate", "ardent", "fervent", "zealous",
+    "dedicated", "committed", "devoted", "loyal", "faithful",
+    "reliable", "dependable", "trustworthy", "responsible",
+    "accountable", "answerable", "liable", "obligated",
+    "professional", "competent", "capable", "able", "skilled",
+    "talented", "gifted", "expert", "master", "specialist",
+    "experienced", "seasoned", "veteran", "proficient",
+    "knowledgeable", "informed", "educated", "trained",
+    "qualified", "certified", "accredited", "licensed",
+    "authorized", "approved", "sanctioned", "endorsed",
+    "recommended", "suggested", "advised", "urged",
+    "encouraged", "supported", "backed", "endorsed",
+    "sponsored", "funded", "financed", "underwritten",
+    "guaranteed", "warranted", "assured", "ensured",
+    "protected", "covered", "insured", "secured",
+    "safe", "secure", "protected", "guarded", "shielded",
+    "defended", "fortified", "reinforced", "strengthened",
+    "hardened", "toughened", "tempered", "seasoned",
+    "tested", "proven", "validated", "verified", "confirmed",
+    "established", "recognized", "acknowledged", "accepted",
+    "approved", "authorized", "licensed", "registered",
+    "certified", "accredited", "chartered", "qualified",
+    "vetted", "screened", "background checked", "cleared",
+    "bonded", "insured", "licensed", "registered",
+    "compliant", "conforming", "adhering", "following",
+    "meeting", "exceeding", "surpassing", "outperforming",
+    "beating", "topping", "leading", "dominating",
+    "controlling", "managing", "directing", "guiding",
+    "leading", "steering", "navigating", "piloting",
+    "captaining", "commanding", "heading", "running",
+    "operating", "managing", "supervising", "overseeing",
+    "monitoring", "tracking", "watching", "observing",
+    "analyzing", "evaluating", "assessing", "reviewing",
+    "auditing", "inspecting", "examining", "studying",
+    "researching", "investigating", "probing", "exploring",
+    "surveying", "polling", "questioning", "interviewing",
+    "consulting", "advising", "counseling", "mentoring",
+    "coaching", "training", "teaching", "instructing",
+    "educating", "informing", "notifying", "alerting",
+    "warning", "cautioning", "advising", "recommending",
+    "suggesting", "proposing", "offering", "providing",
+    "delivering", "supplying", "furnishing", "equipping",
+    "outfitting", "gearing", "preparing", "readying",
+    "setting", "arranging", "organizing", "coordinating",
+    "planning", "scheduling", "timing", "budgeting",
+    "forecasting", "projecting", "estimating", "calculating",
+    "computing", "processing", "handling", "managing",
+    "dealing", "coping", "handling", "addressing",
+    "tackling", "confronting", "facing", "meeting",
+    "encountering", "experiencing", "undergoing", "enduring",
+    "surviving", "thriving", "flourishing", "prospering",
+    "blooming", "blossoming", "flowering", "growing",
+    "developing", "evolving", "maturing", "ripening",
+    "aging", "seasoning", "curing", "fermenting",
+    "brewing", "simmering", "cooking", "baking",
+    "roasting", "grilling", "frying", "boiling",
+    "steaming", "poaching", "braising", "stewing",
+    "blending", "mixing", "combining", "merging",
+    "fusing", "uniting", "joining", "connecting",
+    "linking", "tying", "binding", "fastening",
+    "attaching", "securing", "locking", "latching",
+    "closing", "shutting", "sealing", "capping",
+    "covering", "wrapping", "packaging", "boxing",
+    "crating", "shipping", "transporting", "moving",
+    "relocating", "transferring", "shifting", "switching",
+    "changing", "altering", "modifying", "adjusting",
+    "adapting", "transforming", "converting", "translating",
+    "transcribing", "recording", "documenting", "capturing",
+    "preserving", "conserving", "saving", "storing",
+    "keeping", "maintaining", "sustaining", "supporting",
+    "upholding", "defending", "protecting", "guarding",
+    "safeguarding", "shielding", "screening", "filtering",
+    "sorting", "classifying", "categorizing", "grouping",
+    "clustering", "segmenting", "dividing", "splitting",
+    "separating", "isolating", "insulating", "buffering",
+    "cushioning", "padding", "lining", "layering",
+    "stacking", "piling", "heaping", "mounting",
+    "accumulating", "collecting", "gathering", "assembling",
+    "building", "constructing", "creating", "making",
+    "producing", "manufacturing", "fabricating", "assembling",
+    "composing", "writing", "authoring", "drafting",
+    "editing", "revising", "rewriting", "proofreading",
+    "reviewing", "approving", "signing off", "clearing",
+    "releasing", "publishing", "distributing", "disseminating",
+    "broadcasting", "transmitting", "communicating",
+    "conveying", "expressing", "articulating", "verbalizing",
+    "stating", "declaring", "announcing", "proclaiming",
+    "pronouncing", "asserting", "affirming", "confirming",
+    "verifying", "validating", "authenticating", "certifying",
+    "accrediting", "licensing", "registering", "chartering",
+    "incorporating", "forming", "establishing", "founding",
+    "launching", "starting", "beginning", "initiating",
+    "commencing", "opening", "kicking off", "rolling out",
+    "introducing", "unveiling", "revealing", "disclosing",
+}
+
+# ── INSURANCE CONTENT WHITELIST ───────────────────────────────────────────────
+# When the content category is insurance, only these concrete concepts are allowed.
+# This ensures b-roll visuals are directly tied to the spoken topic.
+_INSURANCE_WHITELIST: set = {
+    # Finance / money
+    "finance", "financial", "money", "cash", "saving", "savings",
+    "investment", "invest", "investing", "chart", "graph", "statistics",
+    "bank", "banking", "account", "budget", "planning", "financial planning",
+    # Risk / protection
+    "risk", "protection", "safety", "security", "safe", "secure",
+    "shield", "guard", "protect", "insurance", "coverage",
+    # Policy / claims
+    "policy", "claim", "claims", "document", "paperwork", "contract",
+    "agreement", "signature", "signing", "application", "form",
+    # Health / medical (for health insurance)
+    "health", "medical", "hospital", "doctor", "clinic", "patient",
+    "medicine", "prescription", "healthcare",
+    # Home / car (for specific insurance types)
+    "home", "house", "car", "vehicle", "family", "property",
+    "accident", "road", "repair", "damage", "emergency",
+    # Professional / office
+    "office", "workspace", "desk", "laptop", "computer", "meeting",
+    "consultation", "advisor", "agent", "broker", "customer service",
+    "call center", "headset", "phone call",
+}
+
 # ── Layer 1: Heuristic scanner ────────────────────────────────────────────────
 
-def _scan_heuristic(words: List[Dict[str, Any]], duration: float) -> SemanticEditPlan:
+def _is_generic_concept(keyword: str) -> bool:
+    """Check if a keyword is a generic/motivational concept that should be rejected."""
+    kw_lower = keyword.lower().strip()
+    if kw_lower in _GENERIC_CONCEPTS:
+        return True
+    # Also check if any word in the keyword is in the generic set
+    for word in kw_lower.replace("-", " ").replace("_", " ").split():
+        if word in _GENERIC_CONCEPTS:
+            return True
+    return False
+
+
+def _is_insurance_relevant(keyword: str) -> bool:
+    """Check if a keyword is relevant for insurance content."""
+    kw_lower = keyword.lower().strip()
+    if kw_lower in _INSURANCE_WHITELIST:
+        return True
+    # Check if any word in the keyword matches the whitelist
+    for word in kw_lower.replace("-", " ").replace("_", " ").split():
+        if word in _INSURANCE_WHITELIST:
+            return True
+    return False
+
+
+def _scan_heuristic(words: List[Dict[str, Any]], duration: float, category: str = "unknown") -> SemanticEditPlan:
     """
     Instant keyword scan. No API call. Returns SemanticEditPlan from
     visual noun detection (B-roll) and impact word detection (SFX).
@@ -227,12 +716,24 @@ def _scan_heuristic(words: List[Dict[str, Any]], duration: float) -> SemanticEdi
                     break
 
         if kw and _BROLL_HOOK_GUARD <= ts <= duration - _BROLL_CTA_GUARD:
+            # ── RULE 1: Reject cues shorter than 2.5s ──
+            _dur = min(3.5, max(BROLL_MIN_OVERLAY_DURATION_S, duration - ts - 0.5))
+            if _dur < BROLL_MIN_OVERLAY_DURATION_S:
+                continue
+            # ── RULE 2: Reject generic concepts ──
+            if _is_generic_concept(kw):
+                logger.debug("[SemanticPlanner/heuristic] Rejected generic concept: '%s'", kw)
+                continue
+            # ── RULE 3: Insurance content filter ──
+            if category == "insurance" and not _is_insurance_relevant(kw):
+                logger.debug("[SemanticPlanner/heuristic] Rejected non-insurance concept: '%s'", kw)
+                continue
             if all(abs(ts - c.timestamp) >= _BROLL_MIN_GAP for c in broll_cues):
                 if len(broll_cues) < _BROLL_MAX:
                     broll_cues.append(BrollCue(
                         timestamp=ts,
                         keyword=kw,
-                        duration=min(3.5, max(2.0, duration - ts - 0.5)),
+                        duration=_dur,
                         trigger_phrase=raw[:40],
                         confidence=0.70,
                     ))
@@ -613,6 +1114,9 @@ _GROQ_SYSTEM = (
     "Rules:\n"
     "- Only output broll/sfx when confidence >0.70\n"
     "- null means no cue for that category in that window\n"
+    "- Each b-roll cue MUST have a minimum duration of 4 seconds.\n"
+    "  Never generate a b-roll cue shorter than 4 seconds.\n"
+    "  If the available window is less than 4 seconds, do not place b-roll there.\n"
     "- Return ONLY valid JSON: {\"results\": [{\"w\": <int>, "
     "\"broll\": {\"t\": <float>, \"kw\": \"<str>\"}|null, "
     "\"sfx\": {\"t\": <float>, \"type\": \"<str>\"}|null}]}"
@@ -683,6 +1187,7 @@ def _merge_groq(
     groq_results: List[Dict[str, Any]],
     windows: List[Dict[str, Any]],
     duration: float,
+    category: str = "unknown",
 ) -> SemanticEditPlan:
     """Merge Groq annotations (confidence=0.90) on top of the heuristic plan."""
     for item in groq_results:
@@ -696,11 +1201,24 @@ def _merge_groq(
             t  = float(broll.get("t", -1))
             kw = str(broll.get("kw", "")).strip()
             if kw and _BROLL_HOOK_GUARD <= t <= duration - _BROLL_CTA_GUARD:
+                # ── RULE 1: Reject cues shorter than 2.5s ──
+                _dur = min(3.5, max(BROLL_MIN_OVERLAY_DURATION_S, duration - t - 0.5))
+                if _dur < BROLL_MIN_OVERLAY_DURATION_S:
+                    logger.debug("[SemanticPlanner/groq] Skipped short b-roll cue at t=%.1fs (dur=%.1f < min=%.1f)", t, _dur, BROLL_MIN_OVERLAY_DURATION_S)
+                    continue
+                # ── RULE 2: Reject generic concepts ──
+                if _is_generic_concept(kw):
+                    logger.debug("[SemanticPlanner/groq] Rejected generic concept from LLM: '%s'", kw)
+                    continue
+                # ── RULE 3: Insurance content filter ──
+                if category == "insurance" and not _is_insurance_relevant(kw):
+                    logger.debug("[SemanticPlanner/groq] Rejected non-insurance concept from LLM: '%s'", kw)
+                    continue
                 if all(abs(t - c.timestamp) >= _BROLL_MIN_GAP for c in plan.broll_cues):
                     if len(plan.broll_cues) < _BROLL_MAX:
                         plan.broll_cues.append(BrollCue(
                             timestamp=t, keyword=kw,
-                            duration=min(3.5, max(2.0, duration - t - 0.5)),
+                            duration=_dur,
                             trigger_phrase=context, confidence=0.90,
                         ))
                     else:
@@ -710,7 +1228,7 @@ def _merge_groq(
                         if plan.broll_cues[lo].confidence < 0.90:
                             plan.broll_cues[lo] = BrollCue(
                                 timestamp=t, keyword=kw,
-                                duration=min(3.5, max(2.0, duration - t - 0.5)),
+                                duration=_dur,
                                 trigger_phrase=context, confidence=0.90,
                             )
 
@@ -766,7 +1284,7 @@ class SemanticEditPlanner:
 
         try:
             # Layer 1: heuristic
-            plan = _scan_heuristic(words, duration)
+            plan = _scan_heuristic(words, duration, category=category)
             logger.info(
                 "[SemanticPlanner] heuristic → %d B-roll, %d SFX cues",
                 len(plan.broll_cues), len(plan.sfx_cues),
@@ -789,7 +1307,7 @@ class SemanticEditPlanner:
                 if windows:
                     groq_out = await _groq_semantic_pass(windows, duration)
                     if groq_out:
-                        plan = _merge_groq(plan, groq_out, windows, duration)
+                        plan = _merge_groq(plan, groq_out, windows, duration, category=category)
 
             # Layer 3: Frame-level vision analysis
             # Runs when clip_path is available (post-render) and API key present.
@@ -826,6 +1344,45 @@ class SemanticEditPlanner:
                 plan = _apply_contextual_sfx_rules(plan, words, duration)
             except Exception as _re:
                 logger.debug("[SemanticPlanner] contextual SFX rules skipped: %s", _re)
+
+            # ── Validation: enforce minimum 4s B-roll duration ────────────────
+            # LLM may return short cues despite prompt instructions.
+            # Extend short cues to 4s, or remove if they exceed clip duration.
+            # ── RULE 6: Filter out generic/fallback concepts from final cues ──
+            # ── RULE 7: Skip cues that cannot be made relevant and long enough ─
+            _MIN_BROLL_DUR = MIN_OVERLAY_DURATION_S
+            _valid_broll = []
+            for cue in plan.broll_cues:
+                # RULE 6: Reject generic/fallback concepts even in final validation
+                if _is_generic_concept(cue.keyword):
+                    logger.info(
+                        "[SemanticPlanner] RULE 6: Removing generic fallback concept '%s' at t=%.1fs",
+                        cue.keyword, cue.timestamp,
+                    )
+                    continue
+                # RULE 7: If extending to minimum duration would exceed clip, skip
+                if cue.timestamp + max(cue.duration, _MIN_BROLL_DUR) > duration:
+                    logger.info(
+                        "[SemanticPlanner] RULE 7: Skipping b-roll cue at t=%.1fs "
+                        "(dur=%.1fs cannot be extended to min=%.1fs without exceeding clip %.1fs)",
+                        cue.timestamp, cue.duration, _MIN_BROLL_DUR, duration,
+                    )
+                    continue
+                if cue.duration < _MIN_BROLL_DUR:
+                    cue.duration = _MIN_BROLL_DUR
+                if cue.timestamp + cue.duration > duration:
+                    logger.info(
+                        "[SemanticPlanner] Removing b-roll cue at t=%.1fs (dur=%.1fs exceeds clip %.1fs)",
+                        cue.timestamp, cue.duration, duration,
+                    )
+                    continue
+                _valid_broll.append(cue)
+            if len(_valid_broll) < len(plan.broll_cues):
+                logger.info(
+                    "[SemanticPlanner] B-roll validation: %d → %d cues (min_dur=%.1fs)",
+                    len(plan.broll_cues), len(_valid_broll), _MIN_BROLL_DUR,
+                )
+            plan.broll_cues = _valid_broll
 
             # Final caps + sort
             plan.broll_cues = sorted(plan.broll_cues, key=lambda c: c.timestamp)[:_BROLL_MAX]

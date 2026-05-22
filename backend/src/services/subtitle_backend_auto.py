@@ -49,15 +49,124 @@ def _format_timestamp(seconds: float, always_include_hours: bool = False) -> str
     return f"{hours_marker}{minutes:02d}:{secs:02d},{milliseconds:03d}"
 
 
-def _write_srt(segments: List[Dict[str, Any]], file_path: Path) -> None:
-    """Write Whisper segments to an SRT file."""
+def _wrap_text(text: str, max_chars: int = 42) -> str:
+    """Split text into short lines suitable for mobile reading.
+    
+    Preserves special characters (accents, ñ, ¿, ¡) and avoids breaking words.
+    Uses a greedy line-fill: fills each line up to max_chars, breaking at word
+    boundaries. If a single word exceeds max_chars, it is kept whole on its own line.
+    
+    Args:
+        text: Input subtitle text (already stripped).
+        max_chars: Maximum characters per line (default 42 for mobile).
+    
+    Returns:
+        Text with newlines inserted for wrapping, preserving all original characters.
+    """
+    if not text:
+        return text
+    
+    words = text.split()
+    lines: list[str] = []
+    current_line: list[str] = []
+    current_len = 0
+    
+    for word in words:
+        # +1 for the space between words
+        sep_len = 1 if current_line else 0
+        if current_len + sep_len + len(word) <= max_chars:
+            current_line.append(word)
+            current_len += sep_len + len(word)
+        else:
+            if current_line:
+                lines.append(" ".join(current_line))
+            # If the word itself is longer than max_chars, put it on its own line
+            if len(word) > max_chars:
+                lines.append(word)
+                current_line = []
+                current_len = 0
+            else:
+                current_line = [word]
+                current_len = len(word)
+    
+    if current_line:
+        lines.append(" ".join(current_line))
+    
+    return "\n".join(lines)
+
+
+def _write_srt(
+    segments: List[Dict[str, Any]],
+    file_path: Path,
+    timeline_offset: float = 0.0,
+    cut_points: Optional[List[float]] = None,
+    max_line_chars: int = 42,
+) -> None:
+    """Write Whisper segments to an SRT file with timeline offset correction.
+    
+    After silence removal or jump cuts, the video timeline shifts. This function
+    applies a cumulative offset to all subtitle timestamps to keep them in sync.
+    Text is wrapped to short lines for mobile readability.
+    
+    Args:
+        segments: Whisper segments with 'start', 'end', 'text' keys
+        file_path: Output SRT file path
+        timeline_offset: Seconds to subtract from all timestamps (cumulative time removed)
+        cut_points: List of cut timestamps in seconds. Subtitles within 0.1s of a cut
+                    are snapped to the cut boundary.
+        max_line_chars: Maximum characters per line for mobile-friendly wrapping.
+    """
+    cut_points = cut_points or []
+    
+    # Sort cut points for binary search
+    cut_points_sorted = sorted(cut_points)
+    
+    def _snap_to_cut(ts: float) -> float:
+        """Snap timestamp to nearest cut boundary if within 0.1s."""
+        for cut in cut_points_sorted:
+            if abs(ts - cut) <= 0.1:
+                return cut
+        return ts
+    
+    # Apply offset and validate ordering
+    adjusted_segments = []
+    for seg in segments:
+        start = max(0.0, seg['start'] - timeline_offset)
+        end = max(0.0, seg['end'] - timeline_offset)
+        
+        # Snap to cut boundaries
+        start = _snap_to_cut(start)
+        end = _snap_to_cut(end)
+        
+        adjusted_segments.append({
+            'start': start,
+            'end': end,
+            'text': seg['text'],
+        })
+    
+    # Validate: ensure no overlapping segments (start >= previous end)
+    for i in range(1, len(adjusted_segments)):
+        prev = adjusted_segments[i - 1]
+        curr = adjusted_segments[i]
+        if curr['start'] < prev['end']:
+            # Trim previous segment's end to avoid overlap
+            prev['end'] = curr['start']
+            logger.debug(
+                "[SRT] Trimmed segment %d end to %.3fs to avoid overlap with segment %d",
+                i, prev['end'], i + 1,
+            )
+    
+    # Write SRT with UTF-8 BOM for full character support (accents, ñ, ¿, ¡)
     with open(file_path, "w", encoding="utf-8") as f:
-        for i, segment in enumerate(segments, start=1):
+        for i, segment in enumerate(adjusted_segments, start=1):
+            text = segment['text'].strip().replace('-->', '->')
+            # Wrap text into short lines for mobile
+            text = _wrap_text(text, max_chars=max_line_chars)
             f.write(
                 f"{i}\n"
                 f"{_format_timestamp(segment['start'], always_include_hours=True)} --> "
                 f"{_format_timestamp(segment['end'], always_include_hours=True)}\n"
-                f"{segment['text'].strip().replace('-->', '->')}\n\n"
+                f"{text}\n\n"
             )
 
 
@@ -221,7 +330,7 @@ class AutoSubtitleBackend:
             import ffmpeg  # noqa: F811
 
             safe_srt = str(srt_path).replace("\\", "/").replace(":", "\\:")
-            vf = f"subtitles='{safe_srt}':force_style='{style_opts}'"
+            vf = f"subtitles='{safe_srt}':charenc=UTF-8:force_style='{style_opts}'"
 
             (
                 ffmpeg

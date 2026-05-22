@@ -89,6 +89,17 @@ def build_keep_intervals(
 
     total_kept    = sum(e - s for s, e in result)
     silence_saved = max(0.0, clip_duration - total_kept)
+    # SILENCE GUARD: skip silence removal if it would remove more than 20% of the clip.
+    # trim/atrim can produce incorrect durations when fed malformed intervals, so
+    # we catch the problem before rendering.
+    max_removal_ratio = 0.2
+    if clip_duration > 0 and silence_saved > clip_duration * max_removal_ratio:
+        logger.warning(
+            "[SILENCE GUARD] Skipping silence removal: original=%.2fs kept=%.2fs removed=%.2fs (%.0f%%)",
+            clip_duration, total_kept, silence_saved,
+            silence_saved / clip_duration * 100,
+        )
+        return [(0.0, clip_duration)], 0.0
     return result, silence_saved
 
 

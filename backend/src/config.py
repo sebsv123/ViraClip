@@ -110,7 +110,7 @@ class Config:
         self.freesound_api_key = os.getenv("FREESOUND_API_KEY", "")
         self.freesound_auto_match = self._get_bool_env("FREESOUND_AUTO_MATCH", True)
         self.freesound_sfx_enabled = self._get_bool_env("FREESOUND_SFX_ENABLED", True)
-        self.broll_enabled = self._get_bool_env("BROLL_ENABLED", False)
+        self.broll_enabled = self._get_bool_env("BROLL_ENABLED", True)
         self.sam2_enabled = self._get_bool_env("SAM2_ENABLED", False)
 
         # Rust sidecar agent
@@ -172,8 +172,8 @@ class Config:
         # Fallback: builds FFmpeg commands directly (legacy approach).
         self.editlist_enabled = self._get_bool_env("EDITLIST_ENABLED", True)  # master switch
         self.editlist_enable_cuts = self._get_bool_env("EDITLIST_ENABLE_CUTS", True)
-        self.editlist_enable_overlays = self._get_bool_env("EDITLIST_ENABLE_OVERLAYS", False)
-        self.editlist_enable_transitions = self._get_bool_env("EDITLIST_ENABLE_TRANSITIONS", False)
+        self.editlist_enable_overlays = self._get_bool_env("EDITLIST_ENABLE_OVERLAYS", True)
+        self.editlist_enable_transitions = self._get_bool_env("EDITLIST_ENABLE_TRANSITIONS", True)
 
         # ── Face Auto-Crop ─────────────────────────────────────────────────────
         # Intelligent face-tracking auto-crop to 9:16 using OpenCV Haar cascades.

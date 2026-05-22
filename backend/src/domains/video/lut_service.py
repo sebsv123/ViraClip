@@ -33,9 +33,60 @@ from src import gpu_utils
 
 logger = logging.getLogger(__name__)
 
+# ── LUT PRESETS — eq-based color grades (no .cube files required) ──────────────
+
+LUT_PRESETS: List[Dict[str, Any]] = [
+    {"name": "natural", "filter": "eq=contrast=1.05:brightness=0.02:saturation=1.02"},
+    {"name": "warm",    "filter": "eq=contrast=1.08:brightness=0.03:saturation=1.05,colorbalance=rs=0.05:gs=0:bs=-0.05"},
+    {"name": "cool",    "filter": "eq=contrast=1.06:brightness=0.01:saturation=0.98,colorbalance=rs=-0.04:gs=0:bs=0.06"},
+    {"name": "vivid",   "filter": "eq=contrast=1.10:brightness=0.0:saturation=1.15"},
+    {"name": "matte",   "filter": "eq=contrast=0.95:brightness=0.04:saturation=0.88"},
+    {"name": "crisp",   "filter": "eq=contrast=1.12:brightness=0.01:saturation=1.0,unsharp=3:3:0.5"},
+]
+
+_CINEMATIC_FILTER = "eq=contrast=1.15:brightness=-0.03:saturation=0.85"
+
+
+def select_lut_by_context(
+    ctx: Any,  # JobContext
+    clip_index: int = 0,
+    visual_style: str = "",
+) -> str:
+    """
+    Select a LUT preset using JobContext for deterministic rotation.
+
+    1. If visual_style == "cinematic", return the cinematic filter directly.
+    2. Filter out presets already in ctx.used_lut_presets.
+    3. From remaining presets, select using:
+       index = (hash(ctx.job_id + str(ctx.clip_count)) % len(remaining))
+    4. Append the selected preset name to ctx.used_lut_presets.
+
+    Returns the FFmpeg filter string.
+    """
+    if visual_style and visual_style.lower() == "cinematic":
+        logger.info("[lut] Cinematic style override — using cinematic grade")
+        return _CINEMATIC_FILTER
+
+    remaining = [p for p in LUT_PRESETS if p["name"] not in ctx.used_lut_presets]
+    if not remaining:
+        # All presets used — reset and cycle from the full list
+        remaining = list(LUT_PRESETS)
+        ctx.used_lut_presets.clear()
+
+    idx = (hash(ctx.job_id + str(ctx.clip_count)) % len(remaining))
+    chosen = remaining[idx]
+    ctx.used_lut_presets.append(chosen["name"])
+    logger.info(
+        "[lut] Selected preset '%s' (job=%s, clip=%d, remaining=%d)",
+        chosen["name"], ctx.job_id, ctx.clip_count, len(remaining),
+    )
+    return chosen["filter"]
+
+
 # ── LUT catalogue ─────────────────────────────────────────────────────────────
 
 LUT_DIR = Path(os.environ.get("LUT_DIR", "/app/luts"))
+
 
 # (filename, display_name, description, ffmpeg_fallback_vf)
 _LUT_CATALOG: List[Dict[str, Any]] = [

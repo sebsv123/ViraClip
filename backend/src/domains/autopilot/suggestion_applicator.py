@@ -27,14 +27,26 @@ class SuggestionApplicator:
         output_path: Path,
         suggestions: List[Dict[str, Any]],
         clip_info: Dict[str, Any],
+        intensity: float = 0.5,
     ) -> Dict[str, Any]:
         """
         Apply multiple suggestions to a video clip.
+
+        intensity (0.0–1.0) controls emoji overlay frequency:
+          - < 0.5: 0 emoji overlays applied.
+          - >= 0.5: at most 2 emoji overlays total per clip.
 
         Returns:
             {"success": True, "output_path": str} on success
             {"success": False, "error": str} on failure
         """
+        # Clamp intensity to [0.0, 1.0]
+        intensity = max(0.0, min(1.0, intensity))
+
+        # Emoji overlay limits based on intensity
+        _emoji_max = 0 if intensity < 0.5 else 2
+        _emoji_count = 0
+
         try:
             _video_filters = []
             _audio_filters = []
@@ -48,15 +60,36 @@ class SuggestionApplicator:
                 _kind = suggestion.get("kind")
                 _payload = suggestion.get("payload", {})
 
+                # Skip emoji overlays if intensity is too low or limit reached
+                if _kind == "emoji_overlay":
+                    if _emoji_count >= _emoji_max:
+                        continue
+                    _emoji_count += 1
+
+
                 if _kind in ("caption_template", "caption_style", "caption_animation"):
                     _vf = self._build_caption_filter(_payload, clip_info)
                     if _vf:
                         _video_filters.append(_vf)
 
                 elif _kind == "zoom_punch":
-                    _vf = self._build_zoom_filter(_payload, clip_info)
-                    if _vf:
-                        _video_filters.append(_vf)
+                    # FIX 2B: When face_autocrop is enabled, skip zoom_punch to avoid
+                    # conflicting crop trajectories (impact_zoom + autocrop).
+                    _face_autocrop_enabled = False
+                    try:
+                        from ...config import get_config
+                        _face_autocrop_enabled = get_config().face_autocrop_enabled
+                    except Exception:
+                        pass
+                    if not _face_autocrop_enabled:
+                        _vf = self._build_zoom_filter(_payload, clip_info)
+                        if _vf:
+                            _video_filters.append(_vf)
+                    else:
+                        logger.info(
+                            "[SuggestionApplicator] Skipping zoom_punch: "
+                            "face_autocrop is enabled"
+                        )
 
                 elif _kind == "vignette":
                     _vf = self._build_vignette_filter(_payload)
@@ -201,7 +234,7 @@ class SuggestionApplicator:
     def _build_color_filter(self, payload: Dict) -> Optional[str]:
         _preset = payload.get("preset", "viral")
         if _preset == "viral":
-            return "eq=contrast=1.1:saturation=1.2:brightness=0.05"
+            return "eq=contrast=1.02:saturation=1.05:brightness=0.03"
         elif _preset == "cinematic":
             return "eq=contrast=1.05:saturation=0.9:brightness=-0.02,curves=preset=film"
         return None

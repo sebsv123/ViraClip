@@ -28,6 +28,12 @@ MIN_BROLL_COVERAGE = 0.2     # fraction of clip covered by B-roll
 MIN_HOOK_SCORE = 5.0
 MIN_ENGAGEMENT_SCORE = 5.0
 LOUD_NORM_TARGET = -14.0     # LUFS
+from ...domains.broll.broll_config import MIN_OVERLAY_DURATION_S
+
+MIN_BROLL_DURATION_S = MIN_OVERLAY_DURATION_S  # minimum B-roll overlay duration
+MAX_BROLL_PER_10S = 4        # max B-roll overlays per 10s of clip
+MIN_VOICE_RMS_DB = -24.0     # minimum voice RMS level in dB
+BGM_EXPECTED = True          # whether BGM is expected by default
 
 
 @dataclass
@@ -297,6 +303,115 @@ def check_thumbnail(thumbnail_path: Optional[str]) -> HealthCheck:
     )
 
 
+# ── New checks: B-roll duration, B-roll density, voice RMS, BGM presence ─────
+
+def check_broll_min_duration(
+    broll_durations: Optional[list[float]] = None,
+) -> HealthCheck:
+    """Check that all B-roll overlays meet the minimum duration threshold."""
+    if not broll_durations:
+        return HealthCheck(
+            name="B-Roll Min Duration",
+            status="info",
+            icon="💡",
+            message="No B-roll durations provided — skipping check.",
+        )
+    short = [d for d in broll_durations if d < MIN_BROLL_DURATION_S]
+    if short:
+        return HealthCheck(
+            name="B-Roll Min Duration",
+            status="fail",
+            icon="❌",
+            message=f"{len(short)} B-roll overlay(s) shorter than {MIN_BROLL_DURATION_S}s minimum.",
+            fix="Increase B-roll overlay duration to at least 1.5s for viewer comprehension.",
+        )
+    return HealthCheck(
+        name="B-Roll Min Duration",
+        status="pass",
+        icon="✅",
+        message=f"All {len(broll_durations)} B-roll overlays meet minimum duration ({MIN_BROLL_DURATION_S}s).",
+    )
+
+
+def check_broll_density(broll_count: int, duration: float) -> HealthCheck:
+    """Check that B-roll density is not absurd (max per 10s)."""
+    if broll_count == 0:
+        return HealthCheck(
+            name="B-Roll Density",
+            status="info",
+            icon="💡",
+            message="No B-roll to check density.",
+        )
+    max_allowed = max(1, int(duration / 10.0) * MAX_BROLL_PER_10S)
+    if broll_count > max_allowed:
+        return HealthCheck(
+            name="B-Roll Density",
+            status="warn",
+            icon="⚠️",
+            message=f"{broll_count} B-roll overlays in {duration:.0f}s clip (max {max_allowed} recommended).",
+            fix=f"Reduce to ≤{max_allowed} B-roll overlays to avoid visual clutter.",
+        )
+    return HealthCheck(
+        name="B-Roll Density",
+        status="pass",
+        icon="✅",
+        message=f"B-roll density ({broll_count} in {duration:.0f}s) within limits.",
+    )
+
+
+def check_voice_presence(voice_rms_db: Optional[float] = None) -> HealthCheck:
+    """Check that voice track is present and above minimum RMS threshold."""
+    if voice_rms_db is None:
+        return HealthCheck(
+            name="Voice Presence",
+            status="info",
+            icon="💡",
+            message="Voice RMS not measured — skipping check.",
+        )
+    if voice_rms_db < MIN_VOICE_RMS_DB:
+        return HealthCheck(
+            name="Voice Presence",
+            status="fail",
+            icon="❌",
+            message=f"Voice RMS at {voice_rms_db:.1f}dB — too quiet (min {MIN_VOICE_RMS_DB}dB).",
+            fix="Apply voice normalization (target -16 LUFS) and boost by 3-6dB.",
+        )
+    return HealthCheck(
+        name="Voice Presence",
+        status="pass",
+        icon="✅",
+        message=f"Voice track present at {voice_rms_db:.1f}dB RMS — good level.",
+    )
+
+
+def check_bgm_presence(
+    bgm_applied: bool,
+    bgm_enabled_flag: bool = True,
+) -> HealthCheck:
+    """Check that BGM was applied when expected."""
+    if not bgm_enabled_flag:
+        return HealthCheck(
+            name="BGM Presence",
+            status="info",
+            icon="💡",
+            message="BGM disabled by flag — skipping check.",
+        )
+    if not bgm_applied:
+        return HealthCheck(
+            name="BGM Presence",
+            status="warn",
+            icon="⚠️",
+            message="No background music applied — clip may feel flat.",
+            fix="Enable BGM_ENABLED=true and ensure a music track is available.",
+        )
+    return HealthCheck(
+        name="BGM Presence",
+        status="pass",
+        icon="✅",
+        message="Background music applied — enhances viewer retention.",
+    )
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def generate_health_report(
@@ -315,6 +430,11 @@ def generate_health_report(
     hashtag_count: int = 0,
     thumbnail_path: Optional[str] = None,
     zoom_punch_applied: bool = False,
+    # ── New QA params ────────────────────────────────────────────────────
+    broll_durations: Optional[list[float]] = None,
+    voice_rms_db: Optional[float] = None,
+    bgm_applied: bool = False,
+    bgm_enabled_flag: bool = True,
     # ── Sanity check flags (from QA module) ──────────────────────────────
     sanity_subtitles_ok: Optional[bool] = None,
     sanity_broll_diversity_ok: Optional[bool] = None,
@@ -333,6 +453,10 @@ def generate_health_report(
         check_captions(has_subtitles),
         check_hashtags(hashtag_count),
         check_thumbnail(thumbnail_path),
+        check_broll_min_duration(broll_durations),
+        check_broll_density(broll_count, duration),
+        check_voice_presence(voice_rms_db),
+        check_bgm_presence(bgm_applied, bgm_enabled_flag),
     ]
 
     # Zoom punch bonus info

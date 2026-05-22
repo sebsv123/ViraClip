@@ -131,10 +131,17 @@ async def overlay_broll_clips(
     pairs = broll_pairs[:_BROLL_MAX]
 
     # Build (timestamp, path, duration) tuples for the compositor
-    compositor_pairs = [
-        (round(event.t, 3), asset.path, round(max(3.5, event.duration + 2.0), 3))
-        for event, asset in pairs
-    ]
+    from ...domains.broll.broll_config import MIN_OVERLAY_DURATION_S
+    # Enforce minimum B-roll display duration — shorter clips flash and distract
+    _MIN_BROLL_DUR = MIN_OVERLAY_DURATION_S
+    compositor_pairs = []
+    for event, asset in pairs:
+        dur = round(max(_MIN_BROLL_DUR, event.duration + 2.0), 3)
+        # Skip if b-roll would exceed clip duration
+        if event.t + dur > 60.0:  # typical clip cap
+            logger.info(f"[BROLL] Skipping b-roll at t={event.t:.1f}s — duration {dur:.1f}s exceeds clip")
+            continue
+        compositor_pairs.append((round(event.t, 3), asset.path, dur))
 
     ok = await compose_overlay_multi(
         main_path=clip_path,

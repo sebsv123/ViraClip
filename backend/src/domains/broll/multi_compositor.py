@@ -99,9 +99,13 @@ async def compose_multi_with_positions(
             scale_filter = f"scale={new_w}:{new_h}:force_original_aspect_ratio=decrease,"
 
         # Alpha/opacity filter
+        # Use format=rgba before colorchannelmixer for proper 4:4:4:4 alpha computation,
+        # then format=yuva420p after for overlay compatibility.
         alpha_filter = ""
         if opacity < 1.0:
-            alpha_filter = f"format=rgba,colorchannelmixer=aa={opacity:.2f},"
+            alpha_filter = f"format=rgba,colorchannelmixer=aa={opacity:.2f},format=yuva420p,"
+        else:
+            alpha_filter = ""
 
         # Build overlay filter for this B-roll
         input_label = f"[{idx + 1}:v]"
@@ -113,6 +117,7 @@ async def compose_multi_with_positions(
             f"{input_label}{scale_filter}{alpha_filter}setpts=PTS-STARTPTS+{timestamp:.3f}/TB{mid_label};"
             f"{last_label}{mid_label}overlay={x}:{y}:enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})'"
         )
+
 
         if transition_type == "dissolve":
             filter_parts[-1] += f":alpha='{alpha_expr}'"

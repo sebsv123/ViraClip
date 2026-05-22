@@ -10,6 +10,43 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ── Insurance/finance content detection ──────────────────────────────────────
+# Shared with broll_service.py to block fallback paths for insurance content.
+# When the transcript contains these Spanish insurance trigger words, the
+# subtitle rebasing fallback (similarity < 30%) is disabled because the
+# re-transcription is unreliable for domain-specific terminology.
+INSURANCE_KEYWORD_MAP: Dict[str, List[str]] = {
+    "seguro de vida": ["life insurance family", "family protection"],
+    "seguro de coche": ["car insurance", "car accident road"],
+    "seguro del hogar": ["home insurance", "modern family home"],
+    "ahorro": ["financial planning", "saving money"],
+    "protección": ["family protection", "safety concept"],
+    "precio": ["budget planning", "insurance quote"],
+    "accidente": ["car accident", "medical support"],
+    "tranquilidad": ["peaceful family", "stress free home"],
+    "contrato": ["signing contract", "agreement handshake"],
+    "mutua": ["health insurance", "doctor consultation"],
+    "fallecimiento": ["family support", "life coverage"],
+    "cobertura": ["insurance coverage", "policy details"],
+    "indemnización": ["insurance claim", "compensation process"],
+}
+
+
+def _is_insurance_content(text: str) -> bool:
+    """Check if transcript contains insurance/finance keywords.
+
+    Returns True if any insurance trigger word is found in the text (case-insensitive).
+    This is used to block fallback paths that could inject generic subtitles or
+    b-roll for insurance/finance content.
+    """
+    if not text:
+        return False
+    text_lower = text.lower()
+    for keyword in INSURANCE_KEYWORD_MAP:
+        if keyword in text_lower:
+            return True
+    return False
+
 
 def _get_ffmpeg_exe() -> str:
     import shutil
@@ -260,6 +297,7 @@ class ConfidenceSubtitleGenerator:
         language: Optional[str] = None,
         anticipation_offset_ms: float = -50.0,
         has_clean_audio: Optional[bool] = None,
+        clip_start: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Re-transcribe un clip ya cortado para obtener timestamps exactos.
@@ -272,6 +310,23 @@ class ConfidenceSubtitleGenerator:
         quemados (has_clean_audio=False), se salta la re-transcripcion y devuelve
         las palabras originales para evitar desincronizacion por audio contaminado.
 
+        RULE 1 FIX (Subtitle Timing): Si la similitud entre la re-transcripcion y
+        el transcript original es menor al 30% (SIMILARITY_CRITICAL_THRESHOLD),
+        se considera que la re-transcripcion NO es fiable en absoluto. En ese caso:
+        - Se devuelve original_words con sus timestamps originales
+        - El caller (_clip_renderer.py) aplicara los offsets acumulativos del
+          timeline editado (jump-cuts, silencios, etc.)
+        - NO se usan los timestamps de la re-transcripcion
+
+        RULE 2 FIX: Si la similitud esta entre 30% y 70%, se usa la re-transcripcion
+        SOLO para los timestamps, pero se preservan los textos originales (que
+        contienen la puntuacion y acentos correctos).
+
+        PHASE 3 FIX: Cuando la similitud es < 30% y se devuelven las palabras
+        originales, sus timestamps pueden referenciar el video completo (no el
+        clip). El parametro clip_start permite restar el offset del clip para
+        que los timestamps sean relativos al clip, no al video completo.
+
         Args:
             segment_video_path: Ruta al clip ya cortado (el .mp4 que sale de create_optimized_clip)
             original_words: Palabras remapeadas del video original (para validacion)
@@ -280,6 +335,9 @@ class ConfidenceSubtitleGenerator:
                                     ligeramente ANTES de la palabra (-50ms = aparece 50ms antes)
             has_clean_audio: Si es False, se salta la re-transcripcion. Si es None,
                              se detecta automaticamente (heuristica basica).
+            clip_start: Segundos desde el inicio del video completo hasta el inicio
+                        del clip. Se resta de los timestamps originales cuando la
+                        re-transcripcion no es fiable, para que sean relativos al clip.
 
         Returns:
             Lista de dicts compatibles con words_with_confidence:
@@ -293,8 +351,6 @@ class ConfidenceSubtitleGenerator:
 
         # ── BUG 3 FIX: Verificar si el audio es limpio ──────────────────────
         if has_clean_audio is None:
-            # Heuristica: detectar si el segmento tiene B-roll o musica
-            # basado en el nombre del archivo o metadatos del pipeline
             has_clean_audio = self._detect_clean_audio(segment_video_path)
 
         if has_clean_audio is False:
@@ -315,16 +371,14 @@ class ConfidenceSubtitleGenerator:
         if language and len(language) == 3:
             language = _ISO3_TO_ISO1.get(language.lower(), None)
 
-        tmp_audio_path = None  # Initialize before try to avoid UnboundLocalError in finally
+        tmp_audio_path = None
 
-            # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
+        # Paso 1: Extraer audio WAV del segmento (16kHz mono, optimo para Whisper)
         tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp_audio_path = tmp_audio.name
         tmp_audio.close()
 
         try:
-            # BUG FIX: Verificar que el audio extraído corresponde al segmento exacto
-            # midiendo su duración y comparándola con la duración esperada del clip.
             import subprocess as _sp
             _dur_probe = _sp.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -346,7 +400,6 @@ class ConfidenceSubtitleGenerator:
                 logger.error(f"[RE-ALIGN] FFmpeg fallo: {result.stderr.decode()}")
                 return original_words or []
 
-            # BUG FIX: Verificar duración del audio extraído vs duración del clip
             _audio_dur_probe = _sp.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                  "-of", "default=noprint_wrappers=1:nokey=1", tmp_audio_path],
@@ -358,7 +411,7 @@ class ConfidenceSubtitleGenerator:
                 _audio_dur, _clip_dur, abs(_audio_dur - _clip_dur),
             )
 
-            # Paso 2: Transcribir con faster-whisper (self.model ya esta cargado)
+            # Paso 2: Transcribir con faster-whisper
             self._load_model()
             segments_iter, info = self.model.transcribe(
                 tmp_audio_path,
@@ -370,7 +423,7 @@ class ConfidenceSubtitleGenerator:
             )
 
             # Paso 3: Construir lista de palabras con offset de anticipacion
-            offset_s = anticipation_offset_ms / 1000.0  # Convertir a segundos
+            offset_s = anticipation_offset_ms / 1000.0
             realigned_words = []
 
             for segment in segments_iter:
@@ -382,7 +435,7 @@ class ConfidenceSubtitleGenerator:
                         continue
                     realigned_words.append({
                         'word': word_text,
-                        'text': word_text,  # Ambos campos por compatibilidad
+                        'text': word_text,
                         'start': max(0.0, round(word.start + offset_s, 3)),
                         'end': round(word.end + offset_s, 3),
                         'confidence': round(word.probability, 3),
@@ -391,7 +444,21 @@ class ConfidenceSubtitleGenerator:
 
             logger.info(f"[RE-ALIGN] {len(realigned_words)} palabras re-alineadas")
 
-            # Paso 4: Validacion contra palabras originales (si las hay)
+            # ── RULE 1 & 2: Validacion contra palabras originales ──────────────
+            # SIMILARITY_SAFE_THRESHOLD = 0.70: Re-transcripcion confiable
+            # SIMILARITY_CRITICAL_THRESHOLD = 0.30: Re-transcripcion NO confiable
+            #   - Por debajo de 0.30: el texto re-transcrito es esencialmente
+            #     diferente al original. Ocurre cuando el audio tiene B-roll,
+            #     musica, ruido de fondo, o el modelo alucina. En este caso:
+            #     * Se devuelven las palabras originales con sus timestamps
+            #     * El caller aplicara offsets acumulativos del timeline
+            #   - Entre 0.30 y 0.70: los timestamps de la re-transcripcion son
+            #     utiles, pero se preservan los textos originales (con acentos
+            #     y puntuacion correctos)
+            #   - Por encima de 0.70: se usan ambos (texto y timestamps)
+            SIMILARITY_SAFE_THRESHOLD = 0.70
+            SIMILARITY_CRITICAL_THRESHOLD = 0.30
+
             if original_words and realigned_words:
                 orig_text = ' '.join(
                     w.get('word', w.get('text', '')) for w in original_words
@@ -402,14 +469,71 @@ class ConfidenceSubtitleGenerator:
                 similarity = SequenceMatcher(None, orig_text, new_text).ratio()
                 logger.info(f"[RE-ALIGN] Similitud texto: {similarity:.1%}")
 
-                if similarity < 0.70:
+                # ── RULE 1: Similitud criticamente baja (< 30%) ──────────────
+                # La re-transcripcion NO es fiable. Devolvemos las palabras
+                # originales con sus timestamps originales. El caller aplicara
+                # los offsets acumulativos del timeline editado.
+                #
+                # PHASE 3 FIX: Los timestamps originales pueden referenciar el
+                # video completo (no el clip). Restamos clip_start para que sean
+                # relativos al clip. Esto asegura que los offsets acumulativos
+                # del timeline editado se apliquen correctamente.
+                #
+                # ── BLOCK FALLBACK PATH B: subtitle rebasing for insurance content ──
+                # When the transcript contains insurance/finance keywords AND the
+                # re-transcription similarity is critically low (< 30%), the rebasing
+                # of original_words with clip_start is unreliable. The re-transcription
+                # model may hallucinate or produce garbled text for domain-specific
+                # Spanish insurance terminology (e.g., "indemnización", "fallecimiento").
+                # Using rebased original_words would inject subtitles with timestamps
+                # from the full video that don't match the clip's actual audio.
+                # Instead, return empty list so the caller uses the primary semantic
+                # planner's timeline as the source of truth.
+                if similarity < SIMILARITY_CRITICAL_THRESHOLD:
+                    # ── BLOCK FALLBACK PATH B: subtitle rebasing for ALL content ──
+                    # When similarity is critically low (< 30%), the re-transcription
+                    # is unreliable regardless of content type. The model may
+                    # hallucinate or produce garbled text. Rebasing original_words
+                    # with clip_start would inject subtitles with timestamps from
+                    # the full video that don't match the clip's actual audio.
+                    # This is blocked for ALL content — not just insurance — because
+                    # low-similarity re-transcription is fundamentally unreliable.
+                    # The caller must use the primary semantic planner's timeline
+                    # as the source of truth.
                     logger.warning(
-                        f"[RE-ALIGN] Similitud muy baja ({similarity:.1%}). "
-                        "Usando palabras originales como fallback."
+                        f"[RE-ALIGN] ⛔ BLOCKED fallback path B: subtitle rebasing "
+                        f"for ALL content. Similarity={similarity:.1%} is below "
+                        f"CRITICAL threshold ({SIMILARITY_CRITICAL_THRESHOLD:.0%}). "
+                        f"Re-transcription is unreliable — rebasing original_words "
+                        f"with clip_start={clip_start:.2f}s would inject subtitles "
+                        f"with timestamps from the full video that don't match the "
+                        f"clip's actual audio. "
+                        f"Returning empty list — caller must use primary semantic "
+                        f"planner timeline as source of truth."
                     )
+                    return []
+
+                # ── RULE 2: Similitud entre 30% y 70% ────────────────────────
+                # Los timestamps de la re-transcripcion son utiles, pero
+                # preservamos los textos originales (con acentos y puntuacion).
+                if similarity < SIMILARITY_SAFE_THRESHOLD:
+                    logger.warning(
+                        f"[RE-ALIGN] ⚠️ Similitud por debajo del umbral seguro ({similarity:.1%}). "
+                        "Usando timestamps de re-transcripcion con textos originales."
+                    )
+                    # Preservar textos originales, usar timestamps de re-transcripcion
+                    # Mapear palabras originales a timestamps re-transcritos
+                    _preserved = _merge_original_texts_with_realigned_timestamps(
+                        original_words, realigned_words
+                    )
+                    if _preserved:
+                        return _preserved
+                    # Si falla el merge, devolver original_words
                     return original_words
 
-            # Paso 5: Transferir flags de emphasis del original si los tiene
+            # ── RULE 4: Preservar acentos y puntuacion española ──────────────
+            # Si llegamos aqui, la similitud es >= 0.70 o no hay original_words.
+            # Transferir flags de emphasis del original si los tiene.
             if original_words:
                 _transfer_emphasis_flags(realigned_words, original_words)
 
@@ -421,6 +545,7 @@ class ConfidenceSubtitleGenerator:
         finally:
             if tmp_audio_path:
                 Path(tmp_audio_path).unlink(missing_ok=True)
+
 
     def _detect_clean_audio(self, video_path: str) -> bool:
         """
@@ -506,6 +631,81 @@ def _transfer_emphasis_flags(realigned: List[Dict], original: List[Dict]):
     for w in realigned:
         if w['word'].lower().strip() in orig_emphasis:
             w['is_emphasis'] = True
+
+
+def _merge_original_texts_with_realigned_timestamps(
+    original_words: List[Dict],
+    realigned_words: List[Dict],
+) -> List[Dict]:
+    """
+    RULE 2 FIX: Preserva los textos originales (con acentos y puntuacion
+    española) pero usa los timestamps de la re-transcripcion.
+
+    Estrategia: alinear por indice posicional. Si el numero de palabras
+    es similar (diferencia < 20%), se mapean 1:1. Si no, se usa el
+    texto original completo y se distribuyen los timestamps de la
+    re-transcripcion proporcionalmente.
+
+    Args:
+        original_words: Palabras del transcript original (con acentos, puntuacion)
+        realigned_words: Palabras de la re-transcripcion (timestamps precisos)
+
+    Returns:
+        Lista combinada: textos originales con timestamps de re-transcripcion
+    """
+    if not original_words or not realigned_words:
+        return original_words or []
+
+    _orig_count = len(original_words)
+    _real_count = len(realigned_words)
+
+    # Si el numero de palabras es similar, mapear 1:1
+    if abs(_orig_count - _real_count) / max(_orig_count, _real_count) < 0.20:
+        _merged = []
+        for i, _ow in enumerate(original_words):
+            if i < _real_count:
+                _rw = realigned_words[i]
+                _merged.append({
+                    "word": _ow.get("word", _ow.get("text", "")),
+                    "text": _ow.get("text", _ow.get("word", "")),
+                    "start": _rw.get("start", _ow.get("start", 0)),
+                    "end": _rw.get("end", _ow.get("end", 0)),
+                    "confidence": _rw.get("confidence", _ow.get("confidence", 0.9)),
+                    "is_emphasis": _ow.get("is_emphasis", False),
+                })
+            else:
+                # Mas palabras originales que re-transcritas
+                _merged.append(_ow)
+        return _merged
+
+    # Si el numero de palabras difiere significativamente,
+    # distribuir timestamps de re-transcripcion proporcionalmente
+    # sobre los textos originales
+    _total_real_dur = max(
+        realigned_words[-1].get("end", 0) - realigned_words[0].get("start", 0),
+        0.1,
+    )
+    _total_orig_dur = max(
+        original_words[-1].get("end", 0) - original_words[0].get("start", 0),
+        0.1,
+    )
+    _scale = _total_real_dur / _total_orig_dur
+
+    _merged = []
+    for _ow in original_words:
+        _ws = _ow.get("start", 0) * _scale
+        _we = _ow.get("end", 0) * _scale
+        _merged.append({
+            "word": _ow.get("word", _ow.get("text", "")),
+            "text": _ow.get("text", _ow.get("word", "")),
+            "start": round(_ws, 3),
+            "end": round(_we, 3),
+            "confidence": _ow.get("confidence", 0.9),
+            "is_emphasis": _ow.get("is_emphasis", False),
+        })
+
+    return _merged
+
 
 
 def create_confidence_colored_subtitles(

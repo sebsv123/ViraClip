@@ -196,6 +196,9 @@ interface TaskOptions {
   use_scene_detection: boolean;
   auto_center_face: boolean;
   caption_template?: string;
+  speaker_name?: string;
+  speaker_title?: string;
+  brand_color?: string;
 }
 
 function CreateTaskModal({ isOpen, onClose, onSubmit }: { 

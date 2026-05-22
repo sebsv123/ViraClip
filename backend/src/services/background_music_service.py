@@ -10,12 +10,22 @@ without background music).
 """
 
 import logging
+import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Local fallback music library ──────────────────────────────────────────────
+# Directory for locally stored music files named with energy prefix:
+#   low_*.mp3, mid_*.mp3, high_*.mp3
+MUSIC_LIBRARY_PATH = Path(os.environ.get(
+    "MUSIC_LIBRARY_PATH",
+    str(Path(__file__).resolve().parent.parent.parent / "assets" / "music"),
+))
+
 
 # ── Mood enum (ported from short-video-maker's MusicMoodEnum) ──────────────────
 
@@ -83,6 +93,7 @@ class MusicTrack:
     end: float          # end offset in seconds
     mood: str           # mood tag from MusicMood
     url: str = ""       # full path resolved at runtime
+    has_vocals: bool = False  # True if track contains lyrics/singing
 
 
 class BackgroundMusicService:
@@ -93,39 +104,34 @@ class BackgroundMusicService:
     Maintains a static library of 31 tracks with mood tags.
     """
 
-    # ── Static music library (31 tracks, ported from short-video-maker) ────────
+    # ── Static music library (all tracks present on disk) ─────────────────────
+    # Auto-generated from ./backend/music/bgm/*.mp3
+    # has_vocals=True for tracks with lyrics/singing (avoid for talking-head clips)
     _MUSIC_LIBRARY: List[MusicTrack] = [
-        MusicTrack(file="Sly Sky - Telecasted.mp3", start=0, end=152, mood=MusicMood.MELANCHOLIC),
-        MusicTrack(file="No.2 Remembering Her - Esther Abrami.mp3", start=2, end=134, mood=MusicMood.MELANCHOLIC),
-        MusicTrack(file="Champion - Telecasted.mp3", start=0, end=142, mood=MusicMood.CHILL),
-        MusicTrack(file="Oh Please - Telecasted.mp3", start=0, end=154, mood=MusicMood.CHILL),
-        MusicTrack(file="Jetski - Telecasted.mp3", start=0, end=142, mood=MusicMood.UNEASY),
-        MusicTrack(file="Phantom - Density & Time.mp3", start=0, end=178, mood=MusicMood.UNEASY),
-        MusicTrack(file="On The Hunt - Andrew Langdon.mp3", start=0, end=95, mood=MusicMood.UNEASY),
-        MusicTrack(file="Name The Time And Place - Telecasted.mp3", start=0, end=142, mood=MusicMood.EXCITED),
-        MusicTrack(file="Delayed Baggage - Ryan Stasik.mp3", start=3, end=108, mood=MusicMood.EUPHORIC),
-        MusicTrack(file="Like It Loud - Dyalla.mp3", start=4, end=160, mood=MusicMood.EUPHORIC),
-        MusicTrack(file="Organic Guitar House - Dyalla.mp3", start=2, end=160, mood=MusicMood.EUPHORIC),
-        MusicTrack(file="Honey, I Dismembered The Kids - Ezra Lipp.mp3", start=2, end=144, mood=MusicMood.DARK),
-        MusicTrack(file="Night Hunt - Jimena Contreras.mp3", start=0, end=88, mood=MusicMood.DARK),
-        MusicTrack(file="Curse of the Witches - Jimena Contreras.mp3", start=0, end=102, mood=MusicMood.DARK),
-        MusicTrack(file="Restless Heart - Jimena Contreras.mp3", start=0, end=94, mood=MusicMood.SAD),
-        MusicTrack(file="Heartbeat Of The Wind - Asher Fulero.mp3", start=0, end=124, mood=MusicMood.SAD),
-        MusicTrack(file="Hopeless - Jimena Contreras.mp3", start=0, end=250, mood=MusicMood.SAD),
-        MusicTrack(file="Touch - Anno Domini Beats.mp3", start=0, end=165, mood=MusicMood.HAPPY),
-        MusicTrack(file="Cafecito por la Manana - Cumbia Deli.mp3", start=0, end=184, mood=MusicMood.HAPPY),
-        MusicTrack(file="Aurora on the Boulevard - National Sweetheart.mp3", start=0, end=130, mood=MusicMood.HAPPY),
-        MusicTrack(file="Buckle Up - Jeremy Korpas.mp3", start=0, end=128, mood=MusicMood.ANGRY),
-        MusicTrack(file="Twin Engines - Jeremy Korpas.mp3", start=0, end=120, mood=MusicMood.ANGRY),
-        MusicTrack(file="Hopeful - Nat Keefe.mp3", start=0, end=175, mood=MusicMood.HOPEFUL),
-        MusicTrack(file="Hopeful Freedom - Asher Fulero.mp3", start=1, end=172, mood=MusicMood.HOPEFUL),
-        MusicTrack(file="Crystaline - Quincas Moreira.mp3", start=0, end=140, mood=MusicMood.CONTEMPLATIVE),
-        MusicTrack(file="Final Soliloquy - Asher Fulero.mp3", start=1, end=178, mood=MusicMood.CONTEMPLATIVE),
-        MusicTrack(file="Seagull - Telecasted.mp3", start=0, end=123, mood=MusicMood.FUNNY),
-        MusicTrack(file="Banjo Doops - Joel Cummins.mp3", start=0, end=98, mood=MusicMood.FUNNY),
-        MusicTrack(file="Baby Animals Playing - Joel Cummins.mp3", start=0, end=124, mood=MusicMood.FUNNY),
-        MusicTrack(file="Sinister - Anno Domini Beats.mp3", start=0, end=215, mood=MusicMood.DARK),
-        MusicTrack(file="Traversing - Godmode.mp3", start=0, end=95, mood=MusicMood.DARK),
+        MusicTrack(file="Back To The Start - Patrick Jordan Patrikios.mp3", start=0, end=120, mood=MusicMood.HAPPY, has_vocals=True),
+        MusicTrack(file="Be The One - Lore Vain.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="bgm_cinematic_ambient.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=False),
+        MusicTrack(file="bgm_dramatic_tension.mp3", start=0, end=120, mood=MusicMood.DARK, has_vocals=False),
+        MusicTrack(file="bgm_energetic_hype.mp3", start=0, end=120, mood=MusicMood.EXCITED, has_vocals=False),
+        MusicTrack(file="bgm_lofi_chill.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=False),
+        MusicTrack(file="bgm_upbeat_positive.mp3", start=0, end=120, mood=MusicMood.HAPPY, has_vocals=False),
+        MusicTrack(file="Care Is Heavy - Jeremy Korpas, Rick Barry.mp3", start=0, end=120, mood=MusicMood.DARK, has_vocals=False),
+        MusicTrack(file="corporate_clean.mp3", start=0, end=120, mood=MusicMood.CONTEMPLATIVE, has_vocals=False),
+        MusicTrack(file="Delirium - Anno Domini Beats.mp3", start=0, end=120, mood=MusicMood.DARK, has_vocals=False),
+        MusicTrack(file="Elysian Fields - Jeremy Korpas, Rick Barry.mp3", start=0, end=120, mood=MusicMood.DARK, has_vocals=False),
+        MusicTrack(file="Eyes - Patrick Jordan Patrikios.mp3", start=0, end=120, mood=MusicMood.HAPPY, has_vocals=True),
+        MusicTrack(file="House Of Cards - Blue Deer.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=True),
+        MusicTrack(file="lofi_chill.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=False),
+        MusicTrack(file="Scratches On The B-Side - National Sweetheart.mp3", start=0, end=120, mood=MusicMood.HAPPY, has_vocals=True),
+        MusicTrack(file="Talk To Me (feat. Devyn Rush) - Blue Deer.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="Through The Night (feat. Devyn Rush) - Blue Deer.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="Tiny Shell - Blue Deer, Nyles Lannon.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=True),
+        MusicTrack(file="Tonight Again - Rod Kim (feat. Mostly Moss).mp3", start=0, end=120, mood=MusicMood.HAPPY, has_vocals=True),
+        MusicTrack(file="Turn In The Sun - Simon Herody.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="upbeat_energy.mp3", start=0, end=120, mood=MusicMood.EUPHORIC, has_vocals=False),
+        MusicTrack(file="Visions - Patrick Jordan Patrikios.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="Way Back Home - Simon Herody.mp3", start=0, end=120, mood=MusicMood.HOPEFUL, has_vocals=True),
+        MusicTrack(file="Yesterdays - Blue Deer.mp3", start=0, end=120, mood=MusicMood.CHILL, has_vocals=True),
     ]
 
     def __init__(self, music_dir: Optional[str] = None):
@@ -144,6 +150,7 @@ class BackgroundMusicService:
         self,
         mood: str,
         duration_s: float,
+        content_type: str = "",
     ) -> Optional[MusicTrack]:
         """
         Pick a background music track matching the given mood.
@@ -155,6 +162,8 @@ class BackgroundMusicService:
                   Will be mapped to the closest available mood.
             duration_s: Desired clip duration in seconds. The track's
                         available duration (end - start) should cover this.
+            content_type: Content type hint ("talking_head", "interview", etc.).
+                          For talking-head clips, prefers instrumental tracks.
 
         Returns:
             MusicTrack if a match is found, None otherwise.
@@ -184,6 +193,25 @@ class BackgroundMusicService:
             )
             return None
 
+        # For talking_head / interview clips: EXCLUDE vocal tracks entirely
+        _is_talking = content_type.lower() in ("talking_head", "interview", "podcast", "tutorial")
+        if _is_talking:
+            instrumental = [t for t in candidates if not t.has_vocals]
+            if instrumental:
+                logger.info(
+                    "[BackgroundMusic] Talking-head clip — excluding vocal tracks entirely "
+                    "(%d instrumental available, %d vocal tracks excluded)",
+                    len(instrumental), len(candidates) - len(instrumental),
+                )
+                candidates = instrumental
+            else:
+                # No instrumental tracks for this mood — use all but reduce volume
+                logger.info(
+                    "[BackgroundMusic] No instrumental tracks for mood '%s' — "
+                    "will use vocal track at reduced volume",
+                    target_mood,
+                )
+
         # Filter by duration: track must cover at least duration_s
         duration_ok = [
             t for t in candidates
@@ -207,8 +235,8 @@ class BackgroundMusicService:
         selected.url = self._resolve_path(selected.file)
 
         logger.info(
-            "[BackgroundMusic] Selected '%s' (mood=%s, dur=%.1fs) for mood='%s'",
-            selected.file, selected.mood, selected.end - selected.start, mood,
+            "[BackgroundMusic] Selected '%s' (mood=%s, dur=%.1fs, vocals=%s) for mood='%s'",
+            selected.file, selected.mood, selected.end - selected.start, selected.has_vocals, mood,
         )
         return selected
 
@@ -274,6 +302,104 @@ class BackgroundMusicService:
         return missing
 
 
+# ── Local fallback music ──────────────────────────────────────────────────────
+
+def get_local_music_track(energy_level: str) -> Optional[str]:
+    """
+    Scan MUSIC_LIBRARY_PATH for a local music file matching the energy level.
+
+    Files should be named with an energy prefix: low_*, mid_*, high_*.
+    Returns a random matching file path, or any file if no match, or None.
+    """
+    if not MUSIC_LIBRARY_PATH.exists():
+        logger.debug("[BackgroundMusic] Local music dir not found: %s", MUSIC_LIBRARY_PATH)
+        return None
+
+    all_files = sorted(MUSIC_LIBRARY_PATH.glob("*.mp3")) + sorted(MUSIC_LIBRARY_PATH.glob("*.wav"))
+    if not all_files:
+        logger.debug("[BackgroundMusic] No local music files in %s", MUSIC_LIBRARY_PATH)
+        return None
+
+    # Filter by energy prefix
+    prefix = energy_level.lower().strip() + "_"
+    matching = [f for f in all_files if f.name.lower().startswith(prefix)]
+
+    if matching:
+        chosen = random.choice(matching)
+        logger.info(
+            "[BackgroundMusic] Local fallback: '%s' (energy=%s)",
+            chosen.name, energy_level,
+        )
+        return str(chosen)
+
+    # No match — return any file
+    chosen = random.choice(all_files)
+    logger.info(
+        "[BackgroundMusic] Local fallback (no energy match): '%s'",
+        chosen.name,
+    )
+    return str(chosen)
+
+
+def pick_music_with_fallback(
+    mood: str,
+    duration_s: float,
+    virality_score: float = 50.0,
+    music_dir: Optional[str] = None,
+) -> Optional[MusicTrack]:
+    """
+    Pick background music with local fallback.
+
+    1. Try the external mood-based library first (pick_music_for_segment).
+    2. If that returns None, falls back to get_local_music_track().
+    3. Derives energy_level from virality_score:
+       score < 40 → "low", 40–70 → "mid", > 70 → "high"
+    4. If local fallback also returns None, logs a warning and returns None
+       (pipeline continues without music).
+
+    Args:
+        mood: Target mood string.
+        duration_s: Desired clip duration.
+        virality_score: Segment virality/engagement score (0–100).
+        music_dir: Optional music directory override.
+
+    Returns:
+        MusicTrack or None.
+    """
+    # Step 1: Try the external mood-based library
+    service = BackgroundMusicService(music_dir=music_dir)
+    track = service.pick_music_for_segment(mood=mood, duration_s=duration_s)
+    if track is not None:
+        return track
+
+    # Step 2: Derive energy level from virality score
+    if virality_score < 40:
+        energy_level = "low"
+    elif virality_score <= 70:
+        energy_level = "mid"
+    else:
+        energy_level = "high"
+
+    # Step 3: Fall back to local music
+    local_path = get_local_music_track(energy_level)
+    if local_path is None:
+        logger.warning(
+            "[BackgroundMusic] No music track available — "
+            "skipping background music for this clip",
+        )
+        return None
+
+    # Wrap local file as a MusicTrack
+    local_file = Path(local_path)
+    return MusicTrack(
+        file=local_file.name,
+        start=0,
+        end=duration_s,
+        mood=energy_level,
+        url=local_path,
+    )
+
+
 # ── Convenience function ──────────────────────────────────────────────────────
 
 def pick_bgm_for_mood(
@@ -294,6 +420,7 @@ def pick_bgm_for_mood(
     """
     service = BackgroundMusicService(music_dir=music_dir)
     return service.pick_music_for_segment(mood=mood, duration_s=duration_s)
+
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

@@ -3,11 +3,20 @@ Video Polish Service - handles advanced AI enhancements like eye contact correct
 """
 import logging
 import os
+
+# Protobuf compatibility fix for MediaPipe FaceMesh.
+# MediaPipe 0.10.x is incompatible with protobuf >= 4.x (which uses
+# upb-backed C extension by default). Setting this env var forces the
+# pure-Python protobuf implementation, which is compatible with both
+# MediaPipe's symbol_database usage and other protobuf-dependent services.
+os.environ.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+
 import subprocess
 import tempfile
 from pathlib import Path
 import cv2
 import numpy as np
+
 
 logger = logging.getLogger(__name__)
 

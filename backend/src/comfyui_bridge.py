@@ -108,6 +108,7 @@ class ComfyUIBridge:
                         "vae": ["1", 2],
                         "image": ["4", 0],
                         "latent": ["6", 0],
+                        "guiding_latent": ["6", 0],
                         "strength": 1.0,
                         "latent_idx": 0,
                     },
@@ -172,6 +173,7 @@ class ComfyUIBridge:
                         "format": "video/h264-mp4",
                         "pix_fmt": "yuv420p",
                         "save_output": True,
+                        "pingpong": False,
                     },
                 },
             }
@@ -346,5 +348,11 @@ async def generate_broll(prompt: str, duration: float = 3.0, output_path: Option
     Note: This is a simplified placeholder. For LTX-Video generation,
     use ComfyUIBridge.generate_ltxv_intro() directly.
     """
-    logger.warning("[comfyui_bridge] generate_broll() is deprecated, use ComfyUIBridge.generate_ltxv_intro()")
+    logger.error("[comfyui_bridge] generate_broll() is DEPRECATED and non-operational — use ComfyUIBridge.generate_ltxv_intro() instead. Called with prompt='%s', duration=%.1f", prompt, duration)
+    import warnings
+    warnings.warn(
+        "generate_broll() is deprecated and non-operational. Use ComfyUIBridge.generate_ltxv_intro() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return None

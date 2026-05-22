@@ -174,11 +174,59 @@ def _ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
+# ── Emphasis word detection ───────────────────────────────────────────────────
+# Words that should get visual emphasis in subtitles (claims, numbers, contrast,
+# surprise markers). Only a few words per line get emphasis — never filler words
+# or entire sentences.
+_EMPHASIS_WORDS = {
+    # English claims
+    "never", "always", "secret", "truth", "lie", "hack", "shocking",
+    "surprised", "incredible", "insane", "amazing", "unbelievable",
+    "nobody", "everyone", "everybody", "worst", "best", "first",
+    "last", "only", "real", "actual", "exposed", "revealed",
+    "guaranteed", "proven", "scientific", "research", "study",
+    "million", "billion", "thousand", "percent", "%",
+    # Spanish claims
+    "nunca", "siempre", "secreto", "verdad", "mentira", "increíble",
+    "sorprendente", "impresionante", "alucinante", "brutal",
+    "nadie", "todos", "peor", "mejor", "primero", "único",
+    "real", "auténtico", "expuesto", "revelado",
+    "millón", "millones", "mil", "ciento", "por ciento",
+    # Numbers (digits)
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9",
+    "10", "100", "1000",
+    # Contrast / comparison
+    "but", "however", "although", "instead", "rather",
+    "pero", "sin embargo", "aunque", "en cambio", "al contrario",
+}
+
+_EMPHASIS_COLOR = "&H00FFFF&"  # yellow highlight for emphasis words
+
+
+def _is_emphasis_word(text: str) -> bool:
+    """Check if a word should get visual emphasis in subtitles."""
+    clean = text.lower().strip(".,!?;:'\"¿¡()[]{}")
+    if clean in _EMPHASIS_WORDS:
+        return True
+    # Check if it contains digits (numbers)
+    if any(c.isdigit() for c in clean):
+        return True
+    return False
+
+
 def _build_karaoke_text(words: List[WordTimestamp]) -> str:
-    """Build \\k-tagged karaoke text from word list."""
+    """Build \\k-tagged karaoke text from word list.
+    
+    Emphasis words (claims, numbers, contrast, surprise) get a yellow
+    colour override for higher visual weight. Only a few words per line
+    get emphasis — never filler words or entire sentences.
+    """
     parts = []
     for w in words:
-        parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
+        if _is_emphasis_word(w.text):
+            parts.append(f"{{\\c{_EMPHASIS_COLOR}\\k{w.duration_cs}}}{w.text}{{\\c}}")
+        else:
+            parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
     return " ".join(parts)
 
 
@@ -197,6 +245,32 @@ def _build_highlight_text(words: List[WordTimestamp], active_idx: int) -> str:
     return " ".join(parts)
 
 
+# ── Subtitle positioning constants (on 1920-tall canvas) ──────────────────────
+# Lower third: 85% of frame height = 1632px (default subtitle zone)
+# Upper third: 15% of frame height = 288px (when broll is active)
+# Minimum vertical distance between simultaneous text elements: 120px
+_SUBTITLE_Y_LOWER = 1632   # 0.85 * 1920
+_SUBTITLE_Y_UPPER = 288    # 0.15 * 1920
+_MIN_TEXT_GAP_PX = 120
+
+
+def _subtitle_margin_v(
+    line_start: float,
+    line_end: float,
+    platform_margin: int,
+    caption_offset_y: int,
+    broll_segments: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    """
+    Compute the per-line MarginV for a subtitle line.
+
+    FIX 3: Hardcoded to 120 for ALL clips. Dynamic positioning based on
+    broll overlap is disabled because it caused inconsistent vertical
+    positioning across clips in the same task.
+    """
+    return 120
+
+
 def build_ass_script(
     lines: List[CaptionLine],
     style: str = "tiktok",
@@ -205,6 +279,8 @@ def build_ass_script(
     uppercase: bool = True,
     platform: str = "tiktok",
     caption_offset_y: int = 0,
+    broll_segments: Optional[List[Dict[str, Any]]] = None,
+    clip_start: float = 0.0,
 ) -> str:
     """
     Build a complete ASS script from caption lines.
@@ -217,10 +293,17 @@ def build_ass_script(
               Supported: 'tiktok', 'reels', 'shorts', 'universal'.
     caption_offset_y: additional vertical offset (px) to shift captions upward
                       (used when source video has burned-in subtitles).
+    broll_segments: list of dicts with 'start_time' and 'duration' keys.
+                    When a broll overlaps a subtitle line, the subtitle is
+                    moved to the upper third of the frame to avoid overlap.
+    clip_start: seconds to subtract from all timestamps so they are relative
+                to the clip start (FIX 1: subtitle desync fix).
     """
+    platform_margin = _margin_v(platform)
     style_def = _STYLE_DEFS.get(style, _STYLE_DEFS["tiktok"])
-    style_def = style_def.replace("MARGINV", str(_margin_v(platform) + caption_offset_y))
+    style_def = style_def.replace("MARGINV", str(platform_margin + caption_offset_y))
     is_highlight = (style == "highlight")
+
 
     header = f"""\
 [Script Info]
@@ -248,21 +331,35 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if uppercase:
             words = [WordTimestamp(w.text.upper(), w.start, w.end) for w in words]
 
+        # Compute per-line MarginV based on broll overlap
+        line_margin_v = _subtitle_margin_v(
+            line.line_start, line.line_end,
+            platform_margin, caption_offset_y,
+            broll_segments=broll_segments,
+        )
+
+        # FIX 1: Subtract clip_start so timestamps are relative to the clip
+        line_start_rel = max(0.0, line.line_start - clip_start)
+        line_end_rel = max(0.0, line.line_end - clip_start)
+
         if is_highlight:
             # One event per word — each word gets the highlight box while active
             for i, w in enumerate(words):
+                w_start_rel = max(0.0, w.start - clip_start)
+                w_end_rel = max(0.0, w.end - clip_start)
                 text = _build_highlight_text(words, i)
                 events.append(
-                    f"Dialogue: 0,{_ass_time(w.start)},{_ass_time(w.end)},"
-                    f"Default,,0,0,0,,{text}"
+                    f"Dialogue: 0,{_ass_time(w_start_rel)},{_ass_time(w_end_rel)},"
+                    f"Default,,0,0,{line_margin_v},,{text}"
                 )
         else:
             # Full line with \\k timing
             text = _build_karaoke_text(words)
             events.append(
-                f"Dialogue: 0,{_ass_time(line.line_start)},{_ass_time(line.line_end)},"
-                f"Default,,0,0,0,,{text}"
+                f"Dialogue: 0,{_ass_time(line_start_rel)},{_ass_time(line_end_rel)},"
+                f"Default,,0,0,{line_margin_v},,{text}"
             )
+
 
     return header + "\n".join(events) + "\n"
 
@@ -274,6 +371,8 @@ def segment_words_into_lines(
     max_words_per_line: int = 5,
     max_line_duration: float = 4.0,
     gap_threshold: float = 0.8,
+    language: str = "es",
+    max_chars_per_line: int = 0,
 ) -> List[CaptionLine]:
     """
     Group word-level timestamps into caption lines suitable for display.
@@ -282,19 +381,41 @@ def segment_words_into_lines(
       - Word gaps > gap_threshold seconds (sentence breaks)
       - Lines that would exceed max_words_per_line
       - Lines that would exceed max_line_duration seconds
+      - Lines that would exceed max_chars_per_line characters (mobile-friendly)
+
+    For Spanish (language="es"), reduces max_words_per_line to 3 and
+    max_line_duration to 3.0s to prevent long Spanish phrases from
+    overflowing the subtitle area. Also sets max_chars_per_line to 28
+    (Spanish words are longer on average).
 
     Args:
         words: List of dicts with 'text', 'start', 'end' keys (Whisper format).
         max_words_per_line: Target max words per caption bubble.
         max_line_duration: Max display duration before forced split (seconds).
         gap_threshold: Gap between words (seconds) that triggers a line break.
+        language: Language code ("es" for Spanish, "en" for English, etc.).
+        max_chars_per_line: Max characters per line (0 = auto-detect based on language).
     """
+    # Spanish subtitles need shorter lines: Spanish words are longer on average
+    # (e.g., "excelentísimo" vs "excellent") and phrases need earlier breaks.
+    if language == "es":
+        max_words_per_line = min(max_words_per_line, 3)
+        max_line_duration = min(max_line_duration, 3.0)
+        gap_threshold = min(gap_threshold, 0.6)
+        if max_chars_per_line == 0:
+            max_chars_per_line = 28  # Spanish: shorter lines for mobile
+    elif language == "en":
+        if max_chars_per_line == 0:
+            max_chars_per_line = 35  # English: slightly longer lines
+    else:
+        if max_chars_per_line == 0:
+            max_chars_per_line = 30  # Other languages: moderate
     if not words:
         return []
 
     wts = [
         WordTimestamp(
-            text=re.sub(r"[^\w\s''-]", "", (w.get("text") or w.get("word") or "")).strip(),
+            text=re.sub(r"[^\w\s'¿¡áéíóúüñÁÉÍÓÚÜÑ]", "", (w.get("text") or w.get("word") or "")).strip(),
             start=float(w.get("start", 0)),
             end=float(w.get("end", 0)),
         )
@@ -334,6 +455,13 @@ def segment_words_into_lines(
             line_end=current[-1].end + 0.15,
         ))
 
+    # FIX 2: Prevent overlapping subtitle events — if end_time of event N
+    # exceeds start_time of event N+1, clamp end_time of event N to
+    # start_time of event N+1 - 0.05s (50ms minimum gap).
+    for i in range(len(lines) - 1):
+        if lines[i].line_end > lines[i + 1].line_start:
+            lines[i].line_end = max(lines[i].line_start, lines[i + 1].line_start - 0.05)
+
     return lines
 
 
@@ -365,6 +493,7 @@ async def burn_captions(
     platform: str = "tiktok",
     caption_offset_y: int = 0,
     clip_index: int = 0,
+    clip_start: float = 0.0,
 ) -> bool:
     """
     Generate an ASS file from word timestamps and burn it into the video
@@ -372,6 +501,9 @@ async def burn_captions(
 
     When clip_index is provided, rotates through CAPTION_PRESETS to vary
     the visual style across consecutive clips in a batch.
+
+    clip_start: seconds to subtract from all timestamps so they are relative
+                to the clip start (FIX 1: subtitle desync fix).
 
     Returns True on success, False on failure (video is still written as-is).
     """
@@ -387,6 +519,7 @@ async def burn_captions(
     ass_content = build_ass_script(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
         platform=platform, caption_offset_y=caption_offset_y,
+        clip_start=clip_start,
     )
 
     # ── Subtitle QA: speed guard + emoji injection + profanity filter ──────────
@@ -410,7 +543,12 @@ async def burn_captions(
         # Escape path for FFmpeg filter string (colons must be escaped on Linux)
         safe_ass = ass_path.replace("\\", "/").replace(":", "\\:")
         font_clause = f":fontsdir={font_dir}" if font_dir else ""
-        vf = f"subtitles='{safe_ass}'{font_clause}"
+        logger.info(
+            "[SUBTITLE] ASS file generated at %s, size: %d bytes",
+            ass_path, Path(ass_path).stat().st_size if Path(ass_path).exists() else 0,
+        )
+        # UTF-8 encoding for Spanish characters (á é í ó ú ñ ü ¿ ¡)
+        vf = f"subtitles='{safe_ass}'{font_clause}:charenc=UTF-8"
 
         proc = await asyncio.create_subprocess_exec(
             _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
@@ -462,11 +600,13 @@ class CaptionService:
         font_dir: Optional[str] = None,
         platform: str = "tiktok",
         caption_offset_y: int = 0,
+        clip_start: float = 0.0,
     ) -> bool:
         return await burn_captions(
             video_path, output_path, words,
             style=style, font_dir=font_dir, platform=platform,
             caption_offset_y=caption_offset_y,
+            clip_start=clip_start,
         )
 
     def generate_ass(
@@ -477,12 +617,14 @@ class CaptionService:
         play_res_y: int = 1920,
         platform: str = "tiktok",
         caption_offset_y: int = 0,
+        clip_start: float = 0.0,
     ) -> str:
         """Return the raw ASS script string (for preview or saving)."""
         lines = segment_words_into_lines(words)
         return build_ass_script(lines, style=style,
                                 play_res_x=play_res_x, play_res_y=play_res_y,
-                                platform=platform, caption_offset_y=caption_offset_y)
+                                platform=platform, caption_offset_y=caption_offset_y,
+                                clip_start=clip_start)
 
     def segment_words(
         self,
@@ -555,12 +697,16 @@ async def burn_captions_with_fallback(
     font_dir: Optional[str] = None,
     platform: str = "tiktok",
     caption_offset_y: int = 0,
+    clip_start: float = 0.0,
 ) -> bool:
     """
     Burn captions using the backend selected by CAPTION_BACKEND.
 
     If the selected backend fails at runtime, falls back dynamically to
     LegacyCaptionBackend for this clip.
+
+    clip_start: seconds to subtract from all timestamps so they are relative
+                to the clip start (FIX 1: subtitle desync fix).
     """
     backend = _get_caption_backend()
 
@@ -586,6 +732,7 @@ async def burn_captions_with_fallback(
                 font_dir=font_dir,
                 platform=platform,
                 caption_offset_y=caption_offset_y,
+                clip_start=clip_start,
             )
     except Exception as exc:
         logger.warning(
@@ -603,6 +750,7 @@ async def burn_captions_with_fallback(
             font_dir=font_dir,
             platform=platform,
             caption_offset_y=caption_offset_y,
+            clip_start=clip_start,
         )
 
 

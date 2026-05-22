@@ -13,60 +13,51 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
-# ── Module-level LangGraph singleton (thread-safe) ──────────────────────────
+# ── Module-level LangGraph singleton (eager build at import time) ──────────
 # Building the graph compiles it via LangGraph's VariableBuilder, which
-# registers built-in functions. If multiple threads compile simultaneously,
-# the same built-in gets registered twice → "Duplicate dispatch rule".
-# Using a threading.Lock ensures exactly one compilation per process.
+# registers built-in functions. If multiple asyncio tasks compile
+# simultaneously, the same built-in gets registered twice → "Duplicate
+# dispatch rule". Building eagerly at module import time ensures exactly
+# one compilation, before any concurrent code runs.
 
 _graph_instance = None
-_graph_lock = threading.Lock()
+
+
+def _build_graph():
+    """Build the LangGraph once at module import time."""
+    global _graph_instance
+    try:
+        from langgraph.graph import StateGraph, START
+        graph = StateGraph(dict)
+        graph.add_node("entry", lambda state: state)
+        graph.add_edge(START, "entry")
+        _graph_instance = graph.compile()
+        NarrativeCutEngine._graph_compiled = True
+        logger.info("[NarrativeCut] Graph built at import time")
+    except Exception as exc:
+        logger.warning("[NarrativeCut] Graph build failed at import: %s — narrative cuts will be skipped", exc)
+        _graph_instance = None
+
+
+# Build eagerly at module import time (before any asyncio tasks can race)
+_build_graph()
 
 
 def _get_or_build_graph():
-    """Return the compiled LangGraph, building it exactly once (thread-safe).
+    """Return the compiled LangGraph singleton (built at import time).
     
-    Uses double-checked locking. On any error, logs WARNING and returns None.
-    The caller should handle None gracefully (skip narrative cuts for that clip).
+    Returns None if the graph failed to build — caller should handle None
+    gracefully (skip narrative cuts for that clip).
     """
     global _graph_instance
     if _graph_instance is not None:
-        logger.debug("[NarrativeCut] Reusing compiled graph singleton")
         return _graph_instance
-    with _graph_lock:
-        if _graph_instance is not None:
-            logger.debug("[NarrativeCut] Reusing compiled graph singleton")
-            return _graph_instance
-        if NarrativeCutEngine._graph_compiled:
-            logger.debug("[NarrativeCut] Graph already compiled (class flag)")
-            return _graph_instance
-        try:
-            from langgraph.graph import StateGraph, START
-            graph = StateGraph(dict)
-            graph.add_node("entry", lambda state: state)
-            graph.add_edge(START, "entry")
-            _graph_instance = graph.compile()
-            NarrativeCutEngine._graph_compiled = True
-            logger.info("[NarrativeCut] Building graph singleton")
-        except Exception as exc:
-            logger.warning("[NarrativeCut] Failed to build graph: %s", exc)
-            _graph_instance = None
+    # Fallback: try building now (should not happen if import-time build succeeded)
+    _build_graph()
     return _graph_instance
 
-# Module-level singleton for SentenceTransformer (CPU-only to preserve VRAM for Whisper)
-_SENTENCE_MODEL = None
-_SENTENCE_UTIL = None
-
-def get_sentence_model():
-    global _SENTENCE_MODEL, _SENTENCE_UTIL
-    if _SENTENCE_MODEL is None:
-        from sentence_transformers import SentenceTransformer, util
-        _SENTENCE_MODEL = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-        _SENTENCE_MODEL = _SENTENCE_MODEL.to("cpu")  # free VRAM for Whisper
-        _SENTENCE_UTIL = util
-        logger.info("[SentenceTransformer] Loaded once on CPU (VRAM reserved for Whisper)")
-    return _SENTENCE_MODEL, _SENTENCE_UTIL
-
+# Import SentenceTransformer singleton from semantic_broll_service (loaded once, CPU-only)
+from src.domains.broll.semantic_broll_service import get_sentence_model
 # Hesitation markers that indicate natural cut points
 HESITATION_MARKERS = [
     "um", "uh", "eh", "ah", "well", "so", "like", "you know",

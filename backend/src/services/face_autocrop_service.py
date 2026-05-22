@@ -128,6 +128,20 @@ class FaceAutocropService:
         self.chin_padding = chin_padding
         self.forehead_padding = forehead_padding
 
+        # MediaPipe availability flag (protobuf compatibility check)
+        self._mediapipe_available: bool = True
+        try:
+            import mediapipe as mp  # noqa: F401
+        except AttributeError as e:
+            if "SymbolDatabase" in str(e):
+                logger.warning(
+                    "[FaceAutocrop] MediaPipe protobuf conflict: %s. "
+                    "Falling back to OpenCV Haar cascades.", e
+                )
+                self._mediapipe_available = False
+            else:
+                raise
+
         # Lazy-loaded OpenCV cascade classifier
         self._face_cascade: Any = None
         self._profile_cascade: Any = None
@@ -284,7 +298,36 @@ class FaceAutocropService:
                 )
 
 
-            # 6. Build FFmpeg crop expression
+            # 6. First-frame safe zone validation: ensure the first crop box
+            # keeps the face vertically centred (no ceiling / background-only).
+            # If the first frame's crop is too high (face in upper 25% of output)
+            # we shift it down so the face sits in the middle third.
+            if crop_boxes and face_centroids and face_centroids[0] is not None:
+                _first_cx, _first_cy = crop_boxes[0][0], crop_boxes[0][1]
+                _first_cw, _first_ch = crop_boxes[0][2], crop_boxes[0][3]
+                # Normalised vertical centre of the crop window (0=top, 1=bottom)
+                _crop_centre_y = (_first_cy + _first_ch / 2) / OUTPUT_HEIGHT
+                # If the crop centre is in the upper 30% of the frame → too high
+                if _crop_centre_y < 0.30:
+                    # Shift crop down so centre sits at ~40% (upper-middle third)
+                    _shift_y = int((0.40 * OUTPUT_HEIGHT) - (_first_cy + _first_ch / 2))
+                    # Clamp so we don't go out of bounds
+                    _max_y = input_height - OUTPUT_HEIGHT
+                    _new_cy = max(0, min(_max_y, _first_cy + _shift_y))
+                    logger.info(
+                        "[FaceAutocrop] First-frame safe zone: crop centre was at "
+                        "%.0f%% height → shifting down by %d px (new y=%d)",
+                        _crop_centre_y * 100, _shift_y, _new_cy,
+                    )
+                    # Apply the same vertical shift to ALL crop boxes (smooth transition)
+                    # so the first second stays well-framed.
+                    _shift_per_frame = _shift_y / max(len(crop_boxes), 1)
+                    for _i in range(len(crop_boxes)):
+                        _bx, _by, _bw, _bh = crop_boxes[_i]
+                        _new_by = max(0, min(_max_y, int(_by + _shift_per_frame * (_i + 1))))
+                        crop_boxes[_i] = (_bx, _new_by, _bw, _bh)
+
+            # 7. Build FFmpeg crop expression
             face_detection_rate = (
                 sum(1 for c in face_centroids if c is not None) / len(face_centroids)
                 if face_centroids else 0.0

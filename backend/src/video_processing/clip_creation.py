@@ -148,6 +148,15 @@ def snap_to_word_boundary(video_path: Path, start: float, end: float) -> Tuple[f
     except Exception as e:
         logger.debug(f"Word boundary snap failed: {e}")
 
+    # GUARD: never truncate more than 20% of the intended duration.
+    # The transcript word timestamps are absolute (from the full source video),
+    # but when using pre-extracted segments, start/end are clip-relative (0 to duration).
+    # Without this guard, the function can snap end to a word at ~9s when the
+    # intended duration is 60s, because the nearest word to end_ms=60000 is
+    # actually at ~9000ms (the first word of the next segment in absolute time).
+    intended_duration = end - start
+    min_end = start + intended_duration * 0.8
+    end = max(end, min_end)
     return max(0, start), max(start + 0.5, end)
 
 
@@ -270,7 +279,22 @@ def create_optimized_clip(
     try:
         with guard.manage():
             # 1. Word Boundary Snapping
+            _orig_start = start_time
+            _orig_end = end_time
             start_time, end_time = snap_to_word_boundary(video_path, start_time, end_time)
+            # Belt-and-suspenders guard: never truncate more than 20% of intended duration.
+            # The snap_to_word_boundary function has an internal guard, but this ensures
+            # protection even if the function's logic changes or the guard is bypassed.
+            _intended_dur = _orig_end - _orig_start
+            _min_end = _orig_start + _intended_dur * 0.8
+            if end_time < _min_end:
+                logger.warning(
+                    "[DURATION GUARD] snap_to_word_boundary truncated clip from %.1fs to %.1fs "
+                    "(min allowed=%.1fs) — restoring to %.1fs",
+                    _intended_dur, end_time - start_time, _intended_dur * 0.8, _intended_dur,
+                )
+                end_time = _orig_end
+                start_time = _orig_start
             duration = end_time - start_time
             if duration <= 0:
                 logger.error(f"Invalid clip duration: {duration:.1f}s")

@@ -188,9 +188,18 @@ class TranslationService:
         video_path: Path,
         output_path: Path,
         target_lang: str = "en",
+        absolute_offset_ms: int = 0,
     ) -> None:
         """
         Create a translated version of `video_path` at `output_path`.
+
+        Args:
+            video_path: Path to the source video clip.
+            output_path: Path for the output video with translated subtitles.
+            target_lang: Target language code (e.g. "en", "es", "fr").
+            absolute_offset_ms: The absolute start time (in ms) of this clip
+                within the original source video. Used to correctly filter
+                words from the full transcript cache to this clip's range.
 
         Falls back to copying the original file if translation fails,
         so the pipeline never crashes due to a missing API key or network.
@@ -198,7 +207,10 @@ class TranslationService:
         import shutil
 
         try:
-            await self._burn_translated_subtitles(video_path, output_path, target_lang)
+            await self._burn_translated_subtitles(
+                video_path, output_path, target_lang,
+                absolute_offset_ms=absolute_offset_ms,
+            )
         except Exception as e:
             logger.error(f"Translation failed ({e}), falling back to original clip")
             shutil.copy2(str(video_path), str(output_path))
@@ -208,6 +220,7 @@ class TranslationService:
         video_path: Path,
         output_path: Path,
         target_lang: str,
+        absolute_offset_ms: int = 0,
     ) -> None:
         from ...video_processing import load_cached_transcript_data
         from ...video_processing.utils import parse_timestamp_to_seconds
@@ -239,10 +252,12 @@ class TranslationService:
         except Exception:
             pass
 
-        # Words are in milliseconds (AssemblyAI) or converted to ms by cache_transcript_data
-        # We don't know the absolute offset of this clip — use relative timestamps (start at 0)
-        clip_start_ms = 0
-        clip_end_ms = int(clip_duration_s * 1000)
+        # Use the absolute source offset to correctly filter words from the
+        # full transcript cache. The transcript words are in absolute ms from
+        # the start of the source video. Without this offset, non-first clips
+        # would get wrong word ranges and desynced subtitles.
+        clip_start_ms = absolute_offset_ms
+        clip_end_ms = absolute_offset_ms + int(clip_duration_s * 1000)
 
         # Normalise words to ms if they appear to be in seconds (faster-whisper)
         if words and words[0].get("start", 0) < 1000:
@@ -273,7 +288,7 @@ class TranslationService:
                 "ffmpeg", "-y",
                 "-i", str(video_path),
                 "-vf", (
-                    f"subtitles={srt_path}:force_style="
+                    f"subtitles={srt_path}:charenc=UTF-8:force_style="
                     "'FontName=Arial,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,"
                     "BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=40'"
                 ),

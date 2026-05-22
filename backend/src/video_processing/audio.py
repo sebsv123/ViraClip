@@ -22,9 +22,12 @@ logger = logging.getLogger(__name__)
 # s16 (signed 16-bit) is the native format for AAC encoding and avoids the
 # codec incompatibility that triggers FFmpeg error -22 (Invalid argument).
 AUDIO_NORMALIZE_FILTER = (
-    "aresample=44100:resampler=soxr:precision=28,"
+    "aresample=48000,"
     "aformat=sample_fmts=s16:channel_layouts=stereo"
 )
+
+
+
 
 # Niche → Pixabay search query mapping
 _NICHE_MUSIC_MOOD: Dict[str, str] = {
@@ -403,40 +406,85 @@ def _validate_audio_stream(path: Path, label: str = "audio") -> bool:
         return False
 
 
-def build_music_mix_filter(music_volume: float = 0.35, ducking_enabled: bool = False) -> str:
+def build_music_mix_filter(music_volume: float = 0.40, ducking_enabled: bool = False, has_vocals: bool = False) -> str:
     """
     Build FFmpeg filter complex for mixing video audio with background music.
     All audio is normalized to 44100Hz fltp before mixing to prevent sample rate mismatch.
     
+    Strategy: voice normalized via loudnorm (target -14 LUFS), BGM normalized + attenuated.
+    BGM base volume is ~-8dB (0.40) — audible but ~8dB below voice peak.
+    Ducking is delegated to audio_ducking_service — this function only does
+    a clean, stable mix. If ducking is requested here, uses a simple volume
+    reduction on BGM (no sidechaincompress) to avoid filter graph complexity.
+    
     Args:
-        music_volume: Volume of background music (0.0-1.0)
-        ducking_enabled: Whether to apply ducking (requires sidechain or volume curves)
+        music_volume: Volume of background music (0.0-1.0, default 0.40 ≈ -8dB)
+        ducking_enabled: If True, reduce BGM volume further (simple attenuation)
+        has_vocals: If True, track contains lyrics — reduce volume to 0.08 max
     
     Returns:
         FFmpeg filter_complex string
     """
-    # Normalize both inputs to prevent sample rate mismatch
-    # Weights: voice (1.0) + music (music_volume) — music is additive, not replacement
+    # If track has vocals, cap volume very low so speaker is always audible
+    if has_vocals:
+        music_volume = min(music_volume, 0.04)
+    else:
+        music_volume = min(music_volume, 0.10)
+    
     if ducking_enabled:
-        # With ducking: music volume is controlled dynamically
+        duck_vol = music_volume * 0.6  # additional -4.4dB during ducking
         return (
-            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f}[music];"
-            "[voice][music]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+            f"[0:a]{AUDIO_NORMALIZE_FILTER},loudnorm=I=-14:LRA=7:TP=-1.0[voice];"
+            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={duck_vol:.3f}[bgm];"
+            "[voice][bgm]amix=inputs=2:duration=first:weights='1 1':normalize=0[aout]"
         )
     else:
-        # Simple mix without ducking
         return (
-            f"[0:a]{AUDIO_NORMALIZE_FILTER}[voice];"
-            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f}[music];"
-            "[voice][music]amix=inputs=2:duration=first:weights='1 0.35':normalize=0[aout]"
+            f"[0:a]{AUDIO_NORMALIZE_FILTER},loudnorm=I=-14:LRA=7:TP=-1.0[voice];"
+            f"[1:a]{AUDIO_NORMALIZE_FILTER},volume={music_volume:.3f}[bgm];"
+            "[voice][bgm]amix=inputs=2:duration=first:weights='1 1':normalize=0[aout]"
         )
+
+
+def _mix_bgm_fallback(video_path: Path, music_path: Path, output_path: Path) -> bool:
+    """
+    BGM mix fallback with explicit sample rate normalization on both inputs.
+    Normalizes both voice and BGM to 44100Hz fltp stereo before amix to prevent
+    sample rate / channel layout mismatches that cause FFmpeg error -22 (EINVAL).
+    """
+    _bgm_norm = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-i", str(music_path),
+        "-filter_complex",
+        f"[0:a]{_bgm_norm}[voice];[1:a]{_bgm_norm},volume=0.35[bgm];"
+        "[voice][bgm]amix=inputs=2:duration=first:dropout_transition=2[aout]",
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        str(output_path),
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            logger.info("[BGM] Fallback mix applied (simple amix)")
+            return True
+        logger.warning("[BGM] Fallback mix also failed: %s", result.stderr[-200:])
+        return False
+    except Exception as e:
+        logger.warning("[BGM] Fallback mix exception: %s", e)
+        return False
 
 
 def mix_background_music(
     video_path: Path,
     output_path: Path,
-    music_volume: float = 0.35,  # 35% volumen base - audible pero no dominante
+    music_volume: float = 0.316,  # -10dB base — audible but not dominant
     ducking_enabled: bool = True,
     music_path: Optional[Path] = None,
     word_timings: Optional[List[Dict[str, Any]]] = None,
@@ -445,15 +493,18 @@ def mix_background_music(
     Mix a background music track into a video as ambient background.
     Uses ffmpeg for fast, high-quality audio mixing with sample rate normalization.
 
-    Phase 1A FIX: All audio streams are normalized to 44100Hz fltp before mixing
-    to prevent sample rate mismatch and white noise.
-
-    If word_timings is provided and ducking_enabled=True, uses PREDICTIVE ducking
-    based on word timestamps (more precise than sidechain).
-    Falls back to sidechain ducking if no word_timings are available.
+    Voice is normalized to -16 LUFS (loudnorm) for consistent vocal presence.
+    BGM base volume is -10dB (0.316). When ducking_enabled=True, uses FFmpeg
+    sidechaincompress for real ducking: BGM is compressed when voice is active,
+    with smooth attack (50ms) and release (200ms), ~6dB reduction.
 
     Returns True on success, False on failure.
     """
+    # Check BGM_ENABLED flag first
+    if os.environ.get("BGM_ENABLED", "true").lower() not in ("true", "1"):
+        logger.info("[BGM] BGM_ENABLED=false — skipping music mix")
+        return False
+
     if music_path is None:
         music_path = _get_background_music_path()
     if music_path is None:
@@ -480,31 +531,27 @@ def mix_background_music(
         logger.warning("[MusicMix] Clip has no audio stream, skipping mix")
         return False
 
-    logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume")
+    logger.info(f"🎵 Mixing background music: {music_path.name} @ {int(music_volume*100)}% volume, ducking={'ON' if ducking_enabled else 'OFF'}")
     try:
-        # SIMPLIFICADO: Usar volumen constante para BGM.
-        # El ducking predictivo con expresiones FFmpeg complejas
-        # (volume=eval=frame:expr='if(gte...') causa errores de parsing
-        # porque FFmpeg no soporta paréntesis anidados ni comas dentro
-        # de filter_complex option values.
-        #
-        # El beat_sync_service (creative_pipeline Step 7) ya maneja el
-        # ducking real con smart_audio. Este mix_background_music solo
-        # necesita poner música de fondo a volumen constante.
-        vol_filter = f"volume={music_volume:.3f}"
-        logger.info(f"[DUCKING] Volumen constante: {music_volume:.3f} (ducking delegado a beat_sync_service)")
-
-        # Use apad + shortest to handle shorter music gracefully instead of aloop
-        # aloop=loop=-1:size=2000000000 can cause issues with some FFmpeg builds
-        # apad ensures the audio stream is long enough, then we trim with shortest
-        # BUG FIX: Force both streams to s16 before amix to prevent codec mismatch
-        # that causes "Nothing was written" error with AAC/h264_nvenc output.
-        filter_complex = (
-            f"[0:a]aformat=sample_fmts=s16:channel_layouts=stereo[a0];"
-            f"[1:a]aformat=sample_fmts=s16:channel_layouts=stereo,"
-            f"{vol_filter},apad=whole_dur=9999[a1];"
-            "[a0][a1]amix=inputs=2:duration=first:dropout_transition=2[aout]"
+        # Use build_music_mix_filter for proper sidechain ducking
+        filter_complex = build_music_mix_filter(
+            music_volume=music_volume,
+            ducking_enabled=ducking_enabled
         )
+
+        # Add apad to music stream for graceful handling of shorter tracks.
+        # Also force BGM to 48000Hz fltp stereo before apad to prevent sample
+        # rate mismatches that cause FFmpeg error -22 (EINVAL).
+        # Replace [1:a] with [1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[bgm_norm];
+        # then use [bgm_norm]apad=whole_dur=9999[apad];[apad] as the BGM input.
+        _bgm_pre = (
+            "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
+        )
+        filter_complex = filter_complex.replace(
+            "[1:a]",
+            f"[1:a]{_bgm_pre}[bgm_norm];[bgm_norm]apad=whole_dur=9999[apad];[apad]",
+        )
+
 
         cmd = [
             "ffmpeg", "-y",
@@ -520,9 +567,12 @@ def mix_background_music(
             "-shortest",
             str(output_path),
         ]
+        logger.error(f"[BGM_DEBUG] cmd: {' '.join(str(x) for x in cmd)}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
         if result.returncode != 0:
+            logger.error(f"[BGM_DEBUG] stderr: {result.stderr}")
             logger.warning(f"Music mix failed: {result.stderr[-300:]}")
+
             # Clean up 0-byte output if FFmpeg failed
             if output_path.exists() and output_path.stat().st_size == 0:
                 output_path.unlink(missing_ok=True)

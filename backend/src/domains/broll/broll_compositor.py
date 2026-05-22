@@ -22,6 +22,16 @@ import logging
 import os
 import subprocess
 import sys
+
+# ── B-roll quality guards ──────────────────────────────────────────────────────
+from .broll_config import (
+    MIN_OVERLAY_DURATION_S,
+    FADE_DURATION_S,
+    MIN_GAP_BETWEEN_OVERLAYS_S,
+)
+
+MIN_BROLL_DURATION = MIN_OVERLAY_DURATION_S  # skip B-roll clips shorter than canonical minimum
+MAX_BROLL_DENSITY = 20.0   # at most 1 B-roll per 20s of clip duration
 sys.path.insert(0, "/app/src") if "/app/src" not in sys.path else None
 from src import gpu_utils
 try:
@@ -129,6 +139,80 @@ def _build_overlay_alpha_expr(ts: float, end_ts: float, fade: float) -> str:
 
 # ── B-roll normalisation ──────────────────────────────────────────────────────
 
+def _find_stable_frame_range(
+    video_path: Path,
+    sample_interval: float = 0.5,
+    motion_threshold: float = 0.15,
+) -> Tuple[float, float]:
+    """
+    Find the first stable frame and last stable frame in a video.
+    
+    Uses FFmpeg scene detection to find frames with low motion.
+    Returns (stable_start, stable_end) in seconds.
+    If the entire clip is unstable, returns (0, 0) to signal skip.
+    """
+    try:
+        import subprocess as _sp
+        import json as _json
+        
+        # Use ffmpeg scene detection to find motion changes
+        _cmd = [
+            "ffprobe", "-v", "quiet", "-print_format", "json",
+            "-show_entries", "format=duration",
+            str(video_path),
+        ]
+        _result = _sp.run(_cmd, capture_output=True, text=True, timeout=10)
+        _data = _json.loads(_result.stdout)
+        _total_dur = float(_data.get("format", {}).get("duration", 0))
+        if _total_dur <= 0:
+            return (0.0, _total_dur)
+        
+        # Sample frames at intervals and check for motion via scene detection
+        _cmd2 = [
+            "ffmpeg", "-v", "quiet", "-i", str(video_path),
+            "-filter:v", f"select='gt(scene,{motion_threshold})',showinfo",
+            "-f", "null", "-",
+        ]
+        _result2 = _sp.run(_cmd2, capture_output=True, text=True, timeout=30)
+        _output = _result2.stderr
+        
+        # Parse scene change timestamps
+        _scene_changes = []
+        import re as _re
+        for _line in _output.splitlines():
+            _m = _re.search(r"pts_time:([0-9.]+)", _line)
+            if _m:
+                _scene_changes.append(float(_m.group(1)))
+        
+        if not _scene_changes:
+            # No significant motion — entire clip is stable
+            return (0.0, _total_dur)
+        
+        # First stable frame: after the first scene change + 0.3s buffer
+        _stable_start = _scene_changes[0] + 0.3 if _scene_changes[0] < _total_dur * 0.3 else 0.0
+        
+        # Last stable frame: before the last scene change - 0.3s buffer
+        _stable_end = _scene_changes[-1] - 0.3 if _scene_changes[-1] > _total_dur * 0.7 else _total_dur
+        
+        # If the stable window is too small (< 1s), the clip is too unstable
+        if _stable_end - _stable_start < 1.0:
+            logger.warning(
+                "[BrollCompositor] B-roll too unstable: %s (stable window=%.1fs)",
+                video_path.name, _stable_end - _stable_start,
+            )
+            return (0.0, 0.0)
+        
+        logger.debug(
+            "[BrollCompositor] Stable frame range: %.1f-%.1fs (total=%.1fs, changes=%d)",
+            _stable_start, _stable_end, _total_dur, len(_scene_changes),
+        )
+        return (_stable_start, _stable_end)
+        
+    except Exception as _e:
+        logger.debug("[BrollCompositor] Frame stability check failed: %s", _e)
+        return (0.0, probe_duration(video_path))
+
+
 def normalize_broll(
     broll_path: Path | str,
     target_w: int,
@@ -144,12 +228,32 @@ def normalize_broll(
       - Fade-in and fade-out of *fade* seconds (default 0.6s for smooth transitions)
       - Audio muted (B-roll is silent by design)
       - Ken Burns effect for static images (subtle zoom + pan)
+      - Frame stability check: skips unstable start/end frames
 
     Works for both video files and static images (image → looped video).
     Returns the output Path on success, None on failure.
     """
     broll_path = Path(broll_path)
     is_image = broll_path.suffix.lower() in _IMAGE_EXTS
+    
+    # Skip B-roll clips shorter than MIN_BROLL_DURATION
+    if not is_image:
+        actual_dur = probe_duration(broll_path)
+        if actual_dur < MIN_BROLL_DURATION:
+            logger.warning(
+                "[BrollCompositor] Skipping B-roll shorter than %.1fs: %s (%.1fs)",
+                MIN_BROLL_DURATION, broll_path.name, actual_dur,
+            )
+            return None
+        
+        # Frame stability check: find stable start/end
+        _stable_start, _stable_end = _find_stable_frame_range(broll_path)
+        if _stable_end <= _stable_start:
+            logger.warning(
+                "[BrollCompositor] Skipping unstable B-roll: %s",
+                broll_path.name,
+            )
+            return None
 
     if output_path is None:
         suffix = ".mp4"
@@ -209,9 +313,19 @@ def normalize_broll(
     else:
         # CPU decode for video inputs (ComfyUI LTX outputs use nv12/cuda hwframes
         # that break hwdownload→yuv420p. Force software decode with -hwaccel none.)
+        # If the requested duration exceeds the asset's actual duration, loop it
+        # seamlessly with -stream_loop -1 so FFmpeg never runs out of frames.
+        loop_flag: list[str] = []
+        if duration > actual_dur:
+            loop_flag = ["-stream_loop", "-1"]
+            logger.info(
+                "[BrollCompositor] Looping B-roll %s (dur=%.1fs) to cover requested %.1fs",
+                broll_path.name, actual_dur, duration,
+            )
         cmd = [
             _get_ffmpeg_exe(), "-y",
             "-hwaccel", "none",
+            *loop_flag,
             "-i", str(broll_path),
             "-t", str(duration),
             "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1",
@@ -221,6 +335,7 @@ def normalize_broll(
             "-movflags", "+faststart",
             str(output_path),
         ]
+
 
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
@@ -438,7 +553,7 @@ async def compose_overlay_multi(
     output_path = Path(output_path)
 
     w, h, _fps = probe_dimensions(main_path)
-
+    
     # Normalise all B-rolls in parallel with semaphore (max 3 concurrent FFmpeg processes)
     _NORMALIZE_SEM = asyncio.Semaphore(3)
     async def _normalize_with_sem(bp, dur):
@@ -466,35 +581,233 @@ async def compose_overlay_multi(
         logger.warning("[BrollCompositor] compose_overlay_multi: no valid B-rolls after normalise")
         return False
 
+    # ── Overlap check: ensure no two B-rolls overlap in time ────────────────
+    # Sort by timestamp, then skip any cue that overlaps with the previous one.
+    # Also enforce minimum 0.5s gap between end of one and start of next.
+    # If two cues are closer than 0.5s, merge or drop the shorter one.
+    valid_pairs.sort(key=lambda x: x[0])  # sort by timestamp
+    _MIN_GAP = 0.5
+    _filtered_pairs = []
+    _last_end = -999.0
+    for ts, np_, dur in valid_pairs:
+        cue_end = ts + dur
+        # Check overlap with previous cue
+        if ts < _last_end:
+            logger.warning(
+                "[BrollGate] DROPPED ts=%.1f dur=%.1f reason=overlap_with_previous_ending_at_%.1f",
+                ts, dur, _last_end,
+            )
+            continue
+        # Check minimum gap — if closer than 0.5s, merge or drop the shorter one
+        _gap = ts - _last_end
+        if _gap < _MIN_GAP and _last_end > 0:
+            # Try to merge: extend previous cue's end to this cue's end
+            if _filtered_pairs:
+                _prev_ts, _prev_np, _prev_dur = _filtered_pairs[-1]
+                _merged_dur = (ts + dur) - _prev_ts
+                logger.warning(
+                    "[BrollGate] MERGED ts=%.1f dur=%.1f into previous cue at ts=%.1f "
+                    "(gap=%.1fs < min %.1fs) — new duration=%.1fs",
+                    ts, dur, _prev_ts, _gap, _MIN_GAP, _merged_dur,
+                )
+                _filtered_pairs[-1] = (_prev_ts, _prev_np, _merged_dur)
+                _last_end = _prev_ts + _merged_dur
+                continue
+        _filtered_pairs.append((ts, np_, dur))
+        _last_end = cue_end
+    valid_pairs = _filtered_pairs
+
+    if not valid_pairs:
+        logger.warning("[BrollCompositor] compose_overlay_multi: all B-rolls filtered by overlap check")
+        return False
+
+    # ── STABILITY GATE: final quality check before render ────────────────────
+    # Runs after overlap/gap filtering, before filtergraph construction.
+    # Never adds new cues — only filters existing ones.
+    # Logs every rejection with exact reason.
+    _stability_pairs: list[tuple] = []
+    _seen_concepts: set = set()
+    _last_concept: str = ""
+    _last_ts: float = -999.0
+    _window_cues: list = []  # cues in current 10s window for density check
+
+    for ts, np_, dur in valid_pairs:
+        _asset_name = Path(np_).stem.lower().replace("_", " ").replace("-", " ")
+        _asset_words = set(_asset_name.split())
+        _cue_end = ts + dur
+
+        # ── GATE 1: MICRO-CUES — drop any cue < 2.5s ────────────────────────
+        if dur < 2.5:
+            logger.warning(
+                "[BrollGate] STABILITY REJECT ts=%.1f dur=%.1f asset=%s reason=micro_cue_below_2.5s",
+                ts, dur, Path(np_).name,
+            )
+            continue
+
+        # ── GATE 2: REPETITION — same concept more than once → keep first ───
+        if _asset_words:
+            _is_repeat = False
+            for _seen in _seen_concepts:
+                _seen_words = set(_seen.split())
+                _inter = _asset_words & _seen_words
+                _union = _asset_words | _seen_words
+                if _union and len(_inter) / len(_union) > 0.30:
+                    _is_repeat = True
+                    logger.warning(
+                        "[BrollGate] STABILITY REJECT ts=%.1f asset=%s reason=repetition "
+                        "(Jaccard=%.2f with '%s')",
+                        ts, Path(np_).name, len(_inter) / len(_union), _seen,
+                    )
+                    break
+            if _is_repeat:
+                continue
+        _seen_concepts.add(_asset_name)
+
+        # ── GATE 3: DENSITY — max 3 cue changes per 10s window ──────────────
+        # Slide the 10s window: remove cues that fell out of the window
+        _window_cues = [c for c in _window_cues if c > ts - 10.0]
+        if len(_window_cues) >= 3:
+            logger.warning(
+                "[BrollGate] STABILITY REJECT ts=%.1f asset=%s reason=density "
+                "(%d cues in last 10s window, max 3)",
+                ts, Path(np_).name, len(_window_cues) + 1,
+            )
+            continue
+        _window_cues.append(ts)
+
+        # ── GATE 4: CONTRADICTION — unrelated consecutive concepts ───────────
+        # If two consecutive cues have no shared keyword or semantic category,
+        # insert a 1s gap or drop the second. We detect by checking if the
+        # asset name words have any overlap with the previous concept.
+        if _last_concept and _asset_words:
+            _last_words = set(_last_concept.split())
+            _shared = _asset_words & _last_words
+            if not _shared:
+                # No shared keywords — check if gap is already ≥ 1s
+                _gap = ts - _last_ts
+                if _gap < 1.0:
+                    logger.warning(
+                        "[BrollGate] STABILITY REJECT ts=%.1f asset=%s reason=contradiction "
+                        "(no shared keywords with previous '%s', gap=%.1fs < 1s)",
+                        ts, Path(np_).name, _last_concept[:40], _gap,
+                    )
+                    continue
+                else:
+                    logger.info(
+                        "[BrollGate] STABILITY GAP ts=%.1f asset=%s reason=contradiction "
+                        "(no shared keywords with '%s', gap=%.1fs ≥ 1s — allowed)",
+                        ts, Path(np_).name, _last_concept[:40], _gap,
+                    )
+
+        _stability_pairs.append((ts, np_, dur))
+        _last_concept = _asset_name
+        _last_ts = ts + dur
+
+    valid_pairs = _stability_pairs
+
+    if not valid_pairs:
+        logger.warning("[BrollCompositor] compose_overlay_multi: all B-rolls rejected by stability gate")
+        return False
+
     inputs: list[str] = ["-i", str(main_path)]
     for _, np_, _ in valid_pairs:
         inputs += ["-i", str(np_)]
 
+    # ── Enforce minimum 4s duration for fade in/out to work ────────────────
+    _FADE_DUR = 0.4  # fixed 0.4s fade in and fade out
+    _MIN_BROLL_DUR = 4.0  # minimum 4s to allow 0.4s fade in + content + 0.4s fade out
+    _filtered_pairs = []
+    for ts, np_, dur in valid_pairs:
+        if dur < _MIN_BROLL_DUR:
+            logger.info(
+                "[BROLL] Skipped b-roll at t=%.1fs (dur=%.1fs < min %.1fs for fade in/out)",
+                ts, dur, _MIN_BROLL_DUR,
+            )
+            continue
+        _filtered_pairs.append((ts, np_, dur))
+    valid_pairs = _filtered_pairs
+
+    if not valid_pairs:
+        logger.warning("[BrollCompositor] compose_overlay_multi: all B-rolls too short for fade in/out")
+        return False
+
+    # ── Crossfade transition between consecutive B-roll overlays ──
+    # When two overlays are close together (gap < 1.0s), use a soft
+    # crossfade instead of separate fade-out/fade-in. This creates a
+    # smooth visual flow between related scenes.
+    # The crossfade works by extending the first overlay's enable window
+    # slightly into the second overlay's start, and fading the first out
+    # while the second fades in.
+    _XFADE_DUR = 0.3  # 0.3s crossfade — subtle and clean
     filter_parts: list[str] = []
     prev = "0:v"
     for idx, (ts, _, dur) in enumerate(valid_pairs):
         end_ts = ts + dur
         out_tag = f"vout{idx}"
-        fade_in_d  = min(fade, dur / 2)
-        fade_out_d = min(fade, dur / 2)
-        fade_out_st = end_ts - fade_out_d
-        # CPU fade on B-roll stream before overlay (avoids broken alpha= expression)
-        filter_parts.append(
-            f"[{idx + 1}:v]setpts=PTS-STARTPTS+{ts:.3f}/TB,"
-            f"fade=t=in:st={ts:.3f}:d={fade_in_d:.3f}:alpha=1,"
-            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
-            f"format=yuva420p[bv{idx}_faded]"
-        )
-        filter_parts.append(
-            f"[{prev}][bv{idx}_faded]"
-            f"overlay="
-            f"enable='between(t,{ts:.3f},{end_ts:.3f})':"
-            f"x=0:y=0:format=auto"
-            f"[{out_tag}]"
-        )
+        fade_out_st = dur - _FADE_DUR
+
+        # Check if this overlay is close to the next one
+        _next_ts = valid_pairs[idx + 1][0] if idx + 1 < len(valid_pairs) else None
+        _gap_to_next = _next_ts - end_ts if _next_ts is not None else None
+        _use_crossfade = _gap_to_next is not None and 0 < _gap_to_next < 1.0
+
+        if _use_crossfade:
+            # Crossfade: extend this overlay's end into the next overlay's start
+            # by _XFADE_DUR seconds. The fade-out starts earlier so it overlaps
+            # with the next overlay's fade-in.
+            _cross_end = end_ts + _XFADE_DUR
+            _cross_fade_out_st = dur - _XFADE_DUR  # start fading out earlier
+            logger.info(
+                "[BROLL] Crossfade: overlay %d→%d (gap=%.2fs, xfade=%.1fs)",
+                idx, idx + 1, _gap_to_next, _XFADE_DUR,
+            )
+            filter_parts.append(
+                f"[{idx + 1}:v]setpts=PTS-STARTPTS+{ts:.3f}/TB,"
+                f"format=rgba,"
+                f"fade=t=in:st=0:d={_FADE_DUR:.3f}:alpha=1,"
+                f"fade=t=out:st={_cross_fade_out_st:.3f}:d={_XFADE_DUR:.3f}:alpha=1,"
+                f"format=yuva420p[bv{idx}_faded]"
+            )
+            filter_parts.append(
+                f"[{prev}][bv{idx}_faded]"
+                f"overlay="
+                f"enable='between(t,{ts:.3f},{_cross_end:.3f})':"
+                f"eof_action=endall:"
+                f"x=0:y=0:format=auto"
+                f"[{out_tag}]"
+            )
+        else:
+            # Standard fade in/out (no crossfade)
+            logger.info(
+                "[BROLL] Fade applied: in=%.1fs out=%.1fs duration=%.1fs",
+                _FADE_DUR, _FADE_DUR, dur,
+            )
+            filter_parts.append(
+                f"[{idx + 1}:v]setpts=PTS-STARTPTS+{ts:.3f}/TB,"
+                f"format=rgba,"
+                f"fade=t=in:st=0:d={_FADE_DUR:.3f}:alpha=1,"
+                f"fade=t=out:st={fade_out_st:.3f}:d={_FADE_DUR:.3f}:alpha=1,"
+                f"format=yuva420p[bv{idx}_faded]"
+            )
+            filter_parts.append(
+                f"[{prev}][bv{idx}_faded]"
+                f"overlay="
+                f"enable='between(t,{ts:.3f},{end_ts:.3f})':"
+                f"eof_action=endall:"
+                f"x=0:y=0:format=auto"
+                f"[{out_tag}]"
+            )
         prev = out_tag
 
     filter_complex = ";".join(filter_parts)
+    
+    # ── Validate filtergraph before execution ────────────────────────────────
+    # Log the full filtergraph string so invalid syntax can be debugged.
+    # If the filtergraph is empty or malformed, raise immediately.
+    if not filter_complex or len(filter_complex) < 10:
+        error_msg = f"[BrollCompositor] Invalid filtergraph (empty or too short): {filter_complex[:200]}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
 
     cmd = [
         _get_ffmpeg_exe(), "-y",

@@ -256,6 +256,14 @@ class FeatureFlagManager:
             mod.FEATURE_FLAGS = cls()
 
 
+# ── Fallback map for health checker status table ────────────────────────────
+# Built from FLAG_META metadata. Each entry maps a feature flag key to its
+# human-readable fallback description.
+FALLBACK_MAP: Dict[str, str] = {
+    key: meta.get("fallback", "—")
+    for key, meta in FLAG_META.items()
+}
+
 # ── Module-level convenience functions ──────────────────────────────────────
 
 FEATURE_FLAGS = FeatureFlagManager()

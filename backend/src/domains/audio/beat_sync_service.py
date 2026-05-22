@@ -245,6 +245,7 @@ async def mix_bgm_beat_synced(
     fade_out: float = 2.0,
     preferred_category: Optional[str] = None,
     word_timings: Optional[List[Dict[str, Any]]] = None,
+    intensity: float = 0.5,
 ) -> Dict[str, Any]:
     """
     Mix beat-synced BGM into a video.
@@ -254,8 +255,16 @@ async def mix_bgm_beat_synced(
     3. Build an adaptive volume envelope: low during speech, louder in gaps.
     4. Run FFmpeg amix.
 
+    intensity (0.0–1.0) controls cut frequency relative to beats:
+      - At 0.3, cut every 4 beats.
+      - At 0.9, cut every beat.
+      Default 0.5.
+
     Returns a result dict with bpm, track used, and success flag.
     """
+    # Clamp intensity to [0.0, 1.0]
+    intensity = max(0.0, min(1.0, intensity))
+
     # Step 1: BPM analysis
     bpm_info: Dict[str, Any] = {"bpm": target_bpm or 95.0, "beat_times": [], "confidence": 0.0}
     if target_bpm is None:

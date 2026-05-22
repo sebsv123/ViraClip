@@ -225,6 +225,9 @@ class CreativePipeline:
         start = _ts(segment.get("start_time") or segment.get("start"), 0.0)
         end = _ts(segment.get("end_time") or segment.get("end"), start + 60.0)
         transcript = segment.get("text", segment.get("transcript", ""))
+        if not transcript and words:
+            transcript = " ".join(w.get("word", "") for w in words if isinstance(w, dict))
+            logger.debug("  [Creative] Reconstructed transcript from %d word timings: %s", len(words), transcript[:120])
 
         meta: dict = {
             "creative_enhanced": False,
@@ -310,6 +313,100 @@ class CreativePipeline:
         except Exception as exc:
             _log_step_error("Step 1 (Timeline)", exc)
             _mark_fail("step_1_timeline")
+
+        # ── 1.5. Smart Auto Editor (viral text pops + jump cuts) ──────────────
+        _sae_enabled = os.getenv("SMART_AUTO_EDITOR_ENABLED", "false").lower() == "true"
+        if _sae_enabled and not _skip("smart_auto_editor"):
+            logger.info("  [Creative] Step 1.5/8: Smart Auto Editor...")
+            try:
+                from ...services.smart_auto_editor import SmartAutoEditor, ViralEditRules
+                sae = SmartAutoEditor()
+                rules = ViralEditRules()
+                # Run analysis
+                decisions = await sae.analyze_and_edit(
+                    clip_path=clip_path,
+                    transcript=transcript,
+                    words=words or [],
+                    audio_features=audio_features or {},
+                    rules=rules,
+                )
+                if decisions and decisions.get("text_pops"):
+                    # Apply text pop overlays
+                    text_pops = decisions["text_pops"]
+                    sae_output = clip_path.with_name(f"sae_{clip_path.name}")
+                    ok = await sae.apply_text_pops(
+                        clip_path=clip_path,
+                        output_path=sae_output,
+                        text_pops=text_pops,
+                    )
+                    if ok and sae_output.exists() and sae_output.stat().st_size > 0:
+                        clip_path.unlink(missing_ok=True)
+                        sae_output.rename(clip_path)
+                        meta["sae_text_pops"] = len(text_pops)
+                        meta["sae_jump_cuts"] = len(decisions.get("jump_cuts", []))
+                        meta["sae_speed_ramps"] = len(decisions.get("speed_ramps", []))
+                        logger.info(
+                            "  [Creative] ✓ Step 1.5/8: SAE applied (%d text pops, %d jump cuts, %d speed ramps)",
+                            meta["sae_text_pops"], meta["sae_jump_cuts"], meta["sae_speed_ramps"],
+                        )
+                        steps_ok.append("step_1_5_smart_auto_editor")
+                    else:
+                        sae_output.unlink(missing_ok=True)
+                        _mark_fail("step_1_5_sae_render_failed")
+                else:
+                    logger.info("  [Creative] Step 1.5/8: No SAE decisions generated")
+                    _mark_fail("step_1_5_sae_empty")
+            except ImportError as exc:
+                _log_step_error("Step 1.5 (Smart Auto Editor) - Import", exc)
+                _mark_fail("step_1_5_sae")
+            except Exception as exc:
+                _log_step_error("Step 1.5 (Smart Auto Editor)", exc)
+                _mark_fail("step_1_5_sae")
+        else:
+            if _sae_enabled:
+                logger.info("  [Creative] Step 1.5/8: Smart Auto Editor skipped (user override)")
+            else:
+                logger.debug("  [Creative] Step 1.5/8: Smart Auto Editor disabled (SMART_AUTO_EDITOR_ENABLED=false)")
+
+        # ── 1.75. SFX Orchestrator (after jump cuts, BEFORE BGM/audio mastering) ──
+        _sfx_profile = os.getenv("SFX_PROFILE", "subtle").lower()
+        if _sfx_profile != "none":
+            try:
+                from ...domains.sfx.sfx_orchestrator import SFXOrchestrator
+                sfx = SFXOrchestrator()
+                sfx_output = clip_path.with_name(f"sfx_{clip_path.name}")
+                jump_cut_times = [
+                    float(e.get("time", e.get("timestamp", 0)))
+                    for e in (timeline or [])
+                    if isinstance(e, dict) and e.get("type") in ("jump_cut", "cut")
+                ]
+                # Mood/energy from virality prediction or audio features
+                _mood = meta.get("mood", "neutral")
+                _energy = meta.get("energy_level", audio_features.get("energy", 0.5) if audio_features else 0.5)
+                result = await sfx.process_clip(
+                    input_path=str(clip_path),
+                    output_path=str(sfx_output),
+                    transcript_segments=[{"text": transcript or ""}],
+                    jump_cuts=jump_cut_times,
+                    clip_metadata={
+                        "topic": meta.get("niche", meta.get("topic", "")),
+                        "mood": _mood,
+                        "energy": _energy,
+                        "duration": meta.get("duration", end - start or 60),
+                    },
+                )
+                if result and sfx_output.exists() and sfx_output.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    sfx_output.rename(clip_path)
+                    meta["sfx_injected"] = len(jump_cut_times)
+                    logger.info("  [Creative] ✓ Step 1.75/8: SFX applied (profile=%s, %d SFX)", _sfx_profile, len(jump_cut_times))
+                    steps_ok.append("step_1_75_sfx")
+                else:
+                    logger.info("  [Creative] Step 1.75/8: SFX skipped (no assets found)")
+                    _mark_fail("step_1_75_sfx_empty")
+            except Exception as e:
+                logger.warning(f"  [Creative] Step 1.75/8: SFX failed — continuing without: {e}")
+                _mark_fail("step_1_75_sfx")
 
         # ── 2. Virality prediction ────────────────────────────────────────────
         logger.info("  [Creative] Step 2/8: Virality prediction...")
@@ -707,6 +804,44 @@ class CreativePipeline:
             overlay_engine = get_contextual_overlay_engine()
             overlayed = clip_path.with_name(f"overlayed_{clip_path.name}")
             
+            # Collect B-roll keywords for overlay fallback
+            _broll_kws = []
+            if segment and segment.get("broll_items"):
+                _broll_kws = [b.get("keyword", "") for b in segment["broll_items"] if b.get("keyword")]
+            if not _broll_kws and segment and segment.get("keywords"):
+                _broll_kws = segment["keywords"] if isinstance(segment["keywords"], list) else []
+            
+            # DEBUG: log what we have before LLM fallback
+            logger.info(
+                "  [Creative] Step 5.5: _broll_kws=%s (len=%d) transcript=%s (len=%d)",
+                _broll_kws, len(_broll_kws),
+                repr(transcript[:80]) if transcript else "EMPTY",
+                len(transcript) if transcript else 0,
+            )
+            
+            # Fallback: use LLM to extract keywords from transcript if no B-roll keywords available
+            if not _broll_kws and transcript:
+                try:
+                    from ...domains.broll.broll_service import BrollService
+                    llm_kws = await BrollService().extract_keywords(transcript)
+                    if llm_kws:
+                        _broll_kws = llm_kws
+                        logger.info("  [Creative] Step 5.5: LLM fallback keywords: %s", llm_kws)
+                except Exception as _llm_e:
+                    logger.debug("  [Creative] Step 5.5: LLM keyword fallback failed: %s", _llm_e)
+            
+            # Also try LLM fallback even if _broll_kws is populated but from broll_items (may not match VISUAL_KEYWORDS dict)
+            if _broll_kws and transcript:
+                try:
+                    from ...domains.broll.broll_service import BrollService
+                    llm_kws = await BrollService().extract_keywords(transcript)
+                    if llm_kws:
+                        logger.info("  [Creative] Step 5.5: LLM keywords (supplement): %s (existing: %s)", llm_kws, _broll_kws)
+                        # Prefer LLM keywords over broll_items keywords (more likely to match VISUAL_KEYWORDS dict)
+                        _broll_kws = llm_kws
+                except Exception as _llm_e2:
+                    logger.debug("  [Creative] Step 5.5: LLM keyword supplement failed: %s", _llm_e2)
+            
             overlay_result = await overlay_engine.apply_overlays(
                 video_path=clip_path,
                 output_path=overlayed,
@@ -714,7 +849,9 @@ class CreativePipeline:
                 word_timings=words or [],
                 audio_features=audio_features or {},
                 virality_score=meta.get("viral_score", 50.0),
-                overlay_frequency="adaptive"
+                overlay_frequency="adaptive",
+                mood=meta.get("mood", "neutral"),
+                broll_keywords=_broll_kws or None,
             )
             
             if overlay_result.success and overlayed.exists() and overlayed.stat().st_size > 0:
@@ -727,7 +864,7 @@ class CreativePipeline:
                 )
             else:
                 overlayed.unlink(missing_ok=True)
-                logger.warning("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
+                logger.debug("  [Creative] Contextual overlays skipped: %s", overlay_result.error)
             if overlay_result.success:
                 steps_ok.append("step_5_5_overlays")
             else:
@@ -757,7 +894,11 @@ class CreativePipeline:
             _face_autocrop_enabled = get_config().face_autocrop_enabled
         except Exception:
             pass
-        _skip_zoom = _autocrop_applied and _face_autocrop_enabled
+        # FIX 2: When face_autocrop is enabled, skip impact_zoom entirely to avoid
+        # conflicting crop trajectories. Previously only skipped when autocrop had
+        # already been applied to this specific clip — now also skips when the
+        # feature is enabled in config (even if not yet applied to this clip).
+        _skip_zoom = _face_autocrop_enabled
         try:
             if preset is None:
                 logger.warning("  [Creative] No preset selected, using default fallback")
@@ -880,38 +1021,6 @@ class CreativePipeline:
         
         meta["speed_control_applied"] = speed_applied
 
-        # ── 6.5. SFX Orchestrator (Freesound + LLM) — before audio mastering ──
-        if os.getenv("SFX_ENABLED", "false").lower() == "true":
-            try:
-                from ...domains.sfx.sfx_orchestrator import SFXOrchestrator
-                sfx = SFXOrchestrator()
-                sfx_output = clip_path.with_name(f"sfx_{clip_path.name}")
-                jump_cut_times = [
-                    float(e.get("time", e.get("timestamp", 0)))
-                    for e in (timeline or [])
-                    if isinstance(e, dict) and e.get("type") in ("jump_cut", "cut")
-                ]
-                result = await sfx.process_clip(
-                    input_path=str(clip_path),
-                    output_path=str(sfx_output),
-                    transcript_segments=[{"text": transcript or ""}],
-                    jump_cuts=jump_cut_times,
-                    clip_metadata={
-                        "topic": meta.get("niche", meta.get("topic", "")),
-                        "mood": meta.get("mood", "neutral"),
-                        "energy": meta.get("energy_level", 0.5),
-                        "duration": meta.get("duration", end - start or 60),
-                    },
-                )
-                if result and sfx_output.exists() and sfx_output.stat().st_size > 0:
-                    clip_path.unlink(missing_ok=True)
-                    sfx_output.rename(clip_path)
-                    logger.info("  [Creative] ✓ Step 6.5/8: SFX applied via Freesound+LLM")
-                else:
-                    logger.info("  [Creative] Step 6.5/8: SFX skipped (no assets found)")
-            except Exception as e:
-                logger.warning(f"  [Creative] Step 6.5/8: SFX failed — continuing without: {e}")
-
         # ── 7. Audio mastering (loudnorm + SFX + ducking) ─────────────────────
         logger.info("  [Creative] Step 7/8: Audio mastering (loudnorm + SFX + ducking)...")
         sfx_count = 0
@@ -988,6 +1097,49 @@ class CreativePipeline:
         meta["loudnorm_applied"] = loudnorm_applied
         meta["audio_ducking_applied"] = ducking_applied
 
+        # ── 7.5. Audio Denoiser (after ducking, before QA) ────────────────────
+        _denoise_enabled = os.getenv("AUDIO_DENOISE_ENABLED", "false").lower() == "true"
+        denoise_applied = False
+        if _denoise_enabled and not _skip("audio_denoise"):
+            logger.info("  [Creative] Step 7.5/8: Audio denoiser...")
+            try:
+                from ...domains.audio.audio_denoiser import denoise_audio
+                denoised = clip_path.with_name(f"denoised_{clip_path.name}")
+                denoise_result = await denoise_audio(
+                    input_path=str(clip_path),
+                    output_path=str(denoised),
+                    noise_reduction=True,
+                    voice_isolation=True,
+                    loudnorm_target_lufs=-14.0,
+                    apply_loudnorm=True,
+                )
+                if denoise_result.success and denoised.exists() and denoised.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    denoised.rename(clip_path)
+                    denoise_applied = True
+                    meta["audio_denoise_applied"] = True
+                    logger.info(
+                        "  [Creative] ✓ Step 7.5/8: Audio denoised (noise_reduction=%s, voice_isolation=%s)",
+                        denoise_result.noise_reduction_applied,
+                        denoise_result.voice_isolation_applied,
+                    )
+                    steps_ok.append("step_7_5_audio_denoise")
+                else:
+                    denoised.unlink(missing_ok=True)
+                    _mark_fail("step_7_5_denoise_failed")
+                    logger.warning("  [Creative] Step 7.5/8: Audio denoise failed")
+            except ImportError as exc:
+                _log_step_error("Step 7.5 (Audio Denoise) - Import", exc)
+                _mark_fail("step_7_5_audio_denoise")
+            except Exception as exc:
+                _log_step_error("Step 7.5 (Audio Denoise)", exc)
+                _mark_fail("step_7_5_audio_denoise")
+        else:
+            if _denoise_enabled:
+                logger.info("  [Creative] Step 7.5/8: Audio denoise skipped (user override)")
+            else:
+                logger.debug("  [Creative] Step 7.5/8: Audio denoise disabled (AUDIO_DENOISE_ENABLED=false)")
+
         # ── 8. QA + render manifest ───────────────────────────────────────────
         logger.info("  [Creative] Step 8/8: QA + render manifest...")
         try:
@@ -1005,6 +1157,7 @@ class CreativePipeline:
                 sfx_count=sfx_count,
                 broll_count=broll_count,
                 loudnorm_applied=loudnorm_applied,
+                pipeline_failed_steps=steps_failed,
             )
             meta["qa_passed"] = manifest.qa_passed
             meta["qa_issues"] = manifest.qa_issues
@@ -1019,6 +1172,54 @@ class CreativePipeline:
         except Exception as exc:
             _log_step_error("Step 8 (QA)", exc)
             _mark_fail("step_8_qa")
+
+        # ── 8.5. Brand Overlay (final step before export) ──────────────────────
+        _brand_enabled = os.getenv("BRAND_OVERLAY_ENABLED", "false").lower() == "true"
+        brand_applied = False
+        if _brand_enabled and not _skip("brand_overlay"):
+            logger.info("  [Creative] Step 8.5/8: Brand overlay...")
+            try:
+                from ...services.brand_overlay_service import BrandConfig, apply_brand_overlay
+                cfg = BrandConfig(
+                    text=os.getenv("BRAND_OVERLAY_TEXT", ""),
+                    image_path=os.getenv("BRAND_OVERLAY_IMAGE", ""),
+                    position=os.getenv("BRAND_OVERLAY_POSITION", "bottom_right"),
+                    padding_x=int(os.getenv("BRAND_OVERLAY_PADDING_X", "20")),
+                    padding_y=int(os.getenv("BRAND_OVERLAY_PADDING_Y", "20")),
+                    font_size=int(os.getenv("BRAND_OVERLAY_FONT_SIZE", "28")),
+                    font_color=os.getenv("BRAND_OVERLAY_FONT_COLOR", "white"),
+                    font_opacity=float(os.getenv("BRAND_OVERLAY_FONT_OPACITY", "0.85")),
+                    image_opacity=float(os.getenv("BRAND_OVERLAY_IMAGE_OPACITY", "0.80")),
+                    image_scale=os.getenv("BRAND_OVERLAY_IMAGE_SCALE", "80:-1"),
+                )
+                branded = clip_path.with_name(f"branded_{clip_path.name}")
+                result_path = await apply_brand_overlay(
+                    input_path=str(clip_path),
+                    output_path=str(branded),
+                    cfg=cfg,
+                )
+                if result_path == str(branded) and branded.exists() and branded.stat().st_size > 0:
+                    clip_path.unlink(missing_ok=True)
+                    branded.rename(clip_path)
+                    brand_applied = True
+                    meta["brand_overlay_applied"] = True
+                    logger.info("  [Creative] ✓ Step 8.5/8: Brand overlay applied")
+                    steps_ok.append("step_8_5_brand_overlay")
+                else:
+                    branded.unlink(missing_ok=True)
+                    _mark_fail("step_8_5_brand_overlay_failed")
+                    logger.warning("  [Creative] Step 8.5/8: Brand overlay failed")
+            except ImportError as exc:
+                _log_step_error("Step 8.5 (Brand Overlay) - Import", exc)
+                _mark_fail("step_8_5_brand_overlay")
+            except Exception as exc:
+                _log_step_error("Step 8.5 (Brand Overlay)", exc)
+                _mark_fail("step_8_5_brand_overlay")
+        else:
+            if _brand_enabled:
+                logger.info("  [Creative] Step 8.5/8: Brand overlay skipped (user override)")
+            else:
+                logger.debug("  [Creative] Step 8.5/8: Brand overlay disabled (BRAND_OVERLAY_ENABLED=false)")
 
         # Calculate creative_enhanced based on actual metadata flags (at least 2 must be true)
         _ok = sum([

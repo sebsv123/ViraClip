@@ -1,6 +1,8 @@
+import os
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
 """
 GPU Worker Tasks — Phase 5.2
-==============================
 Tareas ARQ que requieren GPU: T2V B-roll, TTS, upscaling, LoRA training.
 Los workers CPU nunca toman estas tareas; solo el gpu_worker las procesa.
 

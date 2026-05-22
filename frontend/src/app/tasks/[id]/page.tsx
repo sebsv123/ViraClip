@@ -243,6 +243,55 @@ export default function TaskPage() {
   const [suggestionStudioOpen, setSuggestionStudioOpen] = useState(false);
   const [suggestionStudioClipId, setSuggestionStudioClipId] = useState<string | null>(null);
 
+  // Publish state
+  const [publishStatus, setPublishStatus] = useState<Record<string, { success: boolean; error?: string }>>({});
+  const [publishingClipId, setPublishingClipId] = useState<string | null>(null);
+
+  const handlePublishClip = async (clipId: string, platform: string, title: string) => {
+    const key = `${clipId}_${platform}`;
+    setPublishingClipId(key);
+    setPublishStatus(prev => ({ ...prev, [key]: { success: false } }));
+    try {
+      const res = await fetch(`/api/tasks/${params.id}/clips/${clipId}/publish`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform,
+          title: title || "ViraClip Short",
+          hashtags: [],
+          privacy: "public",
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPublishStatus(prev => ({ ...prev, [key]: { success: true } }));
+        setTimeout(() => {
+          setPublishStatus(prev => {
+            const next = { ...prev };
+            delete next[key];
+            return next;
+          });
+        }, 5000);
+      } else if (res.status === 401) {
+        // Not connected — redirect to OAuth
+        const oauthUrls: Record<string, string> = {
+          tiktok: "/auth/tiktok/callback",
+          instagram: "/auth/instagram/callback",
+          youtube: "/auth/youtube/callback",
+        };
+        window.location.href = oauthUrls[platform] || "/";
+      } else {
+        const err = await res.json().catch(() => ({ detail: "Publish failed" }));
+        const msg = typeof err.detail === "string" ? err.detail : err.detail?.error || "Publish failed";
+        setPublishStatus(prev => ({ ...prev, [key]: { success: false, error: msg } }));
+      }
+    } catch (err) {
+      setPublishStatus(prev => ({ ...prev, [key]: { success: false, error: String(err) } }));
+    } finally {
+      setPublishingClipId(null);
+    }
+  };
+
   // Interactive waiting experience states
   const [clickCount, setClickCount] = useState(0);
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
@@ -2179,6 +2228,52 @@ export default function TaskPage() {
                           Studio
                         </Button>
                       </div>
+
+                      {/* Publish buttons */}
+                      <div className="flex gap-2 mt-2">
+                        {(["tiktok", "instagram", "youtube"] as const).map((platform) => {
+                          const status = publishStatus[`${clip.id}_${platform}`];
+                          const isPublishing = publishingClipId === `${clip.id}_${platform}`;
+                          return (
+                            <Button
+                              key={platform}
+                              size="sm"
+                              variant="outline"
+                              disabled={isPublishing}
+                              onClick={() => handlePublishClip(clip.id, platform, clip.text || "")}
+                              className={
+                                status?.success
+                                  ? "border-green-500 text-green-500 bg-green-500/10"
+                                  : status?.error
+                                  ? "border-red-500 text-red-500 bg-red-500/10"
+                                  : platform === "tiktok"
+                                  ? "border-black text-black dark:border-white dark:text-white"
+                                  : platform === "instagram"
+                                  ? "border-pink-500 text-pink-500"
+                                  : "border-red-600 text-red-600"
+                              }
+                            >
+                              {isPublishing ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : status?.success ? (
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                              ) : (
+                                <Send className="w-3.5 h-3.5" />
+                              )}
+                              {platform === "tiktok" ? "TikTok" : platform === "instagram" ? "Reels" : "Shorts"}
+                              {status?.success && " ✓"}
+                            </Button>
+                          );
+                        })}
+                      </div>
+                      {Object.entries(publishStatus).filter(([key]) => key.startsWith(clip.id)).map(([key, s]) => {
+                        const status = s as { success: boolean; error?: string };
+                        return status.error ? (
+                          <p key={key} className="text-xs text-red-500 mt-1">
+                            {status.error}
+                          </p>
+                        ) : null;
+                      })}
 
                       {musicPickerClipId === clip.id && (
                         <div className="mt-3 p-3 border border-purple-500/30 rounded-lg bg-purple-500/5 flex flex-wrap gap-2 items-center">

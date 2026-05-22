@@ -6,7 +6,6 @@
 #     Layer 1: uv sync from pyproject.toml (rebuilds only when deps change)
 #     Layer 2: ML deps (faster-whisper, mediapipe, etc. — rarely change)
 #     Layer 3: whisperx + TTS (rarely change)
-#     Layer 4: torch cu130 + numpy pin (UNA SOLA VEZ, al final — ~5GB, cached forever)
 #     Source code is NOT copied here — only pyproject.toml for dep resolution.
 #   Stage 2 (runtime): Minimal image — copy only .venv + app code from builder
 #   Result: ~6-8GB final image instead of 42GB
@@ -161,36 +160,29 @@ RUN uv venv --seed .venv
 # uv sync installs the project's declared dependencies.
 COPY pyproject.toml uv.lock* ./
 RUN pip install "protobuf>=3.20.0,<4.0.0" --force-reinstall
+ENV UV_HTTP_TIMEOUT=600
 RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/whl/cu132 \
     && rm -rf /root/.cache/uv
 
 # ── Layer 2: deps ML secundarias (cambian poco) ───────────────────────
-# faster-whisper, sentence-transformers, mediapipe, opencv, moviepy, etc.
-# These are stable pinned versions that rarely change.
+# sentence-transformers, mediapipe, edge-tts, datasets, huggingface-hub,
+# pandas, scikit-learn, xgboost, matplotlib, pydub, psutil, etc.
+# These are NOT in pyproject.toml — they are installed via pip only.
+# Packages already in pyproject.toml (faster-whisper, librosa, opencv,
+# moviepy, Pillow, ultralytics, scenedetect, httpx, prometheus-client,
+# google-api-python-client, deap, pymilvus, kaggle, redis) are excluded
+# here because uv sync already installed them in Layer 1.
 RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-    "faster-whisper==1.1.1" \
     "sentence-transformers" \
-    "librosa" \
     "mediapipe==0.10.5" \
-    "opencv-python-headless" \
-    "moviepy>=2.0.0" \
-    "Pillow" "pydub" "psutil" \
-    "ultralytics>=8.3.0" \
-    "scenedetect[opencv]>=0.6.5" \
-    "httpx>=0.27.0" \
+    "pydub" "psutil" \
     "edge-tts>=6.1.9" \
     "datasets>=2.14.0" \
     "huggingface-hub>=0.17.0" \
     "pandas>=2.0.0" \
     "scikit-learn>=1.3.0" \
     "xgboost>=2.0.0" \
-    "prometheus-client>=0.19.0" \
-    "deap>=1.4.0" \
     "matplotlib" \
-    "pymilvus>=2.3.0" \
-    "redis[asyncio]>=4.5.0" \
-    "google-api-python-client>=2.100.0" \
-    "kaggle>=1.5.16" \
     "protobuf>=3.20.3,<4"
 
 # ── Layer 3: whisperx y sus deps (cambian poco) ───────────────────────
@@ -209,20 +201,6 @@ RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
 RUN .venv/bin/pip install --no-cache-dir --no-deps "whisperx" \
     && .venv/bin/pip install --no-cache-dir --no-deps "TTS>=0.22.0"
 
-# ── Layer 4: torch cu132 + numpy pin (UNA SOLA VEZ, al final) ─────────
-# torch se instala AQUÍ, después de todo lo demás, para que nada lo
-# sobreescriba. Sin --force-reinstall — solo se instala una vez.
-# torchaudio se instala sin +cu132 porque no existe en el índice cu132
-# (máx versión en cu132 es 2.2.0). PyPI resuelve torchaudio>=2.2.0.
-RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
-    torch==2.12.0+cu132 \
-    torchvision==0.27.0+cu132 \
-    torchaudio>=2.2.0 \
-    --index-url https://download.pytorch.org/whl/cu132 \
-    && .venv/bin/pip install --no-cache-dir "numpy==2.2.6" \
-    && .venv/bin/pip install --no-cache-dir "ctranslate2" --pre --index-url https://pypi.org/simple/ \
-    && rm -rf /root/.cache/pip /tmp/*
-
 # ── Stage 2: Runtime (minimal) ────────────────────────────────────────
 FROM nvidia/cuda:13.2.0-runtime-ubuntu22.04
 
@@ -232,6 +210,7 @@ ENV PYTHONPATH=/app
 ENV CUDA_MODULE_LOADING=LAZY
 ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512,garbage_collection_threshold:0.6
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 
 # Only essential runtime system deps
 # ffmpeg is installed from the NVIDIA CUDA repo (already configured in the
@@ -280,7 +259,10 @@ COPY --from=builder /usr/local/lib/libx264.so* /usr/local/lib/
 COPY --from=builder /usr/local/lib/libx265.so* /usr/local/lib/
 # libfdk-aac is installed via apt (libfdk-aac-dev), so it lives in /usr/lib/x86_64-linux-gnu/
 COPY --from=builder /usr/lib/x86_64-linux-gnu/libfdk-aac.so* /usr/local/lib/
-RUN ldconfig
+# Ensure torchcodec can find libavutil.so.60 (FFmpeg 7.1 from builder)
+# The system ffmpeg (4.4.2) provides libavutil.so.56 which torchcodec rejects.
+# The builder's FFmpeg 7.1 provides libavutil.so.60 in /usr/local/lib/.
+RUN ldconfig && ldconfig -p | grep libavutil || true
 # Log which ffmpeg we got and verify NVENC
 RUN echo "=== FFmpeg version ===" && \
     /usr/local/bin/ffmpeg -version 2>&1 | head -3 && \
@@ -316,23 +298,36 @@ RUN .venv/bin/python /app/scripts/generate_sfx_assets.py || echo "SFX generation
 # Bootstrap LUT files
 RUN .venv/bin/python /app/scripts/bootstrap_luts.py || echo "LUT bootstrap skipped"
 
+# Install fontconfig for system font registration
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fontconfig \
+    && rm -rf /var/lib/apt/lists/*
+
 # Download subtitle fonts (Google Fonts CDN — stable URLs)
-RUN curl -fsSL \
-    "https://fonts.gstatic.com/s/oswald/v57/TK3_WkUHHAIjg75cFRf3bXL8LICs1xZogUE.ttf" \
-    -o /app/fonts/TikTokSans-Regular.ttf \
-    && curl -fsSL \
+# Each font is downloaded to /app/fonts/ AND symlinked into the system font
+# directory so libass (used by FFmpeg subtitles filter) can find them by name.
+RUN mkdir -p /app/fonts /usr/local/share/fonts/viraclip && \
+    curl -fsSL \
     "https://fonts.gstatic.com/s/montserrat/v30/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
-    -o /app/fonts/Montserrat-Regular.ttf \
-    && curl -fsSL \
+    -o /app/fonts/Montserrat-Regular.ttf && \
+    ln -sf /app/fonts/Montserrat-Regular.ttf /usr/local/share/fonts/viraclip/Montserrat-Regular.ttf && \
+    curl -fsSL \
     "https://fonts.gstatic.com/s/montserrat/v30/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
-    -o /app/fonts/Montserrat-Bold.ttf \
-    && curl -fsSL \
+    -o /app/fonts/Montserrat-Bold.ttf && \
+    ln -sf /app/fonts/Montserrat-Bold.ttf /usr/local/share/fonts/viraclip/Montserrat-Bold.ttf && \
+    curl -fsSL \
     "https://fonts.gstatic.com/s/bebasneue/v15/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.ttf" \
-    -o /app/fonts/BebasNeue-Regular.ttf \
-    && curl -fsSL \
+    -o /app/fonts/BebasNeue-Regular.ttf && \
+    ln -sf /app/fonts/BebasNeue-Regular.ttf /usr/local/share/fonts/viraclip/BebasNeue-Regular.ttf && \
+    curl -fsSL \
     "https://fonts.gstatic.com/s/inter/v19/UcC73FwrK3iLTeHuS_fctQtRMpLv3Y1k.ttf" \
-    -o /app/fonts/Inter-Regular.ttf \
-    && fc-cache -fv \
+    -o /app/fonts/Inter-Regular.ttf && \
+    ln -sf /app/fonts/Inter-Regular.ttf /usr/local/share/fonts/viraclip/Inter-Regular.ttf && \
+    curl -fsSL \
+    "https://fonts.gstatic.com/s/poppins/v21/pxiByp8kv8JHgFVrLCz7Z1xlFd2JQEk.ttf" \
+    -o /app/fonts/Poppins-Bold.ttf && \
+    ln -sf /app/fonts/Poppins-Bold.ttf /usr/local/share/fonts/viraclip/Poppins-Bold.ttf && \
+    fc-cache -fv \
     || echo "Font download skipped — Arial fallback"
 
 # Download CC0 background music tracks (YouTube Audio Library / Free Music Archive)

@@ -30,6 +30,10 @@ def build_hook_title(segment: Dict[str, Any]) -> Optional[str]:
     filler_starts = {
         "uh", "um", "like", "so", "and", "but", "well",
         "okay", "ok", "right", "you know",
+        # Spanish fillers
+        "bueno", "o sea", "es que", "pues", "la verdad", "sabes",
+        "me refiero", "tipo", "tío", "o sea que", "claro", "entonces",
+        "básicamente", "literalmente", "o sea tío",
     }
     words = text.split()
     while words and words[0].lower().strip(".,!?") in filler_starts:

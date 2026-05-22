@@ -47,7 +47,13 @@ DRIFT_THRESHOLD = float(os.getenv("ENGAGEMENT_DRIFT_THRESHOLD", "15.0"))
 #  Feature extraction from transcript words + audio
 # ─────────────────────────────────────────────────────────────────────────────
 
-_FILLER_WORDS = {"um", "uh", "like", "you know", "basically", "literally", "actually", "right"}
+_FILLER_WORDS = {
+    "um", "uh", "like", "you know", "basically", "literally", "actually", "right",
+    # Spanish fillers
+    "bueno", "o sea", "es que", "pues", "la verdad", "sabes",
+    "me refiero", "tipo", "tío", "o sea que", "claro", "entonces",
+    "básicamente", "literalmente", "o sea tío",
+}
 
 _HOOK_KEYWORDS = {
     "question": ["what", "why", "how", "who", "when"],

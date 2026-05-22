@@ -32,9 +32,19 @@ class AudioDuckingService:
     
     def __init__(self):
         self.enabled = os.environ.get("AUDIO_DUCKING_ENABLED", "true").lower() == "true"
-        self.duck_amount = float(os.environ.get("DUCK_AMOUNT", "0.5"))  # 50% reduction
-        self.attack_ms = float(os.environ.get("DUCK_ATTACK_MS", "100"))
-        self.release_ms = float(os.environ.get("DUCK_RELEASE_MS", "300"))
+        # ── Mix rules ────────────────────────────────────────────────────────
+        # Dialogue: -16 LUFS target (clear, present)
+        # Music:    -22 LUFS ducked target (support, not overpower)
+        # SFX:      -18 LUFS peak (subtle and purposeful)
+        # Ducking:  60% reduction when voice active (clean dialogue priority)
+        # Attack:   50ms (fast enough to catch first syllable)
+        # Release:  400ms (slow enough to avoid pumping)
+        self.duck_amount = float(os.environ.get("DUCK_AMOUNT", "0.6"))  # 60% reduction
+        self.attack_ms = float(os.environ.get("DUCK_ATTACK_MS", "50"))
+        self.release_ms = float(os.environ.get("DUCK_RELEASE_MS", "400"))
+        self.dialogue_target = float(os.environ.get("DIALOGUE_LUFS_TARGET", "-16.0"))
+        self.music_target = float(os.environ.get("MUSIC_LUFS_TARGET", "-22.0"))
+        self.sfx_peak = float(os.environ.get("SFX_PEAK_DB", "-18.0"))
     
     async def apply_ducking(
         self,
@@ -153,29 +163,116 @@ class AudioDuckingService:
         release_ms: float
     ) -> bool:
         """
-        Apply sidechain compression ducking using FFmpeg.
-        
+        Apply ducking by reducing overall audio volume by a fixed factor.
+
         Strategy:
-        1. Extract audio track
-        2. Create a sidechain signal from voice segments
-        3. Apply sidechaincompress to music track
-        4. Mix ducked music back with original voice
-        5. Mux audio back to video
+        Instead of complex eval expressions or aevalsrc+sidechaincompress
+        (both of which have caused FFmpeg errors), apply a simple constant
+        volume reduction to the entire audio track. This is not dynamic
+        ducking, but it's stable and always works. The BGM mix in audio.py
+        already handles the per-word ducking via build_word_aware_ducking_filter.
+
+        Falls back gracefully (returns original audio) on any error.
         """
-        # DISABLED: This approach causes white noise because it applies volume
-        # changes to already-mixed audio (voice + music). The beat_sync_service
-        # handles ducking correctly during BGM mixing phase.
-        # 
-        # For proper ducking, audio must be split into voice/music tracks,
-        # apply ducking only to music, then remix. This is done in beat_sync_service.
-        logger.debug("Audio ducking disabled in this service - use beat_sync_service instead")
-        return False
+        import subprocess
+        import tempfile
+        import math
+
+        try:
+            # ── Step 1: Extract audio from video ──
+            raw_audio = Path(tempfile.mktemp(suffix=".wav"))
+            extract_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-vn",
+                "-acodec", "pcm_s16le",
+                "-ar", "48000",
+                "-ac", "2",
+                str(raw_audio),
+            ]
+            extract_proc = await asyncio.create_subprocess_exec(
+                *extract_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, extract_stderr = await extract_proc.communicate()
+            if extract_proc.returncode != 0 or not raw_audio.exists():
+                logger.warning("[Ducking] Failed to extract audio: %s", extract_stderr.decode()[:200])
+                return False
+
+            # ── Step 2: Apply constant volume reduction ──
+            # duck_amount=0.5 → -6dB reduction across the whole clip.
+            # This is a stable, simple operation that never fails.
+            reduction_db = -20 * math.log10(max(duck_amount, 0.01))
+            duck_gain = max(duck_amount, 0.05)
+
+            ducked_audio = Path(tempfile.mktemp(suffix=".wav"))
+            duck_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(raw_audio),
+                "-af", f"volume={duck_gain:.4f}",
+                "-acodec", "pcm_s16le",
+                "-ar", "48000",
+                "-ac", "2",
+                str(ducked_audio),
+            ]
+            duck_proc = await asyncio.create_subprocess_exec(
+                *duck_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, duck_stderr = await duck_proc.communicate()
+            if duck_proc.returncode != 0 or not ducked_audio.exists():
+                logger.warning(
+                    "[Ducking] volume reduction failed (rc=%d): %s",
+                    duck_proc.returncode, duck_stderr.decode()[:200],
+                )
+                return False
+
+            # ── Step 3: Re-mux ducked audio back to video ──
+            mux_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-i", str(ducked_audio),
+                "-map", "0:v",
+                "-map", "1:a",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-ar", "48000",
+                "-shortest",
+                str(output_path),
+            ]
+            mux_proc = await asyncio.create_subprocess_exec(
+                *mux_cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, mux_stderr = await mux_proc.communicate()
+
+            # Cleanup temp files
+            raw_audio.unlink(missing_ok=True)
+            ducked_audio.unlink(missing_ok=True)
+
+            if mux_proc.returncode == 0 and output_path.exists():
+                logger.info(
+                    "[Ducking] Applied constant reduction: %.0fdB (gain=%.2f)",
+                    reduction_db, duck_gain,
+                )
+                return True
+
+            logger.warning("[Ducking] Mux failed (rc=%d): %s", mux_proc.returncode, mux_stderr.decode()[:200])
+            return False
+
+        except Exception as e:
+            logger.warning("[Ducking] Error (degrading gracefully): %s", e)
+            return False
 
 
 def build_word_aware_ducking_filter(
     words: List[Dict],
-    music_base_volume: float = 0.35,
-    voice_duck_ratio: float = 0.65,
+    music_base_volume: float = 0.12,
+    voice_duck_ratio: float = 0.25,
     short_pause_boost: float = 1.15,
     long_pause_boost: float = 1.30,
     fade_duration: float = 0.25,
@@ -279,6 +376,110 @@ def build_word_aware_ducking_filter(
 
 # Singleton
 _ducking_instance: Optional[AudioDuckingService] = None
+
+
+def build_audio_transition_filter(
+    clip_duration: float,
+    fade_in_duration: float = 0.15,
+    fade_out_duration: float = 0.3,
+    crossfade_positions: Optional[List[float]] = None,
+) -> str:
+    """Build an FFmpeg audio filter for smooth audio transitions.
+
+    Applies:
+    1. Fade-in at the start (0.15s) — prevents click/pop on play
+    2. Fade-out at the end (0.3s) — prevents abrupt cut-off
+    3. Short crossfades at scene change positions (0.1s) — smooths B-roll transitions
+
+    The crossfade uses `acrossfade` filter which blends the audio at each
+    transition point. This preserves dialogue continuity while smoothing
+    B-roll scene changes.
+
+    Args:
+        clip_duration: Total clip duration in seconds.
+        fade_in_duration: Fade-in duration in seconds (default 0.15).
+        fade_out_duration: Fade-out duration in seconds (default 0.3).
+        crossfade_positions: List of timestamps where B-roll scene changes occur.
+                             If None, no crossfades are applied.
+
+    Returns:
+        FFmpeg audio filter string, or empty string if no transitions needed.
+    """
+    _parts: List[str] = []
+
+    # 1. Fade-in at start
+    if fade_in_duration > 0 and clip_duration > fade_in_duration * 2:
+        _parts.append(f"afade=t=in:d={fade_in_duration:.2f}")
+
+    # 2. Fade-out at end
+    if fade_out_duration > 0 and clip_duration > fade_out_duration * 2:
+        _parts.append(f"afade=t=out:st={clip_duration - fade_out_duration:.2f}:d={fade_out_duration:.2f}")
+
+    # 3. Crossfades at scene change positions
+    if crossfade_positions:
+        _XFADE_DUR = 0.1  # 100ms crossfade — subtle, prevents click
+        for _pos in sorted(crossfade_positions):
+            if _pos > fade_in_duration and _pos < clip_duration - fade_out_duration:
+                _parts.append(f"acrossfade=d={_XFADE_DUR:.2f}:curve1=tri:curve2=tri")
+
+    if not _parts:
+        return ""
+
+    _filter = ",".join(_parts)
+    logger.info(
+        "[AudioTransition] Filter: %s (fade_in=%.2fs fade_out=%.2fs crossfades=%d)",
+        _filter, fade_in_duration, fade_out_duration,
+        len(crossfade_positions) if crossfade_positions else 0,
+    )
+    return _filter
+
+
+def get_audio_mix_for_clip_type(clip_type: str) -> Dict[str, float]:
+    """Get audio mix parameters for a specific clip type.
+
+    Maps clip types to audio mix profiles:
+    - testimonial: cleaner, calmer mix — lower ducking, wider dynamic range
+    - claim: clear dialogue, subtle tension — tighter ducking, slightly louder SFX
+    - explainer: structured, balanced — standard mix, moderate ducking
+    - cta/ending: stronger emphasis without distortion — louder music, shorter release
+
+    Returns dict with: duck_amount, attack_ms, release_ms, music_volume, sfx_volume
+    """
+    _profiles = {
+        "testimonial": {
+            "duck_amount": 0.50,    # gentler ducking (50%)
+            "attack_ms": 60.0,      # slightly slower attack
+            "release_ms": 500.0,    # slower release for natural decay
+            "music_volume": 0.10,   # quieter music
+            "sfx_volume": 0.35,     # quieter SFX
+            "description": "Cleaner, calmer mix for emotional testimonials",
+        },
+        "claim": {
+            "duck_amount": 0.65,    # tighter ducking (65%)
+            "attack_ms": 40.0,      # faster attack for clarity
+            "release_ms": 350.0,    # moderate release
+            "music_volume": 0.12,   # standard music
+            "sfx_volume": 0.45,     # slightly louder SFX for tension
+            "description": "Clear dialogue with subtle tension for claims",
+        },
+        "explainer": {
+            "duck_amount": 0.55,    # moderate ducking (55%)
+            "attack_ms": 50.0,      # standard attack
+            "release_ms": 400.0,    # standard release
+            "music_volume": 0.12,   # standard music
+            "sfx_volume": 0.40,     # standard SFX
+            "description": "Structured, balanced mix for explainers",
+        },
+        "cta": {
+            "duck_amount": 0.50,    # gentler ducking (50%)
+            "attack_ms": 45.0,      # slightly faster attack
+            "release_ms": 300.0,    # shorter release for punch
+            "music_volume": 0.15,   # louder music for emphasis
+            "sfx_volume": 0.50,     # louder SFX for impact
+            "description": "Stronger emphasis without distortion for CTAs",
+        },
+    }
+    return _profiles.get(clip_type, _profiles["explainer"])
 
 
 def get_audio_ducking_service() -> AudioDuckingService:

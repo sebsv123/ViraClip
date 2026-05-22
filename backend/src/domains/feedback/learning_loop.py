@@ -13,6 +13,7 @@ import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -60,10 +61,34 @@ class LearningLoop:
         sfx_count: int,
         broll_count: int,
         loudnorm_applied: bool,
+        pipeline_failed_steps: Optional[list] = None,
     ) -> RenderManifest:
         duration, size, has_audio = await self._probe(clip_path)
         qa_issues = await self._qa(clip_path, source_path, duration, size, has_audio)
+        # FIX: Tighten QA gate — also check clip health score >= 60 (grade C or better)
+        # This catches subtitle drift, wrong B-roll, dark grading, and missing captions.
         qa_passed = len(qa_issues) == 0
+        try:
+            from ...domains.validation.clip_health_service import generate_health_report
+            _health = generate_health_report(
+                clip_id=f"{task_id}/clip{clip_index}",
+                virality_score=float(getattr(virality_prediction, "score", 0.0)),
+                hook_score=float(getattr(virality_prediction, "hook_score", 0.0)),
+                duration=duration,
+                has_subtitles=bool(words_with_confidence),
+                broll_count=broll_count,
+                loudnorm_applied=loudnorm_applied,
+            )
+            if _health.overall_score < 60:
+                qa_issues.append(f"Clip health score {_health.overall_score}/100 below minimum 60")
+                qa_passed = False
+        except Exception:
+            pass
+        # FIX: Fail QA when B-roll render failed or B-roll was expected but produced 0
+        if broll_count == 0:
+            if pipeline_failed_steps and any("broll" in s for s in pipeline_failed_steps):
+                qa_issues.append("B-roll render failed (pipeline step failed)")
+                qa_passed = False
 
         manifest = RenderManifest(
             task_id=task_id,

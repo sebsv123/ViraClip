@@ -7,6 +7,7 @@ name: viraclip
 x-core-env: &core-env
   PYTHONPATH: /app
   PYTHONUNBUFFERED: 1
+  PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: python
   DATABASE_URL: postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
   TEMP_DIR: /app/temp/uploads
   REDIS_HOST: redis
@@ -35,8 +36,10 @@ x-core-env: &core-env
   MAX_ELITE_CLIPS: ${MAX_ELITE_CLIPS:-3}
   FAST_MODE_TRANSCRIPT_MODEL: ${FAST_MODE_TRANSCRIPT_MODEL:-nano}
   SELF_HOST: ${SELF_HOST:-true}
-  PIXABAY_API_KEY: ${PIXABAY_API_KEY}
   PEXELS_API_KEY: ${PEXELS_API_KEY}
+  PEXELS_API_KEY_2: ${PEXELS_API_KEY_2}
+  PEXELS_API_KEY_3: ${PEXELS_API_KEY_3}
+  PIXABAY_API_KEY: ${PIXABAY_API_KEY}
   COVERR_API_KEY: ${COVERR_API_KEY}
   UNSPLASH_ACCESS_KEY: ${UNSPLASH_ACCESS_KEY}
   FREESOUND_API_KEY: ${FREESOUND_API_KEY}
@@ -45,6 +48,18 @@ x-core-env: &core-env
   DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
   LLM_FALLBACK: ${LLM_FALLBACK:-}
   ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY}
+  ELEVENLABS_API_KEY_2: ${ELEVENLABS_API_KEY_2}
+  VIRAL_SCORING_LLM: ${VIRAL_SCORING_LLM:-}
+  VIDEO_CODEC: ${VIDEO_CODEC:-h264_nvenc}
+  CUT_ZOOM_ENABLED: ${CUT_ZOOM_ENABLED:-true}
+  VIRAL_EFFECTS_ENABLED: ${VIRAL_EFFECTS_ENABLED:-true}
+  LUT_DIR: ${LUT_DIR:-/app/assets/luts}
+  SFX_MAX_PER_CLIP: ${SFX_MAX_PER_CLIP:-4}
+  SFX_VOLUME_DB: ${SFX_VOLUME_DB:--18}
+  FREESOUND_CLIENT_ID: ${FREESOUND_CLIENT_ID:-}
+  GROQ_REQUESTS_PER_MINUTE: ${GROQ_REQUESTS_PER_MINUTE:-20}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-3}
+  COMPOSITE_MIN_CONFIDENCE: ${COMPOSITE_MIN_CONFIDENCE:-0.55}
   NVIDIA_VISIBLE_DEVICES: all
   NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
   NVIDIA_DISABLE_REQUIRE: "1"
@@ -187,6 +202,12 @@ x-worker-base: &worker-base
   dns:
     - 8.8.8.8
     - 1.1.1.1
+  healthcheck:
+    test: ["CMD-SHELL", "bash /app/scripts/healthcheck.sh"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
   volumes: *worker-volumes
   depends_on: *worker-deps
   deploy:
@@ -322,6 +343,7 @@ services:
       - "service.group=backend"
 
   comfyui:
+    profiles: ["disabled"]
     build:
       context: ./comfyui
       dockerfile: Dockerfile

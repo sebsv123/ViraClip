@@ -45,9 +45,15 @@ async def apply_cut_zooms(
     zoom_factor: float = DEFAULT_ZOOM_FACTOR,
     zoom_duration: float = DEFAULT_ZOOM_DURATION,
     fps: int = 30,
+    intensity: float = 0.5,
 ) -> bool:
     """
     Apply zoom transitions at cut points.
+    
+    intensity (0.0–1.0) controls the number of zoom cuts:
+      - < 0.4: no zoom cuts applied.
+      - 0.4–0.7: at most 1 zoom cut.
+      - > 0.7: at most 3 zoom cuts.
     
     Args:
         video_path: Input video file
@@ -56,13 +62,27 @@ async def apply_cut_zooms(
         zoom_factor: Zoom intensity (1.0 = no zoom, 1.1 = 10% zoom)
         zoom_duration: Duration of each zoom in seconds
         fps: Frame rate
+        intensity: Effect intensity (0.0–1.0), derived from segment virality/energy.
         
     Returns:
         True if successful, False otherwise
     """
+    # Clamp intensity to [0.0, 1.0]
+    intensity = max(0.0, min(1.0, intensity))
+
+    # Intensity-based zoom cut limits
+    if intensity < 0.4:
+        logger.info("[cut_zoom] intensity=%.2f < 0.4 — skipping zoom cuts", intensity)
+        return False
+    elif intensity < 0.7:
+        max_zooms = 1
+    else:
+        max_zooms = 3
+
     if not cut_points:
         logger.debug("[cut_zoom] No cut points, skipping zoom")
         return False
+
     
     # Get video dimensions using ffmpeg -i (imageio_ffmpeg doesn't bundle ffprobe)
     # Parse dimensions from stderr output like: "Stream #0:0: Video: h264 ... 1920x1080"
@@ -100,11 +120,13 @@ async def apply_cut_zooms(
     
     # Build zoompan filter with zoom at each cut point
     # Use zoompan's time-based expressions
+    # Limit to max_zooms based on intensity
     zoom_intervals = []
-    for t in cut_points[:10]:  # Limit to 10 zooms max
+    for t in cut_points[:max_zooms]:
         start = max(0, t - zoom_duration / 2)
         end = t + zoom_duration / 2
         zoom_intervals.append((start, end))
+
 
     if not zoom_intervals:
         logger.debug("[cut_zoom] No valid zoom intervals")

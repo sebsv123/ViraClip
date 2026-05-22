@@ -122,16 +122,18 @@ async def creative_services_health():
     }
     
     # Test service imports
+    # These services were refactored from src.services.* into domain-specific
+    # modules. The health check uses the actual module paths.
     services_to_test = [
-        ("multimodal_detector", "src.services.multimodal_detector", "get_multimodal_detector"),
-        ("virality_engine", "src.services.virality_engine", "get_virality_engine"),
-        ("hook_engine", "src.services.hook_engine", "get_hook_engine"),
-        ("smart_templates", "src.services.smart_templates", "get_template_selector"),
-        ("contextual_broll", "src.services.contextual_broll", "get_contextual_broll"),
-        ("video_effects", "src.services.video_effects", "apply_preset_effects"),
-        ("smart_audio", "src.services.smart_audio", "get_smart_audio"),
-        ("learning_loop", "src.services.learning_loop", "get_learning_loop"),
-        ("creative_pipeline", "src.services.creative_pipeline", "get_creative_pipeline"),
+        ("multimodal_detector", "src.domains.detection.multimodal_detector", "get_multimodal_detector"),
+        ("virality_engine", "src.domains.virality.virality_engine", "get_virality_engine"),
+        ("hook_engine", "src.domains.virality.hook_engine", "get_hook_engine"),
+        ("smart_templates", "src.core.smart_templates", "get_template_selector"),
+        ("contextual_broll", "src.domains.broll.contextual_overlay_engine", "ContextualOverlayEngine"),
+        ("video_effects", "src.domains.video.video_effects", "apply_preset_effects"),
+        ("smart_audio", "src.domains.audio.smart_audio", "get_smart_audio"),
+        ("learning_loop", "src.domains.feedback.learning_loop", "get_learning_loop"),
+        ("creative_pipeline", "src.domains.autopilot.creative_pipeline", "get_creative_pipeline"),
     ]
     
     for name, module_path, func_name in services_to_test:

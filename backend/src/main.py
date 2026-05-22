@@ -1,8 +1,21 @@
 import json
+import os as _os
 import sys as _sys
 import io as _io
 
+# ── CRITICAL: Must be set BEFORE any other import ──────────────────────────
+# Protobuf compatibility fix for MediaPipe FaceMesh and grpcio.
+# grpcio 1.80.x calls GetPrototype on MessageFactory, which was removed in
+# protobuf v5+. protobuf 6.x is installed. Setting this env var forces the
+# pure-Python protobuf implementation, which is compatible.
+# Using direct assignment (not setdefault) because gpu_utils.py is imported
+# transitively by the very next import line and its module-level code
+# (import torch → grpcio) would trigger the error before setdefault runs.
+_os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+# ───────────────────────────────────────────────────────────────────────────
+
 # Force UTF-8 on stdout/stderr so emoji in log messages never crash on Windows cp1252
+
 if hasattr(_sys.stdout, 'buffer'):
     _sys.stdout = _io.TextIOWrapper(_sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
 if hasattr(_sys.stderr, 'buffer'):
@@ -49,6 +62,7 @@ from .api.routes.billing import router as billing_router
 from .api.routes.clips import router as clips_router
 from .api.routes.jobs import router as jobs_router
 from .api.routes.whatsapp import router as whatsapp_router
+from .api.routes.auth import router as auth_router
 from .domains.video.video_service import UPLOAD_URL_PREFIX
 
 config = get_config()
@@ -186,6 +200,7 @@ app.include_router(billing_router)
 app.include_router(clips_router)
 app.include_router(jobs_router)
 app.include_router(whatsapp_router)
+app.include_router(auth_router)
 
 # Include admin routers
 from .api.routes.admin import router as admin_router

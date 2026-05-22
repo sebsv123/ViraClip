@@ -70,6 +70,25 @@ async def _cb_record_success(redis=None) -> None:
     _cb_bypassed_until_mem = 0.0
 
 
+def _cb_log_status() -> None:
+    """Log circuit breaker status at startup so operators can see DeepSeek state."""
+    _deepseek_key = bool(os.environ.get("DEEPSEEK_API_KEY", "").strip())
+    if not _deepseek_key:
+        logger.info("🔷 DeepSeek circuit breaker: DISABLED (no DEEPSEEK_API_KEY configured)")
+        return
+    if _cb_bypassed_until_mem > _time.time():
+        remaining = int(_cb_bypassed_until_mem - _time.time())
+        logger.warning(
+            "⚠️ DeepSeek circuit breaker: OPEN (tripped — fallback to Groq for %d more seconds)",
+            remaining,
+        )
+    else:
+        logger.info("🔷 DeepSeek circuit breaker: CLOSED (healthy)")
+
+
+# Log circuit breaker status at module import time (worker startup)
+_cb_log_status()
+
 async def _call_with_retry(
     coro_factory,
     max_attempts: int = 3,

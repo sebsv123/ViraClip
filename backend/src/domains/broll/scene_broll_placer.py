@@ -133,6 +133,7 @@ def get_insert_timestamps(
     video_path: Path | str,
     max_n: int = 3,
     clip_duration: Optional[float] = None,
+    transcript_segments: Optional[List[Dict[str, Any]]] = None,
 ) -> List[float]:
     """
     Return up to *max_n* timestamps (seconds) for B-roll insertion.
@@ -141,8 +142,33 @@ def get_insert_timestamps(
       1. Try PySceneDetect → pick start of best-scored scenes
       2. Try FFmpeg silencedetect midpoints
       3. Fall back to evenly-spaced intervals
+
+    If *transcript_segments* is provided, only emit timestamps that fall
+    within a segment where the speaker has said at least 5 words.
+    Timestamps in silence or before speech starts are dropped.
     """
     video_path = Path(video_path)
+
+    def _filter_by_transcript(ts_list: List[float]) -> List[float]:
+        """Keep only timestamps that fall within transcript segments with ≥5 words."""
+        if not transcript_segments:
+            return ts_list
+        _filtered = []
+        for ts in ts_list:
+            for seg in transcript_segments:
+                seg_start = seg.get("start", 0) if isinstance(seg, dict) else getattr(seg, "start", 0)
+                seg_end = seg.get("end", 0) if isinstance(seg, dict) else getattr(seg, "end", 0)
+                seg_text = seg.get("text", "") if isinstance(seg, dict) else getattr(seg, "text", "")
+                word_count = len(seg_text.split())
+                if seg_start <= ts <= seg_end and word_count >= 5:
+                    _filtered.append(ts)
+                    break
+        if len(_filtered) < len(ts_list):
+            logger.info(
+                "[SceneBroll] Transcript filter: %d/%d timestamps kept (min 5 words per segment)",
+                len(_filtered), len(ts_list),
+            )
+        return _filtered
 
     # 1 — Scene detection
     scenes = detect_scenes(video_path)
@@ -152,6 +178,7 @@ def get_insert_timestamps(
         timestamps = sorted([s for s, _ in scored[:max_n]])
         # Don't insert B-roll in the first 0.5s (keep hook)
         timestamps = [t for t in timestamps if t >= 0.5]
+        timestamps = _filter_by_transcript(timestamps)
         if timestamps:
             logger.info("[SceneBroll] Scene-based timestamps: %s", timestamps)
             return timestamps[:max_n]
@@ -159,8 +186,10 @@ def get_insert_timestamps(
     # 2 — Silence midpoints
     silences = _detect_silences_ffmpeg(video_path)
     if silences:
-        logger.info("[SceneBroll] Silence-based timestamps: %s", silences[:max_n])
-        return silences[:max_n]
+        silences = _filter_by_transcript(silences)
+        if silences:
+            logger.info("[SceneBroll] Silence-based timestamps: %s", silences[:max_n])
+            return silences[:max_n]
 
     # 3 — Even spacing fallback
     if clip_duration is None:
@@ -172,5 +201,9 @@ def get_insert_timestamps(
 
     step = clip_duration / (max_n + 1)
     fallback = [round(step * (i + 1), 2) for i in range(max_n)]
-    logger.info("[SceneBroll] Even-spacing fallback timestamps: %s", fallback)
-    return fallback
+    fallback = _filter_by_transcript(fallback)
+    if fallback:
+        logger.info("[SceneBroll] Even-spacing fallback timestamps: %s", fallback)
+        return fallback[:max_n]
+    logger.info("[SceneBroll] Even-spacing fallback produced no timestamps after transcript filter — returning empty")
+    return []

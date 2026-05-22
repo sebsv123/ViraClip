@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, cast
 
+import shutil
+
 from ...utils.async_helpers import run_in_thread
 from ... import gpu_utils
 from ...ai import get_most_relevant_parts_by_transcript
@@ -104,6 +106,33 @@ from ._helpers import get_ffmpeg_exe, get_service_config
 from .vfx_service import VFXService
 
 logger = logging.getLogger(__name__)
+
+# ── Duration guard helper ────────────────────────────────────────────────
+# Validates that no video-processing step truncates the clip below min_ratio
+# of the input duration. Called after every step that writes a new MP4.
+def _get_duration(path: str) -> float:
+    """Return video duration in seconds via ffprobe, or 0 on failure."""
+    try:
+        import subprocess as _sp, json as _json
+        r = _sp.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(_json.loads(r.stdout).get("format", {}).get("duration", 0))
+    except Exception:
+        return 0.0
+
+def _guard_output_duration(input_path: str, output_path: str, step_name: str, min_ratio: float = 0.8) -> None:
+    """Revert output to input if output duration < min_ratio of input duration."""
+    in_dur = _get_duration(input_path)
+    out_dur = _get_duration(output_path)
+    if in_dur > 0 and out_dur < in_dur * min_ratio:
+        logger.warning(
+            "[RENDERER GUARD] %s truncated clip: input=%.2fs output=%.2fs min=%.2fs — reverting",
+            step_name, in_dur, out_dur, in_dur * min_ratio,
+        )
+        shutil.copy2(input_path, output_path)
 
 # ── RULE 4: Concept-level tracking across clips ──
 # Persists seen b-roll concepts per task_id so repeated concepts are avoided
@@ -633,6 +662,7 @@ async def create_single_clip(
         return None
 
     output_path = clip_path
+    _guard_output_duration(str(video_path), str(output_path), "create_optimized_clip")
     _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
 
     # ── Step 4.0b: Re-alineacion precisa de subtitulos ──────────────
@@ -897,7 +927,9 @@ async def create_single_clip(
                         words_with_confidence, duration, _silence_thresh,
                     )
                 if _jc_ok and _jc_path.exists():
+                    _prev_path = str(output_path)
                     output_path = _jc_path
+                    _guard_output_duration(_prev_path, str(output_path), "silence_removal")
                     words_with_confidence = _helpers.adjust_words_for_cuts(
                         words_with_confidence, _jc_keep
                     )
@@ -1031,7 +1063,9 @@ async def create_single_clip(
                 polisher = VideoPolishService()
                 _face_centered = await polisher.auto_center_face(output_path, polished_path)
                 if _face_centered and polished_path.exists():
+                    _prev_path = str(output_path)
                     output_path = polished_path
+                    _guard_output_duration(_prev_path, str(output_path), "face_centering")
 
         # Talking-head auto-detection: if face was found AND audio has words
         # → we're looking at a speaker clip → auto-apply eye contact correction.
@@ -1046,7 +1080,9 @@ async def create_single_clip(
                 polished_path = output_path.with_name(f"gaze_{output_path.name}")
                 await polisher.apply_eye_contact_correction(output_path, polished_path)
                 if polished_path.exists():
+                    _prev_path = str(output_path)
                     output_path = polished_path
+                    _guard_output_duration(_prev_path, str(output_path), "gaze_correction")
                     if _is_talking_head and not eye_contact_correction:
                         logger.info("  ✓ Eye contact correction auto-applied (talking head detected)")
             except Exception as _ec_e:

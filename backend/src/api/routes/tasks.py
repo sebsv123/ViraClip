@@ -156,7 +156,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     font_size = _normalize_font_size(font_options.get("font_size", 24))
     font_color = _normalize_font_color(font_options.get("font_color", "#FFFFFF"))
     caption_template = data.get("caption_template", "default")
-    include_broll = data.get("include_broll", False)
+    include_broll = data.get("include_broll", True)
     processing_mode = data.get("processing_mode", config.default_processing_mode)
     
     # Viral editing features
@@ -400,7 +400,7 @@ async def batch_start(request: Request, db: AsyncSession = Depends(get_db)):
         "font_size": _normalize_font_size(font_options.get("font_size", 24)),
         "font_color": _normalize_font_color(font_options.get("font_color", "#FFFFFF")),
         "caption_template": data.get("caption_template", "default"),
-        "include_broll": data.get("include_broll", False),
+        "include_broll": data.get("include_broll", True),
         "processing_mode": data.get("processing_mode", config.default_processing_mode),
         "output_format": data.get("output_format", "vertical"),
         "add_subtitles": data.get("add_subtitles", True),
@@ -1677,7 +1677,7 @@ async def apply_task_settings(
         font_size = _normalize_font_size(payload.get("font_size", 24))
         font_color = _normalize_font_color(payload.get("font_color", "#FFFFFF"))
         caption_template = payload.get("caption_template", "default")
-        include_broll = bool(payload.get("include_broll", False))
+        include_broll = bool(payload.get("include_broll", True))
         apply_to_existing = bool(payload.get("apply_to_existing", False))
 
         task_service = TaskService(db)
@@ -2088,3 +2088,126 @@ async def debug_queue_status():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@router.post("/{task_id}/clips/{clip_id}/publish")
+async def publish_clip(
+    task_id: str,
+    clip_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Publish a clip to TikTok, Instagram Reels, or YouTube Shorts.
+
+    Body:
+    {
+        "platform": "tiktok" | "instagram" | "youtube",
+        "title": "Optional title",
+        "hashtags": ["tag1", "tag2"],
+        "privacy": "public" | "private" | "unlisted"
+    }
+
+    Requires the user to have connected their account via OAuth first
+    (GET /auth/{platform}/callback).
+    """
+    from ...domains.publishing.social_distribution_service import SocialDistributionService
+    from pathlib import Path
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    platform = body.get("platform", "").lower().strip()
+    if platform not in ("tiktok", "instagram", "youtube"):
+        raise HTTPException(status_code=400, detail="platform must be one of: tiktok, instagram, youtube")
+
+    title = str(body.get("title", "") or "")
+    hashtags = body.get("hashtags", [])
+    if not isinstance(hashtags, list):
+        hashtags = []
+    privacy = str(body.get("privacy", "public") or "public")
+
+    # Verify task ownership
+    task_service = TaskService(db)
+    await _require_task_owner(request, task_service, db, task_id)
+
+    # Get clip info
+    clip = await task_service.clip_repo.get_clip_by_id(db, clip_id)
+    if not clip or clip.get("task_id") != task_id:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    video_path_str = clip.get("file_path") or clip.get("video_url", "")
+    if not video_path_str:
+        raise HTTPException(status_code=400, detail="Clip has no video file")
+
+    video_path = Path(video_path_str)
+    if not video_path.exists():
+        raise HTTPException(status_code=400, detail=f"Video file not found: {video_path}")
+
+    # Get user's stored OAuth tokens
+    user_id = _get_user_id_from_headers(request)
+    user = await task_service.task_repo.get_user_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Retrieve tokens from user record (columns already exist in DB)
+    access_token = None
+    open_id = None
+    if platform == "tiktok":
+        creds = user.get("tiktok_credentials")
+        if creds:
+            try:
+                parsed = json.loads(creds)
+                access_token = parsed.get("access_token")
+                open_id = parsed.get("open_id")
+            except (json.JSONDecodeError, TypeError):
+                pass
+    elif platform == "instagram":
+        creds = user.get("instagram_credentials")
+        if creds:
+            try:
+                parsed = json.loads(creds)
+                access_token = parsed.get("access_token")
+            except (json.JSONDecodeError, TypeError):
+                pass
+    elif platform == "youtube":
+        creds = user.get("youtube_credentials")
+        if creds:
+            try:
+                parsed = json.loads(creds)
+                access_token = parsed.get("access_token")
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    if not access_token:
+        raise HTTPException(
+            status_code=401,
+            detail=f"{platform.title()} account not connected. Use GET /auth/{platform}/callback to connect.",
+        )
+
+    # Publish
+    result = await SocialDistributionService.publish_clip(
+        video_path=video_path,
+        platform=platform,
+        caption=title,
+        hashtags=hashtags,
+        privacy_level=privacy,
+        user_auth_token=access_token,
+        open_id=open_id,
+    )
+
+    if result.success:
+        logger.info("[Publish] ✅ %s published: video_id=%s", platform, result.video_id)
+        return {"success": True, "platform": platform, "video_id": result.video_id, "status": "published"}
+
+    logger.warning("[Publish] ❌ %s failed: [%s] %s", platform, result.error_code, result.error)
+    raise HTTPException(
+        status_code=502,
+        detail={
+            "error": result.error or "Publish failed",
+            "error_code": result.error_code,
+            "platform": platform,
+        },
+    )

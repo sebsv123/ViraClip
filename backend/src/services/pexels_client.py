@@ -22,8 +22,39 @@ import httpx
 logger = logging.getLogger(__name__)
 from src.services.metrics_aggregator import record_event
 
+# ── In-memory query cache ─────────────────────────────────────────────────────
+# Prevents the same Pexels query from being fired multiple times within the
+# same server session. Keyed by (query, page). FIFO eviction at 200 entries.
+_query_cache: dict[tuple[str, int], list] = {}
+_query_cache_order: list[tuple[str, int]] = []
+_MAX_CACHE_SIZE = 200
+_EVICT_BATCH = 50
+
+
+def _cache_get(key: tuple[str, int]) -> Optional[list]:
+    return _query_cache.get(key)
+
+
+def _cache_set(key: tuple[str, int], value: list) -> None:
+    global _query_cache, _query_cache_order
+    # Evict oldest entries if cache is full
+    if len(_query_cache) >= _MAX_CACHE_SIZE:
+        for _old_key in _query_cache_order[:_EVICT_BATCH]:
+            _query_cache.pop(_old_key, None)
+        _query_cache_order = _query_cache_order[_EVICT_BATCH:]
+    _query_cache[key] = value
+    _query_cache_order.append(key)
+
+
 # ── Constants ported from short-video-maker ──────────────────────────────────
+# ⛔ BLOCKED for insurance/finance content: JOKER_TERMS are generic stock
+# keywords ["nature", "globe", "space", "ocean"] that are completely irrelevant
+# for insurance/finance transcripts. When the primary query returns no results,
+# these joker terms would inject generic nature/space footage unrelated to
+# insurance concepts. The search_videos() method checks for insurance content
+# and skips JOKER_TERMS when detected.
 JOKER_TERMS = ["nature", "globe", "space", "ocean"]
+
 DURATION_BUFFER_SECONDS = 3.0
 DEFAULT_TIMEOUT_MS = 5000
 RETRY_TIMES = 3
@@ -110,8 +141,35 @@ class PexelsClient:
             pass
 
         exclude_ids = exclude_ids or []
-        search_terms = [query] + JOKER_TERMS
-        random.shuffle(search_terms)
+
+        # ── BLOCK FALLBACK PATH C: JOKER_TERMS for insurance/finance content ──
+        # When the query contains insurance/finance keywords, skip JOKER_TERMS
+        # (nature, globe, space, ocean) because they would inject completely
+        # irrelevant generic footage. Only search with the original query.
+        # Insurance keywords are defined in INSURANCE_KEYWORD_MAP (shared with
+        # broll_service.py and confidence_subtitle_service.py).
+        _INSURANCE_KEYWORDS = [
+            "seguro", "seguros", "indemnización", "indemnizacion",
+            "fallecimiento", "cobertura", "mutua", "ahorro",
+            "protección", "proteccion", "accidente", "tranquilidad",
+            "contrato", "precio", "prima", "póliza", "poliza",
+            "siniestro", "reclamación", "reclamacion", "vida",
+            "coche", "hogar", "salud", "vivienda",
+        ]
+        _query_lower = query.lower()
+        _is_insurance = any(kw in _query_lower for kw in _INSURANCE_KEYWORDS)
+
+        if _is_insurance:
+            logger.info(
+                f"[PexelsClient] ⛔ BLOCKED fallback path C: JOKER_TERMS skipped "
+                f"for insurance/finance content (query='{query}'). "
+                f"Only searching with the original query to avoid injecting "
+                f"generic nature/space footage irrelevant to insurance concepts."
+            )
+            search_terms = [query]
+        else:
+            search_terms = [query] + JOKER_TERMS
+            random.shuffle(search_terms)
 
         for term in search_terms:
             try:
@@ -154,7 +212,22 @@ class PexelsClient:
         Search a single term with retry logic.
 
         Ported from short-video-maker's PexelsAPI._findVideo().
+        Uses an in-memory cache keyed by (term, page=1) to avoid redundant
+        API calls within the same server session.
         """
+        # Check in-memory cache before making the HTTP request
+        _cache_key = (term, 1)
+        cached = _cache_get(_cache_key)
+        if cached is not None:
+            logger.debug("[PexelsClient] Cache hit for term '%s'", term)
+            # Re-apply filtering on cached raw data (exclude_ids may differ)
+            return self._filter_videos(
+                videos=cached,
+                min_duration=min_duration,
+                exclude_ids=exclude_ids,
+                orientation=orientation,
+            )[:3]
+
         last_error: Optional[Exception] = None
 
         for attempt in range(RETRY_TIMES):
@@ -174,6 +247,10 @@ class PexelsClient:
                 resp.raise_for_status()
                 data = resp.json()
                 videos = data.get("videos", [])
+
+                # Store in cache (raw API response, before filtering)
+                _cache_set(_cache_key, videos)
+
 
                 if not videos:
                     logger.debug("[PexelsClient] No videos for term '%s'", term)
