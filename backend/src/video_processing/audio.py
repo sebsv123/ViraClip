@@ -454,6 +454,18 @@ def _mix_bgm_fallback(video_path: Path, music_path: Path, output_path: Path) -> 
     """
     _bgm_norm = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
 
+    # Probe video duration to prevent audio exceeding video length
+    _video_dur = 0.0
+    try:
+        _dur_probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=15
+        )
+        _video_dur = float(_dur_probe.stdout.strip())
+    except Exception:
+        pass
+
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
@@ -465,9 +477,7 @@ def _mix_bgm_fallback(video_path: Path, music_path: Path, output_path: Path) -> 
         "-map", "[aout]",
         "-c:v", "copy",
         "-c:a", "aac", "-b:a", "192k",
-        # NOTE: -shortest intentionally removed. amix=duration=first already
-        # guarantees output duration matches first input (video). -shortest was
-        # redundant and could truncate if loudnorm produced shorter audio.
+        *(["-t", str(_video_dur)] if _video_dur > 0 else []),
         str(output_path),
     ]
 
@@ -555,6 +565,18 @@ def mix_background_music(
         )
 
 
+        # Probe video duration to prevent audio exceeding video length
+        _video_dur = 0.0
+        try:
+            _dur_probe = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(video_path)],
+                capture_output=True, text=True, timeout=15
+            )
+            _video_dur = float(_dur_probe.stdout.strip())
+        except Exception:
+            pass
+
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
@@ -566,9 +588,11 @@ def mix_background_music(
             "-c:a", "aac",
             "-b:a", "192k",
             "-ar", "48000",
-            # NOTE: -shortest intentionally removed. apad=whole_dur=9999 already
-            # guarantees music is long enough. -shortest could truncate video if
-            # loudnorm on [0:a] produced shorter audio than the video stream.
+            # -shortest ensures audio never exceeds video duration.
+            # apad=whole_dur=9999 on BGM guarantees music is long enough,
+            # but the main audio (loudnorm-processed) must not exceed video.
+            "-shortest",
+            *(["-t", str(_video_dur)] if _video_dur > 0 else []),
             str(output_path),
         ]
         logger.error(f"[BGM_DEBUG] cmd: {' '.join(str(x) for x in cmd)}")
