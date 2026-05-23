@@ -15,7 +15,7 @@ Applies professional visual + audio effects in one FFmpeg invocation:
 All effects compose into a single filter_complex — one decode + encode pass.
 """
 
-from __future__ import annotations
+from __future__ import annotations+
 
 import asyncio
 import logging
@@ -842,12 +842,14 @@ def _build_filter_complex(
                 f"[0:a]{_dn}highpass=f=80,{theme_eq}"
                 f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
+                f"aresample=44100,aformat=channel_layouts=stereo,"
+                f"atrim=end={dur:.3f}[aout]"
             )
         else:
             filters.append(
                 f"[0:a]{_dn}{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
+                f"aresample=44100,aformat=channel_layouts=stereo,"
+                f"atrim=end={dur:.3f}[aout]"
             )
         return ";".join(filters), "[vout]", "[aout]"
     else:
@@ -945,11 +947,7 @@ class EditingPipeline:
         cmd = [_get_ffmpeg_exe(), "-y", "-i", str(video_path),
                "-filter_complex", fc, "-map", v_label]
         if a_label:
-            # atrim ensures audio never exceeds video duration even when
-            # -shortest is unreliable with filter_complex (the filter graph
-            # processes audio independently and -shortest may not truncate it).
-            cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k",
-                    "-af", f"atrim=end={dur}"]
+            cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
         cmd += vcodec + ["-pix_fmt", "yuv420p",
                 "-shortest",
                 "-movflags", "+faststart", str(output_path)]
