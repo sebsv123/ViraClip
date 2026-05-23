@@ -316,7 +316,11 @@ def create_optimized_clip(
                     [
                         _get_ffmpeg_exe(), "-y", "-ss", str(start_time),
                         "-i", str(video_path), "-t", str(duration),
-                        "-c", "copy", "-shortest", "-movflags", "+faststart",
+                        "-c", "copy",
+                        "-shortest",
+                        "-avoid_negative_ts", "make_zero",
+                        "-fflags", "+genpts",
+                        "-movflags", "+faststart",
                         str(output_path),
                     ],
                     capture_output=True, text=True, timeout=300,
@@ -342,6 +346,7 @@ def create_optimized_clip(
                 "-map", "0:v:0",
                 "-map", "0:a?",
                 "-shortest",
+                "-avoid_negative_ts", "make_zero",
             ]
             if _vf:
                 _ffmpeg_base += ["-vf", _vf]
