@@ -253,6 +253,7 @@ async def speed_ramp_silences(
         _get_ffmpeg_exe(), "-y", "-i", video_path,
         "-filter_complex", filter_complex,
         "-map", "[vout]", "-map", "[aout]",
+        "-vsync", "cfr",
         *gpu_utils.ffmpeg_codec_flags("high"),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",

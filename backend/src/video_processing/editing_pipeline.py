@@ -129,8 +129,8 @@ def _probe_actual_frame_count(path: Path, dur: float = 0.0, fps: float = 30.0) -
     dur * fps would overestimate.
     
     If ffprobe is not available or probing fails, returns a conservative
-    estimate with a 2% safety margin (dur * fps * 0.98) to prevent zoompan
-    from generating more frames than the source has.
+    estimate using ceil(dur * fps) — better to have one extra frame than
+    to run out of frames mid-clip.
     """
     try:
         import shutil
@@ -140,9 +140,9 @@ def _probe_actual_frame_count(path: Path, dur: float = 0.0, fps: float = 30.0) -
                 import imageio_ffmpeg as _iio
                 ffprobe_path = _iio.get_ffmpeg_exe().replace("ffmpeg", "ffprobe")
                 if not Path(ffprobe_path).exists():
-                    return max(1, int(dur * fps * 0.98))
+                    return max(1, int(math.ceil(dur * fps)))
             except Exception:
-                return max(1, int(dur * fps * 0.98))
+                return max(1, int(math.ceil(dur * fps)))
         else:
             ffprobe_path = "ffprobe"
 
@@ -164,7 +164,7 @@ def _probe_actual_frame_count(path: Path, dur: float = 0.0, fps: float = 30.0) -
             return max(0, count)
     except Exception:
         pass
-    return max(1, int(dur * fps * 0.98))
+    return max(1, int(math.ceil(dur * fps)))
 
 
 def _emphasis_items(
@@ -945,7 +945,9 @@ class EditingPipeline:
         # We need to extract just the video codec part and append audio/map flags
         vcodec = _ep_enc_flags  # Already includes -c:v, -preset, and all NVENC/libx264 params
 
-        cmd = [_get_ffmpeg_exe(), "-y", "-i", str(video_path),
+        cmd = [_get_ffmpeg_exe(), "-y",
+               "-r", str(int(round(max(24.0, fps)))),
+               "-i", str(video_path),
                "-filter_complex", fc, "-map", v_label]
         if a_label:
             cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
