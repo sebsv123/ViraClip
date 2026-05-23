@@ -15,7 +15,7 @@ Applies professional visual + audio effects in one FFmpeg invocation:
 All effects compose into a single filter_complex — one decode + encode pass.
 """
 
-from __future__ import annotations+
+from __future__ import annotations
 
 import asyncio
 import logging
