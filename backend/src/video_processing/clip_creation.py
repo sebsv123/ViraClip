@@ -238,6 +238,7 @@ def create_optimized_clip(
     gpu_encoding_settings: Optional[Dict[str, Any]] = None,
     target_platform: str = "tiktok",
     subtitle_safe_zone: bool = True,
+    use_extracted_segment: bool = False,
 ) -> bool:
     """
     Create a high-quality clip with resource management and effects.
@@ -279,22 +280,28 @@ def create_optimized_clip(
     try:
         with guard.manage():
             # 1. Word Boundary Snapping
-            _orig_start = start_time
-            _orig_end = end_time
-            start_time, end_time = snap_to_word_boundary(video_path, start_time, end_time)
-            # Belt-and-suspenders guard: never truncate more than 20% of intended duration.
-            # The snap_to_word_boundary function has an internal guard, but this ensures
-            # protection even if the function's logic changes or the guard is bypassed.
-            _intended_dur = _orig_end - _orig_start
-            _min_end = _orig_start + _intended_dur * 0.8
-            if end_time < _min_end:
-                logger.warning(
-                    "[DURATION GUARD] snap_to_word_boundary truncated clip from %.1fs to %.1fs "
-                    "(min allowed=%.1fs) — restoring to %.1fs",
-                    _intended_dur, end_time - start_time, _intended_dur * 0.8, _intended_dur,
-                )
-                end_time = _orig_end
-                start_time = _orig_start
+            # When using pre-extracted segments, skip snap_to_word_boundary because
+            # the transcript word timestamps are absolute (from the full source video)
+            # while start/end are clip-relative (0 to duration). Snapping would find
+            # the nearest word to end_ms=60000 at ~9000ms (first word of next segment
+            # in absolute time), truncating the clip to ~9s.
+            if not use_extracted_segment:
+                _orig_start = start_time
+                _orig_end = end_time
+                start_time, end_time = snap_to_word_boundary(video_path, start_time, end_time)
+                # Belt-and-suspenders guard: never truncate more than 20% of intended duration.
+                # The snap_to_word_boundary function has an internal guard, but this ensures
+                # protection even if the function's logic changes or the guard is bypassed.
+                _intended_dur = _orig_end - _orig_start
+                _min_end = _orig_start + _intended_dur * 0.8
+                if end_time < _min_end:
+                    logger.warning(
+                        "[DURATION GUARD] snap_to_word_boundary truncated clip from %.1fs to %.1fs "
+                        "(min allowed=%.1fs) — restoring to %.1fs",
+                        _intended_dur, end_time - start_time, _intended_dur * 0.8, _intended_dur,
+                    )
+                    end_time = _orig_end
+                    start_time = _orig_start
             duration = end_time - start_time
             if duration <= 0:
                 logger.error(f"Invalid clip duration: {duration:.1f}s")
@@ -309,7 +316,7 @@ def create_optimized_clip(
                     [
                         _get_ffmpeg_exe(), "-y", "-ss", str(start_time),
                         "-i", str(video_path), "-t", str(duration),
-                        "-c", "copy", "-movflags", "+faststart",
+                        "-c", "copy", "-shortest", "-movflags", "+faststart",
                         str(output_path),
                     ],
                     capture_output=True, text=True, timeout=300,
@@ -334,6 +341,7 @@ def create_optimized_clip(
                 "-t", str(duration),
                 "-map", "0:v:0",
                 "-map", "0:a?",
+                "-shortest",
             ]
             if _vf:
                 _ffmpeg_base += ["-vf", _vf]

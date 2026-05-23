@@ -120,6 +120,51 @@ def _probe_video(path: Path) -> Tuple[int, int, float, float]:
     return w, h, fps, dur
 
 
+def _probe_actual_frame_count(path: Path) -> int:
+    """
+    Probe the actual number of video frames in a file using ffprobe.
+    
+    Uses `-count_packets` to count packets in the video stream, which gives
+    the real frame count even for VFR (Variable Frame Rate) videos where
+    dur * fps would overestimate.
+    
+    Falls back to 0 on any error (ffprobe not available, no video stream, etc.).
+    """
+    try:
+        import shutil
+        if not shutil.which("ffprobe"):
+            # Try imageio_ffmpeg as fallback for ffprobe
+            try:
+                import imageio_ffmpeg as _iio
+                ffprobe_path = _iio.get_ffmpeg_exe().replace("ffmpeg", "ffprobe")
+                if not Path(ffprobe_path).exists():
+                    return 0
+            except Exception:
+                return 0
+        else:
+            ffprobe_path = "ffprobe"
+
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-count_packets",
+                "-show_entries", "stream=nb_read_packets",
+                "-of", "csv=p=0",
+                str(path),
+            ],
+            capture_output=True, timeout=15,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            count = int(result.stdout.strip())
+            return max(0, count)
+    except Exception:
+        pass
+    return 0
+
+
 def _emphasis_items(
     words: List[Dict[str, Any]], max_zooms: int = 1
 ) -> List[Tuple[float, str]]:
@@ -175,36 +220,66 @@ def _beat_timestamps(video_path: Path, dur: float, max_beats: int = 6) -> List[f
 
 def _detect_face_position(path: Path, dur: float) -> Tuple[float, float]:
     """
-    Sample the middle frame and return the normalised face centre (cx_norm, cy_norm).
-    Uses MediaPipe FaceMesh (nose-bridge landmark) for accuracy.
-    Returns (0.5, 0.5) if face not found — falls back to centred crop.
+    Sample 5 frames distributed across the clip and return the averaged
+    normalised face centre (cx_norm, cy_norm).
+    Uses MediaPipe FaceMesh first, falls back to Haar cascade.
+    Returns (0.5, 0.5) if face not found.
     """
     try:
         import cv2
         import mediapipe as mp
 
+        sample_times = [dur * t for t in (0.20, 0.35, 0.50, 0.65, 0.80)]
+        cx_values, cy_values = [], []
         cap = cv2.VideoCapture(str(path))
-        cap.set(cv2.CAP_PROP_POS_MSEC, (dur / 2) * 1000)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret:
-            return 0.5, 0.5
+        w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         with mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            min_detection_confidence=0.5,
+            static_image_mode=True, max_num_faces=1,
+            refine_landmarks=True, min_detection_confidence=0.3,
         ) as face_mesh:
-            results = face_mesh.process(rgb)
-            if results.multi_face_landmarks:
-                lm  = results.multi_face_landmarks[0].landmark
-                cx  = float(lm[1].x)   # nose-bridge x  (stable across expressions)
-                cy  = float(lm[1].y)   # nose-bridge y
-                # clamp away from extreme edges to avoid over-panning
-                return max(0.15, min(0.85, cx)), max(0.15, min(0.85, cy))
+            for t in sample_times:
+                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = face_mesh.process(rgb)
+                if results.multi_face_landmarks:
+                    lm = results.multi_face_landmarks[0].landmark
+                    cx_values.append(float(lm[1].x))
+                    cy_values.append(float(lm[1].y))
+
+        # Fallback: Haar cascade si FaceMesh no detectó nada
+        if not cx_values:
+            cascade = cv2.CascadeClassifier(
+                cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            )
+            for t in sample_times:
+                cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+                ret, frame = cap.read()
+                if not ret:
+                    continue
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                faces = cascade.detectMultiScale(gray, 1.1, 4, minSize=(30, 30))
+                if len(faces) > 0:
+                    x, y, fw, fh = faces[0]
+                    cx_values.append((x + fw / 2) / w)
+                    cy_values.append((y + fh / 2) / h)
+
+        cap.release()
+
+        if cx_values:
+            cx = max(0.15, min(0.85, sum(cx_values) / len(cx_values)))
+            cy = max(0.15, min(0.85, sum(cy_values) / len(cy_values)))
+            logger.info(f"[face] detected={len(cx_values)} cx={cx:.3f} cy={cy:.3f}")
+            return cx, cy
+
     except Exception:
         pass
+
+    logger.info("[face] no face detected, using center fallback")
     return 0.5, 0.5
 
 
@@ -352,11 +427,13 @@ def _build_filter_complex(
     lut_vf: str = "",
     denoise_audio: bool = True,
     sections: Optional[List[Any]] = None,
+    video_path: Optional[Path] = None,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
     Returns (filter_complex_str, v_out_label, a_out_label_or_None).
     """
+
     filters: List[str] = []
 
     # ── 0. Determine clip theme for adaptive grade + audio EQ ──────────────────
@@ -502,13 +579,51 @@ def _build_filter_complex(
     # FIX: Force minimum 24fps for zoompan output. Source videos with low FPS
     # (e.g. talking head at 11.99fps) produce choppy output when zoompan inherits
     # the source framerate. 24fps is the minimum standard for smooth video.
+    # CRITICAL: d=1 only outputs 1 frame per input frame. If source is 12fps and
+    # target is 24fps, we get only 12fps of output = half the expected frames.
+    # This causes frozen frames after the real content ends. Use d=1 only when
+    # source fps >= target fps, otherwise calculate d to fill the full duration.
+    # 
+    # FIX V2: Probe the ACTUAL number of video frames in the source file instead
+    # of estimating from dur * fps. VFR videos or incorrect FPS detection can
+    # cause the source to have far fewer frames than estimated, leading to
+    # zoompan producing fewer output frames than needed. After the real frames
+    # run out, FFmpeg freezes on the last frame for the remaining duration,
+    # producing a static image with audio (the exact bug reported).
     _zoompan_fps = max(24.0, fps)
     if z_expr == "1.0":
         filters.append(f"{prev_v}null[vzoom]")
     else:
+        # Probe actual frame count from the source video to handle VFR
+        # and incorrect FPS detection. This is critical for zoompan's d
+        # parameter — if we overestimate source frames, zoompan runs out
+        # of input frames and freezes on the last frame.
+        _actual_source_frames = _probe_actual_frame_count(video_path)
+        if _actual_source_frames > 0:
+            _source_total_frames = _actual_source_frames
+        else:
+            _source_total_frames = int(round(dur * fps))
+        
+        # Calculate how many output frames we need for the full duration
+        _zoompan_total_frames = max(1, int(math.ceil(dur * _zoompan_fps)))
+        
+        # d = how many output frames per input frame
+        if _source_total_frames > 0 and _zoompan_total_frames > _source_total_frames:
+            # Need more output frames than source frames — use ceil division
+            _d = (_zoompan_total_frames + _source_total_frames - 1) // _source_total_frames
+        else:
+            _d = 1
+        
+        logger.debug(
+            "[EP] zoompan: dur=%.1f fps=%.1f actual_frames=%d "
+            "source_frames=%d target_frames=%d d=%d",
+            dur, fps, _actual_source_frames, _source_total_frames,
+            _zoompan_total_frames, _d,
+        )
+        
         filters.append(
             f"{prev_v}zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-            f":d=1:s={w}x{h}:fps={_zoompan_fps:.3f}[vzoom]"
+            f":d={_zoompan_total_frames}:s={w}x{h}:fps={_zoompan_fps:.3f}[vzoom]"
         )
     prev_v = "[vzoom]"
 
@@ -789,6 +904,10 @@ class EditingPipeline:
             face_cx_norm, face_cy_norm = await asyncio.get_event_loop().run_in_executor(
                 None, _detect_face_position, video_path, dur
             )
+            # Si no se detectó cara (fallback center), desactivar face zoom
+            if face_cx_norm == 0.5 and face_cy_norm == 0.5:
+                FACE_ZOOM_ON = False
+                logger.debug("[EP] No face detected — disabling face-aware zoom for this clip")
 
         # Beat-sync pattern interrupts via librosa
         beat_pi_ts: List[float] = []
@@ -812,7 +931,9 @@ class EditingPipeline:
             lut_vf=lut_vf,
             denoise_audio=denoise_audio,
             sections=sections,
+            video_path=video_path,
         )
+
 
         # Auto-detect encoder: NVENC (GPU) → libx264 (CPU fallback)
         from ..gpu_utils import ffmpeg_codec_flags as _ep_gpu_flags
@@ -824,8 +945,13 @@ class EditingPipeline:
         cmd = [_get_ffmpeg_exe(), "-y", "-i", str(video_path),
                "-filter_complex", fc, "-map", v_label]
         if a_label:
-            cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
+            # atrim ensures audio never exceeds video duration even when
+            # -shortest is unreliable with filter_complex (the filter graph
+            # processes audio independently and -shortest may not truncate it).
+            cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k",
+                    "-af", f"atrim=end={dur}"]
         cmd += vcodec + ["-pix_fmt", "yuv420p",
+                "-shortest",
                 "-movflags", "+faststart", str(output_path)]
 
         try:
@@ -837,6 +963,35 @@ class EditingPipeline:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=360)
 
             if proc.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+                # ── Post-render validation: ensure actual frame count matches expected ──
+                try:
+                    _validate_proc = await asyncio.create_subprocess_exec(
+                        _get_ffmpeg_exe(), "-i", str(output_path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    _, _val_stderr = await asyncio.wait_for(_validate_proc.communicate(), timeout=15)
+                    _val_stderr_str = _val_stderr.decode('utf-8', errors='replace') if _val_stderr else ''
+                    # Parse actual video stream duration from output
+                    _dur_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", _val_stderr_str)
+                    _actual_dur = 0.0
+                    if _dur_match:
+                        _actual_dur = int(_dur_match.group(1)) * 3600 + int(_dur_match.group(2)) * 60 + float(_dur_match.group(3))
+                    # Parse actual fps
+                    _fps_match = re.search(r"(\d+\.?\d*)\s*fps", _val_stderr_str)
+                    _actual_fps = float(_fps_match.group(1)) if _fps_match else 0.0
+                    # Expected frames = dur * target_fps
+                    _expected_frames = int(round(dur * max(24.0, fps)))
+                    _actual_frames = int(round(_actual_dur * _actual_fps)) if _actual_dur > 0 and _actual_fps > 0 else 0
+                    if _actual_frames > 0 and _actual_frames < _expected_frames * 0.5:
+                        logger.error(
+                            f"[EP] ❌ FRAME COUNT MISMATCH: expected ~{_expected_frames} frames "
+                            f"({dur:.1f}s × {max(24.0, fps):.1f}fps), got {_actual_frames} "
+                            f"({_actual_dur:.1f}s × {_actual_fps:.1f}fps) — output may have frozen frames!"
+                        )
+                except Exception as _val_e:
+                    logger.debug(f"[EP] Post-render validation skipped: {_val_e}")
+
                 effects = [f"color+cine({theme})"]
                 if EP_SAT_PULSE_ON and emphasis_items:
                     effects.append("sat-pulse")
@@ -994,6 +1149,22 @@ class OrchestratedEditingPipeline:
             if enhanced_path and enhanced_path.exists():
                 current_path = enhanced_path
                 self.logger.info(f"[Pipeline] ✅ Step 1 complete")
+                
+                # ── Duration guard: validate Step 1 output isn't truncated ──────
+                if segment_duration > 0:
+                    try:
+                        from .ffmpeg_guard import get_duration
+                        _actual_dur = get_duration(str(current_path))
+                        _min_expected = segment_duration * 0.8
+                        if _actual_dur > 0 and _actual_dur < _min_expected:
+                            self.logger.warning(
+                                f"[Pipeline] ⚠️ Step 1 output duration {_actual_dur:.1f}s "
+                                f"< 80% of expected {segment_duration:.1f}s — "
+                                f"reverting to original clip to avoid frozen-frame output"
+                            )
+                            current_path = clip_path
+                    except Exception as _dur_e:
+                        self.logger.debug(f"[Pipeline] Duration check skipped: {_dur_e}")
             else:
                 self.logger.warning(f"[Pipeline] Step 1 failed, using original")
                 current_path = clip_path
