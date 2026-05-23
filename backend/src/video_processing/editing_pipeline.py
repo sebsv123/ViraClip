@@ -120,7 +120,7 @@ def _probe_video(path: Path) -> Tuple[int, int, float, float]:
     return w, h, fps, dur
 
 
-def _probe_actual_frame_count(path: Path) -> int:
+def _probe_actual_frame_count(path: Path, dur: float = 0.0, fps: float = 30.0) -> int:
     """
     Probe the actual number of video frames in a file using ffprobe.
     
@@ -128,7 +128,9 @@ def _probe_actual_frame_count(path: Path) -> int:
     the real frame count even for VFR (Variable Frame Rate) videos where
     dur * fps would overestimate.
     
-    Falls back to 0 on any error (ffprobe not available, no video stream, etc.).
+    If ffprobe is not available or probing fails, returns a conservative
+    estimate with a 2% safety margin (dur * fps * 0.98) to prevent zoompan
+    from generating more frames than the source has.
     """
     try:
         import shutil
@@ -138,9 +140,9 @@ def _probe_actual_frame_count(path: Path) -> int:
                 import imageio_ffmpeg as _iio
                 ffprobe_path = _iio.get_ffmpeg_exe().replace("ffmpeg", "ffprobe")
                 if not Path(ffprobe_path).exists():
-                    return 0
+                    return max(1, int(dur * fps * 0.98))
             except Exception:
-                return 0
+                return max(1, int(dur * fps * 0.98))
         else:
             ffprobe_path = "ffprobe"
 
@@ -162,7 +164,7 @@ def _probe_actual_frame_count(path: Path) -> int:
             return max(0, count)
     except Exception:
         pass
-    return 0
+    return max(1, int(dur * fps * 0.98))
 
 
 def _emphasis_items(
@@ -598,11 +600,10 @@ def _build_filter_complex(
         # and incorrect FPS detection. This is critical for zoompan's d
         # parameter — if we overestimate source frames, zoompan runs out
         # of input frames and freezes on the last frame.
-        _actual_source_frames = _probe_actual_frame_count(video_path)
-        if _actual_source_frames > 0:
-            _source_total_frames = _actual_source_frames
-        else:
-            _source_total_frames = int(round(dur * fps))
+        # _probe_actual_frame_count now accepts dur/fps for a safe fallback
+        # with 2% margin when ffprobe is unavailable.
+        _actual_source_frames = _probe_actual_frame_count(video_path, dur, fps)
+        _source_total_frames = _actual_source_frames
         
         # Calculate how many output frames we need for the full duration
         _zoompan_total_frames = max(1, int(math.ceil(dur * _zoompan_fps)))
