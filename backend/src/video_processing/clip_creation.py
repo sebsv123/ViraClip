@@ -345,7 +345,6 @@ def create_optimized_clip(
                 "-t", str(duration),
                 "-map", "0:v:0",
                 "-map", "0:a?",
-                "-shortest",
                 "-avoid_negative_ts", "make_zero",
             ]
             if _vf:
@@ -565,7 +564,7 @@ def create_optimized_clip(
                         # NOTE: -cq is an h264_nvenc encoder-specific AVOption that
                         # MoviePy 2.1.2 places in a position where FFmpeg doesn't
                         # recognize it. Use -b:v (standard FFmpeg option) instead.
-                        "ffmpeg_params": ["-b:v", "10M", "-pix_fmt", "yuv420p", "-shortest"],
+                        "ffmpeg_params": ["-b:v", "10M", "-pix_fmt", "yuv420p"],
                     }
                     logger.info(f"Using GPU encoding: h264_nvenc (via gpu_utils)")
                 else:
@@ -573,7 +572,7 @@ def create_optimized_clip(
                     encoding_settings = {
                         "codec": _enc["codec"],
                         "preset": _enc.get("preset", "ultrafast"),
-                        "ffmpeg_params": ["-crf", "22", "-pix_fmt", "yuv420p", "-shortest"],
+                        "ffmpeg_params": ["-crf", "22", "-pix_fmt", "yuv420p"],
                     }
                     logger.info(f"Using encoding: {_enc['codec']} (NVENC unavailable, via gpu_utils)")
 
