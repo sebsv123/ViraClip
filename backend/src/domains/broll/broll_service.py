@@ -4827,39 +4827,24 @@ class BrollService:
             # Persist updated used_urls for this task
             await self._save_used_urls(_task_id, _used_urls)
 
-            # Step 2b — semantic scoring: filter out weak B-roll matches
-            # Score each asset against segment_text + visual_keywords.
-            # Drop assets with score below threshold.
-            _visual_kws: List[str] = []
-            try:
-                from ...domains.detection.visual_keyword_detector import get_visual_keyword_detector
-                _vkd = get_visual_keyword_detector()
-                _vk_result = _vkd.detect(segment_text, words_with_timestamps or [], max_keywords=5)
-                _visual_kws = list(set(k.keyword for k in _vk_result))
-            except Exception:
-                pass
-            # ── Skip semantic scoring when visual keyword detector is unavailable ──
-            # _visual_kws will be empty when the visual_keyword_detector import fails
-            # (ModuleNotFoundError: No module named 'src.detection'). Without visual
-            # keywords, _score_broll_candidate() returns 0.00 for every asset, which
-            # causes ALL assets to be rejected. Skip scoring entirely in this case.
-            if not _visual_kws:
-                logger.info(
-                    "[BRoll] Skipping semantic scoring — visual_keyword_detector unavailable "
-                    "(_visual_kws is empty). Passing all %d assets through.",
-                    len(broll_assets),
-                )
-                _before = len(broll_assets)
-            else:
-                _scored_assets: List[Tuple[float, Path]] = []
-                for _asset in broll_assets:
-                    _tags = _asset.stem.replace("_", " ")
-                    _score = self._score_broll_candidate(segment_text, _visual_kws, _tags)
-                    _scored_assets.append((_score, _asset))
-                _scored_assets.sort(key=lambda x: x[0], reverse=True)
-                _threshold = 0.35 if os.getenv("BROLL_USE_EMBEDDINGS", "true").lower() == "true" else 0.35
-                _before = len(broll_assets)
-                broll_assets = [a for s, a in _scored_assets if s >= _threshold]
+            # Step 2b — semantic scoring: score each asset against segment_text.
+            # Uses sentence-transformers embeddings when available for deep semantic
+            # matching, otherwise falls back to keyword overlap between the asset's
+            # filename/tags and the segment text. This ensures every asset is scored
+            # for relevance — no asset passes through unscored.
+            # 
+            # The scoring uses the segment text directly (not visual_keywords) so it
+            # always works even when the visual keyword detector is unavailable.
+            # Assets with score below threshold are rejected; the rest are ranked.
+            _scored_assets: List[Tuple[float, Path]] = []
+            for _asset in broll_assets:
+                _tags = _asset.stem.replace("_", " ")
+                _score = self._score_broll_candidate(segment_text, keywords, _tags)
+                _scored_assets.append((_score, _asset))
+            _scored_assets.sort(key=lambda x: x[0], reverse=True)
+            _threshold = 0.35
+            _before = len(broll_assets)
+            broll_assets = [a for s, a in _scored_assets if s >= _threshold]
             if len(broll_assets) < _before:
                 for s, a in _scored_assets:
                     if s < _threshold:
