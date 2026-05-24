@@ -43,6 +43,19 @@ def get_duration(source_path: str) -> float:
             seconds = float(match.group(3))
             return hours * 3600 + minutes * 60 + seconds
         else:
+            # Fallback: try ffprobe when ffmpeg -i returns Duration: N/A
+            try:
+                import shutil
+                if shutil.which("ffprobe"):
+                    _fp = subprocess.run(
+                        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                         "-of", "csv=p=0", source_path],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    if _fp.returncode == 0 and _fp.stdout.strip():
+                        return float(_fp.stdout.strip())
+            except Exception:
+                pass
             logger.warning(f"[FFMPEG_GUARD] Could not parse duration from ffmpeg output for {source_path}")
             return 0.0
     except Exception as e:

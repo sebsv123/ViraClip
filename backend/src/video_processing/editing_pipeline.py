@@ -117,6 +117,20 @@ def _probe_video(path: Path) -> Tuple[int, int, float, float]:
     dur_match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
     if dur_match:
         dur = int(dur_match.group(1)) * 3600 + int(dur_match.group(2)) * 60 + float(dur_match.group(3))
+    else:
+        # Fallback: try ffprobe when ffmpeg -i returns Duration: N/A
+        try:
+            import shutil
+            if shutil.which("ffprobe"):
+                _fp = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", str(path)],
+                    capture_output=True, text=True, timeout=15
+                )
+                if _fp.returncode == 0 and _fp.stdout.strip():
+                    dur = float(_fp.stdout.strip())
+        except Exception:
+            pass
     return w, h, fps, dur
 
 
@@ -841,16 +855,17 @@ def _build_filter_complex(
         if VOICE_COMPRESS_ON:
             filters.append(
                 f"[0:a]{_dn}highpass=f=80,{theme_eq}"
+                f"atrim=end={dur:.3f},"
                 f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo,"
-                f"atrim=end={dur:.3f}[aout]"
+                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
             )
         else:
             filters.append(
-                f"[0:a]{_dn}{theme_eq}loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo,"
-                f"atrim=end={dur:.3f}[aout]"
+                f"[0:a]{_dn}{theme_eq}"
+                f"atrim=end={dur:.3f},"
+                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
+                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
             )
         return ";".join(filters), "[vout]", "[aout]"
     else:
@@ -952,7 +967,7 @@ class EditingPipeline:
         if a_label:
             cmd += ["-map", a_label, "-c:a", "aac", "-b:a", "192k"]
         cmd += vcodec + ["-pix_fmt", "yuv420p",
-                "-shortest",
+                "-t", f"{dur:.3f}",
                 "-movflags", "+faststart", str(output_path)]
 
         try:
