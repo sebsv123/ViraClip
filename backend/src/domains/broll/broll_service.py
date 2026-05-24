@@ -4567,11 +4567,13 @@ class BrollService:
         clip_duration: float,
     ) -> List[Path]:
         """
-        Re-rank and filter assets according to the B-roll style profile.
+        Re-rank assets according to the B-roll style profile.
         
         - Boosts assets whose filename/tags contain preferred_tags for the style.
         - Caps count at style's max_per_min.
-        - Returns filtered list.
+        - NEVER rejects assets when there are few (≤ 3) — only re-ranks them.
+        - When there are many assets (> 3), keeps only the top N by preference.
+        - Returns re-ranked list (best matches first).
         """
         _profile = BROLL_STYLE_PROFILES.get(style, BROLL_STYLE_PROFILES["generic"])
         _preferred = _profile["preferred_tags"]
@@ -4584,15 +4586,24 @@ class BrollService:
             _match_count = sum(1 for t in _preferred if t in _name)
             _scored.append((_match_count, _a))
         
-        # Sort by match count descending, then take top N
+        # Sort by match count descending
         _scored.sort(key=lambda x: x[0], reverse=True)
-        _result = [a for _, a in _scored[:max(1, _max)]]
         
-        if len(_result) < len(assets):
+        # When few assets (≤ 3), keep ALL but re-ranked — never reject
+        # When many assets, keep only top N by preference
+        if len(assets) <= 3:
+            _result = [a for _, a in _scored]
             logger.info(
-                "[BRoll] Style '%s' filtered %d → %d assets (max_per_min=%d)",
-                style, len(assets), len(_result), _profile["max_per_min"],
+                "[BRoll] Style '%s' re-ranked %d assets (kept all — few assets policy)",
+                style, len(assets),
             )
+        else:
+            _result = [a for _, a in _scored[:max(1, _max)]]
+            if len(_result) < len(assets):
+                logger.info(
+                    "[BRoll] Style '%s' filtered %d → %d assets (max_per_min=%d)",
+                    style, len(assets), len(_result), _profile["max_per_min"],
+                )
         return _result
 
     # ──────────────────────────────────────────────────────────────────────────
