@@ -155,7 +155,7 @@ def snap_to_word_boundary(video_path: Path, start: float, end: float) -> Tuple[f
     # intended duration is 60s, because the nearest word to end_ms=60000 is
     # actually at ~9000ms (the first word of the next segment in absolute time).
     intended_duration = end - start
-    min_end = start + intended_duration * 0.8
+    min_end = start + intended_duration * 0.95
     end = max(end, min_end)
     return max(0, start), max(start + 0.5, end)
 
@@ -293,12 +293,12 @@ def create_optimized_clip(
                 # The snap_to_word_boundary function has an internal guard, but this ensures
                 # protection even if the function's logic changes or the guard is bypassed.
                 _intended_dur = _orig_end - _orig_start
-                _min_end = _orig_start + _intended_dur * 0.8
+                _min_end = _orig_start + _intended_dur * 0.95
                 if end_time < _min_end:
                     logger.warning(
                         "[DURATION GUARD] snap_to_word_boundary truncated clip from %.1fs to %.1fs "
                         "(min allowed=%.1fs) — restoring to %.1fs",
-                        _intended_dur, end_time - start_time, _intended_dur * 0.8, _intended_dur,
+                        _intended_dur, end_time - start_time, _intended_dur * 0.95, _intended_dur,
                     )
                     end_time = _orig_end
                     start_time = _orig_start
@@ -647,7 +647,12 @@ def _render_segment_task(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             }
         return None
     except Exception as e:
-        logger.error(f"Parallel task failed: {e}")
+        import traceback
+        logger.error(
+            f"[Worker] Clip render failed for segment "
+            f"{task.get('start_seconds', '?')}-{task.get('end_seconds', '?')}: "
+            f"{e}\n{traceback.format_exc()}"
+        )
         return None
 
 
