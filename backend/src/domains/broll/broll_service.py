@@ -433,7 +433,20 @@ BROLL_STYLE_PROFILES: Dict[str, Dict[str, Any]] = {
         "description": "Corporate scenes for business insurance and enterprise content",
     },
     "generic": {
-        "preferred_tags": ["nature", "landscape", "people", "city", "technology", "abstract"],
+        "preferred_tags": [
+            "nature", "landscape", "people", "city", "technology", "abstract",
+            "success", "achievement", "goal", "motivation", "determination",
+            "fitness", "workout", "sport", "running", "exercise", "health",
+            "business", "office", "meeting", "presentation", "team",
+            "travel", "adventure", "sunrise", "sunset", "mountain", "ocean",
+            "lifestyle", "happy", "smile", "family", "friends", "love",
+            "education", "learning", "study", "book", "knowledge",
+            "creative", "design", "art", "music", "inspiration",
+            "food", "cooking", "nature", "garden", "plant", "flower",
+            "meditation", "yoga", "wellness", "calm", "peaceful",
+            "celebration", "party", "fun", "dance", "music",
+            "innovation", "future", "digital", "data", "connection",
+        ],
         "max_per_min": 8,
         "prefer_kind": "abstract",
     },
@@ -4836,6 +4849,7 @@ class BrollService:
                     "(_visual_kws is empty). Passing all %d assets through.",
                     len(broll_assets),
                 )
+                _before = len(broll_assets)
             else:
                 _scored_assets: List[Tuple[float, Path]] = []
                 for _asset in broll_assets:
