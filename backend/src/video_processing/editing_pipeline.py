@@ -608,52 +608,62 @@ def _build_filter_complex(
         elif z_expr.startswith("1+"):
             z_expr = "1+" + hook_term + "+" + z_expr[2:]
 
-    # FIX: Force minimum 24fps for zoompan output. Source videos with low FPS
-    # (e.g. talking head at 11.99fps) produce choppy output when zoompan inherits
-    # the source framerate. 24fps is the minimum standard for smooth video.
-    # CRITICAL: d=1 only outputs 1 frame per input frame. If source is 12fps and
-    # target is 24fps, we get only 12fps of output = half the expected frames.
-    # This causes frozen frames after the real content ends. Use d=1 only when
-    # source fps >= target fps, otherwise calculate d to fill the full duration.
-    # 
-    # FIX V2: Probe the ACTUAL number of video frames in the source file instead
-    # of estimating from dur * fps. VFR videos or incorrect FPS detection can
-    # cause the source to have far fewer frames than estimated, leading to
-    # zoompan producing fewer output frames than needed. After the real frames
-    # run out, FFmpeg freezes on the last frame for the remaining duration,
-    # producing a static image with audio (the exact bug reported).
-    _zoompan_fps = max(24.0, fps)
-    if z_expr == "1.0":
-        filters.append(f"{prev_v}null[vzoom]")
-    else:
-        # Probe actual frame count from the source video to handle VFR
-        # and incorrect FPS detection. This is critical for zoompan's d
-        # parameter — if we overestimate source frames, zoompan runs out
-        # of input frames and freezes on the last frame.
-        # _probe_actual_frame_count now accepts dur/fps for a safe fallback
-        # with 2% margin when ffprobe is unavailable.
-        # Guard: if video_path is None (e.g. called directly without it),
-        # fall back to the estimate to avoid silent failure.
-        if video_path is None:
-            _actual_source_frames = max(1, int(math.ceil(dur * fps)))
+    # ── 4. Zoom: scale+crop animado con expresiones de tiempo ────────────────
+    # Reemplaza zoompan (que requiere d=N_frames y congela el último frame
+    # cuando el frame count del input se sobreestima en VFR o FPS mal detectado).
+    # Usa scale + crop con enable='between(t,...)' para cada tipo de zoom:
+    #   • Hook zoom: t=0 → ~0.4s, escala a zoom_factor y vuelve
+    #   • Emphasis zoom: en cada ts, escala a zoom_factor ~0.3s
+    #   • Ken Burns: escala lineal lenta 1.0 → 1.04 en toda la duración
+    #   • Pattern interrupts: pulsos periódicos con enable
+    # El centrado de cara se aplica en el crop con face_cx_norm, face_cy_norm.
+    _zoom_scale_exprs: List[str] = []
+    
+    # Hook zoom: t=0 hasta ~0.4s
+    if EP_HOOK_ZOOM_ON and dur >= 1.0:
+        _hook_delta = (ZOOM_FACTOR - 1.0) * 0.70
+        _zoom_scale_exprs.append(
+            f"if(between(t,0,0.4),1+{_hook_delta:.4f}*sin(PI*t/0.4),1)"
+        )
+    
+    # Emphasis zoom: en cada ts
+    if emphasis_ts and zoom_intensity != "off":
+        for ts in emphasis_ts:
+            _zoom_scale_exprs.append(
+                f"if(between(t,{ts-0.15:.3f},{ts+0.45:.3f}),{ZOOM_FACTOR:.4f},1)"
+            )
+    
+    # Ken Burns: escala lineal lenta (cuando no hay emphasis)
+    if not emphasis_ts and dur >= 4.0 and zoom_intensity != "off":
+        _zoom_scale_exprs.append(f"1+0.004*t/{dur:.3f}")
+    
+    # Pattern interrupts
+    if not emphasis_ts and dur >= 4.0 and zoom_intensity != "off":
+        if beat_pi_ts:
+            _pi_ts_list = beat_pi_ts
+        elif dur >= PI_INTERVAL * 2:
+            _pi_ts_list = _pattern_interrupt_timestamps(dur, PI_INTERVAL)
         else:
-            _actual_source_frames = _probe_actual_frame_count(video_path, dur, fps)
-        _source_total_frames = _actual_source_frames
-        
-        # Calculate how many output frames we need for the full duration
-        _zoompan_total_frames = max(1, int(math.ceil(dur * _zoompan_fps)))
-        
-        logger.debug(
-            "[EP] zoompan: dur=%.1f fps=%.1f actual_frames=%d "
-            "source_frames=%d target_frames=%d",
-            dur, fps, _actual_source_frames, _source_total_frames,
-            _zoompan_total_frames,
-        )
-        
+            _pi_ts_list = []
+        for _pi_ts in _pi_ts_list:
+            _zoom_scale_exprs.append(
+                f"if(between(t,{_pi_ts-0.15:.3f},{_pi_ts+0.45:.3f}),{PI_ZOOM:.4f},1)"
+            )
+    
+    if _zoom_scale_exprs:
+        # Combine all zoom expressions: multiply them together (1*1.12*1 = 1.12)
+        _combined_zoom = "*".join(_zoom_scale_exprs)
+        _scale_expr = f"iw*{_combined_zoom}"
+        _crop_w = f"iw/{_combined_zoom}"
+        _crop_h = f"ih/{_combined_zoom}"
         filters.append(
-            f"{prev_v}zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
-            f":d={_zoompan_total_frames}:s={w}x{h}:fps={_zoompan_fps:.3f}[vzoom]"
+            f"{prev_v}scale={_scale_expr}:{_scale_expr},"
+            f"crop=w={_crop_w}:h={_crop_h}:"
+            f"x=(iw-{_crop_w})*{face_cx_norm:.4f}:"
+            f"y=(ih-{_crop_h})*{face_cy_norm:.4f}[vzoom]"
         )
+    else:
+        filters.append(f"{prev_v}null[vzoom]")
     prev_v = "[vzoom]"
 
     # ── 5. (Pattern interrupts now baked into step 4 — no second zoompan) ─────
@@ -888,6 +898,7 @@ def _build_filter_complex(
                 f"equalizer=f=200:t=o:w=2:g=-2,"
                 f"acompressor=threshold=0.08:ratio=5:attack=3:release=50:makeup=2,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"apad=whole_dur={dur:.3f},"
                 f"aresample=44100,"
                 f"aformat=channel_layouts=stereo[aout]"
             )
@@ -897,6 +908,7 @@ def _build_filter_complex(
                 f"{_silence_remove}"
                 f"{_dn}{theme_eq}"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"apad=whole_dur={dur:.3f},"
                 f"aresample=44100,"
                 f"aformat=channel_layouts=stereo[aout]"
             )
@@ -1081,13 +1093,42 @@ class EditingPipeline:
                             f"({dur:.1f}s × {max(24.0, fps):.1f}fps), got {_actual_frames} "
                             f"({_actual_dur:.1f}s × {_actual_fps:.1f}fps) — output may have frozen frames!"
                         )
-                        logger.error("FRAME COUNT MISMATCH — reverting to source video")
-                        import shutil
-                        try:
+                        logger.warning("[EP] Retrying without zoom (zoom_intensity=off)...")
+                        fc_retry, v_retry, a_retry = _build_filter_complex(
+                            w, h, fps, dur, emphasis_items, has_audio, segment_text,
+                            flash_timestamps=flash_timestamps or [],
+                            face_cx_norm=face_cx_norm,
+                            face_cy_norm=face_cy_norm,
+                            beat_pi_ts=[],
+                            energy_level=energy_level,
+                            zoom_intensity="off",
+                            grain_override=grain_override,
+                            lut_vf=lut_vf,
+                            denoise_audio=denoise_audio,
+                            sections=sections,
+                            video_path=video_path,
+                        )
+                        cmd_retry = [_get_ffmpeg_exe(), "-y",
+                                     "-r", str(int(round(max(24.0, fps)))),
+                                     "-i", str(video_path),
+                                     "-filter_complex", fc_retry, "-map", v_retry]
+                        if a_retry:
+                            cmd_retry += ["-map", a_retry, "-c:a", "aac", "-b:a", "192k"]
+                        cmd_retry += vcodec + ["-pix_fmt", "yuv420p",
+                                     "-t", f"{dur:.3f}",
+                                     "-movflags", "+faststart", str(output_path)]
+                        proc_retry = await asyncio.create_subprocess_exec(
+                            *cmd_retry,
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                        _, stderr_retry = await asyncio.wait_for(proc_retry.communicate(), timeout=360)
+                        if proc_retry.returncode != 0 or not output_path.exists() or output_path.stat().st_size == 0:
+                            import shutil
                             shutil.copy2(str(video_path), str(output_path))
-                            logger.warning(f"[FALLBACK] Copied original to output: {output_path.name}")
-                        except Exception as _revert_err:
-                            logger.error(f"[FALLBACK] Revert failed: {_revert_err}")
+                            logger.warning("[EP] Retry also failed — copied original as last resort")
+                        else:
+                            logger.info("[EP] ✅ Retry without zoom succeeded")
                 except Exception as _val_e:
                     logger.debug(f"[EP] Post-render validation skipped: {_val_e}")
 
