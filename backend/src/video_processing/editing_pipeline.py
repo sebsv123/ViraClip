@@ -917,13 +917,14 @@ class EditingPipeline:
 
         # Detect face position for face-aware zoom centering
         face_cx_norm, face_cy_norm = 0.5, 0.5
-        if FACE_ZOOM_ON:
+        _face_zoom_on = FACE_ZOOM_ON
+        if _face_zoom_on:
             face_cx_norm, face_cy_norm = await asyncio.get_event_loop().run_in_executor(
                 None, _detect_face_position, video_path, dur
             )
             # Si no se detectó cara (fallback center), desactivar face zoom
             if face_cx_norm == 0.5 and face_cy_norm == 0.5:
-                FACE_ZOOM_ON = False
+                _face_zoom_on = False
                 logger.debug("[EP] No face detected — disabling face-aware zoom for this clip")
 
         # Beat-sync pattern interrupts via librosa
@@ -1022,7 +1023,7 @@ class EditingPipeline:
                     effects.append(f"KenBurns+beat-PI({len(beat_pi_ts)})")
                 else:
                     effects.append("KenBurns+PI")
-                if FACE_ZOOM_ON:
+                if _face_zoom_on:
                     effects.append(f"face({face_cx_norm:.2f},{face_cy_norm:.2f})")
                 if WORD_CALLOUT_ON and emphasis_items:
                     effects.append(f"callouts({len(emphasis_items)})")

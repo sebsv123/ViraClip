@@ -595,6 +595,12 @@ def create_optimized_clip(
     except Exception as e:
         import traceback
         logger.error(f"❌ Render Failed [{output_path}]: {e}\n{traceback.format_exc()}")
+        if temp_segment_path is not None and temp_segment_path.exists():
+            try:
+                temp_segment_path.unlink()
+                logger.debug(f"🧹 [except] Cleaned temp segment: {temp_segment_path.name}")
+            except Exception:
+                pass
         return False
     finally:
         # Guaranteed cleanup of FFmpeg temp segment
