@@ -622,18 +622,11 @@ def _build_filter_complex(
         # Calculate how many output frames we need for the full duration
         _zoompan_total_frames = max(1, int(math.ceil(dur * _zoompan_fps)))
         
-        # d = how many output frames per input frame
-        if _source_total_frames > 0 and _zoompan_total_frames > _source_total_frames:
-            # Need more output frames than source frames — use ceil division
-            _d = (_zoompan_total_frames + _source_total_frames - 1) // _source_total_frames
-        else:
-            _d = 1
-        
         logger.debug(
             "[EP] zoompan: dur=%.1f fps=%.1f actual_frames=%d "
-            "source_frames=%d target_frames=%d d=%d",
+            "source_frames=%d target_frames=%d",
             dur, fps, _actual_source_frames, _source_total_frames,
-            _zoompan_total_frames, _d,
+            _zoompan_total_frames,
         )
         
         filters.append(
@@ -1005,6 +998,13 @@ class EditingPipeline:
                             f"({dur:.1f}s × {max(24.0, fps):.1f}fps), got {_actual_frames} "
                             f"({_actual_dur:.1f}s × {_actual_fps:.1f}fps) — output may have frozen frames!"
                         )
+                        logger.error("FRAME COUNT MISMATCH — reverting to source video")
+                        import shutil
+                        try:
+                            shutil.copy2(str(video_path), str(output_path))
+                            logger.warning(f"[FALLBACK] Copied original to output: {output_path.name}")
+                        except Exception as _revert_err:
+                            logger.error(f"[FALLBACK] Revert failed: {_revert_err}")
                 except Exception as _val_e:
                     logger.debug(f"[EP] Post-render validation skipped: {_val_e}")
 
