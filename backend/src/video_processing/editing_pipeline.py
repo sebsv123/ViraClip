@@ -846,18 +846,12 @@ def _build_filter_complex(
         if RNNOISE_MODEL_PATH and Path(RNNOISE_MODEL_PATH).exists():
             _rnnoise_prefix = f"arnndn=m={RNNOISE_MODEL_PATH},"
         _dn = "arnndn=m=cb.rnnn," if denoise_audio else ""
-        _silence_remove = (
-            "silenceremove=start_periods=0:stop_periods=-1:"
-            "stop_duration=0.45:stop_threshold=-42dB:"
-            "stop_silence=0.12:leave_silence=1,"
-        )
         _content_type = segment_text if segment_text else "default"
         _tempo_val = SPEECH_TEMPO_PROFILES.get(_content_type, SPEECH_TEMPO_PROFILES["default"])
         _tempo = f"atempo={_tempo_val:.3f},"
         if VOICE_COMPRESS_ON:
             filters.append(
                 f"[0:a]atrim=end={dur:.3f},"
-                f"{_silence_remove}"
                 f"{_dn}"
                 f"highpass=f=90,"
                 f"{theme_eq}"
@@ -865,6 +859,7 @@ def _build_filter_complex(
                 f"equalizer=f=200:t=o:w=2:g=-2,"
                 f"acompressor=threshold=0.08:ratio=5:attack=3:release=50:makeup=2,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"{_tempo}"
                 f"apad=whole_dur={dur:.3f},"
                 f"aresample=44100,"
                 f"aformat=channel_layouts=stereo[aout]"
@@ -872,9 +867,9 @@ def _build_filter_complex(
         else:
             filters.append(
                 f"[0:a]atrim=end={dur:.3f},"
-                f"{_silence_remove}"
                 f"{_dn}{theme_eq}"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"{_tempo}"
                 f"apad=whole_dur={dur:.3f},"
                 f"aresample=44100,"
                 f"aformat=channel_layouts=stereo[aout]"
@@ -961,10 +956,10 @@ class EditingPipeline:
             )
         except Exception as probe_e:
             logger.warning(f"[EP] probe failed: {probe_e}")
-            return video_path
+            return None
 
         if dur <= 0:
-            return video_path
+            return None
 
         emphasis_items = _emphasis_items(words or [], max_zooms=1)
         emphasis_ts    = [ts for ts, _ in emphasis_items]
@@ -1256,7 +1251,7 @@ class OrchestratedEditingPipeline:
             sections=(clip_metadata or {}).get("sections"),
         )
         
-        if enhanced_path and enhanced_path.exists():
+        if enhanced_path and enhanced_path.exists() and enhanced_path != current_path:
             current_path = enhanced_path
             self.logger.info(f"[Pipeline] ✅ Step 1 complete")
             
