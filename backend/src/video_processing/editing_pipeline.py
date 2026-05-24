@@ -59,7 +59,17 @@ PI_ZOOM         = float(os.environ.get("EP_PI_ZOOM",         "1.04"))  # Pattern
 PI_FRAMES       = int(os.environ.get("EP_PI_FRAMES",         "12"))    # Pattern interrupt ramp frames
 PROGRESS_H      = int(os.environ.get("EP_PROGRESS_H",        "6"))
 PROGRESS_CLR    = os.environ.get("EP_PROGRESS_COLOR",        "ff4444")
-LUFS_TARGET     = float(os.environ.get("EP_LUFS_TARGET",     "-14.0"))
+LUFS_TARGET     = float(os.environ.get("EP_LUFS_TARGET",     "-14"))
+SPEECH_TEMPO_PROFILES = {
+    "insurance_explainer": 1.12,   # seguros: +12%, óptimo para explicaciones técnicas
+    "interview":           1.08,   # entrevista: +8%, respeta el ritmo natural
+    "testimonial":         1.05,   # testimonio: +5%, más emocional, no acelerar mucho
+    "default":             1.10,   # default seguro para cualquier contenido
+}
+RNNOISE_MODEL_PATH = os.environ.get("RNNOISE_MODEL_PATH", "")
+# Para activar denoising neuronal, descargar modelo bd.rnnn de:
+# https://github.com/GregorR/rnnoise-models
+# y configurar: RNNOISE_MODEL_PATH=/path/to/bd.rnnn en el entorno Docker.
 LOWER_THIRD_ON    = os.environ.get("EP_LOWER_THIRD",   "true").lower() != "false"
 FONT_PATH         = os.environ.get("EP_FONT_PATH",    "/app/fonts/TikTokSans-Regular.ttf")
 VOICE_COMPRESS_ON = os.environ.get("EP_VOICE_COMPRESS", "true").lower() != "false"
@@ -844,24 +854,86 @@ def _build_filter_complex(
                 theme_eq = "lowshelf=g=2:f=150:width_type=s:width=200,"
             elif theme == "cool":
                 theme_eq = "highshelf=g=2:f=6000:width_type=s:width=2000,"
+        _rnnoise_prefix = ""
+        if RNNOISE_MODEL_PATH and Path(RNNOISE_MODEL_PATH).exists():
+            _rnnoise_prefix = f"arnndn=m={RNNOISE_MODEL_PATH},"
         _dn = "afftdn=nf=-25," if denoise_audio else ""
+        _silence_remove = (
+            "silenceremove=start_periods=0:stop_periods=-1:"
+            "stop_duration=0.45:stop_threshold=-42dB:"
+            "stop_silence=0.12:leave_silence=1,"
+        )
+        _content_type = segment_text if segment_text else "default"
+        _tempo_val = SPEECH_TEMPO_PROFILES.get(_content_type, SPEECH_TEMPO_PROFILES["default"])
+        _tempo = f"atempo={_tempo_val:.3f},"
         if VOICE_COMPRESS_ON:
             filters.append(
-                f"[0:a]atrim=end={dur:.3f},{_dn}"
-                f"highpass=f=80,{theme_eq}"
-                f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
-                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
+                f"[0:a]atrim=end={dur:.3f},"
+                f"{_silence_remove}"
+                f"{_dn}"
+                f"highpass=f=90,"
+                f"{theme_eq}"
+                f"equalizer=f=3000:t=o:w=2:g=3,"
+                f"equalizer=f=200:t=o:w=2:g=-2,"
+                f"acompressor=threshold=0.08:ratio=5:attack=3:release=50:makeup=2,"
+                f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"aresample=44100,"
+                f"aformat=channel_layouts=stereo[aout]"
             )
         else:
             filters.append(
-                f"[0:a]atrim=end={dur:.3f},{_dn}{theme_eq}"
-                f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
-                f"aresample=44100,aformat=channel_layouts=stereo[aout]"
+                f"[0:a]atrim=end={dur:.3f},"
+                f"{_silence_remove}"
+                f"{_dn}{theme_eq}"
+                f"loudnorm=I={LUFS_TARGET}:TP=-1.0:LRA=9,"
+                f"aresample=44100,"
+                f"aformat=channel_layouts=stereo[aout]"
             )
         return ";".join(filters), "[vout]", "[aout]"
     else:
         return ";".join(filters), "[vout]", None
+
+
+# Muletillas comunes en español para contenido de seguros
+_SPANISH_FILLERS = {
+    "eh", "este", "pues", "bueno", "entonces", "osea", "o sea",
+    "mm", "mmm", "ah", "mhm", "ehm", "este...", "pues...",
+    "digamos", "básicamente", "literalmente"
+}
+_MAX_FILLER_DURATION_S = 0.65  # muletillas duran < 650ms
+
+def detect_spanish_fillers(words: list) -> list:
+    """
+    Detecta timestamps de muletillas en español usando dos métodos:
+    1. Palabras explícitas de la lista _SPANISH_FILLERS.
+    2. Gaps entre palabras de 100-650ms donde Whisper no transcribió nada
+       (zona típica de 'eh', 'mm' no capturados por el modelo).
+    Retorna lista de (start_s, end_s) a eliminar del timeline.
+    """
+    cuts = []
+    if not words:
+        return cuts
+
+    # Método 1: palabras explícitas
+    for w in words:
+        text = w.get("text", "").strip().lower().rstrip(".,;:")
+        if text in _SPANISH_FILLERS:
+            s = w.get("start", 0) / 1000.0
+            e = w.get("end", 0) / 1000.0
+            if 0 < (e - s) < _MAX_FILLER_DURATION_S:
+                cuts.append((s, e))
+
+    # Método 2: gaps silenciosos no transcritos (muletillas inaudibles)
+    for i in range(len(words) - 1):
+        gap_s = words[i].get("end", 0) / 1000.0
+        gap_e = words[i + 1].get("start", 0) / 1000.0
+        gap_dur = gap_e - gap_s
+        if 0.12 < gap_dur < _MAX_FILLER_DURATION_S:
+            cuts.append((gap_s, gap_e))
+
+    # Deduplicar y ordenar
+    cuts = sorted(set(cuts), key=lambda x: x)
+    return cuts
 
 
 # ── public API ────────────────────────────────────────────────────────────────
@@ -1159,6 +1231,11 @@ class OrchestratedEditingPipeline:
                 video_path=current_path,
                 output_path=step1_output,
                 words=words_with_timestamps or [],
+                segment_text=segment_text,
+                energy_level=(clip_metadata or {}).get("energy_level", 0.5),
+                grain_override=(clip_metadata or {}).get("grain_override", 0),
+                flash_timestamps=jump_cuts,
+                sections=(clip_metadata or {}).get("sections"),
             )
             
             if enhanced_path and enhanced_path.exists():

@@ -23,44 +23,39 @@ def _get_ffmpeg_exe() -> str:
 
 
 def get_duration(source_path: str) -> float:
-    """Return file duration in seconds via ffmpeg -i. Returns 0.0 on failure."""
+    """Return file duration in seconds. Tries ffmpeg -i first, then ffprobe."""
+    import re
+    
+    # Intento 1: ffmpeg -i stderr parsing
     try:
-        import re
         result = subprocess.run(
-            [
-                _get_ffmpeg_exe(), "-i", source_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
+            [_get_ffmpeg_exe(), "-i", source_path],
+            capture_output=True, timeout=15
         )
-        # Parse duration from stderr: "Duration: 00:01:23.45"
-        stderr = result.stderr
-        match = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
-        if match:
-            hours = int(match.group(1))
-            minutes = int(match.group(2))
-            seconds = float(match.group(3))
-            return hours * 3600 + minutes * 60 + seconds
-        else:
-            # Fallback: try ffprobe when ffmpeg -i returns Duration: N/A
-            try:
-                import shutil
-                if shutil.which("ffprobe"):
-                    _fp = subprocess.run(
-                        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
-                         "-of", "csv=p=0", source_path],
-                        capture_output=True, text=True, timeout=15
-                    )
-                    if _fp.returncode == 0 and _fp.stdout.strip():
-                        return float(_fp.stdout.strip())
-            except Exception:
-                pass
-            logger.warning(f"[FFMPEG_GUARD] Could not parse duration from ffmpeg output for {source_path}")
-            return 0.0
-    except Exception as e:
-        logger.warning(f"[FFMPEG_GUARD] get_duration error for {source_path}: {e}")
-        return 0.0
+        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+        m = re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", stderr)
+        if m:
+            return int(m.group(1))*3600 + int(m.group(2))*60 + float(m.group(3))
+    except Exception:
+        pass
+    
+    # Intento 2: ffprobe (más fiable para VFR y containers sin cabecera)
+    try:
+        import shutil
+        if shutil.which("ffprobe"):
+            r = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-show_entries",
+                 "format=duration", "-of", "csv=p=0", source_path],
+                capture_output=True, text=True, timeout=15
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                val = float(r.stdout.strip())
+                if val > 0:
+                    return val
+    except Exception:
+        pass
+    
+    return 0.0   # Solo retorna 0 si AMBOS métodos fallan
 
 
 def validate_segment_call(
