@@ -632,7 +632,12 @@ def _build_filter_complex(
         # of input frames and freezes on the last frame.
         # _probe_actual_frame_count now accepts dur/fps for a safe fallback
         # with 2% margin when ffprobe is unavailable.
-        _actual_source_frames = _probe_actual_frame_count(video_path, dur, fps)
+        # Guard: if video_path is None (e.g. called directly without it),
+        # fall back to the estimate to avoid silent failure.
+        if video_path is None:
+            _actual_source_frames = max(1, int(math.ceil(dur * fps)))
+        else:
+            _actual_source_frames = _probe_actual_frame_count(video_path, dur, fps)
         _source_total_frames = _actual_source_frames
         
         # Calculate how many output frames we need for the full duration
@@ -1070,7 +1075,7 @@ class EditingPipeline:
                     # Expected frames = dur * target_fps
                     _expected_frames = int(round(dur * max(24.0, fps)))
                     _actual_frames = int(round(_actual_dur * _actual_fps)) if _actual_dur > 0 and _actual_fps > 0 else 0
-                    if _actual_frames > 0 and _actual_frames < _expected_frames * 0.5:
+                    if _actual_frames > 0 and _actual_frames < _expected_frames * 0.85:
                         logger.error(
                             f"[EP] ❌ FRAME COUNT MISMATCH: expected ~{_expected_frames} frames "
                             f"({dur:.1f}s × {max(24.0, fps):.1f}fps), got {_actual_frames} "
@@ -1360,6 +1365,15 @@ class OrchestratedEditingPipeline:
         # ─────────────────────────────────────────────────────────────────
         import shutil
         shutil.copy(current_path, output_path)
+        
+        # Clean up temp files (including step1_output even if current_path
+        # points to the original clip — avoids minor disk leak)
+        for temp_file in temp_files:
+            try:
+                if temp_file.exists() and temp_file != current_path:
+                    temp_file.unlink()
+            except Exception:
+                pass
         
         self.logger.info(f"✅ [Pipeline] Complete: {output_path.name}")
         return output_path
