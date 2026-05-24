@@ -574,40 +574,6 @@ def _build_filter_complex(
         filters.append(f"{prev_v}noise=alls={_grain}:allf=t[vgrain]")
         prev_v = "[vgrain]"
 
-    # ── 4. Zoom: emphasis punch-in OR Ken Burns + pattern interrupts ────────────
-    # All zoom logic runs in ONE zoompan call to avoid chained decode quality loss.
-    # Uses Gaussian exp(-k*(in-fi)^2) — no commas in expressions (FFmpeg 4.4 safe).
-    # x/y are face-aware: (iw-iw/zoom)*face_cx_norm centres the crop on the face.
-    x_expr = f"(iw-iw/zoom)*{face_cx_norm:.4f}"
-    y_expr = f"(ih-ih/zoom)*{face_cy_norm:.4f}"
-
-    emphasis_ts = [ts for ts, _ in emphasis_items]
-    if emphasis_ts and zoom_intensity != "off":
-        z_expr = _build_zoom_expr(emphasis_ts, fps, _zoom, ZOOM_FRAMES)
-    elif dur >= 4.0 and zoom_intensity != "off":
-        # Prefer beat-synced PI; fall back to evenly-spaced
-        if beat_pi_ts:
-            pi_ts = beat_pi_ts
-        elif dur >= _pi_int * 2:
-            pi_ts = _pattern_interrupt_timestamps(dur, _pi_int)
-        else:
-            pi_ts = []
-        z_expr = _build_ken_burns_zoom(fps, dur, pi_ts)
-    else:
-        z_expr = "1.0"
-
-    # ── 4.5. Hook zoom: sharp punch-in at t=0 to grab immediate attention ─────
-    # Gaussian bell centred on frame 0 — no comma in expression (FFmpeg 4.4 safe).
-    if EP_HOOK_ZOOM_ON and dur >= 1.0:
-        hook_delta = (ZOOM_FACTOR - 1.0) * 0.70         # 70% of normal punch
-        hook_half  = max(3, int(fps * 0.15))             # ~0.15 s radius
-        hook_k     = math.log(20.0) / max(1, hook_half * hook_half)
-        hook_term  = f"{hook_delta:.4f}*exp(-{hook_k:.5f}*in*in)"
-        if z_expr == "1.0":
-            z_expr = f"1+{hook_term}"
-        elif z_expr.startswith("1+"):
-            z_expr = "1+" + hook_term + "+" + z_expr[2:]
-
     # ── 4. Zoom: scale+crop animado con expresiones de tiempo ────────────────
     # Reemplaza zoompan (que requiere d=N_frames y congela el último frame
     # cuando el frame count del input se sobreestima en VFR o FPS mal detectado).
@@ -653,11 +619,12 @@ def _build_filter_complex(
     if _zoom_scale_exprs:
         # Combine all zoom expressions: multiply them together (1*1.12*1 = 1.12)
         _combined_zoom = "*".join(_zoom_scale_exprs)
-        _scale_expr = f"iw*{_combined_zoom}"
+        _scale_expr_w = f"iw*{_combined_zoom}"
+        _scale_expr_h = f"ih*{_combined_zoom}"
         _crop_w = f"round(iw/({_combined_zoom})/2)*2"
         _crop_h = f"round(ih/({_combined_zoom})/2)*2"
         filters.append(
-            f"{prev_v}scale={_scale_expr}:{_scale_expr},"
+            f"{prev_v}scale={_scale_expr_w}:{_scale_expr_h},"
             f"crop=w={_crop_w}:h={_crop_h}:"
             f"x=(iw-{_crop_w})*{face_cx_norm:.4f}:"
             f"y=(ih-{_crop_h})*{face_cy_norm:.4f}[vzoom]"
