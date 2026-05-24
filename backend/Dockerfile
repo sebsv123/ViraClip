@@ -174,7 +174,7 @@ RUN uv sync --no-build-isolation --extra-index-url https://download.pytorch.org/
 # here because uv sync already installed them in Layer 1.
 RUN .venv/bin/pip install --no-cache-dir --default-timeout=600 \
     "sentence-transformers" \
-    "mediapipe==0.10.5" \
+    "mediapipe>=0.10.18" \
     "pydub" "psutil" \
     "edge-tts>=6.1.9" \
     "datasets>=2.14.0" \
