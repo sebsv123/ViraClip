@@ -1144,7 +1144,6 @@ class OrchestratedEditingPipeline:
                 video_path=current_path,
                 output_path=step1_output,
                 words=words_with_timestamps or [],
-                speaker_name="",
             )
             
             if enhanced_path and enhanced_path.exists():
