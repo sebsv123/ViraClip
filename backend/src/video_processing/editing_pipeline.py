@@ -857,7 +857,7 @@ def _build_filter_complex(
         _rnnoise_prefix = ""
         if RNNOISE_MODEL_PATH and Path(RNNOISE_MODEL_PATH).exists():
             _rnnoise_prefix = f"arnndn=m={RNNOISE_MODEL_PATH},"
-        _dn = "afftdn=nf=-25," if denoise_audio else ""
+        _dn = "arnndn=m=cb.rnnn," if denoise_audio else ""
         _silence_remove = (
             "silenceremove=start_periods=0:stop_periods=-1:"
             "stop_duration=0.45:stop_threshold=-42dB:"
