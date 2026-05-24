@@ -620,24 +620,24 @@ def _build_filter_complex(
     _zoom_scale_exprs: List[str] = []
     
     # Hook zoom: t=0 hasta ~0.4s
-    if EP_HOOK_ZOOM_ON and dur >= 1.0:
+    if EP_HOOK_ZOOM_ON and dur >= 1.0 and zoom_intensity != "off":
         _hook_delta = (ZOOM_FACTOR - 1.0) * 0.70
         _zoom_scale_exprs.append(
             f"if(between(t,0,0.4),1+{_hook_delta:.4f}*sin(PI*t/0.4),1)"
         )
     
-    # Emphasis zoom: en cada ts
+    # Emphasis zoom: en cada ts (rampa coseno suave)
     if emphasis_ts and zoom_intensity != "off":
         for ts in emphasis_ts:
             _zoom_scale_exprs.append(
-                f"if(between(t,{ts-0.15:.3f},{ts+0.45:.3f}),{ZOOM_FACTOR:.4f},1)"
+                f"1+{ZOOM_FACTOR-1:.4f}*0.5*(1-cos(2*PI*(t-{ts-0.15:.3f})/0.6))"
             )
     
     # Ken Burns: escala lineal lenta (cuando no hay emphasis)
     if not emphasis_ts and dur >= 4.0 and zoom_intensity != "off":
         _zoom_scale_exprs.append(f"1+0.004*t/{dur:.3f}")
     
-    # Pattern interrupts
+    # Pattern interrupts (rampa coseno suave)
     if not emphasis_ts and dur >= 4.0 and zoom_intensity != "off":
         if beat_pi_ts:
             _pi_ts_list = beat_pi_ts
@@ -647,15 +647,15 @@ def _build_filter_complex(
             _pi_ts_list = []
         for _pi_ts in _pi_ts_list:
             _zoom_scale_exprs.append(
-                f"if(between(t,{_pi_ts-0.15:.3f},{_pi_ts+0.45:.3f}),{PI_ZOOM:.4f},1)"
+                f"1+{PI_ZOOM-1:.4f}*0.5*(1-cos(2*PI*(t-{_pi_ts-0.15:.3f})/0.6))"
             )
     
     if _zoom_scale_exprs:
         # Combine all zoom expressions: multiply them together (1*1.12*1 = 1.12)
         _combined_zoom = "*".join(_zoom_scale_exprs)
         _scale_expr = f"iw*{_combined_zoom}"
-        _crop_w = f"iw/{_combined_zoom}"
-        _crop_h = f"ih/{_combined_zoom}"
+        _crop_w = f"round(iw/({_combined_zoom})/2)*2"
+        _crop_h = f"round(ih/({_combined_zoom})/2)*2"
         filters.append(
             f"{prev_v}scale={_scale_expr}:{_scale_expr},"
             f"crop=w={_crop_w}:h={_crop_h}:"
