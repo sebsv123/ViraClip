@@ -239,6 +239,7 @@ services:
         - NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT=${NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT:-10}
         - NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT=${NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT:-200}
     container_name: viraclip-frontend
+    command: sh -c "npx prisma migrate deploy && bunx prisma generate && bun run dev"
     ports:
       - "3000:3000"
     volumes:
@@ -383,6 +384,8 @@ services:
       - /dev/nvidia-modeset:/dev/nvidia-modeset
       - /dev/nvidia-uvm:/dev/nvidia-uvm
       - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    volumes:
+      - worker_logs:/var/log/worker
     environment:
       <<: [*core-env, *editing-env, *ai-env]
       NVIDIA_REQUIRE_CUDA: ""
@@ -392,6 +395,7 @@ services:
       WHISPER_MODEL_SIZE: ${WHISPER_MODEL_SIZE:-small}
       RENDER_CONCURRENCY: 4
       FFMPEG_BINARY: /usr/local/bin/ffmpeg
+      COMFYUI_ENABLED: "false"
 
   worker-2:
     <<: *worker-base
