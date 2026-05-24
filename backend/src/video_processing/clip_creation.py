@@ -564,7 +564,12 @@ def create_optimized_clip(
                         # NOTE: -cq is an h264_nvenc encoder-specific AVOption that
                         # MoviePy 2.1.2 places in a position where FFmpeg doesn't
                         # recognize it. Use -b:v (standard FFmpeg option) instead.
-                        "ffmpeg_params": ["-b:v", "10M", "-pix_fmt", "yuv420p"],
+                        "ffmpeg_params": [
+                            "-b:v", "10M",
+                            "-pix_fmt", "yuv420p",
+                            "-g", "30",
+                            "-forced-idr", "1",
+                        ],
                     }
                     logger.info(f"Using GPU encoding: h264_nvenc (via gpu_utils)")
                 else:

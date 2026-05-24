@@ -124,6 +124,8 @@ async def _extract_single_segment(
             "-preset", "p4",
             "-tune", "hq",
             "-b:v", "8M",
+            "-g", "30",
+            "-forced-idr", "1",
             "-c:a", "aac",
             "-b:a", "128k",
             "-avoid_negative_ts", "make_zero",
