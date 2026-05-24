@@ -141,6 +141,12 @@ def _probe_video(path: Path) -> Tuple[int, int, float, float]:
                     dur = float(_fp.stdout.strip())
         except Exception:
             pass
+    # BUG B fix: raise ValueError if both duration detection methods failed
+    if dur <= 0:
+        raise ValueError(
+            f"Could not determine duration for {path} — "
+            f"ffmpeg -i returned no Duration: line and ffprobe fallback also failed"
+        )
     return w, h, fps, dur
 
 
@@ -1218,172 +1224,145 @@ class OrchestratedEditingPipeline:
         current_path = clip_path
         temp_files = []
         
-        try:
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 0: Silence detection (pre-process analysis only)
-            # ─────────────────────────────────────────────────────────────────
-            _silence_data = []
-            try:
-                from .silence_removal import build_keep_intervals
-                _silence_data = await asyncio.get_event_loop().run_in_executor(
-                    None, build_keep_intervals, [], segment_duration
-                )
-                self.logger.debug(f"[Orchestrator] Silences detected: {len(_silence_data)} segments")
-            except Exception as _sr_e:
-                self.logger.debug(f"[Orchestrator] SilenceRemover skipped: {_sr_e}")
-
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 1: Visual Enhancement
-            # ─────────────────────────────────────────────────────────────────
-            self.logger.info(f"[Pipeline] Step 1: Visual enhancement for {clip_path.name}")
+        # ─────────────────────────────────────────────────────────────────
+        # STEP 1: Visual Enhancement
+        # ─────────────────────────────────────────────────────────────────
+        self.logger.info(f"[Pipeline] Step 1: Visual enhancement for {clip_path.name}")
+        
+        step1_output = Path(tempfile.mktemp(suffix=".mp4"))
+        temp_files.append(step1_output)
+        
+        enhanced_path = await self.ep.apply(
+            video_path=current_path,
+            output_path=step1_output,
+            words=words_with_timestamps or [],
+            segment_text=segment_text,
+            energy_level=(clip_metadata or {}).get("energy_level", 0.5),
+            grain_override=(clip_metadata or {}).get("grain_override", 0),
+            flash_timestamps=jump_cuts,
+            sections=(clip_metadata or {}).get("sections"),
+        )
+        
+        if enhanced_path and enhanced_path.exists():
+            current_path = enhanced_path
+            self.logger.info(f"[Pipeline] ✅ Step 1 complete")
             
-            step1_output = Path(tempfile.mktemp(suffix=".mp4"))
-            temp_files.append(step1_output)
+            # ── Duration guard: validate Step 1 output isn't truncated ──────
+            if segment_duration > 0:
+                try:
+                    from .ffmpeg_guard import get_duration
+                    _actual_dur = get_duration(str(current_path))
+                    _min_expected = segment_duration * 0.8
+                    if _actual_dur > 0 and _actual_dur < _min_expected:
+                        self.logger.warning(
+                            f"[Pipeline] ⚠️ Step 1 output duration {_actual_dur:.1f}s "
+                            f"< 80% of expected {segment_duration:.1f}s — "
+                            f"reverting to original clip to avoid frozen-frame output"
+                        )
+                        current_path = clip_path
+                except Exception as _dur_e:
+                    self.logger.debug(f"[Pipeline] Duration check skipped: {_dur_e}")
+        else:
+            self.logger.warning(f"[Pipeline] Step 1 failed, using original")
+            current_path = clip_path
+        
+        # ─────────────────────────────────────────────────────────────────
+        # STEP 2: B-Roll Insertion (optional)
+        # ─────────────────────────────────────────────────────────────────
+        if enable_broll and keywords:
+            self.logger.info(f"[Pipeline] Step 2: B-roll insertion ({len(keywords)} keywords)")
             
-            enhanced_path = await self.ep.apply(
-                video_path=current_path,
-                output_path=step1_output,
-                words=words_with_timestamps or [],
+            # Create decision engine
+            decision_engine = BRollDecisionEngine()
+            decisions = decision_engine.analyze_segment(
                 segment_text=segment_text,
-                energy_level=(clip_metadata or {}).get("energy_level", 0.5),
-                grain_override=(clip_metadata or {}).get("grain_override", 0),
-                flash_timestamps=jump_cuts,
-                sections=(clip_metadata or {}).get("sections"),
+                segment_start=segment_start,
+                segment_duration=segment_duration,
+                keywords=keywords,
             )
             
-            if enhanced_path and enhanced_path.exists():
-                current_path = enhanced_path
-                self.logger.info(f"[Pipeline] ✅ Step 1 complete")
+            if decisions:
+                step2_output = Path(tempfile.mktemp(suffix=".mp4"))
+                temp_files.append(step2_output)
                 
-                # ── Duration guard: validate Step 1 output isn't truncated ──────
-                if segment_duration > 0:
-                    try:
-                        from .ffmpeg_guard import get_duration
-                        _actual_dur = get_duration(str(current_path))
-                        _min_expected = segment_duration * 0.8
-                        if _actual_dur > 0 and _actual_dur < _min_expected:
-                            self.logger.warning(
-                                f"[Pipeline] ⚠️ Step 1 output duration {_actual_dur:.1f}s "
-                                f"< 80% of expected {segment_duration:.1f}s — "
-                                f"reverting to original clip to avoid frozen-frame output"
-                            )
-                            current_path = clip_path
-                    except Exception as _dur_e:
-                        self.logger.debug(f"[Pipeline] Duration check skipped: {_dur_e}")
-            else:
-                self.logger.warning(f"[Pipeline] Step 1 failed, using original")
-                current_path = clip_path
-            
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 2: B-Roll Insertion (optional)
-            # ─────────────────────────────────────────────────────────────────
-            if enable_broll and keywords:
-                self.logger.info(f"[Pipeline] Step 2: B-roll insertion ({len(keywords)} keywords)")
-                
-                # Create decision engine
-                decision_engine = BRollDecisionEngine()
-                decisions = decision_engine.analyze_segment(
-                    segment_text=segment_text,
-                    segment_start=segment_start,
-                    segment_duration=segment_duration,
-                    keywords=keywords,
+                success = insert_broll_into_clip(
+                    clip_path=current_path,
+                    decisions=decisions,
+                    output_path=step2_output,
                 )
                 
-                if decisions:
-                    step2_output = Path(tempfile.mktemp(suffix=".mp4"))
-                    temp_files.append(step2_output)
-                    
-                    success = insert_broll_into_clip(
-                        clip_path=current_path,
-                        decisions=decisions,
-                        output_path=step2_output,
-                    )
-                    
-                    if success:
-                        current_path = step2_output
-                        self.logger.info(f"[Pipeline] ✅ Step 2 complete ({len(decisions)} B-rolls)")
-                    else:
-                        self.logger.warning(f"[Pipeline] Step 2 failed, continuing without B-roll")
+                if success:
+                    current_path = step2_output
+                    self.logger.info(f"[Pipeline] ✅ Step 2 complete ({len(decisions)} B-rolls)")
                 else:
-                    self.logger.info(f"[Pipeline] Step 2: No B-roll decisions")
-            
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 2.5: SFX Insertion (optional — after B-roll, before music)
-            # ─────────────────────────────────────────────────────────────────
-            if enable_sfx:
-                self.logger.info(f"[Pipeline] Step 2.5: SFX insertion")
-                try:
-                    from ..domains.sfx.sfx_orchestrator import SFXOrchestrator
-                    _sfx = SFXOrchestrator()
-                    _sfx_enabled = os.getenv("SFX_PROFILE", "subtle").lower() != "none"
-                    if _sfx_enabled:
-                        step_sfx_output = Path(tempfile.mktemp(suffix=".mp4"))
-                        temp_files.append(step_sfx_output)
-                        _sfx_result = await _sfx.process_clip(
-                            input_path=str(current_path),
-                            output_path=str(step_sfx_output),
-                            transcript_segments=[],
-                            jump_cuts=jump_cuts or [],
-                            clip_metadata=clip_metadata,
-                        )
-                        if _sfx_result and Path(_sfx_result).exists():
-                            current_path = Path(_sfx_result)
-                            self.logger.info(f"[Pipeline] ✅ Step 2.5 (SFX) complete")
-                        else:
-                            self.logger.warning(f"[Pipeline] Step 2.5 (SFX) returned no output — continuing without SFX")
+                    self.logger.warning(f"[Pipeline] Step 2 failed, continuing without B-roll")
+            else:
+                self.logger.info(f"[Pipeline] Step 2: No B-roll decisions")
+        
+        # ─────────────────────────────────────────────────────────────────
+        # STEP 2.5: SFX Insertion (optional — after B-roll, before music)
+        # ─────────────────────────────────────────────────────────────────
+        if enable_sfx:
+            self.logger.info(f"[Pipeline] Step 2.5: SFX insertion")
+            try:
+                from ..domains.sfx.sfx_orchestrator import SFXOrchestrator
+                _sfx = SFXOrchestrator()
+                _sfx_enabled = os.getenv("SFX_PROFILE", "subtle").lower() != "none"
+                if _sfx_enabled:
+                    step_sfx_output = Path(tempfile.mktemp(suffix=".mp4"))
+                    temp_files.append(step_sfx_output)
+                    _sfx_result = await _sfx.process_clip(
+                        input_path=str(current_path),
+                        output_path=str(step_sfx_output),
+                        transcript_segments=[],
+                        jump_cuts=jump_cuts or [],
+                        clip_metadata=clip_metadata,
+                    )
+                    if _sfx_result and Path(_sfx_result).exists():
+                        current_path = Path(_sfx_result)
+                        self.logger.info(f"[Pipeline] ✅ Step 2.5 (SFX) complete")
                     else:
-                        self.logger.info(f"[Pipeline] Step 2.5 (SFX): disabled (SFX_PROFILE=none)")
-                except Exception as _sfx_e:
-                    self.logger.warning(f"[Pipeline] Step 2.5 (SFX) failed: {_sfx_e} — continuing without SFX")
+                        self.logger.warning(f"[Pipeline] Step 2.5 (SFX) returned no output — continuing without SFX")
+                else:
+                    self.logger.info(f"[Pipeline] Step 2.5 (SFX): disabled (SFX_PROFILE=none)")
+            except Exception as _sfx_e:
+                self.logger.warning(f"[Pipeline] Step 2.5 (SFX) failed: {_sfx_e} — continuing without SFX")
+        
+        # ─────────────────────────────────────────────────────────────────
+        # STEP 3: Audio Mixing (optional)
+        # ─────────────────────────────────────────────────────────────────
+        if enable_music:
+            self.logger.info(f"[Pipeline] Step 3: Audio mixing")
             
-            # ─────────────────────────────────────────────────────────────────
-            # STEP 3: Audio Mixing (optional)
-            # ─────────────────────────────────────────────────────────────────
-            if enable_music:
-                self.logger.info(f"[Pipeline] Step 3: Audio mixing")
+            # Validate audio stream before mixing (Phase 1B)
+            if not _validate_audio_stream(current_path, "clip"):
+                self.logger.warning(f"[Pipeline] Invalid audio stream, skipping music mix")
+            else:
+                step3_output = Path(tempfile.mktemp(suffix=".mp4"))
+                temp_files.append(step3_output)
                 
-                # Validate audio stream before mixing (Phase 1B)
-                if not _validate_audio_stream(current_path, "clip"):
-                    self.logger.warning(f"[Pipeline] Invalid audio stream, skipping music mix")
+                success = mix_background_music(
+                    video_path=current_path,
+                    output_path=step3_output,
+                    music_volume=music_volume,
+                    ducking_enabled=True,
+                    word_timings=words_with_timestamps,
+                )
+                
+                if success:
+                    current_path = step3_output
+                    self.logger.info(f"[Pipeline] ✅ Step 3 complete")
                 else:
-                    step3_output = Path(tempfile.mktemp(suffix=".mp4"))
-                    temp_files.append(step3_output)
-                    
-                    success = mix_background_music(
-                        video_path=current_path,
-                        output_path=step3_output,
-                        music_volume=music_volume,
-                        ducking_enabled=True,
-                        word_timings=words_with_timestamps,
-                    )
-                    
-                    if success:
-                        current_path = step3_output
-                        self.logger.info(f"[Pipeline] ✅ Step 3 complete")
-                    else:
-                        self.logger.warning(f"[Pipeline] Step 3 failed, continuing without music")
-            
-            # ─────────────────────────────────────────────────────────────────
-            # FINAL: Copy to output location
-            # ─────────────────────────────────────────────────────────────────
-            import shutil
-            shutil.copy(current_path, output_path)
-            
-            self.logger.info(f"✅ [Pipeline] Complete: {output_path.name}")
-            return output_path
-            
-        except Exception as e:
-            self.logger.error(f"[Pipeline] Fatal error: {e}")
-            # Return original on failure
-            return None
-        finally:
-            # Cleanup temp files (except current_path which might be output)
-            for temp_file in temp_files:
-                try:
-                    if temp_file.exists() and temp_file != current_path:
-                        temp_file.unlink()
-                except Exception:
-                    pass
+                    self.logger.warning(f"[Pipeline] Step 3 failed, continuing without music")
+        
+        # ─────────────────────────────────────────────────────────────────
+        # FINAL: Copy to output location
+        # ─────────────────────────────────────────────────────────────────
+        import shutil
+        shutil.copy(current_path, output_path)
+        
+        self.logger.info(f"✅ [Pipeline] Complete: {output_path.name}")
+        return output_path
     
     async def process_clips_batch(
         self,
