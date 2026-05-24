@@ -622,7 +622,7 @@ async def cleanup_stale_tasks(ctx: dict) -> None:
     from datetime import datetime, timedelta
 
     timeout_min = int(os.getenv("TASK_STALE_TIMEOUT_MINUTES", "45"))
-    cutoff = datetime.utcnow() - timedelta(minutes=timeout_min)
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_min)
 
     try:
         from ..database import AsyncSessionLocal
@@ -691,10 +691,8 @@ async def _on_job_start(ctx: dict) -> None:
                         "Fix 4: Job %s for task %s blocked at start — task status is '%s'",
                         job_id[:12] if job_id else "?", task_id[:12], status,
                     )
-                    # Raise JobExecutionFailed to prevent ARQ from processing
-                    raise asyncio.CancelledError(
-                        f"Task {task_id[:12]} is '{status}' — ARQ job blocked"
-                    )
+                    # Prevent ARQ from processing this job
+                    return
         finally:
             await conn.close()
     except asyncio.CancelledError:
@@ -742,7 +740,12 @@ class WorkerSettings:
     config = get_config()
 
     # Functions to run
-    functions = [process_video_task, analyze_ab_test, process_scheduled_job]
+    functions = [
+        process_video_task,
+        analyze_ab_test,
+        process_scheduled_job,
+        finalize_clip_with_suggestions_task,
+    ]
     # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
     queue_name = "viraclip_cpu_tasks"
 
@@ -988,6 +991,11 @@ async def finalize_clip_with_suggestions_task(
                 backup_path = original_path.with_suffix(".original" + original_path.suffix)
                 if original_path.exists():
                     shutil.copy2(str(original_path), str(backup_path))
+                else:
+                    logger.warning(
+                        "[Worker] Original file %s not found — skipping backup",
+                        original_path,
+                    )
 
                 # Replace original with new render
                 if new_path.exists():
