@@ -104,5 +104,5 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-# Start the application
-CMD ["bun", "server.js"]
+# Run pending migrations before starting the app
+CMD ["sh", "-c", "npx prisma migrate deploy && bun server.js"]

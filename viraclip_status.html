@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ViraClip — Panel de Estado Técnico</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0f0f0f;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;padding:24px;max-width:960px;margin:0 auto}
+h1{font-size:1.5rem;font-weight:600;margin-bottom:4px;color:#22c55e}
+.sub{color:#888;font-size:.85rem;margin-bottom:24px}
+.section{background:#1a1a1a;border:1px solid #2a2a2a;border-radius:8px;margin-bottom:16px;overflow:hidden}
+.section-header{padding:12px 16px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none;font-weight:500;font-size:.95rem}
+.section-header:hover{background:#222}
+.section-header .arrow{transition:transform .2s;font-size:.8rem;color:#666}
+.section-header.collapsed .arrow{transform:rotate(-90deg)}
+.section-body{padding:12px 16px;border-top:1px solid #2a2a2a}
+.section-body.hidden{display:none}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+th,td{text-align:left;padding:8px 6px;border-bottom:1px solid #2a2a2a}
+th{color:#888;font-weight:500;font-size:.8rem;text-transform:uppercase;letter-spacing:.03em}
+td{font-family:'SF Mono','Fira Code','Cascadia Code',monospace;font-size:.82rem}
+.badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.75rem;font-weight:500}
+.badge-green{background:#22c55e22;color:#22c55e;border:1px solid #22c55e44}
+.badge-red{background:#ef444422;color:#ef4444;border:1px solid #ef444444}
+.badge-yellow{background:#eab30822;color:#eab308;border:1px solid #eab30844}
+.badge-gray{background:#66666622;color:#999;border:1px solid #66666644}
+.code-block{background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;padding:12px;margin:8px 0;font-family:'SF Mono','Fira Code','Cascadia Code',monospace;font-size:.8rem;line-height:1.5;overflow-x:auto;position:relative;white-space:pre}
+.copy-btn{position:absolute;top:6px;right:6px;background:#2a2a2a;border:1px solid #3a3a3a;color:#aaa;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:.7rem}
+.copy-btn:hover{background:#3a3a3a;color:#fff}
+.checklist-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #222;font-size:.88rem}
+.checklist-item:last-child{border-bottom:none}
+.checklist-item input[type=checkbox]{accent-color:#22c55e;width:16px;height:16px;cursor:pointer}
+.checklist-item label{cursor:pointer;flex:1}
+.checklist-item.done label{text-decoration:line-through;color:#666}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.green{background:#22c55e}
+.status-dot.red{background:#ef4444}
+.status-dot.yellow{background:#eab308}
+.status-dot.gray{background:#555}
+.mono{font-family:'SF Mono','Fira Code','Cascadia Code',monospace}
+@media(max-width:640px){body{padding:12px}th,td{font-size:.75rem;padding:6px 4px}}
+</style>
+</head>
+<body>
+
+<h1>⬡ ViraClip · Panel de Estado</h1>
+<p class="sub">Post-limpieza · Pipeline >70 min · Clips truncados · <span class="mono" style="color:#ef4444">🔴 bug activo</span> · Diagnóstico completado 22/05/2026</p>
+
+<!-- ─── 1. Pipeline Map ─── -->
+<div class="section">
+  <div class="section-header" onclick="toggle(this)">
+    <span>1. Pipeline Map — Fases del clip</span>
+    <span class="arrow">▼</span>
+  </div>
+  <div class="section-body">
+    <table>
+      <thead>
+        <tr><th>Etapa</th><th>Archivo responsable</th><th>Estado</th><th>Duración esperada</th><th>Riesgo trunc.</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Detección de momento</td>
+          <td>_pipeline.py / hook_analysis.py</td>
+          <td><span class="badge badge-yellow">PENDIENTE DIAGNÓSTICO</span></td>
+          <td>~5 min</td>
+          <td><span class="badge badge-gray">BAJO</span></td>
+        </tr>
+        <tr>
+          <td>Creación de clip</td>
+          <td>clip_creation.py<br><span class="mono" style="color:#eab308">create_optimized_clip()</span></td>
+          <td><span class="badge badge-yellow">PENDIENTE DIAGNÓSTICO</span></td>
+          <td>~15 min</td>
+          <td><span class="badge badge-red">ALTO</span></td>
+        </tr>
+        <tr>
+          <td>Optimización / snap</td>
+          <td>clip_creation.py<br><span class="mono" style="color:#eab308">snap_to_word_boundary()</span></td>
+          <td><span class="badge badge-green">✅ DESCARTA</span></td>
+          <td>~2 min</td>
+          <td><span class="badge badge-gray">BAJO</span></td>
+        </tr>
+        <tr>
+          <td>Silence removal</td>
+          <td>silence_removal.py</td>
+          <td><span class="badge badge-yellow">PENDIENTE DIAGNÓSTICO</span></td>
+          <td>~10 min</td>
+          <td><span class="badge badge-red">ALTO</span></td>
+        </tr>
+        <tr>
+          <td>Render final (subtítulos + b-roll + audio)</td>
+          <td>_clip_renderer.py (2059 lines)</td>
+          <td><span class="badge badge-yellow">PENDIENTE DIAGNÓSTICO</span></td>
+          <td>~30 min</td>
+          <td><span class="badge badge-yellow">MEDIO</span></td>
+        </tr>
+        <tr>
+          <td>Polish / export</td>
+          <td>video_polish_service.py / export_gate.py</td>
+          <td><span class="badge badge-yellow">PENDIENTE DIAGNÓSTICO</span></td>
+          <td>~8 min</td>
+          <td><span class="badge badge-yellow">MEDIO</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin-top:10px;font-size:.8rem;color:#888">
+      ⚠️ <strong>create_optimized_clip</strong> (clip_creation.py:775 lines) y <strong>_clip_renderer</strong> (2059 lines) son los dos módulos más grandes y con más llamadas FFmpeg. Ambos son candidatos prioritarios para auditoría de guards de duración.
+    </p>
+  </div>
+</div>
+
+<!-- ─── 2. Bug Tracker ─── -->
+<div class="section">
+  <div class="section-header" onclick="toggle(this)">
+    <span>2. Bug Tracker — Truncación de clips</span>
+    <span class="arrow">▼</span>
+  </div>
+  <div class="section-body">
+    <table>
+      <thead>
+        <tr><th>Ítem</th><th>Estado</th><th>Detalle</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="mono">-shortest</span> en <span class="mono">mix_background_music</span> (audio.py:566)</td>
+          <td><span class="badge badge-green">✅ FIXED</span></td>
+          <td>Eliminado + añadido duration guard post-FFmpeg (≥80%).</td>
+        </tr>
+        <tr>
+          <td><span class="mono">_render_segment_task</span> params incorrectos (clip_creation.py:606)</td>
+          <td><span class="badge badge-red">🔴 CAUSA RAÍZ — FIXED</span></td>
+          <td>Pasaba <span class="mono">start_seconds</span>/<span class="mono">end_seconds</span>/<span class="mono">task_id</span> pero la firma espera <span class="mono">start_time</span>/<span class="mono">end_time</span> (sin <span class="mono">task_id</span>). Los parámetros incorrectos eran ignorados silenciosamente, dejando <span class="mono">start_time=None</span> y <span class="mono">end_time=None</span>. Corregido.</td>
+        </tr>
+
+        <tr>
+          <td><span class="mono">-shortest</span> en <span class="mono">_mix_bgm_fallback</span> (audio.py:468)</td>
+          <td><span class="badge badge-green">✅ YA NO EXISTÍA</span></td>
+          <td>El flag ya había sido eliminado previamente. Solo se añadió comentario documentando la decisión.</td>
+        </tr>
+        <tr>
+          <td><span class="mono">snap_to_word_boundary</span></td>
+          <td><span class="badge badge-green">✅ DESCARTADO</span></td>
+          <td>Tiene guard interno que restaura duración si se trunca >20%. Código en clip_creation.py y transcription.py.</td>
+        </tr>
+        <tr>
+          <td><span class="mono">create_optimized_clip</span> — flags <span class="mono">-t</span> y <span class="mono">-ss</span></td>
+          <td><span class="badge badge-red">🔴 SOSPECHOSO PRINCIPAL</span></td>
+          <td><span class="mono">-t</span> en líneas 311 y 334: si <span class="mono">duration</span> está mal calculado, el clip sale truncado. <span class="mono">-ss</span> es seguro (va antes de <span class="mono">-i</span>). Sin guard de duración post-FFmpeg.</td>
+        </tr>
+        <tr>
+          <td><span class="mono">broll_overlay.py</span> — <span class="mono">trim=duration=</span></td>
+          <td><span class="badge badge-green">✅ DESCARTADO</span></td>
+          <td>Solo afecta al B-roll (overlay), no al clip base. No causa truncación del clip principal.</td>
+        </tr>
+        <tr>
+          <td>Guards de duración en FFmpeg calls</td>
+          <td><span class="badge badge-red">🔴 POR VERIFICAR</span></td>
+          <td>No se ha confirmado que cada llamada FFmpeg en _clip_renderer.py (2059 líneas) tenga un guard que compare duración esperada vs real.</td>
+        </tr>
+        <tr>
+          <td>Silence removal >20% duración</td>
+          <td><span class="badge badge-yellow">🟡 HIPÓTESIS ACTIVA</span></td>
+          <td>Threshold: 0.4s. Si el video tiene muchas pausas, podría eliminar >20% de la duración original. Verificar con ffprobe antes/después.</td>
+        </tr>
+        <tr>
+          <td>Duration guard en <span class="mono">mix_background_music</span></td>
+          <td><span class="badge badge-green">✅ AÑADIDO</span></td>
+          <td>Post-FFmpeg: si output < 80% del input, log WARNING y retorna False (caller usa original).</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ─── 3. Comandos de diagnóstico rápido ─── -->
+<div class="section">
+  <div class="section-header" onclick="toggle(this)">
+    <span>3. Comandos de diagnóstico rápido</span>
+    <span class="arrow">▼</span>
+  </div>
+  <div class="section-body">
+    <p style="font-size:.82rem;color:#888;margin-bottom:8px">Copia y pega en la terminal del contenedor backend o worker.</p>
+
+    <div class="code-block" id="cmd1">ffprobe -v quiet -print_format json -show_format output.mp4 | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['format']['duration'])"<button class="copy-btn" onclick="copyCmd('cmd1')">Copiar</button></div>
+
+    <div class="code-block" id="cmd2">for f in *.mp4; do echo "$f: $(ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$f")s"; done<button class="copy-btn" onclick="copyCmd('cmd2')">Copiar</button></div>
+
+    <div class="code-block" id="cmd3">grep -rn "\-t \|\-ss \|atrim\|trim\|shortest" backend/src/ --include="*.py"<button class="copy-btn" onclick="copyCmd('cmd3')">Copiar</button></div>
+
+    <div class="code-block" id="cmd4">grep -n "silence\|threshold\|duration" backend/src/video_processing/silence_removal.py \| head -30<button class="copy-btn" onclick="copyCmd('cmd4')">Copiar</button></div>
+
+    <div class="code-block" id="cmd5"># Log duración post-FFmpeg (para añadir en _clip_renderer.py)
+ffprobe -v quiet -show_entries format=duration -of csv=p=0 "$output" 2>/dev/null || echo "NO_FILE"<button class="copy-btn" onclick="copyCmd('cmd5')">Copiar</button></div>
+  </div>
+</div>
+
+<!-- ─── 4. Estado Docker ─── -->
+<div class="section">
+  <div class="section-header" onclick="toggle(this)">
+    <span>4. Estado Docker — Post-limpieza</span>
+    <span class="arrow">▼</span>
+  </div>
+  <div class="section-body">
+    <table>
+      <thead>
+        <tr><th>Recurso</th><th>Estado</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Volúmenes huérfanos</td><td><span class="badge badge-green">✅ LIMPIADO</span></td></tr>
+        <tr><td>Build cache</td><td><span class="badge badge-green">✅ LIMPIADO</span></td></tr>
+        <tr><td>Imágenes dangling</td><td><span class="badge badge-green">✅ LIMPIADO</span></td></tr>
+        <tr><td>Contenedores parados</td><td><span class="badge badge-green">✅ LIMPIADO</span></td></tr>
+        <tr><td>Archivos huérfanos (scripts, docs, vendors)</td><td><span class="badge badge-green">✅ LIMPIADO</span></td></tr>
+        <tr><td>Tiempo estimado de job</td><td><span class="badge badge-red">>70 min (por optimizar)</span></td></tr>
+        <tr><td>Disco /dev/nvme0n1p2</td><td><span class="badge badge-yellow">73% usado / 256G libres</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ─── 5. Próximos pasos ─── -->
+<div class="section">
+  <div class="section-header" onclick="toggle(this)">
+    <span>5. Próximos pasos — Lista de prioridades</span>
+    <span class="arrow">▼</span>
+  </div>
+  <div class="section-body" id="checklist-section">
+    <div class="checklist-item" data-id="1">
+      <input type="checkbox" id="chk1"><label for="chk1">Ejecutar grep de <span class="mono">-t</span> / <span class="mono">-ss</span> / <span class="mono">-shortest</span> en los 3 archivos clave (clip_creation.py, _clip_renderer.py, silence_removal.py)</label>
+    </div>
+    <div class="checklist-item" data-id="2">
+      <input type="checkbox" id="chk2"><label for="chk2">Añadir log de duración post-FFmpeg en <span class="mono">_clip_renderer.py</span></label>
+    </div>
+    <div class="checklist-item" data-id="3">
+      <input type="checkbox" id="chk3"><label for="chk3">Añadir guard en <span class="mono">silence_removal</span>: máximo 20% de reducción de duración</label>
+    </div>
+    <div class="checklist-item" data-id="4">
+      <input type="checkbox" id="chk4"><label for="chk4">Lanzar job de prueba con clip de 60s conocido y medir duración en cada etapa</label>
+    </div>
+    <div class="checklist-item" data-id="5">
+      <input type="checkbox" id="chk5"><label for="chk5">Comparar duración en cada etapa con <span class="mono">ffprobe</span></label>
+    </div>
+    <div class="checklist-item" data-id="6">
+      <input type="checkbox" id="chk6"><label for="chk6">Optimizar Dockerfile para reducir tiempo de build (<20 min objetivo)</label>
+    </div>
+  </div>
+</div>
+
+<p style="text-align:center;font-size:.75rem;color:#444;margin-top:24px">
+  Generado el <span id="date"></span> · ViraClip · <span class="mono">viraclip_status.html</span>
+</p>
+
+<script>
+function toggle(el) {
+  el.classList.toggle('collapsed');
+  const body = el.nextElementSibling;
+  body.classList.toggle('hidden');
+}
+
+function copyCmd(id) {
+  const block = document.getElementById(id);
+  const text = block.textContent.replace('Copiar', '').trim();
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = block.querySelector('.copy-btn');
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copiado';
+    setTimeout(() => btn.textContent = orig, 1500);
+  }).catch(() => {});
+}
+
+// Persist checkboxes in memory (Map, not localStorage)
+const checkState = new Map();
+document.querySelectorAll('#checklist-section input[type=checkbox]').forEach(cb => {
+  cb.addEventListener('change', function() {
+    const item = this.closest('.checklist-item');
+    checkState.set(this.id, this.checked);
+    item.classList.toggle('done', this.checked);
+  });
+});
+
+document.getElementById('date').textContent = new Date().toLocaleString('es-ES', {
+  year: 'numeric', month: 'short', day: 'numeric',
+  hour: '2-digit', minute: '2-digit'
+});
+</script>
+</body>
+</html>

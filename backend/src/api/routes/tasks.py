@@ -129,11 +129,15 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=400, detail="Request body read timed out")
-    # FIX 2: Normalize: accept both {"source": {"url": ...}} and {"youtube_url": ...}
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    # FIX 2: Normalize: accept {"source": {"url": ...}}, {"youtube_url": ...}, {"url": ...}, or {"source_url": ...}
     if "youtube_url" in data and "source" not in data:
         data["source"] = {"url": data["youtube_url"]}
     if "url" in data and "source" not in data:
         data["source"] = {"url": data["url"]}
+    if "source_url" in data and "source" not in data:
+        data["source"] = {"url": data["source_url"]}
 
     raw_source = data.get("source")
     config = get_config()
@@ -224,117 +228,120 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     # ComfyUI AI features (Phase 10)
     use_comfyui_reframe = bool(data.get("use_comfyui_reframe", False))
     use_comfyui_thumbnail = bool(data.get("use_comfyui_thumbnail", False))
-    if not raw_source or not raw_source.get("url"):
-        raise HTTPException(status_code=400, detail="Source URL is required")
-
     try:
-        billing_service = BillingService(db)
-        await billing_service.assert_can_create_task(user_id)
+        if not raw_source or not raw_source.get("url"):
+            raise HTTPException(status_code=400, detail="Source URL is required")
 
-        task_service = TaskService(db)
+        # Wrap the entire handler body in _CREATE_TASK_TIMEOUT to prevent
+        # hanging indefinitely if Redis, DB, or any downstream dependency blocks.
+        async def _do_create():
 
-        # ── Idempotency check: prevent duplicate submissions ──────────────
-        # BUG 4 fix: if the same user already has a task for the same URL
-        # that is still queued or processing, return the existing task_id
-        # instead of creating a duplicate.
-        existing_task = await task_service.task_repo.find_task_by_user_and_url(
-            db, user_id, raw_source["url"]
-        )
-        if existing_task and existing_task.get("status") in ("queued", "processing"):
-            logger.info(
-                f"Idempotency hit: user {user_id} already has task "
-                f"{existing_task['id']} for URL {raw_source['url'][:60]} "
-                f"(status={existing_task['status']}) — returning existing task"
+            billing_service = BillingService(db)
+            await billing_service.assert_can_create_task(user_id)
+
+            task_service = TaskService(db)
+
+            # ── Idempotency check: prevent duplicate submissions ──────────────
+            existing_task = await task_service.task_repo.find_task_by_user_and_url(
+                db, user_id, raw_source["url"]
             )
+            if existing_task and existing_task.get("status") in ("queued", "processing"):
+                logger.info(
+                    f"Idempotency hit: user {user_id} already has task "
+                    f"{existing_task['id']} for URL {raw_source['url'][:60]} "
+                    f"(status={existing_task['status']}) — returning existing task"
+                )
+                return {
+                    "task_id": existing_task["id"],
+                    "message": "Task already exists and is being processed",
+                    "duplicate": True,
+                }
+
+            # Create task
+            task_id = await task_service.create_task_with_source(
+                user_id=user_id,
+                url=raw_source["url"],
+                title=raw_source.get("title"),
+                font_family=font_family,
+                font_size=font_size,
+                font_color=font_color,
+                caption_template=caption_template,
+                include_broll=include_broll,
+                processing_mode=processing_mode,
+                target_language=target_language,
+                auto_center_face=auto_center_face,
+                eye_contact_correction=eye_contact_correction,
+                split_screen=split_screen,
+                force_fresh=force_fresh,
+            )
+
+            # Get source type for worker
+            source_type = task_service.video_service.determine_source_type(
+                raw_source["url"]
+            )
+
+            # Enqueue job for worker.
+            logger.info("[ENQUEUE] Attempting to enqueue task %s (mode=%s, source=%s)", task_id, processing_mode, source_type)
+            queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
+            try:
+                job_id = await queue_adapter.enqueue_processing_job(
+                    "process_video_task",
+                    processing_mode,
+                    task_id,
+                    raw_source["url"],
+                    source_type,
+                    user_id,
+                    font_family,
+                    font_size,
+                    font_color,
+                    caption_template,
+                    processing_mode,
+                    output_format,
+                    add_subtitles,
+                    target_language,
+                    auto_center_face,
+                    eye_contact_correction,
+                    include_broll,
+                    split_screen,
+                )
+                logger.info("[ENQUEUE] ✅ Success: task %s → job %s (queue=%s)", task_id, job_id, processing_mode)
+            except Exception as exc:
+                logger.error("[ENQUEUE] ❌ Failed to enqueue task %s: %s", task_id, exc)
+                raise
+
+            # Save source metadata for resume/retries
+            try:
+                pool = await JobQueue.get_pool()
+                await pool.set(
+                    f"task_source:{task_id}",
+                    json.dumps({
+                        "url": raw_source["url"],
+                        "source_type": source_type,
+                        "output_format": output_format,
+                        "add_subtitles": add_subtitles,
+                        "force_fresh": force_fresh,
+                    }),
+                    ex=60 * 60 * 24 * 7,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to save task source metadata to Redis: {e}")
+
+            logger.info(f"Task {task_id} created and job {job_id} enqueued")
+
             return {
-                "task_id": existing_task["id"],
-                "message": "Task already exists and is being processed",
-                "duplicate": True,
+                "task_id": task_id,
+                "job_id": job_id,
+                "message": "Task created and queued for processing",
             }
 
-        # Create task
-        task_id = await task_service.create_task_with_source(
-            user_id=user_id,
-            url=raw_source["url"],
-            title=raw_source.get("title"),
-            font_family=font_family,
-            font_size=font_size,
-            font_color=font_color,
-            caption_template=caption_template,
-            include_broll=include_broll,
-            processing_mode=processing_mode,
-            target_language=target_language,
-            auto_center_face=auto_center_face,
-            eye_contact_correction=eye_contact_correction,
-            split_screen=split_screen,
-            force_fresh=force_fresh,
+        return await asyncio.wait_for(_do_create(), timeout=_CREATE_TASK_TIMEOUT)
+
+    except asyncio.TimeoutError:
+        logger.error(f"create_task timed out after {_CREATE_TASK_TIMEOUT}s for user {user_id}")
+        raise HTTPException(
+            status_code=504,
+            detail="Task creation timed out. The system may be under load — please try again.",
         )
-
-        # Get source type for worker
-        source_type = task_service.video_service.determine_source_type(
-            raw_source["url"]
-        )
-
-        # Enqueue job for worker.
-        # Note: generate_ab_variants and target_platform are NOT stored in the task
-        # record — they are passed directly as job arguments so the worker can act on
-        # them at render time.  task_service.process_task() uses generate_ab_variants
-        # to optionally render a B-variant clip for each segment (P3.5).
-        logger.info("[ENQUEUE] Attempting to enqueue task %s (mode=%s, source=%s)", task_id, processing_mode, source_type)
-        queue_adapter = getattr(request.app.state, "queue_adapter", JobQueue)
-        try:
-            job_id = await queue_adapter.enqueue_processing_job(
-                "process_video_task",
-                processing_mode,
-                task_id,
-                raw_source["url"],
-                source_type,
-                user_id,
-                font_family,
-                font_size,
-                font_color,
-                caption_template,
-                processing_mode,
-                output_format,
-                add_subtitles,
-                target_language,
-                auto_center_face,
-                eye_contact_correction,
-                include_broll,
-                split_screen,
-            )
-            logger.info("[ENQUEUE] ✅ Success: task %s → job %s (queue=%s)", task_id, job_id, processing_mode)
-        except Exception as exc:
-            logger.error("[ENQUEUE] ❌ Failed to enqueue task %s: %s", task_id, exc)
-            raise
-
-        # Save source metadata for resume/retries in environments without sources.url column
-        # Use the existing JobQueue pool (ArqRedis) instead of creating a new connection
-        try:
-            pool = await JobQueue.get_pool()
-            await pool.set(
-                f"task_source:{task_id}",
-                json.dumps({
-                    "url": raw_source["url"],
-                    "source_type": source_type,
-                    "output_format": output_format,
-                    "add_subtitles": add_subtitles,
-                    "force_fresh": force_fresh,
-                }),
-                ex=60 * 60 * 24 * 7,
-            )
-        except Exception as e:
-            logger.warning(f"Failed to save task source metadata to Redis: {e}")
-            # Non-fatal: task will still work without this cache entry
-
-        logger.info(f"Task {task_id} created and job {job_id} enqueued")
-
-        return {
-            "task_id": task_id,
-            "job_id": job_id,
-            "message": "Task created and queued for processing",
-        }
-
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except BillingLimitExceeded as e:

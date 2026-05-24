@@ -312,6 +312,7 @@ async def mix_bgm_beat_synced(
             "-map", "[aout]",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,

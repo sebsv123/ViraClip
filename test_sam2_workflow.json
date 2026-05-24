@@ -1,0 +1,52 @@
+{
+  "1": {
+    "inputs": {
+      "video": "clips/ff74a714-5430-41fc-9e9e-1ae7507459c1/sub_jc_clip_2_viral_53_0035-0135.mp4",
+      "force_rate": 0,
+      "custom_width": 0,
+      "custom_height": 0,
+      "frame_load_cap": 24,
+      "skip_first_frames": 0,
+      "select_every_nth": 1
+    },
+    "class_type": "VHS_LoadVideo"
+  },
+  "2": {
+    "inputs": {
+      "model": "sam2_hiera_small.safetensors",
+      "segmentor": "video",
+      "device": "cuda",
+      "precision": "fp16"
+    },
+    "class_type": "DownloadAndLoadSAM2Model"
+  },
+  "3": {
+    "inputs": {
+      "sam2_model": ["2", 0],
+      "image": ["1", 0],
+      "keep_model_loaded": false,
+      "coordinates_positive": "[{\"x\": 540, \"y\": 864}]",
+      "individual_objects": false
+    },
+    "class_type": "Sam2Segmentation"
+  },
+  "4": {
+    "inputs": {"mask": ["3", 0]},
+    "class_type": "MaskToImage"
+  },
+  "5": {
+    "inputs": {
+      "images": ["4", 0],
+      "frame_rate": 30,
+      "loop_count": 0,
+      "filename_prefix": "test_sam2_mask",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 18,
+      "save_metadata": false,
+      "save_output": true,
+      "pingpong": false
+    },
+    "class_type": "VHS_VideoCombine"
+  }
+}

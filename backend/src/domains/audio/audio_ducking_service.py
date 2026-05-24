@@ -179,6 +179,37 @@ class AudioDuckingService:
         import math
 
         try:
+            # ── Step 0: Get video duration via ffprobe ──
+            # We need the exact video duration to pass -t to the mux command,
+            # because -shortest can truncate when audio is slightly shorter.
+            import json as _json
+            probe_cmd = [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_entries", "format=duration",
+                str(video_path),
+            ]
+            probe_proc = await asyncio.create_subprocess_exec(
+                *probe_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            probe_stdout, _ = await probe_proc.communicate()
+            video_duration: Optional[float] = None
+            if probe_proc.returncode == 0 and probe_stdout:
+                try:
+                    info = _json.loads(probe_stdout)
+                    video_duration = float(info["format"]["duration"])
+                except (KeyError, ValueError, TypeError):
+                    pass
+            if video_duration is None:
+                logger.warning("[Ducking] Could not probe video duration, falling back to -shortest:v")
+                # Fallback: use -shortest:v (may not work in all ffmpeg versions)
+                use_shortest_v = True
+            else:
+                use_shortest_v = False
+                logger.info("[Ducking] Video duration: %.2fs — will use -t instead of -shortest", video_duration)
+
             # ── Step 1: Extract audio from video ──
             raw_audio = Path(tempfile.mktemp(suffix=".wav"))
             extract_cmd = [
@@ -230,6 +261,8 @@ class AudioDuckingService:
                 return False
 
             # ── Step 3: Re-mux ducked audio back to video ──
+            # Use -t <duration> to force the output to match the video duration exactly.
+            # This is more reliable than -shortest which can truncate when audio is shorter.
             mux_cmd = [
                 "ffmpeg", "-y",
                 "-i", str(video_path),
@@ -240,9 +273,17 @@ class AudioDuckingService:
                 "-c:a", "aac",
                 "-b:a", "192k",
                 "-ar", "48000",
-                "-shortest",
-                str(output_path),
             ]
+            if use_shortest_v:
+                mux_cmd += ["-shortest:v"]
+            else:
+                # Pad audio with silence to match video duration, then trim to exact duration
+                mux_cmd += [
+                    "-af", f"apad=whole_dur={video_duration:.3f}",
+                    "-t", f"{video_duration:.3f}",
+                ]
+            mux_cmd.append(str(output_path))
+
             mux_proc = await asyncio.create_subprocess_exec(
                 *mux_cmd,
                 stdout=asyncio.subprocess.DEVNULL,

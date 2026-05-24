@@ -12,7 +12,7 @@ from typing import List, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-from ..domains.broll.broll_config import (
+from src.domains.broll.broll_config import (
     MIN_OVERLAY_DURATION_S,
     MIN_GAP_BETWEEN_OVERLAYS_S,
     CATEGORY_COOLDOWN_S,

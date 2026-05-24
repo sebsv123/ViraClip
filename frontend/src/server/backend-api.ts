@@ -13,6 +13,10 @@ export function getBackendApiBaseUrl() {
     process.env.NEXT_PUBLIC_API_URL ||
     "http://localhost:8000";
 
+  if (!process.env.BACKEND_INTERNAL_URL && process.env.NODE_ENV === "production") {
+    console.warn("[backend-api] BACKEND_INTERNAL_URL not set in production. Falling back to NEXT_PUBLIC_API_URL. Set BACKEND_INTERNAL_URL for internal Docker networking.");
+  }
+
   return apiUrl.replace(/\/$/, "");
 }
 

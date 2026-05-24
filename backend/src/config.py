@@ -117,6 +117,13 @@ class Config:
         self.rust_agent_url = os.getenv("RUST_AGENT_URL", "http://rust-agent:8001")
         self.rust_agent_enabled = self._get_bool_env("RUST_AGENT_ENABLED", False)
 
+        # IconScout integration
+        self.iconscout_client_id = self._get_optional_env("ICONSCOUT_CLIENT_ID")
+        self.iconscout_cache_ttl = int(os.getenv("ICONSCOUT_CACHE_TTL", "86400"))
+
+        # render3d service for 3D asset rendering
+        self.render3d_url = os.getenv("RENDER3D_URL", "http://render3d:7890")
+
         # LLM optimization & dataset collection
         self.dataset_dir = os.getenv("DATASET_DIR", "/app/datasets")
         self.llm_routing_enabled = self._get_bool_env("LLM_ROUTING_ENABLED", False)

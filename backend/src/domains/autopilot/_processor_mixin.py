@@ -401,12 +401,15 @@ class _ProcessorMixin:
                 _tdur = max(45.0, min(120.0, _tdur))
                 _s0 = parse_timestamp_to_seconds(_seg["start_time"])
                 _e0 = parse_timestamp_to_seconds(_seg["end_time"])
+                # Always cap at video end to prevent FFmpeg silent truncation,
+                # regardless of whether the segment is being extended or not.
+                _new_end = _e0
                 if (_e0 - _s0) < _tdur:
                     _new_end = _s0 + _tdur
-                    # Cap at video end to prevent FFmpeg silent truncation
-                    if _video_dur and _new_end > _video_dur - 1.0:
-                        _new_end = max(_s0 + 10.0, _video_dur - 1.0)
-                        logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
+                if _video_dur and _new_end > _video_dur - 1.0:
+                    _new_end = max(_s0 + 10.0, _video_dur - 1.0)
+                    logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
+                if _new_end != _e0:
                     _seg["end_time"] = f"{int(_new_end) // 60:02d}:{int(_new_end) % 60:02d}"
                     logger.debug(
                         f"  [pre-extract] Segment updated to {_tdur:.0f}s "
@@ -486,6 +489,26 @@ class _ProcessorMixin:
                     # audio mastering (EBU R128), QA check, learning-loop manifest.
                     # All steps are independently guarded — never breaks clip delivery.
                     if info is not None:
+                        # Guard: save backup of clip before Creative Pipeline
+                        _cp_backup = None
+                        _cp_before_dur = 0.0
+                        try:
+                            import subprocess as _cp_sp, json as _cp_json
+                            _cp_probe = _cp_sp.run(
+                                ["ffprobe", "-v", "quiet", "-print_format", "json",
+                                 "-show_format", info["path"]],
+                                capture_output=True, text=True, timeout=10
+                            )
+                            _cp_before_dur = float(
+                                _cp_json.loads(_cp_probe.stdout)
+                                .get("format", {}).get("duration", 0)
+                            )
+                            # Save backup before Creative Pipeline modifies the file
+                            _cp_backup = Path(info["path"]).with_name(f"_cp_backup_{Path(info['path']).name}")
+                            shutil.copy2(info["path"], str(_cp_backup))
+                        except Exception:
+                            pass
+                        
                         try:
                             from .creative_pipeline import get_creative_pipeline
                             _cp = get_creative_pipeline()
@@ -515,8 +538,33 @@ class _ProcessorMixin:
                                 "Phase 9 creative pipeline skipped for clip %d: %s",
                                 i, _ce,
                             )
-                            info.pop("words", None)
-                            info.pop("audio_features", None)
+                        
+                        # Guard: restore clip from backup if Creative Pipeline truncated it
+                        if _cp_backup and _cp_backup.exists() and _cp_before_dur > 0:
+                            try:
+                                _cp_after_probe = _cp_sp.run(
+                                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                                     "-show_format", info["path"]],
+                                    capture_output=True, text=True, timeout=10
+                                )
+                                _cp_after_dur = float(
+                                    _cp_json.loads(_cp_after_probe.stdout)
+                                    .get("format", {}).get("duration", 0)
+                                )
+                                if _cp_after_dur < _cp_before_dur * 0.8:
+                                    logger.warning(
+                                        "[CREATIVE GUARD] Creative Pipeline truncated clip %d: "
+                                        "%.1fs → %.1fs — restoring from backup",
+                                        i + 1, _cp_before_dur, _cp_after_dur,
+                                    )
+                                    shutil.copy2(str(_cp_backup), info["path"])
+                                    logger.info(
+                                        "[CREATIVE GUARD] Restored clip %d from backup (%.1fs)",
+                                        i + 1, _cp_before_dur,
+                                    )
+                                _cp_backup.unlink(missing_ok=True)
+                            except Exception:
+                                _cp_backup.unlink(missing_ok=True)
                     
                     # ── Viral Editing: Audio Denoise (opt-in) ────────────────────────
                     if info is not None and denoise_audio:

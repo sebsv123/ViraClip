@@ -88,7 +88,7 @@ class VoiceCloningService:
                 "-c:a", "aac", "-b:a", "192k",
                 "-map", "0:v:0",
                 "-map", "1:a:0",
-                "-shortest",
+                "-shortest:v",
                 output_path,
             ]
             result = subprocess.run(cmd, capture_output=True, timeout=120)

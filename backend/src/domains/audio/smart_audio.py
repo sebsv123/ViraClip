@@ -65,13 +65,27 @@ class SmartAudio:
 
         Returns output_path on success, input_path as safe fallback.
         """
+        def _dur(p) -> float:
+            import subprocess, json
+            try:
+                r = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                     "-show_format", str(p)],
+                    capture_output=True, text=True, timeout=10
+                )
+                return float(json.loads(r.stdout).get("format", {}).get("duration", 0))
+            except Exception:
+                return 0.0
+
         try:
             current = input_path
+            logger.info(f"[DURATION] smart_audio_start: {_dur(current):.2f}s")
 
             # Step 1: loudnorm
             normed = await self._loudnorm(current)
             if normed and normed.exists():
                 current = normed
+                logger.info(f"[DURATION] post_loudnorm: {_dur(current):.2f}s")
 
             # Step 2: SFX injection
             sfx_events = self._build_sfx_events(timeline_events)
@@ -81,6 +95,7 @@ class SmartAudio:
                     if current != input_path:
                         current.unlink(missing_ok=True)
                     current = with_sfx
+                    logger.info(f"[DURATION] post_sfx_inject: {_dur(current):.2f}s")
 
             # Step 3: BGM mix
             if bgm_path and bgm_path.exists():
@@ -89,12 +104,14 @@ class SmartAudio:
                     if current != input_path:
                         current.unlink(missing_ok=True)
                     current = with_bgm
+                    logger.info(f"[DURATION] post_bgm_mix: {_dur(current):.2f}s")
 
             # Move final result to output_path
             if current != output_path:
                 import shutil
                 shutil.move(str(current), str(output_path))
 
+            logger.info(f"[DURATION] smart_audio_end: {_dur(output_path):.2f}s")
             return output_path if output_path.exists() else input_path
 
         except Exception as exc:

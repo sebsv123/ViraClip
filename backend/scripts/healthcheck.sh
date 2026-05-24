@@ -55,6 +55,20 @@ else
     log "torchcodec not installed — skipping (non-fatal)"
 fi
 
+# ── 5. Post-fix validation checks ─────────────────────────────────────────────
+log "Running post-fix validation checks..."
+docker exec viraclip-worker test -d /shared_temp \
+    && log "shared_temp: OK" \
+    || log "shared_temp: MISSING"
+docker exec viraclip-worker test -f /var/log/worker/worker.log \
+    && log "worker.log: OK" \
+    || log "worker.log: MISSING"
+docker exec viraclip-redis redis-cli ping \
+    && log "redis ping: OK" \
+    || log "redis ping: FAILED"
+WATCHDOG_RESTARTS=$(docker inspect viraclip-watchdog --format '{{.RestartCount}}' 2>/dev/null || echo "unknown")
+log "watchdog restarts: ${WATCHDOG_RESTARTS}"
+
 # ── All checks passed ─────────────────────────────────────────────────────────
 log "All health checks PASSED"
 exit 0

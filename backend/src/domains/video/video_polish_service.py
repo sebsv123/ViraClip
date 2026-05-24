@@ -220,8 +220,13 @@ class VideoPolishService:
             detected = detected[:frame_count]
             if detected.any():
                 det_idx = np.where(detected)[0]
-                raw_cx = np.interp(np.arange(frame_count), det_idx, raw_cx[det_idx])
-                raw_cy = np.interp(np.arange(frame_count), det_idx, raw_cy[det_idx])
+                all_idx = np.arange(frame_count)
+                # Extender con anclas al inicio y final para evitar freeze en extremos
+                anchor_cx = np.concatenate([[width / 2.0],  raw_cx[det_idx], [width / 2.0]])
+                anchor_cy = np.concatenate([[height * 0.35], raw_cy[det_idx], [height * 0.35]])
+                anchor_idx = np.concatenate([[0], det_idx, [frame_count - 1]])
+                raw_cx = np.interp(all_idx, anchor_idx, anchor_cx)
+                raw_cy = np.interp(all_idx, anchor_idx, anchor_cy)
             sigma = max(4.0, fps * 0.25)
             smooth_cx = self._gaussian_smooth(raw_cx, sigma)
             smooth_cy = self._gaussian_smooth(raw_cy, sigma)
@@ -248,6 +253,11 @@ class VideoPolishService:
                         yield cropped
                     else:
                         cl = (width - target_w) // 2
+                        logger.warning(
+                            f"[autocrop] static fallback at frame {written} "
+                            f"— cropped.shape={cropped.shape} expected=({target_h},{target_w}) "
+                            f"cx={cx} cy={cy} left={left} top={top}"
+                        )
                         yield frame[0:target_h, cl:cl + target_w]
                     written += 1
             temp_v = output_path.with_suffix(".noaudio.mp4")

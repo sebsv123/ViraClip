@@ -154,24 +154,40 @@ class CodeDiagnosticAgent:
         await self._watch_stdin()
 
     async def _watch_file(self, path: str) -> None:
-        """Tail a file by polling for new lines."""
+        """Tail a file by polling for new lines.
+        Retries with backoff if the file doesn't exist yet (e.g. worker
+        container hasn't created it yet).
+        """
         import time as _time
-        try:
-            with open(path, "r") as f:
-                f.seek(0, 2)  # seek to end
-                while not _shutdown.is_set():
-                    line = f.readline()
-                    if not line:
-                        await asyncio.sleep(0.5)
-                        continue
-                    line = line.rstrip()
-                    if not line:
-                        continue
-                    await self._process_line(line)
-        except FileNotFoundError:
-            logger.error("Log file not found: %s", path)
-        except Exception as exc:
-            logger.error("Error reading log file %s: %s", path, exc)
+        retries = 0
+        max_retries = 30
+        while retries < max_retries and not _shutdown.is_set():
+            try:
+                with open(path, "r") as f:
+                    f.seek(0, 2)  # seek to end
+                    logger.info("Now watching: %s", path)
+                    while not _shutdown.is_set():
+                        line = f.readline()
+                        if not line:
+                            await asyncio.sleep(0.5)
+                            continue
+                        line = line.rstrip()
+                        if not line:
+                            continue
+                        await self._process_line(line)
+            except FileNotFoundError:
+                retries += 1
+                wait = min(2 ** retries, 30)
+                logger.warning(
+                    "Log file not found yet: %s (attempt %d/%d, retrying in %ds)",
+                    path, retries, max_retries, wait,
+                )
+                await asyncio.sleep(wait)
+            except Exception as exc:
+                logger.error("Error reading log file %s: %s", path, exc)
+                await asyncio.sleep(5)
+        if retries >= max_retries:
+            logger.error("Gave up waiting for log file: %s", path)
 
     async def _watch_stdin(self) -> None:
         """Read lines from stdin."""

@@ -111,16 +111,21 @@ async def _extract_single_segment(
         # -ss: seek to start position (before input for fast seek)
         # -i: input file
         # -t: duration to extract
-        # -c copy: stream copy (no re-encoding)
-        # -avoid_negative_ts make_zero: fix timestamp issues
-        # -movflags +faststart: optimize for web playback
+        # Re-encode with NVENC for frame-accurate cuts (was -c copy which
+        # caused truncation because -ss fast seek + -c copy can only cut at
+        # keyframes, producing unpredictable durations).
         cmd = [
             "ffmpeg",
             "-y",  # overwrite without asking
             "-ss", str(start_seconds),
             "-i", str(video_path),
             "-t", str(duration),
-            "-c", "copy",  # Critical: no re-encoding!
+            "-c:v", "h264_nvenc",
+            "-preset", "p4",
+            "-tune", "hq",
+            "-b:v", "8M",
+            "-c:a", "aac",
+            "-b:a", "128k",
             "-avoid_negative_ts", "make_zero",
             "-movflags", "+faststart",
             str(output_file)
@@ -148,6 +153,50 @@ async def _extract_single_segment(
             return None
         
         file_size_mb = output_file.stat().st_size / (1024 * 1024)
+        
+        # Verificar duración real del segmento extraído con ffprobe
+        import json as _json
+        _probe = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", str(output_file)],
+            capture_output=True, text=True, timeout=10
+        )
+        _probe_data = _json.loads(_probe.stdout)
+        _real_duration = float(_probe_data.get("format", {}).get("duration", 0))
+        logger.info(
+            f"Segment extracted: requested={duration:.1f}s "
+            f"real={_real_duration:.1f}s path={output_file.name}"
+        )
+        if _real_duration < duration * 0.8:
+            logger.warning(
+                f"SEGMENT TRUNCATED: {_real_duration:.1f}s vs "
+                f"{duration:.1f}s requested — re-extracting with libx264 fallback"
+            )
+            # Fallback: re-extract with libx264 (CPU) for frame-accurate cut
+            _fallback_cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(start_seconds),
+                "-i", str(video_path),
+                "-t", str(duration),
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "18",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-avoid_negative_ts", "make_zero",
+                "-movflags", "+faststart",
+                str(output_file)
+            ]
+            _fb_proc = await asyncio.create_subprocess_exec(
+                *_fallback_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await _fb_proc.communicate()
+            if _fb_proc.returncode == 0:
+                _fb_size = output_file.stat().st_size / (1024 * 1024)
+                logger.info(f"  Fallback re-extract OK: {_fb_size:.1f}MB")
+        
         logger.info(
             f"✓ Extracted segment {segment_index}: "
             f"{duration:.1f}s → {file_size_mb:.1f}MB ({output_file.name})"

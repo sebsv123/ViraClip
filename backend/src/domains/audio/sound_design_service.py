@@ -386,7 +386,7 @@ class SoundDesignService:
                 "-c:v", "copy",
                 "-c:a", "aac",
                 "-b:a", "192k",
-                "-shortest",
+                "-shortest:v",
                 output_path
             ]
             

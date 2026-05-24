@@ -422,15 +422,36 @@ def _normalize_segment(seg: dict, next_seg: Optional[dict] = None) -> dict:
     
     Handles:
     - timestamp → start_time + end_time
+    - timestamps/timing nested objects → start_time + end_time
     - Missing text, relevance_score, reasoning, virality → defaults
     """
     result = dict(seg)
     changed = []
 
+    # timestamps/timing nested object → start_time + end_time
+    for _nested_key in ("timestamps", "timing"):
+        if _nested_key in result and isinstance(result[_nested_key], dict):
+            _ts = result.pop(_nested_key)
+            if "start_time" not in result and "start" in _ts:
+                result["start_time"] = _ts["start"]
+                changed.append(f"{_nested_key}.start->start_time")
+            if "end_time" not in result and "end" in _ts:
+                result["end_time"] = _ts["end"]
+                changed.append(f"{_nested_key}.end->end_time")
+
     # timestamp → start_time
     if "start_time" not in result and "timestamp" in result:
         result["start_time"] = result["timestamp"]
         changed.append("timestamp->start_time")
+
+    # Normalize numeric timestamps to MM:SS strings
+    for _ts_key in ("start_time", "end_time"):
+        if _ts_key in result and isinstance(result[_ts_key], (int, float)):
+            _secs = float(result[_ts_key])
+            _m = int(_secs) // 60
+            _s = int(_secs) % 60
+            result[_ts_key] = f"{_m:02d}:{_s:02d}"
+            changed.append(f"{_ts_key} normalized from numeric to MM:SS")
 
     # Infer end_time from next segment or default +30s
     if "end_time" not in result and "start_time" in result:

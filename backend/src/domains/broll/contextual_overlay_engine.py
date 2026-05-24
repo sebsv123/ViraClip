@@ -90,7 +90,7 @@ class ContextualOverlayEngine:
         
         try:
             # Step 1: Detect visual keywords
-            from ...detection.visual_keyword_detector import get_visual_keyword_detector
+            from src.domains.detection.visual_keyword_detector import get_visual_keyword_detector
             
             detector = get_visual_keyword_detector()
             

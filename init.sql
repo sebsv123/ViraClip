@@ -76,6 +76,7 @@ CREATE TABLE tasks (
     cache_hit BOOLEAN NOT NULL DEFAULT false,
     error_code VARCHAR(80),
     stage_timings_json TEXT,
+    context JSONB,
     completion_notification_sent_at TIMESTAMP WITH TIME ZONE,
 
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -271,3 +272,33 @@ ALTER TABLE generated_clips ADD COLUMN IF NOT EXISTS variants_json           TEX
 
 -- tasks: flip auto_center_face default to true
 ALTER TABLE tasks ALTER COLUMN auto_center_face SET DEFAULT TRUE;
+
+-- ── Watchdog tables (idempotent — safe to re-run) ────────────────────────────
+CREATE TABLE IF NOT EXISTS watchdog_events (
+    id          UUID PRIMARY KEY,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    error_type  VARCHAR(50) NOT NULL,
+    context     JSONB,
+    fix_applied VARCHAR(200),
+    fix_success BOOLEAN
+);
+CREATE INDEX IF NOT EXISTS idx_watchdog_events_detected_at
+    ON watchdog_events (detected_at DESC);
+
+CREATE TABLE IF NOT EXISTS dead_letter_tasks (
+    id              UUID PRIMARY KEY,
+    task_id         TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    original_status VARCHAR(50) NOT NULL DEFAULT 'dead',
+    error_code      VARCHAR(100) NOT NULL,
+    error_message   TEXT,
+    source          VARCHAR(50) NOT NULL DEFAULT 'watchdog',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    retried_at      TIMESTAMPTZ,
+    retried_by      VARCHAR(100),
+    UNIQUE(task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_tasks_created_at
+    ON dead_letter_tasks (created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_dead_letter_tasks_retried
+    ON dead_letter_tasks (retried_at)
+    WHERE retried_at IS NULL;

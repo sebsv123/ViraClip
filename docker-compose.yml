@@ -178,6 +178,8 @@ x-worker-volumes: &worker-volumes
   - ./backend/music:/app/assets/sounds
   - ./backend/comfy_workflows:/app/comfy_workflows
   - uploads:/app/temp/uploads/broll
+  - worker_logs:/var/log/worker
+  - sam_models:/app/models/sam
 
 x-gpu-reserve: &gpu-reserve
   resources:
@@ -239,7 +241,7 @@ services:
         - NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT=${NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT:-10}
         - NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT=${NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT:-200}
     container_name: viraclip-frontend
-    command: sh -c "npx prisma migrate deploy && bunx prisma generate && bun run dev"
+    command: sh -c "bunx prisma migrate deploy && bunx prisma generate && bun run dev"
     ports:
       - "3000:3000"
     volumes:
@@ -384,8 +386,6 @@ services:
       - /dev/nvidia-modeset:/dev/nvidia-modeset
       - /dev/nvidia-uvm:/dev/nvidia-uvm
       - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
-    volumes:
-      - worker_logs:/var/log/worker
     environment:
       <<: [*core-env, *editing-env, *ai-env]
       NVIDIA_REQUIRE_CUDA: ""
@@ -396,6 +396,9 @@ services:
       RENDER_CONCURRENCY: 4
       FFMPEG_BINARY: /usr/local/bin/ffmpeg
       COMFYUI_ENABLED: "false"
+      LTXV_INTRO_ENABLED: "false"
+      ICONSCOUT_CLIENT_ID: ${ICONSCOUT_CLIENT_ID}
+      RENDER3D_URL: ${RENDER3D_URL:-http://render3d:7890}
 
   worker-2:
     <<: *worker-base
@@ -589,6 +592,35 @@ services:
       timeout: 10s
       retries: 3
 
+  render3d:
+    profiles: ["render3d"]
+    build:
+      context: ./render3d
+      dockerfile: Dockerfile
+    container_name: viraclip-render3d
+    platform: linux/amd64
+    ports:
+      - "5000:5000"
+    volumes:
+      - render3d_outputs:/app/outputs
+      - render3d_uploads:/app/uploads
+    environment:
+      BLENDER_PATH: /usr/local/blender/blender
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
   nginx:
     profiles: ["proxy"]
     image: nginx:alpine
@@ -631,6 +663,9 @@ volumes:
   gpu_models_lora_cache:
   llm_datasets:
   worker_logs:
+  render3d_outputs:
+  render3d_uploads:
+  sam_models:
 
 networks:
   default:

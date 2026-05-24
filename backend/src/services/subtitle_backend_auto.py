@@ -241,6 +241,8 @@ class AutoSubtitleBackend:
         video_path: Path,
         lang: str = "auto",
         task: str = "transcribe",
+        timeline_offset: float = 0.0,
+        cut_points: Optional[List[float]] = None,
     ) -> Optional[Path]:
         """
         Transcribe a video file and produce an SRT subtitle file.
@@ -249,6 +251,10 @@ class AutoSubtitleBackend:
             video_path: Path to the input video.
             lang: Language code ("auto" for auto-detect, or e.g. "en", "es").
             task: "transcribe" (X→X) or "translate" (X→en).
+            timeline_offset: Seconds to subtract from all timestamps (cumulative time removed
+                             by silence removal or jump cuts). Passed through to _write_srt().
+            cut_points: List of cut timestamps in seconds. Subtitles within 0.1s of a cut
+                        are snapped to the cut boundary. Passed through to _write_srt().
 
         Returns:
             Path to the generated .srt file, or None on failure.
@@ -284,10 +290,15 @@ class AutoSubtitleBackend:
             logger.warning("[auto_sub] Whisper returned no segments")
             return None
 
-        # 3. Write SRT
+        # 3. Write SRT with timeline offset and cut points for sync correction
         srt_path = video_path.with_suffix(".srt")
         try:
-            _write_srt(result["segments"], srt_path)
+            _write_srt(
+                result["segments"],
+                srt_path,
+                timeline_offset=timeline_offset,
+                cut_points=cut_points,
+            )
             logger.info(
                 "[auto_sub] Generated SRT (%d segments) → %s",
                 len(result["segments"]), srt_path.name,

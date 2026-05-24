@@ -846,9 +846,12 @@ def _build_filter_complex(
         if RNNOISE_MODEL_PATH and Path(RNNOISE_MODEL_PATH).exists():
             _rnnoise_prefix = f"arnndn=m={RNNOISE_MODEL_PATH},"
         _dn = "arnndn=m=cb.rnnn," if denoise_audio else ""
-        _content_type = segment_text if segment_text else "default"
-        _tempo_val = SPEECH_TEMPO_PROFILES.get(_content_type, SPEECH_TEMPO_PROFILES["default"])
-        _tempo = f"atempo={_tempo_val:.3f},"
+        # TEMPORALMENTE DESACTIVADO: _content_type se asignaba a segment_text
+        # (texto completo de la transcripción), no a un tipo de contenido válido
+        # en SPEECH_TEMPO_PROFILES. El .get() siempre caía en "default" → 1.10×
+        # fijo para todos los clips. Hasta tener un clasificador de contenido
+        # correcto, se desactiva atempo para no acelerar todo un 10% por defecto.
+        _tempo = ""
         if VOICE_COMPRESS_ON:
             filters.append(
                 f"[0:a]atrim=end={dur:.3f},"

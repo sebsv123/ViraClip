@@ -74,6 +74,9 @@ model Task {
   font_size   Int?    @default(24)
   font_color  String? @default("#FFFFFF") @db.VarChar(7)
 
+  // Job context from worker/watchdog
+  context Json?
+
   created_at DateTime @default(now()) @db.Timestamptz
   updated_at DateTime @default(now()) @updatedAt @db.Timestamptz
 

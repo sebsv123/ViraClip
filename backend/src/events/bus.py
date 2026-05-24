@@ -106,10 +106,24 @@ class EventBus:
         Yields PipelineEvent objects until the generator is closed or a
         terminal event is received. The caller is responsible for breaking
         on event.is_terminal.
+
+        NOTE: Uses a *separate* Redis client for pub/sub to avoid blocking
+        the shared client used by publish() and is_active(). A subscribed
+        pubsub connection enters "listener mode" and cannot perform other
+        operations — a separate client prevents interference.
         """
         redis = await _get_redis()
         channel = _channel(task_id)
-        pubsub = redis.pubsub()
+
+        # Create a dedicated Redis client for the pubsub subscription so the
+        # shared _redis_client singleton remains usable for publish() etc.
+        config = get_config()
+        sub_redis = await aioredis.from_url(
+            f"redis://{config.redis_host}:{config.redis_port}",
+            password=config.redis_password or None,
+            decode_responses=True,
+        )
+        pubsub = sub_redis.pubsub()
 
         try:
             await pubsub.subscribe(channel)

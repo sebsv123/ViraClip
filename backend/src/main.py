@@ -108,6 +108,30 @@ async def lifespan(app: FastAPI):
         except Exception as _lut_e:
             logger.debug(f"[LUT] Auto-download skipped: {_lut_e}")
 
+        # ── shared_temp mount check ──────────────────────────────────────────
+        # Verificar que /app/temp existe y es accesible para servir clips.
+        # No impedir el arranque — solo loggear.
+        try:
+            _temp_dir = Path("/app/temp")
+            if _temp_dir.exists() and _temp_dir.is_dir():
+                _test_file = _temp_dir / ".startup_check"
+                _test_file.write_text("ok")
+                _test_file.unlink(missing_ok=True)
+                logger.info("[STARTUP] ✓ shared_temp montado en %s", _temp_dir)
+            else:
+                logger.error(
+                    "[STARTUP] ❌ shared_temp NO montado en %s — "
+                    "los clips no serán accesibles. "
+                    "Verificar docker-compose volumes.",
+                    _temp_dir,
+                )
+        except Exception as _temp_e:
+            logger.error(
+                "[STARTUP] ❌ Error accediendo a shared_temp (%s): %s — "
+                "los clips no serán accesibles. Verificar docker-compose volumes.",
+                "/app/temp", _temp_e,
+            )
+
         yield
     finally:
         await close_db()
@@ -261,6 +285,59 @@ async def check_database_health(db: AsyncSession = Depends(get_db)):
 
 # ── Upload endpoints ─────────────────────────────────────────────────────────
 
+# ── Upload validation constants ──────────────────────────────────────────────
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+MAX_UPLOAD_SIZE_MB = int(os.getenv("MAX_UPLOAD_SIZE_MB", "500"))
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+MAX_VIDEO_DURATION_MIN = int(os.getenv("MAX_VIDEO_DURATION_MIN", "60"))
+
+
+def _validate_video_file(filename: str, file_size: int) -> None:
+    """Valida extensión y tamaño del archivo de vídeo."""
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Formato no soportado: '{ext}'. Usa: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
+        )
+    if file_size > MAX_UPLOAD_SIZE_BYTES:
+        mb = file_size / (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"El vídeo supera el límite de {MAX_UPLOAD_SIZE_MB}MB "
+                f"(tamaño: {mb:.1f}MB). Comprime el vídeo antes de subirlo."
+            ),
+        )
+
+
+async def _validate_video_duration(file_path: Path) -> None:
+    """Verifica que la duración del vídeo no exceda el máximo."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "csv=p=0",
+            str(file_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            duration = float(result.stdout.strip())
+            if duration > MAX_VIDEO_DURATION_MIN * 60:
+                Path(file_path).unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        f"El vídeo supera el límite de {MAX_VIDEO_DURATION_MIN} minutos "
+                        f"(duración: {duration/60:.1f}min)."
+                    ),
+                )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Error validando duración del vídeo: %s", exc)
+
+
 @app.post("/upload")
 async def upload_video(request: Request):
     """Upload a single video file"""
@@ -276,6 +353,9 @@ async def upload_video(request: Request):
         if not video_file or not hasattr(video_file, "filename"):
             raise HTTPException(status_code=400, detail="No video file provided")
 
+        # Validar extensión y tamaño
+        _validate_video_file(video_file.filename, video_file.size or 0)
+
         uploads_dir = Path(config.temp_dir)
         uploads_dir.mkdir(parents=True, exist_ok=True)
         file_extension = Path(video_file.filename).suffix
@@ -284,6 +364,9 @@ async def upload_video(request: Request):
 
         async with aiofiles.open(video_path, "wb") as f:
             await f.write(await video_file.read())
+
+        # Validar duración después de escribir
+        await _validate_video_duration(video_path)
 
         return {"message": "Video uploaded successfully", "video_path": f"{UPLOAD_URL_PREFIX}{unique_filename}"}
     except HTTPException:

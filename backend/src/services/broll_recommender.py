@@ -792,7 +792,10 @@ async def recommend_brolls(
             queries_to_run.append(q3)
 
         # query_4: metaphorical — broader conceptual variant
-        q4 = kw_str[:5]
+        # Skip if keyword is too short (≤5 chars) to avoid truncated queries
+        if len(kw_str) <= 5:
+            continue
+        q4 = f"{kw_str} concept"
         if q4 not in used_queries:
             used_queries.add(q4)
             queries_to_run.append(q4)
@@ -924,9 +927,15 @@ async def recommend_brolls(
                 break
 
 
-    # ── 5. Update task_ctx ────────────────────────────────────────────────────
+    # ── 5. Post-filter: enforce hard limits (rules 3, 4, 5) ──────────────────
+    # Run BEFORE _update_ctx() so that filtered-out assets are never marked as used.
+    chosen = _post_filter_broll_candidates(chosen, clip_duration)
+
+    # ── 6. Update task_ctx ────────────────────────────────────────────────────
+    # Only mark surviving candidates as used — assets filtered out by post-filter
+    # (e.g. too short, clip too short for broll) are never inserted, so they
+    # should NOT be added to used_broll_ids.
     chosen_ids = [c.video_id for c in chosen]
-    rejected_ids = [c.video_id for c in all_candidates if c not in chosen]
 
     async def _update_ctx():
         nonlocal used_broll_ids
@@ -942,9 +951,6 @@ async def recommend_brolls(
             await _update_ctx()
     else:
         await _update_ctx()
-
-    # ── 6. Post-filter: enforce hard limits (rules 3, 4, 5) ──────────────────
-    chosen = _post_filter_broll_candidates(chosen, clip_duration)
 
     # ── 7. Logging ────────────────────────────────────────────────────────────
     chosen_log = [

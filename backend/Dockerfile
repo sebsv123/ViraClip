@@ -332,6 +332,24 @@ RUN mkdir -p /app/fonts /usr/local/share/fonts/viraclip && \
     fc-cache -fv \
     || echo "Font download skipped — Arial fallback"
 
+# Download SAM checkpoints for shape_morph_transition (clip_editor.py)
+# vit_b: ~375MB, vit_h: ~2.6GB — only download what's needed
+# These are used by segment-anything for contour-based morph transitions.
+# NOTE: clip_editor.py checks /models/sam_{model_type}.pth (no /sam/ subdir),
+# so we download directly to /app/models/ to match that path.
+RUN mkdir -p /app/models && \
+    if [ "${SAM_MODEL:-vit_b}" = "vit_h" ] || [ "${SAM_MODEL:-vit_b}" = "all" ]; then \
+        echo "Downloading SAM vit_h (2.6GB)..." && \
+        curl -fsSL "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth" \
+            -o /app/models/sam_vit_h.pth; \
+    fi && \
+    if [ "${SAM_MODEL:-vit_b}" = "vit_b" ] || [ "${SAM_MODEL:-vit_b}" = "all" ]; then \
+        echo "Downloading SAM vit_b (375MB)..." && \
+        curl -fsSL "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth" \
+            -o /app/models/sam_vit_b.pth; \
+    fi && \
+    echo "✓ SAM checkpoints downloaded" || echo "⚠ SAM download skipped"
+
 # Download CC0 background music tracks (YouTube Audio Library / Free Music Archive)
 # These are the 5 most-used tracks from the 31-track library
 RUN curl -fsSL "https://raw.githubusercontent.com/sebsv123/viraclip-assets/main/music/Sly%20Sky%20-%20Telecasted.mp3" \

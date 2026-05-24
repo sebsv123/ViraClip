@@ -47,6 +47,7 @@ except ImportError:
     def get_phi3_service():  # type: ignore
         raise RuntimeError("phi3_virality_service not available — LLMRouter fallback will handle scoring")
 from ...domains.audio.sound_design_service import SoundDesignService, add_viral_sound_effects
+from ...audio_placement import detect_audio_events, apply_audio_events
 from ...domains.broll.broll_service import BrollService
 from ...core.job_context import JobContext
 from ...domains.broll.hook_visual_service import HookVisualService
@@ -111,9 +112,26 @@ logger = logging.getLogger(__name__)
 # Validates that no video-processing step truncates the clip below min_ratio
 # of the input duration. Called after every step that writes a new MP4.
 def _get_duration(path: str) -> float:
-    """Return video duration in seconds via ffprobe, or 0 on failure."""
+    """Return video duration in seconds via ffprobe, or 0 on failure.
+    
+    Uses the video stream's actual duration (not the container duration)
+    to detect frozen-frame issues where the container says 60s but the
+    video stream only has 9s of real frames.
+    """
     try:
         import subprocess as _sp, json as _json
+        # First try video stream duration (more accurate — detects frozen frames)
+        r = _sp.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=duration",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        data = _json.loads(r.stdout)
+        streams = data.get("streams", [])
+        if streams and "duration" in streams[0]:
+            return float(streams[0]["duration"])
+        # Fallback to container duration
         r = _sp.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",
              "-of", "json", path],
@@ -123,14 +141,21 @@ def _get_duration(path: str) -> float:
     except Exception:
         return 0.0
 
-def _guard_output_duration(input_path: str, output_path: str, step_name: str, min_ratio: float = 0.8) -> None:
-    """Revert output to input if output duration < min_ratio of input duration."""
+def _guard_output_duration(input_path: str, output_path: str, step_name: str, min_ratio: float = 0.8, declared_duration: Optional[float] = None) -> None:
+    """Revert output to input if output duration < min_ratio of input duration.
+    
+    When declared_duration is provided (e.g., the platform-capped render duration),
+    compare against that instead of the input file duration. This prevents false
+    positives when the input is a pre-extracted segment (90s) but the declared
+    render duration is shorter (60s due to TikTok cap).
+    """
     in_dur = _get_duration(input_path)
     out_dur = _get_duration(output_path)
-    if in_dur > 0 and out_dur < in_dur * min_ratio:
+    ref_dur = declared_duration if declared_duration is not None else in_dur
+    if ref_dur > 0 and out_dur < ref_dur * min_ratio:
         logger.warning(
-            "[RENDERER GUARD] %s truncated clip: input=%.2fs output=%.2fs min=%.2fs — reverting",
-            step_name, in_dur, out_dur, in_dur * min_ratio,
+            "[RENDERER GUARD] %s truncated clip: ref=%.2fs output=%.2fs min=%.2fs — reverting",
+            step_name, ref_dur, out_dur, ref_dur * min_ratio,
         )
         shutil.copy2(input_path, output_path)
 
@@ -616,7 +641,26 @@ async def create_single_clip(
         # So we render from 0 to duration
         render_start = 0.0
         render_end = duration
-        logger.debug(f"Rendering from pre-extracted segment: 0-{duration:.1f}s")
+        # Cap duration to actual segment file duration to prevent FFmpeg
+        # from requesting more video than exists (e.g., platform cap extends
+        # duration to 60s but segment is only 10s near video end).
+        try:
+            import subprocess as _sp, json as _json
+            _probe = _sp.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json",
+                 "-show_format", str(video_path)],
+                capture_output=True, text=True, timeout=10
+            )
+            _seg_dur = float(_json.loads(_probe.stdout).get("format", {}).get("duration", 0))
+            if _seg_dur > 0 and render_end > _seg_dur:
+                logger.info(
+                    f"Duration capped: {render_end:.1f}s → {_seg_dur:.1f}s "
+                    f"(segment file limit)"
+                )
+                render_end = _seg_dur
+        except Exception as _probe_e:
+            logger.debug(f"Could not probe segment duration: {_probe_e}")
+        logger.debug(f"Rendering from pre-extracted segment: 0-{render_end:.1f}s")
     else:
         # Render from full video using original timestamps
         render_start = start_seconds
@@ -655,6 +699,7 @@ async def create_single_clip(
         elite_metadata=elite_metadata,
         gpu_encoding_settings=gpu_encoding_settings,
         target_platform=target_platform,
+        use_extracted_segment=use_extracted_segment,
     )
 
     if not success:
@@ -662,7 +707,8 @@ async def create_single_clip(
         return None
 
     output_path = clip_path
-    _guard_output_duration(str(video_path), str(output_path), "create_optimized_clip")
+    _guard_output_duration(str(video_path), str(output_path), "create_optimized_clip",
+                           declared_duration=(render_end - render_start))
     _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
 
     # ── Step 4.0b: Re-alineacion precisa de subtitulos ──────────────
@@ -946,6 +992,21 @@ async def create_single_clip(
                         f"  ✓ {mode_label} applied ({_jc_saved:.1f}s handled), "
                         f"subtitle timestamps adjusted"
                     )
+                    # BUG H: Re-probe duration after silence removal — the cut changes
+                    # the clip length, and downstream steps (b-roll, EP) use the
+                    # original duration which can cause misalignment.
+                    _new_dur = _get_duration(str(output_path))
+                    if _new_dur > 0:
+                        logger.info(
+                            f"  Duration re-probed after silence removal: "
+                            f"{duration:.1f}s → {_new_dur:.1f}s"
+                        )
+                        duration = _new_dur
+                    else:
+                        logger.warning(
+                            "  Could not re-probe duration after silence removal — "
+                            "keeping original duration %.1fs", duration
+                        )
         except Exception as _jc_e:
             logger.debug(f"  Silence handling skipped: {_jc_e}")
 
@@ -1575,59 +1636,39 @@ async def create_single_clip(
     #     3) Exponerlo por `comfyui_integration.process_with_comfyui("enhance")`.
     #   Mantenemos el bloque desactivado para no generar ruido en logs.
 
-    # DISABLED: duplicate SFX pipeline — see Fix 5.
-    # SmartAudio (in creative_pipeline.py Step 7) handles all SFX injection
-    # with loudnorm + BGM mixing. Running SoundDesignService here too causes
-    # double SFX injection (audio artifacts, muddied mix).
-    # try:
-    #     sound_service = SoundDesignService()
-    #     sound_cues = []
-    #     if _sem_plan and _sem_plan.sfx_cues:
-    #         _dropped = 0
-    #         for c in _sem_plan.sfx_cues:
-    #             if not (0 < c.timestamp < duration):
-    #                 continue
-    #             if _render_plan and not _render_plan.is_sfx_allowed_at(c.sfx_type, c.timestamp):
-    #                 _dropped += 1
-    #                 continue
-    #             vol_mult = _render_plan.sfx_volume_at(c.timestamp) if _render_plan else 1.0
-    #             sound_cues.append({
-    #                 "timestamp": c.timestamp,
-    #                 "type":      c.sfx_type,
-    #                 "intensity": min(1.5, c.intensity * vol_mult),
-    #             })
-    #         logger.info(
-    #             "  [SFX] Director-filtered %d cues (%d dropped by section rules): %s",
-    #             len(sound_cues), _dropped,
-    #             ", ".join(f"{c['timestamp']:.1f}s:{c['type']}@{c['intensity']:.2f}"
-    #                       for c in sound_cues[:6]),
-    #         )
-    #     if not sound_cues:
-    #         _emphasis_words = [
-    #             {"start": w["start"]}
-    #             for w in words_with_confidence
-    #             if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
-    #         ] if words_with_confidence else []
-    #         virality_segments = [{
-    #             "start": 0,
-    #             "end": duration,
-    #             "hook_type": segment.get("hook_type", "insight_reveal"),
-    #             "text": segment.get("text", ""),
-    #             "emphasis_words": _emphasis_words,
-    #         }]
-    #         sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
-    #     if sound_cues:
-    #         sound_path = output_path.with_name(f"sound_{output_path.name}")
-    #         await sound_service.inject_sound_effects(
-    #             str(output_path),
-    #             str(sound_path),
-    #             sound_cues
-    #         )
-    #         if Path(sound_path).exists():
-    #             output_path = sound_path
-    #             logger.info(f"  ✓ {len(sound_cues)} sound effects added")
-    # except Exception as sound_e:
-    #     logger.warning(f"  Sound design failed: {sound_e}")
+    # Step 4.8: Audio events — detect and apply SFX based on transcript analysis.
+    # Uses audio_placement.detect_audio_events (LLM + keyword) to find moments
+    # where sound effects enhance the viewing experience, then mixes them in.
+    # Graceful degradation: on any failure, the clip is returned unmodified.
+    try:
+        _transcript_text = segment.get("text", "")
+        if _transcript_text and len(_transcript_text.strip()) > 10:
+            _audio_events = await detect_audio_events(
+                transcript=_transcript_text,
+                language=target_language or "es",
+                video_duration=duration,
+            )
+            if _audio_events:
+                _sfx_path = output_path.with_name(f"sfx_{output_path.name}")
+                _sfx_result = await apply_audio_events(
+                    clip_path=str(output_path),
+                    events=_audio_events,
+                    output_path=str(_sfx_path),
+                )
+                if _sfx_result and Path(_sfx_result).exists() and _sfx_result != str(output_path):
+                    output_path = Path(_sfx_result)
+                    logger.info(
+                        "  ✓ %d audio events applied (transcript-based SFX)",
+                        len(_audio_events),
+                    )
+                else:
+                    logger.debug("  Audio events: apply_audio_events returned no change")
+            else:
+                logger.debug("  Audio events: no events detected from transcript")
+        else:
+            logger.debug("  Audio events: no transcript available, skipping")
+    except Exception as _audio_ev_e:
+        logger.warning("  Audio events detection/application failed: %s", _audio_ev_e)
 
     # Step 4.10: Platform export — only re-encode when burning hardsubs.
     # When no subtitle file exists use stream copy (near-instant, no quality loss).

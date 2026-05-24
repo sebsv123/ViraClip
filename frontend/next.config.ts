@@ -22,11 +22,11 @@ const nextConfig: NextConfig = {
       },
       {
         source: "/api/autopilot/:path*",
-        destination: "http://localhost:8000/autopilot/:path*",
+        destination: "http://backend:8000/autopilot/:path*",
       },
       {
         source: "/clips/:path*",
-        destination: "http://localhost:8000/clips/:path*",
+        destination: "http://backend:8000/clips/:path*",
       },
     ];
   },

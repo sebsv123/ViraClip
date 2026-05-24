@@ -25,6 +25,19 @@ logger = logging.getLogger(__name__)
 # Runtime diagnostics flag - set to True to see detailed error traces
 DIAGNOSTIC_MODE = True
 
+def _get_duration(path) -> float:
+    """Return video duration in seconds via ffprobe, or 0 on failure."""
+    import subprocess, json
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-print_format", "json",
+             "-show_format", str(path)],
+            capture_output=True, text=True, timeout=10
+        )
+        return float(json.loads(r.stdout).get("format", {}).get("duration", 0))
+    except Exception:
+        return 0.0
+
 def _log_step_error(step_name: str, exc: Exception, critical: bool = False):
     """Log detailed error information for pipeline step failures."""
     level = logging.ERROR if critical else logging.WARNING
@@ -342,6 +355,7 @@ class CreativePipeline:
                     if ok and sae_output.exists() and sae_output.stat().st_size > 0:
                         clip_path.unlink(missing_ok=True)
                         sae_output.rename(clip_path)
+                        logger.info(f"[DURATION] post_smart_auto_editor: {_get_duration(clip_path):.2f}s")
                         meta["sae_text_pops"] = len(text_pops)
                         meta["sae_jump_cuts"] = len(decisions.get("jump_cuts", []))
                         meta["sae_speed_ramps"] = len(decisions.get("speed_ramps", []))
@@ -398,6 +412,7 @@ class CreativePipeline:
                 if result and sfx_output.exists() and sfx_output.stat().st_size > 0:
                     clip_path.unlink(missing_ok=True)
                     sfx_output.rename(clip_path)
+                    logger.info(f"[DURATION] post_sfx: {_get_duration(clip_path):.2f}s")
                     meta["sfx_injected"] = len(jump_cut_times)
                     logger.info("  [Creative] ✓ Step 1.75/8: SFX applied (profile=%s, %d SFX)", _sfx_profile, len(jump_cut_times))
                     steps_ok.append("step_1_75_sfx")
@@ -579,6 +594,7 @@ class CreativePipeline:
                 if result and reordered.exists() and reordered.stat().st_size > 0:
                     clip_path.unlink(missing_ok=True)
                     reordered.rename(clip_path)
+                    logger.info(f"[DURATION] post_hook_reorder: {_get_duration(clip_path):.2f}s")
                     meta["hook_reorder_applied"] = True
                     logger.info(
                         "  [Creative] Hook flash prepended (t=%.1fs)", _hook_start
@@ -672,6 +688,7 @@ class CreativePipeline:
                             if _broll_temp.exists():
                                 clip_path.unlink(missing_ok=True)
                                 _broll_temp.rename(clip_path)
+                                logger.info(f"[DURATION] post_broll_v1: {_get_duration(clip_path):.2f}s")
                                 logger.info("  [Creative] ✓ Applied %d editable B-roll overlays", broll_count)
                                 steps_ok.append("step_5_broll_editable")
                     except Exception as _editable_e:
@@ -765,6 +782,7 @@ class CreativePipeline:
                     if result and brolled.exists() and brolled.stat().st_size > 0:
                         clip_path.unlink(missing_ok=True)
                         brolled.rename(clip_path)
+                        logger.info(f"[DURATION] post_broll_v2: {_get_duration(clip_path):.2f}s")
                         broll_count = len(broll_pairs)
                         logger.info("  [Creative] ✓ Step 5/8: B-roll overlay: %s", brolled.name)
                         steps_ok.append("step_5_broll")
@@ -857,6 +875,7 @@ class CreativePipeline:
             if overlay_result.success and overlayed.exists() and overlayed.stat().st_size > 0:
                 clip_path.unlink(missing_ok=True)
                 overlayed.rename(clip_path)
+                logger.info(f"[DURATION] post_overlays: {_get_duration(clip_path):.2f}s")
                 contextual_overlays = overlay_result.overlays_applied
                 logger.info(
                     "  [Creative] ✓ Step 5.5/8: Contextual overlays: %d applied (%d keywords detected)",
@@ -1050,6 +1069,7 @@ class CreativePipeline:
             if result_path == mastered and mastered.exists() and mastered.stat().st_size > 0:
                 clip_path.unlink(missing_ok=True)
                 mastered.rename(clip_path)
+                logger.info(f"[DURATION] post_audio_mastering: {_get_duration(clip_path):.2f}s")
                 loudnorm_applied = True
                 sfx_count = sum(1 for e in timeline if e.strength >= 0.6)
                 
@@ -1066,6 +1086,7 @@ class CreativePipeline:
                         if duck_result.success and ducked.exists() and ducked.stat().st_size > 0:
                             clip_path.unlink(missing_ok=True)
                             ducked.rename(clip_path)
+                            logger.info(f"[DURATION] post_audio_ducking_1: {_get_duration(clip_path):.2f}s")
                             ducking_applied = True
                             logger.info("  [Creative] ✓ Audio ducking applied (%d voice segments)", duck_result.ducked_segments)
                         else:
@@ -1116,6 +1137,7 @@ class CreativePipeline:
                 if denoise_result.success and denoised.exists() and denoised.stat().st_size > 0:
                     clip_path.unlink(missing_ok=True)
                     denoised.rename(clip_path)
+                    logger.info(f"[DURATION] post_audio_denoise: {_get_duration(clip_path):.2f}s")
                     denoise_applied = True
                     meta["audio_denoise_applied"] = True
                     logger.info(
@@ -1201,6 +1223,7 @@ class CreativePipeline:
                 if result_path == str(branded) and branded.exists() and branded.stat().st_size > 0:
                     clip_path.unlink(missing_ok=True)
                     branded.rename(clip_path)
+                    logger.info(f"[DURATION] post_branding_1: {_get_duration(clip_path):.2f}s")
                     brand_applied = True
                     meta["brand_overlay_applied"] = True
                     logger.info("  [Creative] ✓ Step 8.5/8: Brand overlay applied")

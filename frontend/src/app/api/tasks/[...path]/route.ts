@@ -13,6 +13,12 @@ async function proxyTaskRequest(
   }
 
   const { path } = await params;
+
+  // Evitar colisión con /api/tasks/create que tiene su propio handler
+  if (path.length === 1 && path[0] === "create") {
+    return NextResponse.json({ error: "Use POST /api/tasks/create" }, { status: 405 });
+  }
+
   const incomingUrl = new URL(request.url);
   const targetPath = `/tasks/${path.join("/")}${incomingUrl.search}`;
   const body =
@@ -24,6 +30,9 @@ async function proxyTaskRequest(
     method: request.method,
     userId: session.user.id,
     extraHeaders: {
+      ...(request.headers.get("authorization")
+        ? { Authorization: request.headers.get("authorization") as string }
+        : {}),
       ...(body && request.headers.get("content-type")
         ? { "Content-Type": request.headers.get("content-type") as string }
         : {}),

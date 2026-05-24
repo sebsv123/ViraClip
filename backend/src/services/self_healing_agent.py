@@ -73,9 +73,15 @@ async def _remove_arq_jobs_for_task(r, task_id: str) -> int:
     """
     removed = 0
     queue_name = "arq:queue:viraclip_cpu_tasks"
-    members = await r.zrange(queue_name, 0, -1)
+    members = await r.lrange(queue_name, 0, -1)
     for member in members:
-        job_key = f"arq:job:{member}"
+        # member is a JSON string from the list, parse it to get job_id
+        try:
+            job_data = json.loads(member)
+            job_id_val = job_data.get("job_id", member)
+        except (json.JSONDecodeError, TypeError):
+            job_id_val = member
+        job_key = f"arq:job:{job_id_val}"
         raw = await r.get(job_key)
         if raw:
             try:
@@ -87,7 +93,7 @@ async def _remove_arq_jobs_for_task(r, task_id: str) -> int:
             args = data.get("args", [])
             if task_id in args or str(task_id) in [str(a) for a in args]:
                 await r.delete(job_key)
-                await r.zrem(queue_name, member)
+                await r.lrem(queue_name, 1, member)
                 removed += 1
                 logger.info(
                     "🗑️ Removed stale ARQ job %s for task %s from queue",
@@ -239,13 +245,14 @@ async def get_healable_tasks() -> list[dict]:
         # Fix 2: Only pick failed tasks that have a real error_code (not NULL, not EXHAUSTED)
         # Explicitly exclude permanently_failed and cancelled to prevent infinite healing loops
         rows = await conn.fetch(
-            "SELECT id, status, error_message, retry_count, progress_message, metadata, "
-            "source_url, source_type, user_id, error_code "
-            "FROM tasks "
-            "WHERE status = 'failed' "
-            "AND error_code IS NOT NULL "
-            "AND error_code != 'SELF_HEALING_EXHAUSTED' "
-            "AND error_code != 'permanently_failed'",
+            "SELECT t.id, t.status, t.error_message, t.retry_count, t.progress_message, t.metadata, "
+            "s.url AS source_url, s.type AS source_type, t.user_id, t.error_code "
+            "FROM tasks t "
+            "LEFT JOIN sources s ON s.id = t.source_id "
+            "WHERE t.status = 'failed' "
+            "AND t.error_code IS NOT NULL "
+            "AND t.error_code != 'SELF_HEALING_EXHAUSTED' "
+            "AND t.error_code != 'permanently_failed'",
         )
         tasks = []
         for row in rows:
@@ -260,11 +267,61 @@ async def get_healable_tasks() -> list[dict]:
         # Queued > 600s
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=600)
         qrows = await conn.fetch(
-            "SELECT id, status, source_url, source_type, user_id, error_code "
-            "FROM tasks WHERE status = 'queued' AND created_at < $1",
+            "SELECT t.id, t.status, s.url AS source_url, s.type AS source_type, t.user_id, t.error_code "
+            "FROM tasks t "
+            "LEFT JOIN sources s ON s.id = t.source_id "
+            "WHERE t.status = 'queued' AND t.created_at < $1",
             cutoff,
         )
+
+        # BUG I fix: Before re-enqueuing queued-timeout tasks, check if there are
+        # already active ARQ jobs for that task_id in the Redis queue. If a job
+        # is already queued, skip re-enqueuing to prevent duplicate processing.
+        # Initialize active_task_ids to empty set BEFORE the try block to prevent
+        # UnboundLocalError if the ARQ check fails.
+        active_task_ids: set[str] = set()
+        r = None
+        try:
+            r = await _get_redis()
+            queue_name = "arq:queue:viraclip_cpu_tasks"
+            members = await r.lrange(queue_name, 0, -1)
+            # Build a set of task_ids that already have active ARQ jobs
+            for member in members:
+                # member is a JSON string from the list, parse it to get job_id
+                try:
+                    job_data = json.loads(member)
+                    job_id_val = job_data.get("job_id", member)
+                except (json.JSONDecodeError, TypeError):
+                    job_id_val = member
+                job_key = f"arq:job:{job_id_val}"
+                raw = await r.get(job_key)
+                if raw:
+                    try:
+                        data = json.loads(raw)
+                        args = data.get("args", [])
+                        # ARQ stores args as a list; task_id is the first positional arg
+                        for arg in args:
+                            arg_str = str(arg)
+                            # Match any queued-timeout task_id against this job's args
+                            for qrow in qrows:
+                                if qrow["id"] == arg_str or qrow["id"][:12] == arg_str[:12]:
+                                    active_task_ids.add(qrow["id"])
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+        except Exception as exc:
+            logger.warning("Failed to check ARQ queue for active jobs: %s", exc)
+        finally:
+            if r is not None:
+                await r.aclose()
+
         for row in qrows:
+            # BUG I: Skip if this task already has an active ARQ job in the queue
+            if row["id"] in active_task_ids:
+                logger.info(
+                    "⏭️ Skipping queued-timeout task %s — already has active ARQ job",
+                    row["id"][:12],
+                )
+                continue
             tasks.append(dict(row) | {"metadata": {}, "error_message": "QUEUED_TIMEOUT", "retry_count": 0})
 
         return tasks
@@ -462,8 +519,12 @@ async def heal_task(task: dict) -> str:
     conn = await _get_db()
     try:
         # Step 1: Update Postgres status to 'queued' first
+        # BUG F fix: also reset error_code=NULL and error_message=NULL so the
+        # task gets a clean slate for its next attempt. Without this, stale
+        # error codes persist and can confuse downstream monitoring.
         result = await conn.execute(
-            "UPDATE tasks SET status='queued', updated_at=NOW() WHERE id=$1 AND status='failed'",
+            "UPDATE tasks SET status='queued', error_code=NULL, error_message=NULL, "
+            "updated_at=NOW() WHERE id=$1 AND status='failed'",
             task_id,
         )
         if result == "UPDATE 0":

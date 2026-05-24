@@ -1,0 +1,58 @@
+/* Editor Studio — After Effects-inspired dark theme */
+/* Importado solo en la página Studio, no contamina el tema global */
+
+.editor-studio {
+  --ae-bg: #1a1a1a;
+  --ae-panel: #252525;
+  --ae-border: #3a3a3a;
+  --ae-accent: #4a9eff;
+  --ae-accent-2: #ff6b35;
+  --ae-text: #d4d4d4;
+  --ae-text-muted: #888888;
+  --ae-clip: #2d5a8e;
+  --ae-transition: #8e4a2d;
+  --ae-sfx: #2d8e4a;
+  --ae-playhead: #ff3333;
+}
+
+.editor-studio {
+  background-color: var(--ae-bg);
+  color: var(--ae-text);
+}
+
+.editor-studio ::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.editor-studio ::-webkit-scrollbar-track {
+  background: var(--ae-bg);
+}
+
+.editor-studio ::-webkit-scrollbar-thumb {
+  background: var(--ae-border);
+  border-radius: 4px;
+}
+
+.editor-studio ::-webkit-scrollbar-thumb:hover {
+  background: var(--ae-text-muted);
+}
+
+/* ── Skeleton shimmer ──────────────────────────────────────────────────────── */
+
+@keyframes ae-shimmer {
+  0%   { background-position: -400px 0 }
+  100% { background-position: 400px 0 }
+}
+
+.ae-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--ae-panel) 25%,
+    #303030 50%,
+    var(--ae-panel) 75%
+  );
+  background-size: 400px 100%;
+  animation: ae-shimmer 1.4s ease-in-out infinite;
+  border-radius: 4px;
+}

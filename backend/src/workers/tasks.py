@@ -3,8 +3,9 @@ os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
 # Worker tasks - background jobs processed by arq workers.
 
+import asyncio
 import logging
-
+import time
 
 from typing import Dict, Any, Optional
 import json
@@ -93,6 +94,33 @@ async def process_video_task(
     set_task_id(str(task_id))
     set_trace_id(f"task-{task_id}")
     logger.info(f"Worker processing task {task_id}")
+
+    # ── Global task timeout ──────────────────────────────────────────────────
+    # Si el procesamiento supera TASK_TIMEOUT_MIN minutos, se cancela.
+    # Limpia archivos tmp de la tarea inmediatamente.
+    _TASK_TIMEOUT_MIN = int(os.getenv("TASK_TIMEOUT_MIN", "30"))
+    _task_start = time.monotonic()
+
+    async def _check_timeout():
+        elapsed = time.monotonic() - _task_start
+        if elapsed > _TASK_TIMEOUT_MIN * 60:
+            logger.error(
+                "Timeout: tarea %s superó %d minutos (%.1fs)",
+                task_id, _TASK_TIMEOUT_MIN, elapsed,
+            )
+            # Limpiar archivos tmp
+            try:
+                from ..utils.resource_manager import cleanup_temp_files
+                from pathlib import Path
+                cfg = get_config()
+                temp_base = Path(cfg.temp_dir)
+                cleanup_temp_files(temp_base / "segments", max_age_hours=0, task_id=task_id)
+                cleanup_temp_files(temp_base / "clips", max_age_hours=0, task_id=task_id)
+            except Exception as _clean_e:
+                logger.warning("Error limpiando tmp tras timeout: %s", _clean_e)
+            raise asyncio.TimeoutError(
+                f"Timeout: el procesamiento superó {_TASK_TIMEOUT_MIN} minutos"
+            )
 
     # ── Atomic status guard: only process if task is 'queued' ──────────────
     # Prevents duplicate execution when multiple workers race on the same task
@@ -611,6 +639,51 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
     except Exception as _font_err:
         logger.warning("[Startup] Font file check skipped: %s", _font_err)
 
+    # ── SAM model health check + singleton load ────────────────────────────
+    # Verify SAM checkpoint files exist for shape_morph_transition.
+    # Then load the model into memory via sam_singleton (carga una vez,
+    # reutiliza siempre). Ahorra 3-8s por transición.
+    # Never fail startup — only warn if models are missing.
+    try:
+        from ..sam_singleton import initialize_sam as _init_sam
+        _sam_loaded = _init_sam(models_dir="/app/models")
+        if _sam_loaded:
+            from ..sam_singleton import get_sam_model_type
+            logger.info("[Startup] ✓ SAM %s cargado en memoria", get_sam_model_type())
+        else:
+            logger.warning(
+                "[Startup] ⚠ SAM no disponible — "
+                "shape_morph_transition usará rembg como fallback. "
+                "Coloca sam_vit_h.pth o sam_vit_b.pth en /app/models/."
+            )
+    except Exception as _sam_err:
+        logger.warning("[Startup] SAM singleton load skipped: %s", _sam_err)
+
+    # ── render3d health check ──────────────────────────────────────────────
+    # Verify the render3d service is reachable at startup.
+    # Never fail startup — only warn if render3d is unavailable.
+    try:
+        import httpx
+        _render3d_url = os.getenv("RENDER3D_URL", "http://render3d:7890")
+        _resp = httpx.get(f"{_render3d_url}/health", timeout=5.0)
+        if _resp.status_code == 200:
+            _data = _resp.json()
+            logger.info(
+                "[Startup] ✓ render3d service healthy: %s (blender=%s, gpu=%s)",
+                _data.get("service", "?"),
+                _data.get("blender_available", "?"),
+                _data.get("gpu_available", "?"),
+            )
+        else:
+            logger.warning("[Startup] ⚠ render3d health returned status %s", _resp.status_code)
+    except Exception as _r3d_err:
+        logger.warning(
+            "[Startup] ⚠ render3d service unreachable at %s: %s — "
+            "3D asset rendering will fail at runtime if requested",
+            os.getenv("RENDER3D_URL", "http://render3d:7890"),
+            _r3d_err,
+        )
+
 
 async def cleanup_stale_tasks(ctx: dict) -> None:
     """
@@ -619,7 +692,7 @@ async def cleanup_stale_tasks(ctx: dict) -> None:
     Previene tasks zombie cuando un worker crashea.
     """
     import os
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     timeout_min = int(os.getenv("TASK_STALE_TIMEOUT_MINUTES", "45"))
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=timeout_min)
