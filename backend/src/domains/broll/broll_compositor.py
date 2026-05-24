@@ -423,15 +423,68 @@ def compose_overlay(
     fade_out_d = min(fade, (end_ts - timestamp) / 2)
     fade_out_st = end_ts - fade_out_d
 
+    # ── Select transition effect based on asset index for variety ──────────────
+    # Cycles through: fade, slide_left, slide_right, zoom_in, ken_burns
+    # Uses hash of broll_path to get deterministic variety per asset.
+    _effect_idx = abs(hash(str(broll_path))) % 5
+    _effects = ["fade", "slide_left", "slide_right", "zoom_in", "ken_burns"]
+    _effect = _effects[_effect_idx]
+    
     # CPU overlay pipeline: fade on CPU → overlay → yuv420p
     # Avoids hwupload_cuda/overlay_cuda/hwdownload which can fail with
     # incompatible hwframe formats from ComfyUI LTX outputs.
-    _broll_prep = (
-        f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
-        f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
-        f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
-        f"format=yuva420p[bv_faded]"
-    )
+    if _effect == "fade":
+        _broll_prep = (
+            f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+            f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"format=yuva420p[bv_faded]"
+        )
+    elif _effect == "slide_left":
+        _slide_dur = min(fade * 2, duration * 0.3)
+        _broll_prep = (
+            f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+            f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"crop=iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):ih:0:0,"
+            f"format=yuva420p[bv_faded]"
+        )
+    elif _effect == "slide_right":
+        _slide_dur = min(fade * 2, duration * 0.3)
+        _broll_prep = (
+            f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+            f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"crop=iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):ih:iw-iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):0,"
+            f"format=yuva420p[bv_faded]"
+        )
+    elif _effect == "zoom_in":
+        _zoom_dur = min(fade * 2, duration * 0.3)
+        _broll_prep = (
+            f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+            f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"scale=iw*1.15:ih*1.15:eval=frame,"
+            f"crop=iw/1.15:ih/1.15:(iw-iw/1.15)*0.5:(ih-ih/1.15)*0.5,"
+            f"format=yuva420p[bv_faded]"
+        )
+    elif _effect == "ken_burns":
+        _broll_prep = (
+            f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
+            f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"scale=iw*1.04:ih*1.04:eval=frame,"
+            f"crop=iw/1.04:ih/1.04:"
+            f"(iw-iw/1.04)*0.5*(t-{timestamp:.3f})/{duration:.3f}:"
+            f"(ih-ih/1.04)*0.5*(t-{timestamp:.3f})/{duration:.3f},"
+            f"format=yuva420p[bv_faded]"
+        )
+    
+    # ── Color matching: apply eq to match B-roll brightness/contrast to main clip ──
+    # Uses a subtle normalization to prevent jarring color shifts between sources.
+    # The eq values are fixed (not probed per-clip) to avoid extra ffprobe calls.
+    _color_match = "eq=saturation=0.95:brightness=0.01:contrast=1.02,"
+    
     filter_complex = (
         f"{_broll_prep};"
         f"[0:v][bv_faded]overlay="

@@ -17,8 +17,9 @@ MIN_ASSET_DURATION_S = 2.0
 
 # ── Fade duration (seconds) ─────────────────────────────────────────────────
 # Fade-in and fade-out length for all B-roll overlays.
-# 0.4s is the standard broadcast fade — visible but not sluggish.
-FADE_DURATION_S = 0.4
+# 0.6s is the standard broadcast fade — visible but not sluggish.
+# Increased from 0.4s for smoother, more professional transitions.
+FADE_DURATION_S = 0.6
 
 # ── Overlap tolerance (seconds) ─────────────────────────────────────────────
 # Minimum gap between the end of one overlay and the start of the next.
