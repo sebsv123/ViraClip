@@ -854,16 +854,15 @@ def _build_filter_complex(
         _dn = "afftdn=nf=-25," if denoise_audio else ""
         if VOICE_COMPRESS_ON:
             filters.append(
-                f"[0:a]{_dn}highpass=f=80,{theme_eq}"
-                f"atrim=end={dur:.3f},"
+                f"[0:a]atrim=end={dur:.3f},{_dn}"
+                f"highpass=f=80,{theme_eq}"
                 f"acompressor=threshold=0.125:ratio=4:attack=5:release=80,"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
                 f"aresample=44100,aformat=channel_layouts=stereo[aout]"
             )
         else:
             filters.append(
-                f"[0:a]{_dn}{theme_eq}"
-                f"atrim=end={dur:.3f},"
+                f"[0:a]atrim=end={dur:.3f},{_dn}{theme_eq}"
                 f"loudnorm=I={LUFS_TARGET}:TP=-1.5:LRA=11,"
                 f"aresample=44100,aformat=channel_layouts=stereo[aout]"
             )
