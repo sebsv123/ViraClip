@@ -227,7 +227,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.11 /usr/bin/python3 \
     && ln -sf /usr/bin/python3.11 /usr/bin/python \
     && ldconfig \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && which ffprobe || (echo "FATAL: ffprobe not found — frozen frame bug will recur" && exit 1)
 
 WORKDIR /app
 
@@ -286,7 +287,8 @@ COPY scripts/ ./scripts/
 # Create required directories
 RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx \
     /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \
-    /app/storage/ingested /app/data /app/data/creator_profiles /app/luts
+    /app/storage/ingested /app/data /app/data/creator_profiles /app/luts \
+    /shared_temp /var/log/worker
 
 # Create temp/output dirs in /tmp so workers always have write access
 RUN mkdir -p /tmp/viraclip/temp /tmp/viraclip/outputs /tmp/viraclip/clips /tmp/viraclip/downloads \

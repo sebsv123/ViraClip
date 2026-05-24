@@ -1075,7 +1075,7 @@ class EditingPipeline:
                     # Expected frames = dur * target_fps
                     _expected_frames = int(round(dur * max(24.0, fps)))
                     _actual_frames = int(round(_actual_dur * _actual_fps)) if _actual_dur > 0 and _actual_fps > 0 else 0
-                    if _actual_frames > 0 and _actual_frames < _expected_frames * 0.85:
+                    if _actual_frames > 0 and _actual_frames < _expected_frames * 0.92:
                         logger.error(
                             f"[EP] ❌ FRAME COUNT MISMATCH: expected ~{_expected_frames} frames "
                             f"({dur:.1f}s × {max(24.0, fps):.1f}fps), got {_actual_frames} "
