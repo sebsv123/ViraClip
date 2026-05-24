@@ -744,7 +744,6 @@ class WorkerSettings:
         process_video_task,
         analyze_ab_test,
         process_scheduled_job,
-        finalize_clip_with_suggestions_task,
     ]
     # Phase 5.2: dedicated CPU queue (GPU tasks go to viraclip_gpu_tasks)
     queue_name = "viraclip_cpu_tasks"
