@@ -1026,7 +1026,7 @@ export default function TaskPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white flex">
+    <><div className="min-h-screen bg-[#0a0a0f] text-white flex">
       {/* Header */}
       <header className="sticky top-0 z-40 bg-[#0a0a0f]/80 backdrop-blur-xl border-b border-white/5 px-8 py-4">
         <div className="flex items-center gap-4">
@@ -2055,8 +2055,11 @@ export default function TaskPage() {
                   </motion.aside>
                 )}
               </AnimatePresence>
-            </div>      {/* Delete Task Confirmation Dialog */}
-      <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
+            </div>
+            </div>
+          </div>
+
+          <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Delete Generation</AlertDialogTitle>
@@ -2084,5 +2087,6 @@ export default function TaskPage() {
         sessionToken={session?.accessToken}
       />
     </div>
+    </>
   );
 }

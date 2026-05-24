@@ -3,13 +3,20 @@ import Link from "next/link";
 
 export default function SignInPage() {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 py-12 px-4 sm:px-6 lg:px-8">
+    <div
+      className="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8"
+      style={{ background: "var(--bg)" }}
+    >
       <div className="max-w-md w-full space-y-8">
         <SignIn />
         <div className="text-center">
-          <p className="text-sm text-gray-600">
-            Don&apos;t have an account?{" "}
-            <Link href="/sign-up" className="font-medium text-indigo-600 hover:text-indigo-500">
+          <p className="text-sm" style={{ color: "var(--meta)" }}>
+            Don't have an account?{" "}
+            <Link
+              href="/sign-up"
+              className="font-medium transition-all"
+              style={{ color: "var(--accent)" }}
+            >
               Sign up
             </Link>
           </p>
