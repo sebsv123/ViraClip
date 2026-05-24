@@ -1220,6 +1220,19 @@ class OrchestratedEditingPipeline:
         
         try:
             # ─────────────────────────────────────────────────────────────────
+            # STEP 0: Silence detection (pre-process analysis only)
+            # ─────────────────────────────────────────────────────────────────
+            _silence_data = []
+            try:
+                from .silence_removal import build_keep_intervals
+                _silence_data = await asyncio.get_event_loop().run_in_executor(
+                    None, build_keep_intervals, [], segment_duration
+                )
+                self.logger.debug(f"[Orchestrator] Silences detected: {len(_silence_data)} segments")
+            except Exception as _sr_e:
+                self.logger.debug(f"[Orchestrator] SilenceRemover skipped: {_sr_e}")
+
+            # ─────────────────────────────────────────────────────────────────
             # STEP 1: Visual Enhancement
             # ─────────────────────────────────────────────────────────────────
             self.logger.info(f"[Pipeline] Step 1: Visual enhancement for {clip_path.name}")
