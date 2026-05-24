@@ -8,14 +8,6 @@
   /* tokens cargados desde tokens.css — no redefinir aquí */
 }
 
-@theme inline {
-  --font-sans: var(--font-body);
-  --font-mono: var(--font-mono);
-  --radius-sm: var(--radius-sm);
-  --radius-md: var(--radius-md);
-  --radius-lg: var(--radius-lg);
-}
-
 /* Animations — solo las que usa ViraClip */
 @keyframes shimmer {
   0% { background-position: -200% 0; }
@@ -62,7 +54,6 @@
 
 /* Base Styles */
 @layer base {
-  * { @apply border-border; }
   html { scroll-behavior: smooth; }
   body {
     font-family: var(--font-body);

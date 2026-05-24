@@ -3,10 +3,10 @@
    Source: https://github.com/nexu-io/open-design/tree/main/design-systems/linear-app
    ============================================================ */
 
-@import './tokens.css';
-
 /* ---------- Inter Variable from Google Fonts ---------- */
 @import url('https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,100..900&display=swap');
+
+@import './tokens.css';
 
 /* ---------- Reset ---------- */
 *,
