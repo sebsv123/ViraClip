@@ -57,6 +57,7 @@ from sqlalchemy import text
 from .database import init_db, close_db, get_db, AsyncSessionLocal
 from .auth_headers import USER_ID_HEADER
 from .api.routes.tasks import router as tasks_router
+from .api.routes.tasks_retry import router as tasks_retry_router
 from .api.routes.feedback import router as feedback_router
 from .api.routes.billing import router as billing_router
 from .api.routes.clips import router as clips_router
@@ -218,6 +219,7 @@ app.add_middleware(
 
 # Include API routers
 app.include_router(tasks_router)
+app.include_router(tasks_retry_router)
 app.include_router(feedback_router)
 app.include_router(billing_router)
 #app.include_router(social_router)
@@ -451,5 +453,3 @@ async def broll_status():
     """Check B-roll service availability"""
     return {"configured": bool(config.pexels_api_key),
             "provider": "pexels" if config.pexels_api_key else None}
-
-
