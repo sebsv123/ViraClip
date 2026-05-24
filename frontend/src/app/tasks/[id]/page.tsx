@@ -73,7 +73,7 @@ import {
 import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "@/components/ui/tooltip";
 import { Progress } from "@/components/ui/progress";
 import Link from "next/link";
-import DynamicVideoPlayer from "@/components/dynamic-video-player";
+import { ClipVideoPlayer } from "@/components/clip-video-player";
 import { SuggestionStudio } from "@/components/suggestion-studio";
 
 interface Clip {
@@ -1453,7 +1453,19 @@ export default function TaskPage() {
                       <CardContent className="p-0">
                         <div className="flex flex-col lg:flex-row">
                           <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                            <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                            <ClipVideoPlayer
+                              src={`${apiUrl}${clip.video_url}`}
+                              poster="/placeholder-video.jpg"
+                              clip={{
+                                clip_order: clip.clip_order,
+                                duration: clip.duration,
+                                filename: clip.filename,
+                                video_url: clip.video_url,
+                                thumbnail_url: clip.thumbnail_url,
+                              }}
+                              apiUrl={apiUrl}
+                              className="w-full max-w-[280px]"
+                            />
                           </div>
                           <div className="p-6 flex-1">
                             <div className="flex items-start justify-between mb-4">
@@ -1715,716 +1727,330 @@ export default function TaskPage() {
               </SheetContent>
             </Sheet>
 
-            {clips.map((clip) => (
-              <Card key={clip.id} className="overflow-hidden glass-card hover:shadow-xl transition-shadow duration-300">
-                <CardContent className="p-0">
-                  <div className="flex flex-col lg:flex-row">
-                    {/* Video Player */}
-                    <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                      <DynamicVideoPlayer
-                        src={`${apiUrl}${clip.video_url}`}
-                        poster={clip.thumbnail_url ? `${apiUrl}${clip.thumbnail_url}` : "/placeholder-video.jpg"}
-                      />
-                    </div>
-
-                    {/* Clip Details */}
-                    <div className="p-6 flex-1">
-                      <div className="flex items-start justify-between mb-4">
-                        <div className="flex-1">
-                          <label className="flex items-center gap-2 text-xs text-gray-400 mb-2">
-                            <input
-                              type="checkbox"
-                              checked={selectedClipIds.includes(clip.id)}
-                              onChange={() => handleToggleClipSelection(clip.id)}
-                            />
-                            Select for merge
-                          </label>
-                          <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
-                          <div className="flex items-center gap-2 text-sm text-gray-400">
-                            <span>
-                              {clip.start_time} - {clip.end_time}
-                            </span>
-                            <span>•</span>
-                            <span>{formatDuration(clip.duration)}</span>
-                          </div>
-                        </div>
-                        <div className="flex flex-col items-end gap-2">
-                          <div className="flex items-center gap-2">
-                            {clip.virality_score > 0 && (
-                              <Badge className={`${getViralityBgColor(clip.virality_score)} text-white shadow-lg`}>
-                                <Zap className="w-3 h-3 mr-1" />
-                                {clip.virality_score}
-                              </Badge>
-                            )}
-                            {/* V3 Intensity Badge */}
-                            {clip.intensity !== undefined && (
-                              <Badge variant="outline" className={`${getIntensityColor(clip.intensity)} glass-badge shadow-sm`}>
-                                <TrendingUp className="w-3 h-3 mr-1" />
-                                {(clip.intensity * 10).toFixed(1)} Intensity
-                              </Badge>
-                            )}
-                            <Badge className={getScoreColor(clip.relevance_score)}>
-                              <Star className="w-3 h-3 mr-1" />
-                              {(clip.relevance_score * 100).toFixed(0)}%
-                            </Badge>
-                            {/* P2.4: Hook preview score badge */}
-                            {clip.hook_preview_score !== undefined && clip.hook_preview_score > 0 && (
-                              <Badge
-                                variant="outline"
-                                className={`${getHookPreviewColor(clip.hook_preview_score)} border-0 shadow-sm`}
-                                title="Hook Preview Score — how likely the opening seconds are to stop scrolling"
-                              >
-                                🎣 {clip.hook_preview_score}
-                              </Badge>
-                            )}
-                            {/* P3.5: A/B variant badge */}
-                            {clip.variant && (
-                              <Badge
-                                variant="outline"
-                                className="bg-blue-50 text-blue-700 border-blue-200 shadow-sm font-semibold"
-                                title={`A/B variant ${clip.variant} — different caption template for split testing`}
-                              >
-                                A/B {clip.variant}
-                              </Badge>
-                            )}
-                          </div>
-                          {clip.bgm_style && (
-                            <Badge variant="secondary" className="text-[10px] h-5 bg-purple-50 text-purple-700 border-purple-100">
-                              🎵 {clip.bgm_style}
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Virality Score Breakdown */}
-                      {clip.virality_score > 0 && (
-                        <div className="mb-4 p-3 bg-white/3 rounded-lg">
-                          <div className="flex items-center justify-between mb-3">
-                            <h4 className="font-medium text-black text-sm flex items-center gap-1">
-                              <Zap className="w-4 h-4" />
-                              Virality Score
-                            </h4>
-                            <span className={`text-lg font-bold ${getViralityColor(clip.virality_score)}`}>
-                              {clip.virality_score}/100
-                            </span>
-                          </div>
-
-                          <div className="grid grid-cols-2 gap-3 text-xs">
-                            {/* Hook Score */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-400">
-                                  <MessageSquare className="w-3 h-3" />
-                                  Hook
-                                </span>
-                                <span className="font-medium">{clip.hook_score}/25</span>
-                              </div>
-                              <Progress value={(clip.hook_score / 25) * 100} className="h-1.5" />
-                            </div>
-
-                            {/* Engagement Score */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-400">
-                                  <TrendingUp className="w-3 h-3" />
-                                  Engagement
-                                </span>
-                                <span className="font-medium">{clip.engagement_score}/25</span>
-                              </div>
-                              <Progress value={(clip.engagement_score / 25) * 100} className="h-1.5" />
-                            </div>
-
-                            {/* Value Score */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-400">
-                                  <Star className="w-3 h-3" />
-                                  Value
-                                </span>
-                                <span className="font-medium">{clip.value_score}/25</span>
-                              </div>
-                              <Progress value={(clip.value_score / 25) * 100} className="h-1.5" />
-                            </div>
-
-                            {/* Shareability Score */}
-                            <div className="space-y-1">
-                              <div className="flex items-center justify-between">
-                                <span className="flex items-center gap-1 text-gray-400">
-                                  <Share2 className="w-3 h-3" />
-                                  Shareability
-                                </span>
-                                <span className="font-medium">{clip.shareability_score}/25</span>
-                              </div>
-                              <Progress value={(clip.shareability_score / 25) * 100} className="h-1.5" />
-                            </div>
-                          </div>
-
-                          {clip.hook_type && clip.hook_type !== "none" && (
-                            <div className="mt-3 pt-2 border-t">
-                              <Badge variant="outline" className="text-xs">
-                                {getHookTypeLabel(clip.hook_type)}
-                              </Badge>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {clip.text && (
-                        <div className="mb-4">
-                          <h4 className="font-medium text-black mb-2">Transcript</h4>
-                          <p className="text-sm text-gray-300 bg-white/3 p-3 rounded">{clip.text}</p>
-                        </div>
-                      )}
-
-                      {/* Phase 9: Creative Engine Panel */}
-                      {clip.creative_enhanced && (
-                        <div className="mb-4 p-4 bg-gradient-to-br from-cyan-950/60 to-purple-950/60 border border-cyan-800/40 rounded-lg">
-                          <div className="flex items-center justify-between mb-3">
-                            <div className="flex items-center gap-2">
-                              <Wand2 className="w-4 h-4 text-cyan-400" />
-                              <h4 className="font-bold text-sm text-cyan-300 uppercase tracking-wider">Creative Engine</h4>
-                            </div>
-                            {clip.preset_used && (
-                              <span className="text-xs bg-cyan-900/60 text-cyan-300 border border-cyan-700/40 rounded-full px-2 py-0.5 font-mono">
-                                {clip.preset_used}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* Effect flags */}
-                          <div className="grid grid-cols-2 gap-2 mb-3">
-                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
-                              clip.hook_reorder_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
-                            }`}>
-                              <Film className="w-3 h-3" />
-                              Hook Flash {clip.hook_reorder_applied ? "✓" : "—"}
-                            </div>
-                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
-                              clip.zoom_punch_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
-                            }`}>
-                              <Layers className="w-3 h-3" />
-                              Zoom Punch {clip.zoom_punch_applied ? "✓" : "—"}
-                            </div>
-                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
-                              clip.loudnorm_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
-                            }`}>
-                              <Volume2 className="w-3 h-3" />
-                              EBU R128 {clip.loudnorm_applied ? "✓" : "—"}
-                            </div>
-                            <div className={`flex items-center gap-1.5 text-xs px-2 py-1 rounded ${
-                              clip.color_grade_applied ? "bg-emerald-900/40 text-emerald-300" : "bg-white/5 text-gray-500"
-                            }`}>
-                              <Sparkles className="w-3 h-3" />
-                              Color Grade {clip.color_grade_applied ? "✓" : "—"}
-                            </div>
-                          </div>
-
-                          {/* Pacing + Emotion sub-scores */}
-                          {(clip.pacing_score != null || clip.emotion_score != null) && (
-                            <div className="grid grid-cols-2 gap-2 mb-3">
-                              {clip.pacing_score != null && (
-                                <div className="space-y-1">
-                                  <div className="flex items-center justify-between text-xs">
-                                    <span className="text-gray-400 flex items-center gap-1"><Clock className="w-3 h-3" />Pacing</span>
-                                    <span className="text-cyan-300 font-medium">{Math.round(clip.pacing_score)}</span>
-                                  </div>
-                                  <Progress value={clip.pacing_score} className="h-1" />
-                                </div>
-                              )}
-                              {clip.emotion_score != null && (
-                                <div className="space-y-1">
-                                  <div className="flex items-center justify-between text-xs">
-                                    <span className="text-gray-400 flex items-center gap-1"><Zap className="w-3 h-3" />Emotion</span>
-                                    <span className="text-purple-300 font-medium">{Math.round(clip.emotion_score)}</span>
-                                  </div>
-                                  <Progress value={clip.emotion_score} className="h-1" />
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {/* B-roll + SFX counts */}
-                          <div className="flex flex-wrap gap-3 mb-3 text-xs">
-                            {clip.broll_overlays !== undefined && clip.broll_overlays > 0 && (
-                              <span className="text-purple-300">🎬 {clip.broll_overlays} B-roll{clip.broll_overlays !== 1 ? "s" : ""}</span>
-                            )}
-                            {clip.sfx_injected !== undefined && clip.sfx_injected > 0 && (
-                              <span className="text-cyan-300">🔊 {clip.sfx_injected} SFX</span>
-                            )}
-                            {clip.smart_edit_decisions !== undefined && clip.smart_edit_decisions > 0 && (
-                              <span className="text-amber-300">✂️ {clip.smart_edit_decisions} edit{clip.smart_edit_decisions !== 1 ? "s" : ""}{clip.smart_edit_time_saved ? ` · ${clip.smart_edit_time_saved.toFixed(1)}s saved` : ""}</span>
-                            )}
-                            {clip.text_pops_applied !== undefined && clip.text_pops_applied > 0 && (
-                              <span className="text-pink-300">💥 {clip.text_pops_applied} keyword pop{clip.text_pops_applied !== 1 ? "s" : ""}</span>
-                            )}
-                          </div>
-
-                          {clip.hook_text && (
-                            <div className="text-xs text-cyan-200 italic mb-2">Hook: &ldquo;{clip.hook_text}&rdquo;</div>
-                          )}
-
-                          {/* Improvement suggestions */}
-                          {clip.improvements && clip.improvements.length > 0 && (
-                            <div className="mb-3">
-                              <p className="text-xs text-amber-400 font-medium mb-1">💡 Suggestions</p>
-                              <ul className="space-y-0.5">
-                                {clip.improvements.slice(0, 3).map((imp, i) => (
-                                  <li key={i} className="text-xs text-amber-200/80">• {imp}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          )}
-
-                          <div className={`flex items-center gap-1.5 text-xs font-medium ${
-                            clip.qa_passed ? "text-emerald-400" : "text-amber-400"
-                          }`}>
-                            {clip.qa_passed
-                              ? <><CheckCircle2 className="w-3.5 h-3.5" /> QA Passed</>
-                              : <><XCircle className="w-3.5 h-3.5" /> QA Issues: {(clip.qa_issues || []).join(", ")}</>
-                            }
-                          </div>
-                        </div>
-                      )}
-
-                      {/* Phase 10: Viral Polish panel */}
-                      {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (
-                        <div className="mb-4 p-4 bg-gradient-to-br from-rose-950/50 to-orange-950/50 border border-rose-800/40 rounded-lg">
-                          <div className="flex items-center gap-2 mb-3">
-                            <Sparkles className="w-4 h-4 text-rose-400" />
-                            <h4 className="font-bold text-sm text-rose-300 uppercase tracking-wider">Viral Polish</h4>
-                          </div>
-
-                          {/* Applied effects badges */}
-                          <div className="flex flex-wrap gap-2 mb-3">
-                            {clip.cta_overlay_applied && (
-                              <span className="flex items-center gap-1 text-xs bg-orange-900/50 text-orange-300 border border-orange-700/40 rounded-full px-2 py-0.5">
-                                <Target className="w-3 h-3" /> CTA Overlay
-                              </span>
-                            )}
-                            {clip.emoji_overlays_applied && (
-                              <span className="flex items-center gap-1 text-xs bg-pink-900/50 text-pink-300 border border-pink-700/40 rounded-full px-2 py-0.5">
-                                😀 Emoji Cues
-                              </span>
-                            )}
-                          </div>
-
-                          {/* A/B Variants */}
-                          {clip.variants && clip.variants.length > 0 && (
-                            <div>
-                              <p className="text-xs text-rose-400 font-medium mb-2 flex items-center gap-1">
-                                <Shuffle className="w-3 h-3" /> A/B Variants ({clip.variants.length})
-                              </p>
-                              <div className="space-y-1.5">
-                                {clip.variants.map((v, vi) => (
-                                  <div key={vi} className="flex items-center justify-between bg-black/30 rounded px-2 py-1.5">
-                                    <div className="flex items-center gap-2">
-                                      {v.type === "caption_style" ? (
-                                        <Subtitles className="w-3 h-3 text-cyan-400 flex-shrink-0" />
-                                      ) : (
-                                        <Music className="w-3 h-3 text-purple-400 flex-shrink-0" />
-                                      )}
-                                      <span className="text-xs text-gray-300 truncate max-w-[160px]" title={v.label}>{v.label}</span>
-                                    </div>
-                                    <a
-                                      href={`${apiUrl}/clips/${clip.video_url.split("/")[2]}/${v.path.split("/").pop()}`}
-                                      download
-                                      className="text-xs text-rose-400 hover:text-rose-300 font-medium ml-2 flex-shrink-0"
-                                    >
-                                      <Download className="w-3 h-3" />
-                                    </a>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      {/* ViraClip V3: Viral Intelligence & Tactical Tips */}
-                      {(clip.strategic_advice || clip.conversion_tips) && (
-                        <div className="mb-4 p-4 bg-blue-50/50 border border-blue-100 rounded-lg backdrop-blur-sm">
-                          <div className="flex items-center gap-2 mb-3 text-blue-800">
-                            <BrainCircuit className="w-5 h-5 text-blue-600" />
-                            <h4 className="font-bold text-sm tracking-tight uppercase">Viral Intelligence</h4>
-                          </div>
-                          <div className="space-y-3">
-                            {clip.strategic_advice && (
-                              <div className="flex gap-3">
-                                <div className="mt-1 p-1 bg-blue-100 rounded-md">
-                                  <Target className="w-3.5 h-3.5 text-blue-700" />
-                                </div>
-                                <div>
-                                  <span className="text-[10px] font-bold text-blue-400 uppercase leading-none block mb-1">Psychological Hook</span>
-                                  <p className="text-sm text-blue-900 leading-relaxed font-medium">
-                                    {clip.strategic_advice}
-                                  </p>
-                                </div>
-                              </div>
-                            )}
-                            {clip.conversion_tips && (
-                              <div className="flex gap-3 pt-2 border-t border-blue-100/50">
-                                <div className="mt-1 p-1 bg-green-100 rounded-md">
-                                  <MousePointer className="w-3.5 h-3.5 text-green-700" />
-                                </div>
-                                <div>
-                                  <span className="text-[10px] font-bold text-green-500 uppercase leading-none block mb-1">Conversion Tactic</span>
-                                  <p className="text-sm text-gray-300 leading-relaxed italic">
-                                    {clip.conversion_tips}
-                                  </p>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )}
-
-                      {clip.reasoning && (
-                        <div className="mb-4">
-                          <h4 className="font-medium text-black mb-2">AI Analysis</h4>
-                          <p className="text-sm text-gray-400">{clip.reasoning}</p>
-                        </div>
-                      )}
-
-                      {/* P3: Social Copy Panel */}
-                      {(clip.social_title || clip.social_description || (clip.suggested_hashtags && clip.suggested_hashtags.length > 0)) && (
-                        <div className="mb-4 p-3 bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-100 rounded-lg">
-                          <h4 className="font-medium text-purple-800 mb-2 text-sm flex items-center gap-1">
-                            📱 Social Media Copy
-                          </h4>
-                          {clip.social_title && (
-                            <div className="mb-2">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-xs text-gray-500 font-medium">TITLE</span>
-                                <button
-                                  onClick={() => navigator.clipboard.writeText(clip.social_title!)}
-                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
-                                  title="Copy title"
-                                >
-                                  Copy
-                                </button>
-                              </div>
-                              <p className="text-sm font-semibold text-gray-800 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_title}</p>
-                            </div>
-                          )}
-                          {clip.social_description && (
-                            <div className="mb-2">
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-xs text-gray-500 font-medium">DESCRIPTION</span>
-                                <button
-                                  onClick={() => navigator.clipboard.writeText(clip.social_description!)}
-                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
-                                  title="Copy description"
-                                >
-                                  Copy
-                                </button>
-                              </div>
-                              <p className="text-sm text-gray-300 bg-white rounded px-2 py-1 border border-purple-100">{clip.social_description}</p>
-                            </div>
-                          )}
-                          {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
-                            <div>
-                              <div className="flex items-center justify-between mb-1">
-                                <span className="text-xs text-gray-500 font-medium">HASHTAGS</span>
-                                <button
-                                  onClick={() => navigator.clipboard.writeText((clip.suggested_hashtags || []).join(' '))}
-                                  className="text-xs text-purple-400 hover:text-purple-800 font-medium"
-                                  title="Copy hashtags"
-                                >
-                                  Copy
-                                </button>
-                              </div>
-                              <div className="flex flex-wrap gap-1">
-                                {clip.suggested_hashtags.map((tag, idx) => (
-                                  <span key={idx} className="text-xs bg-purple-100 text-purple-700 rounded-full px-2 py-0.5 cursor-pointer hover:bg-purple-200"
-                                    onClick={() => navigator.clipboard.writeText(tag)}>
-                                    {tag}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-1 mb-3" title="Rate this clip">
-                        {[1, 2, 3, 4, 5].map((star) => (
-                          <button
-                            key={star}
-                            onClick={() => rateClip(clip.id, star)}
-                            className="p-0.5 transition-transform hover:scale-110 focus:outline-none"
-                            aria-label={`Rate ${star} star${star !== 1 ? 's' : ''}`}
-                          >
-                            <Star
-                              className={`w-5 h-5 ${
-                                star <= (clipRatings[clip.id] ?? clip.user_rating ?? 0)
-                                  ? "fill-yellow-400 text-yellow-400"
-                                  : "text-gray-300"
-                              }`}
-                            />
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="flex gap-2">
-                        <Button size="sm" variant="outline" asChild>
-                          <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
-                            <Download className="w-4 h-4" />
-                            Download
-                          </a>
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => handleExportClip(clip.id, clip.filename)}>
-                          <Download className="w-4 h-4" />
-                          Export
-                        </Button>
-                        <Select value={exportPreset} onValueChange={setExportPreset}>
-                          <SelectTrigger className="h-8 w-28">
-                            <SelectValue placeholder="Preset" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="tiktok">TikTok</SelectItem>
-                            <SelectItem value="reels">Reels</SelectItem>
-                            <SelectItem value="shorts">Shorts</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"
-                          onClick={() => setDeletingClipId(clip.id)}
-                        >
-                          <Trash2 className="w-4 h-4" />
-                          Delete
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            setEditingClipId(editingClipId === clip.id ? null : clip.id);
-                            setCaptionText(clip.text || "");
-                          }}
-                        >
-                          <Scissors className="w-4 h-4" />
-                          Edit
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className={musicAppliedClipId === clip.id ? "border-green-500 text-green-400" : ""}
-                          onClick={() => setMusicPickerClipId(musicPickerClipId === clip.id ? null : clip.id)}
-                        >
-                          <Music className="w-4 h-4" />
-                          {musicAppliedClipId === clip.id ? "Applied!" : "Music"}
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => {
-                            setSuggestionStudioClipId(clip.id);
-                            setSuggestionStudioOpen(true);
-                          }}
-                          className="border-rose-500/30 text-rose-400 hover:bg-rose-500/10"
-                        >
-                          <SlidersHorizontal className="w-4 h-4" />
-                          Studio
-                        </Button>
-                      </div>
-
-                      {/* Publish buttons */}
-                      <div className="flex gap-2 mt-2">
-                        {(["tiktok", "instagram", "youtube"] as const).map((platform) => {
-                          const status = publishStatus[`${clip.id}_${platform}`];
-                          const isPublishing = publishingClipId === `${clip.id}_${platform}`;
-                          return (
-                            <Button
-                              key={platform}
-                              size="sm"
-                              variant="outline"
-                              disabled={isPublishing}
-                              onClick={() => handlePublishClip(clip.id, platform, clip.text || "")}
-                              className={
-                                status?.success
-                                  ? "border-green-500 text-green-500 bg-green-500/10"
-                                  : status?.error
-                                  ? "border-red-500 text-red-500 bg-red-500/10"
-                                  : platform === "tiktok"
-                                  ? "border-black text-black dark:border-white dark:text-white"
-                                  : platform === "instagram"
-                                  ? "border-pink-500 text-pink-500"
-                                  : "border-red-600 text-red-600"
-                              }
-                            >
-                              {isPublishing ? (
-                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                              ) : status?.success ? (
-                                <CheckCircle2 className="w-3.5 h-3.5" />
-                              ) : (
-                                <Send className="w-3.5 h-3.5" />
-                              )}
-                              {platform === "tiktok" ? "TikTok" : platform === "instagram" ? "Reels" : "Shorts"}
-                              {status?.success && " ✓"}
-                            </Button>
-                          );
-                        })}
-                      </div>
-                      {Object.entries(publishStatus).filter(([key]) => key.startsWith(clip.id)).map(([key, s]) => {
-                        const status = s as { success: boolean; error?: string };
-                        return status.error ? (
-                          <p key={key} className="text-xs text-red-500 mt-1">
-                            {status.error}
-                          </p>
-                        ) : null;
-                      })}
-
-                      {musicPickerClipId === clip.id && (
-                        <div className="mt-3 p-3 border border-purple-500/30 rounded-lg bg-purple-500/5 flex flex-wrap gap-2 items-center">
-                          <Select value={selectedTrack} onValueChange={setSelectedTrack}>
-                            <SelectTrigger className="h-8 w-48">
-                              <SelectValue placeholder="Choose a track…" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {musicTracks.map(t => (
-                                <SelectItem key={t.id} value={t.id}>{t.label}</SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <Button
-                            size="sm"
-                            disabled={!selectedTrack || isApplyingMusic}
-                            onClick={() => handleApplyMusic(clip.id)}
-                          >
-                            {isApplyingMusic ? <Loader2 className="w-4 h-4 animate-spin" /> : <Music className="w-4 h-4" />}
-                            {isApplyingMusic ? "Applying…" : "Apply"}
-                          </Button>
-                          <span className="text-xs text-gray-500">Music is mixed with ducking — voice stays clear</span>
-                        </div>
-                      )}
-
-                      {editingClipId === clip.id && (
-                        <div className="mt-4 p-3 border rounded-lg space-y-3 bg-white/3">
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input
-                              value={startOffset}
-                              onChange={(e) => setStartOffset(e.target.value)}
-                              placeholder="Start trim (sec)"
-                            />
-                            <Input
-                              value={endOffset}
-                              onChange={(e) => setEndOffset(e.target.value)}
-                              placeholder="End trim (sec)"
-                            />
-                            <Button size="sm" onClick={() => handleTrimClip(clip.id)}>
-                              <Scissors className="w-4 h-4" />
-                              Trim
-                            </Button>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input
-                              value={splitTime}
-                              onChange={(e) => setSplitTime(e.target.value)}
-                              placeholder="Split at (sec)"
-                            />
-                            <Button size="sm" variant="outline" onClick={() => handleSplitClip(clip.id)}>
-                              <SplitSquareVertical className="w-4 h-4" />
-                              Split
-                            </Button>
-                            <Button size="sm" variant="outline" onClick={() => handleTrimClip(clip.id)}>
-                              <RefreshCw className="w-4 h-4" />
-                              Regenerate
-                            </Button>
-                          </div>
-                          <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-                            <Input
-                              value={captionText}
-                              onChange={(e) => setCaptionText(e.target.value)}
-                              placeholder="Caption text"
-                            />
-                            <Select value={captionPosition} onValueChange={setCaptionPosition}>
-                              <SelectTrigger>
-                                <SelectValue placeholder="Caption position" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="top">Top</SelectItem>
-                                <SelectItem value="middle">Middle</SelectItem>
-                                <SelectItem value="bottom">Bottom</SelectItem>
-                              </SelectContent>
-                            </Select>
-                            <Input
-                              value={highlightWords}
-                              onChange={(e) => setHighlightWords(e.target.value)}
-                              placeholder="Highlights: word1, word2"
-                            />
-                          </div>
-                          <Button size="sm" variant="outline" onClick={() => handleUpdateCaptions(clip.id)}>
-                            <Subtitles className="w-4 h-4" />
-                            Update Captions
-                          </Button>
-                        </div>
-                      )}
-
-                      {/* P3.1: AI Refine panel */}
-                      <div className="mt-3 border border-purple-500/20 rounded-lg bg-purple-500/5">
-                        <button
-                          className="w-full flex items-center gap-2 px-3 py-2 text-sm font-medium text-purple-300 hover:bg-purple-500/10 rounded-lg transition-colors"
-                          onClick={() => {
-                            setRefiningClipId(refiningClipId === clip.id ? null : clip.id);
-                            setRefineResult(null);
-                          }}
-                        >
-                          <Sparkles className="w-4 h-4" />
-                          AI Refine
-                          <span className="ml-auto text-xs text-purple-400">
-                            {refiningClipId === clip.id ? "▲" : "▼"}
-                          </span>
-                        </button>
-                        {refiningClipId === clip.id && (
-                          <div className="px-3 pb-3 space-y-2">
-                            <p className="text-xs text-purple-400">
-                              Describe what you want to change: <em>"trim 3 seconds from the start"</em>, <em>"make the hook more energetic"</em>, <em>"use the subtitles template"</em>…
-                            </p>
-                            <div className="flex gap-2">
-                              <Input
-                                value={refineInstruction}
-                                onChange={(e) => setRefineInstruction(e.target.value)}
-                                onKeyDown={(e) => e.key === "Enter" && !isRefining && handleRefineClip(clip.id)}
-                                placeholder="e.g. Remove the first 2 seconds"
-                                className="text-sm"
-                              />
-                              <Button
-                                size="sm"
-                                onClick={() => handleRefineClip(clip.id)}
-                                disabled={isRefining || !refineInstruction.trim()}
-                                className="bg-purple-600 hover:bg-purple-700 text-white shrink-0"
-                              >
-                                {isRefining ? (
-                                  <RefreshCw className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <Send className="w-4 h-4" />
-                                )}
-                              </Button>
-                            </div>
-                            {refineResult && (
-                              <div className={`text-xs rounded p-2 ${refineResult.action === "error" ? "bg-red-500/10 text-red-400 border border-red-500/30" : "bg-green-500/10 text-green-400 border border-green-500/30"}`}>
-                                <span className="font-semibold capitalize">
-                                  {refineResult.action === "noop" ? "No changes needed" : refineResult.action === "error" ? "Error" : `✓ ${refineResult.action.replace("_", " ")}`}
-                                </span>
-                                {refineResult.reasoning && (
-                                  <span className="ml-1 text-current/80">— {refineResult.reasoning}</span>
-                                )}
-                              </div>
-                            )}
+            {/* ── Clip Gallery ── */}
+            <div className="flex gap-0" style={{ minHeight: "60vh" }}>
+              {/* Main grid area */}
+              <div className="flex-1 min-w-0">
+                <div
+                  className="grid gap-3"
+                  style={{
+                    gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+                  }}
+                >
+                  {clips.map((clip) => {
+                    const isSelected = selectedClip?.id === clip.id;
+                    return (
+                      <div
+                        key={clip.id}
+                        onClick={() => setSelectedClip(isSelected ? null : clip)}
+                        className="relative cursor-pointer overflow-hidden rounded-md transition-all"
+                        style={{
+                          aspectRatio: "9/16",
+                          background: "var(--surface)",
+                          border: isSelected
+                            ? "1px solid var(--accent)"
+                            : "1px solid var(--border-soft)",
+                          boxShadow: isSelected
+                            ? "0 0 0 3px rgba(94,106,210,0.2)"
+                            : undefined,
+                          transitionDuration: "var(--motion-fast)",
+                          transitionTimingFunction: "var(--ease-standard)",
+                        }}
+                        onMouseEnter={(e) => {
+                          if (!isSelected) {
+                            e.currentTarget.style.borderColor = "var(--border)";
+                            e.currentTarget.style.boxShadow = "var(--elev-raised)";
+                          }
+                        }}
+                        onMouseLeave={(e) => {
+                          if (!isSelected) {
+                            e.currentTarget.style.borderColor = "var(--border-soft)";
+                            e.currentTarget.style.boxShadow = "none";
+                          }
+                        }}
+                      >
+                        {/* Thumbnail */}
+                        {clip.thumbnail_url || clip.video_url ? (
+                          <img
+                            src={clip.thumbnail_url || clip.video_url}
+                            alt={clip.title || "Clip thumbnail"}
+                            className="absolute inset-0 w-full h-full"
+                            style={{ objectFit: "cover" }}
+                          />
+                        ) : (
+                          <div className="absolute inset-0 flex items-center justify-center">
+                            <Film size={24} style={{ color: "var(--meta)" }} />
                           </div>
                         )}
+
+                        {/* Bottom overlay */}
+                        <div
+                          className="absolute bottom-0 left-0 right-0 p-3"
+                          style={{
+                            background: "linear-gradient(transparent, rgba(0,0,0,0.75))",
+                          }}
+                        >
+                          <div className="flex items-center gap-2">
+                            {clip.duration && (
+                              <span
+                                className="inline-flex items-center px-1.5 py-0.5 rounded-full text-xs"
+                                style={{
+                                  background: "rgba(0,0,0,0.6)",
+                                  color: "var(--fg)",
+                                }}
+                              >
+                                {formatDuration(clip.duration)}
+                              </span>
+                            )}
+                            {clip.retention_score && (
+                              <span
+                                className="text-xs"
+                                style={{ color: "var(--accent)" }}
+                              >
+                                {clip.retention_score}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* ── Inspector Panel ── */}
+              <AnimatePresence>
+                {selectedClip && (
+                  <motion.aside
+                    initial={{ transform: "translateX(280px)" }}
+                    animate={{ transform: "translateX(0)" }}
+                    exit={{ transform: "translateX(280px)" }}
+                    transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}
+                    className="shrink-0 overflow-y-auto"
+                    style={{
+                      width: 280,
+                      background: "var(--bg)",
+                      borderLeft: "1px solid var(--border)",
+                    }}
+                  >
+                    {/* Header */}
+                    <div
+                      className="flex items-center justify-between px-4 py-3"
+                      style={{ borderBottom: "1px solid var(--border)" }}
+                    >
+                      <span
+                        className="text-sm font-medium"
+                        style={{ color: "var(--fg)" }}
+                      >
+                        Inspector
+                      </span>
+                      <button
+                        onClick={() => setSelectedClip(null)}
+                        className="p-1 rounded-sm transition-all"
+                        style={{ color: "var(--muted)" }}
+                        onMouseEnter={(e) =>
+                          (e.currentTarget.style.background =
+                            "rgba(255,255,255,0.06)")
+                        }
+                        onMouseLeave={(e) =>
+                          (e.currentTarget.style.background = "transparent")
+                        }
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
+
+                    {/* Clip Settings */}
+                    <div
+                      className="text-xs uppercase tracking-wider px-4 pt-3 pb-2"
+                      style={{
+                        color: "var(--muted)",
+                        letterSpacing: "0.08em",
+                      }}
+                    >
+                      Clip Settings
+                    </div>
+                    <div className="px-4 space-y-3 pb-4">
+                      {/* Start trim */}
+                      <div>
+                        <label
+                          className="text-xs mb-1 block"
+                          style={{ color: "var(--fg-2)" }}
+                        >
+                          Start Trim (s)
+                        </label>
+                        <input
+                          type="number"
+                          value={startOffset}
+                          onChange={(e) => setStartOffset(e.target.value)}
+                          className="w-full rounded-sm text-sm transition-all"
+                          style={{
+                            height: 30,
+                            background: "rgba(255,255,255,0.06)",
+                            boxShadow: "var(--elev-ring)",
+                            color: "var(--fg)",
+                            padding: "0 var(--space-3)",
+                            border: "none",
+                          }}
+                          onFocus={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--focus-ring)")
+                          }
+                          onBlur={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--elev-ring)")
+                          }
+                        />
+                      </div>
+                      {/* End trim */}
+                      <div>
+                        <label
+                          className="text-xs mb-1 block"
+                          style={{ color: "var(--fg-2)" }}
+                        >
+                          End Trim (s)
+                        </label>
+                        <input
+                          type="number"
+                          value={endOffset}
+                          onChange={(e) => setEndOffset(e.target.value)}
+                          className="w-full rounded-sm text-sm transition-all"
+                          style={{
+                            height: 30,
+                            background: "rgba(255,255,255,0.06)",
+                            boxShadow: "var(--elev-ring)",
+                            color: "var(--fg)",
+                            padding: "0 var(--space-3)",
+                            border: "none",
+                          }}
+                          onFocus={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--focus-ring)")
+                          }
+                          onBlur={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--elev-ring)")
+                          }
+                        />
+                      </div>
+                      {/* Caption position */}
+                      <div>
+                        <label
+                          className="text-xs mb-1 block"
+                          style={{ color: "var(--fg-2)" }}
+                        >
+                          Caption Position
+                        </label>
+                        <select
+                          value={captionPosition}
+                          onChange={(e) => setCaptionPosition(e.target.value)}
+                          className="w-full rounded-sm text-sm transition-all"
+                          style={{
+                            height: 30,
+                            background: "rgba(255,255,255,0.06)",
+                            boxShadow: "var(--elev-ring)",
+                            color: "var(--fg)",
+                            padding: "0 var(--space-3)",
+                            border: "none",
+                          }}
+                          onFocus={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--focus-ring)")
+                          }
+                          onBlur={(e) =>
+                            (e.currentTarget.style.boxShadow =
+                              "var(--elev-ring)")
+                          }
+                        >
+                          <option value="top">Top</option>
+                          <option value="middle">Middle</option>
+                          <option value="bottom">Bottom</option>
+                        </select>
                       </div>
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        )}
-      </div>
 
-      {/* Delete Task Confirmation Dialog */}
+                    {/* Divider */}
+                    <div style={{ borderTop: "1px solid var(--border-soft)" }} />
+
+                    {/* Subtitles */}
+                    <div
+                      className="text-xs uppercase tracking-wider px-4 pt-3 pb-2"
+                      style={{
+                        color: "var(--muted)",
+                        letterSpacing: "0.08em",
+                      }}
+                    >
+                      Subtitles
+                    </div>
+                    <div className="px-4 pb-4">
+                      <label className="flex items-center justify-between cursor-pointer">
+                        <span className="text-xs" style={{ color: "var(--fg-2)" }}>
+                          Show Subtitles
+                        </span>
+                        <div
+                          className="relative rounded-full transition-all cursor-pointer"
+                          style={{
+                            width: 28,
+                            height: 16,
+                            background: selectedClip?.has_captions
+                              ? "var(--accent)"
+                              : "rgba(255,255,255,0.15)",
+                          }}
+                          onClick={() => {
+                            // Toggle captions for this clip
+                            const updated = { ...selectedClip, has_captions: !selectedClip?.has_captions };
+                            setSelectedClip(updated);
+                          }}
+                        >
+                          <div
+                            className="absolute top-0.5 rounded-full transition-all"
+                            style={{
+                              width: 12,
+                              height: 12,
+                              background: "var(--fg)",
+                              left: selectedClip?.has_captions ? 14 : 2,
+                            }}
+                          />
+                        </div>
+                      </label>
+                    </div>
+
+                    {/* Divider */}
+                    <div style={{ borderTop: "1px solid var(--border-soft)" }} />
+
+                    {/* Export */}
+                    <div className="px-4 pt-3 pb-4">
+                      <button
+                        onClick={() => handleExportClip(selectedClip.id)}
+                        className="w-full rounded-sm text-sm font-medium transition-all"
+                        style={{
+                          height: 36,
+                          background: "var(--accent)",
+                          color: "#fff",
+                        }}
+                        onMouseEnter={(e) =>
+                          (e.currentTarget.style.background =
+                            "var(--accent-hover)")
+                        }
+                        onMouseLeave={(e) =>
+                          (e.currentTarget.style.background = "var(--accent)")
+                        }
+                        onMouseDown={(e) =>
+                          (e.currentTarget.style.background =
+                            "var(--accent-active)")
+                        }
+                        onMouseUp={(e) =>
+                          (e.currentTarget.style.background =
+                            "var(--accent-hover)")
+                        }
+                      >
+                        Export Clip
+                      </button>
+                    </div>
+                  </motion.aside>
+                )}
+              </AnimatePresence>
+            </div>      {/* Delete Task Confirmation Dialog */}
       <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>

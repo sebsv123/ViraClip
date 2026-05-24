@@ -1,8 +1,12 @@
 "use client";
 
 import { useEffect } from "react";
-import { AlertCircle, RefreshCw, ArrowLeft } from "lucide-react";
-import Link from "next/link";
+import { AlertTriangle } from "lucide-react";
+
+/* ─────────────────────────────────────────────
+   ErrorBoundary — Linear App Design System
+   EmptyState pattern, no stack traces visible
+   ───────────────────────────────────────────── */
 
 export function ErrorBoundary({
   error,
@@ -16,49 +20,95 @@ export function ErrorBoundary({
   }, [error]);
 
   return (
-    <div className="min-h-screen bg-[#0a0a0f] text-white flex items-center justify-center p-8">
-      <div className="max-w-md w-full text-center">
-        <div className="w-20 h-20 bg-red-500/10 rounded-2xl flex items-center justify-center mx-auto mb-6">
-          <AlertCircle className="w-10 h-10 text-red-400" />
-        </div>
-        
-        <h2 className="text-2xl font-bold mb-2">Something went wrong</h2>
-        <p className="text-gray-400 mb-6">
-          {error.message || "An unexpected error occurred. Please try again."}
-        </p>
-        
-        <div className="flex flex-col sm:flex-row gap-3 justify-center">
-          <button
-            onClick={reset}
-            className="flex items-center justify-center gap-2 px-6 py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-semibold rounded-xl transition-all"
-          >
-            <RefreshCw className="w-5 h-5" />
-            Try Again
-          </button>
-          
-          <Link href="/dashboard">
-            <button className="flex items-center justify-center gap-2 px-6 py-3 bg-white/5 hover:bg-white/10 border border-white/10 font-semibold rounded-xl transition-all">
-              <ArrowLeft className="w-5 h-5" />
-              Go to Dashboard
-            </button>
-          </Link>
-        </div>
-        
-        {error.digest && (
-          <p className="mt-6 text-xs text-gray-600 font-mono">
-            Error ID: {error.digest}
-          </p>
-        )}
+    <div
+      className="flex flex-col items-center text-center"
+      style={{
+        minHeight: "100dvh",
+        background: "var(--bg)",
+        justifyContent: "center",
+        padding: "var(--space-8)",
+        gap: "var(--space-3)",
+      }}
+    >
+      {/* Icon wrapper */}
+      <div
+        className="grid place-items-center"
+        style={{
+          width: 64,
+          height: 64,
+          borderRadius: "var(--radius-lg)",
+          background: "rgba(220,38,38,0.1)",
+          boxShadow: "var(--elev-ring)",
+        }}
+      >
+        <AlertTriangle size={36} style={{ color: "var(--danger)" }} />
       </div>
+
+      {/* Title */}
+      <p
+        className="font-medium"
+        style={{
+          fontSize: "var(--text-base)",
+          fontWeight: 510,
+          color: "var(--fg)",
+          fontFeatureSettings: '"cv01", "ss03"',
+        }}
+      >
+        Algo sali\u00f3 mal
+      </p>
+
+      {/* Description */}
+      <p
+        className="text-sm"
+        style={{
+          color: "var(--muted)",
+          maxWidth: "36ch",
+          lineHeight: "var(--leading-body)",
+          fontFeatureSettings: '"cv01", "ss03"',
+        }}
+      >
+        Ocurri\u00f3 un error inesperado. Intenta recargar la p\u00e1gina.
+      </p>
+
+      {/* Action */}
+      <button
+        onClick={reset}
+        className="btn btn-ghost"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: "var(--space-2)",
+          padding: "8px 16px",
+          borderRadius: "var(--radius-sm)",
+          fontFamily: "var(--font-display)",
+          fontSize: "var(--text-sm)",
+          fontWeight: 510,
+          fontFeatureSettings: '"cv01", "ss03"',
+          lineHeight: 1,
+          cursor: "pointer",
+          border: "1px solid rgba(36,40,44,1)",
+          background: "rgba(255,255,255,0.02)",
+          color: "#e2e4e7",
+          transition: "background-color var(--motion-fast) var(--ease-standard)",
+        }}
+        onMouseEnter={(e) => {
+          e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+        }}
+        onMouseLeave={(e) => {
+          e.currentTarget.style.background = "rgba(255,255,255,0.02)";
+        }}
+      >
+        Recargar p\u00e1gina
+      </button>
     </div>
   );
 }
 
-// Global error boundary for the root level
+/* ── Global error boundary for root level ── */
 export function GlobalError({ error, reset }: { error: Error; reset: () => void }) {
   return (
-    <html className="dark">
-      <body className="min-h-screen bg-[#0a0a0f] text-white">
+    <html lang="en" data-theme="dark">
+      <body style={{ margin: 0 }}>
         <ErrorBoundary error={error} reset={reset} />
       </body>
     </html>

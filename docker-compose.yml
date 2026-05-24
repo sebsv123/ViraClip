@@ -241,7 +241,7 @@ services:
         - NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT=${NEXT_PUBLIC_FREE_PLAN_TASK_LIMIT:-10}
         - NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT=${NEXT_PUBLIC_PRO_PLAN_TASK_LIMIT:-200}
     container_name: viraclip-frontend
-    command: sh -c "bunx prisma migrate deploy && bunx prisma generate && bun run dev"
+    command: sh -c "bunx prisma db push --accept-data-loss && bunx prisma generate && bunx next dev"
     ports:
       - "3000:3000"
     volumes:

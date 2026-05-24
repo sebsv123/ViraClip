@@ -1,44 +1,26 @@
 "use client";
 
 import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
-import { Separator } from "@/components/ui/separator";
-import { 
-  Tabs, 
-  TabsContent, 
-  TabsList, 
-  TabsTrigger 
-} from "@/components/ui/tabs";
-import { 
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { 
-  User, 
-  Bell, 
-  Shield, 
-  Palette, 
-  Database, 
-  Share2, 
+import {
+  User,
+  Bell,
+  Shield,
+  Palette,
+  Share2,
   CreditCard,
   Globe,
   Moon,
   Sun,
   Smartphone,
-  Mail,
   Key,
-  ExternalLink,
   CheckCircle2,
-  AlertCircle
+  AlertCircle,
+  Monitor,
 } from "lucide-react";
+
+/* ─────────────────────────────────────────────
+   Types
+   ───────────────────────────────────────────── */
 
 interface UserSettings {
   profile: {
@@ -76,41 +58,89 @@ interface UserSettings {
   };
 }
 
+/* ─────────────────────────────────────────────
+   Nav items
+   ───────────────────────────────────────────── */
+
+const navItems = [
+  { id: "profile", label: "Perfil", icon: User },
+  { id: "notifications", label: "Notificaciones", icon: Bell },
+  { id: "preferences", label: "Preferencias", icon: Palette },
+  { id: "integrations", label: "Integraciones", icon: Share2 },
+  { id: "privacy", label: "Privacidad", icon: Shield },
+  { id: "billing", label: "Plan", icon: CreditCard },
+] as const;
+
+type SectionId = (typeof navItems)[number]["id"];
+
+/* ─────────────────────────────────────────────
+   Toggle Switch — Linear style
+   ───────────────────────────────────────────── */
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div
+      className="relative rounded-full transition-all cursor-pointer shrink-0"
+      style={{
+        width: 28,
+        height: 16,
+        background: checked ? "var(--accent)" : "rgba(255,255,255,0.15)",
+      }}
+      onClick={() => onChange(!checked)}
+    >
+      <div
+        className="absolute top-0.5 rounded-full transition-all"
+        style={{
+          width: 12,
+          height: 12,
+          background: "var(--fg)",
+          left: checked ? 14 : 2,
+        }}
+      />
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Component
+   ───────────────────────────────────────────── */
+
 export function SettingsPage() {
+  const [activeSection, setActiveSection] = useState<SectionId>("profile");
   const [settings, setSettings] = useState<UserSettings>({
     profile: {
       name: "John Creator",
       email: "john@example.com",
       avatar: "",
       bio: "Video creator and content strategist",
-      timezone: "UTC-5"
+      timezone: "UTC-5",
     },
     notifications: {
       email: true,
       push: true,
       marketing: false,
       clipReady: true,
-      viralAlerts: true
+      viralAlerts: true,
     },
     preferences: {
       theme: "system",
       language: "en",
       defaultQuality: "1080p",
       autoPublish: false,
-      watermark: true
+      watermark: true,
     },
     integrations: {
       youtube: true,
       tiktok: false,
       instagram: true,
       notion: false,
-      slack: true
+      slack: true,
     },
     privacy: {
       publicProfile: true,
       shareAnalytics: true,
-      allowTagging: true
-    }
+      allowTagging: true,
+    },
   });
 
   const [hasChanges, setHasChanges] = useState(false);
@@ -119,488 +149,740 @@ export function SettingsPage() {
   const updateSetting = <K extends keyof UserSettings>(
     section: K,
     key: keyof UserSettings[K],
-    value: unknown
+    value: unknown,
   ) => {
-    setSettings(prev => ({
+    setSettings((prev) => ({
       ...prev,
       [section]: {
         ...prev[section],
-        [key]: value
-      }
+        [key]: value,
+      },
     }));
     setHasChanges(true);
   };
 
   const saveSettings = async () => {
     setIsSaving(true);
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     setIsSaving(false);
     setHasChanges(false);
   };
 
+  /* ── Shared input style ── */
+  const inputStyle: React.CSSProperties = {
+    background: "rgba(255,255,255,0.02)",
+    color: "var(--fg-2)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    padding: "12px 14px",
+    fontFamily: "var(--font-body)",
+    fontSize: "var(--text-base)",
+    fontFeatureSettings: '"cv01", "ss03"',
+    outline: "none",
+    transition: "border-color var(--motion-fast) var(--ease-standard)",
+    width: "100%",
+  };
+
+  const labelStyle: React.CSSProperties = {
+    fontSize: "var(--text-sm)",
+    fontWeight: 510,
+    color: "var(--fg-2)",
+    fontFeatureSettings: '"cv01", "ss03"',
+  };
+
+  /* ── Card wrapper ── */
+  const cardStyle: React.CSSProperties = {
+    background: "rgba(255,255,255,0.02)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-md)",
+    padding: "var(--space-6)",
+  };
+
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">Settings</h1>
-          <p className="text-muted-foreground">
-            Manage your account preferences and integrations
-          </p>
+    <div
+      className="flex gap-6"
+      style={{ maxWidth: "var(--container-max)", margin: "0 auto", padding: "var(--space-6)" }}
+    >
+      {/* ── Sidebar nav ── */}
+      <nav className="shrink-0 flex flex-col gap-1" style={{ width: 200 }}>
+        {navItems.map((item) => {
+          const Icon = item.icon;
+          const isActive = activeSection === item.id;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveSection(item.id)}
+              className="flex items-center gap-2 rounded-sm transition-all text-sm"
+              style={{
+                height: 32,
+                padding: "0 var(--space-3)",
+                background: isActive ? "rgba(94,106,210,0.15)" : "transparent",
+                color: isActive ? "var(--fg)" : "var(--fg-2)",
+                fontFeatureSettings: '"cv01", "ss03"',
+                transitionDuration: "var(--motion-fast)",
+                transitionTimingFunction: "var(--ease-standard)",
+              }}
+              onMouseEnter={(e) => {
+                if (!isActive) e.currentTarget.style.background = "rgba(255,255,255,0.06)";
+              }}
+              onMouseLeave={(e) => {
+                if (!isActive) e.currentTarget.style.background = "transparent";
+              }}
+            >
+              <Icon size={16} style={{ color: isActive ? "var(--accent)" : undefined }} />
+              <span>{item.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* ── Content ── */}
+      <div className="flex-1 min-w-0 space-y-4">
+        {/* Header */}
+        <div className="flex items-center justify-between mb-2">
+          <div>
+            <h1 className="text-xl font-semibold" style={{ color: "var(--fg)" }}>
+              Settings
+            </h1>
+            <p className="lead" style={{ marginTop: 2 }}>
+              Manage your account preferences and integrations
+            </p>
+          </div>
+          {hasChanges && (
+            <button
+              onClick={saveSettings}
+              disabled={isSaving}
+              className="btn btn-primary"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "var(--space-2)",
+                padding: "8px 16px",
+                borderRadius: "var(--radius-sm)",
+                fontFamily: "var(--font-display)",
+                fontSize: "var(--text-sm)",
+                fontWeight: 510,
+                fontFeatureSettings: '"cv01", "ss03"',
+                lineHeight: 1,
+                cursor: isSaving ? "not-allowed" : "pointer",
+                border: "1px solid transparent",
+                background: "var(--accent)",
+                color: "#ffffff",
+                opacity: isSaving ? 0.45 : 1,
+                transition: "background-color var(--motion-fast) var(--ease-standard)",
+              }}
+              onMouseEnter={(e) => {
+                if (!isSaving) e.currentTarget.style.background = "var(--accent-hover)";
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = "var(--accent)";
+              }}
+            >
+              {isSaving ? "Saving..." : "Save Changes"}
+            </button>
+          )}
         </div>
-        {hasChanges && (
-          <Button onClick={saveSettings} disabled={isSaving}>
-            {isSaving ? "Saving..." : "Save Changes"}
-          </Button>
-        )}
-      </div>
 
-      <Tabs defaultValue="profile" className="space-y-6">
-        <TabsList className="grid w-full grid-cols-2 lg:grid-cols-6 lg:w-auto">
-          <TabsTrigger value="profile">Profile</TabsTrigger>
-          <TabsTrigger value="notifications">Notifications</TabsTrigger>
-          <TabsTrigger value="preferences">Preferences</TabsTrigger>
-          <TabsTrigger value="integrations">Integrations</TabsTrigger>
-          <TabsTrigger value="privacy">Privacy</TabsTrigger>
-          <TabsTrigger value="billing">Billing</TabsTrigger>
-        </TabsList>
+        {/* ── Profile ── */}
+        {activeSection === "profile" && (
+          <>
+            <div style={cardStyle}>
+              <h3 style={{ marginBottom: 4 }}>Profile Information</h3>
+              <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+                Update your personal details and public profile.
+              </p>
 
-        {/* Profile Tab */}
-        <TabsContent value="profile" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <User className="h-5 w-5" />
-                Profile Information
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="flex items-center gap-6">
-                <div className="w-24 h-24 bg-muted rounded-full flex items-center justify-center">
-                  <User className="h-12 w-12 text-muted-foreground" />
+              <div className="flex items-center gap-4 mb-6">
+                <div
+                  className="w-16 h-16 rounded-full flex items-center justify-center"
+                  style={{ background: "rgba(255,255,255,0.06)" }}
+                >
+                  <User size={28} style={{ color: "var(--meta)" }} />
                 </div>
-                <div className="space-y-2">
-                  <Button variant="outline" size="sm">
+                <div>
+                  <button
+                    className="btn btn-ghost"
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: "var(--space-2)",
+                      padding: "6px 12px",
+                      borderRadius: "var(--radius-sm)",
+                      fontFamily: "var(--font-display)",
+                      fontSize: "var(--text-xs)",
+                      fontWeight: 510,
+                      fontFeatureSettings: '"cv01", "ss03"',
+                      lineHeight: 1,
+                      cursor: "pointer",
+                      border: "1px solid rgba(36,40,44,1)",
+                      background: "rgba(255,255,255,0.02)",
+                      color: "#e2e4e7",
+                      transition: "background-color var(--motion-fast) var(--ease-standard)",
+                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                  >
                     Change Avatar
-                  </Button>
-                  <p className="text-xs text-muted-foreground">
+                  </button>
+                  <p className="text-xs" style={{ color: "var(--meta)", marginTop: 4 }}>
                     JPG, PNG or GIF. Max 2MB.
                   </p>
                 </div>
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="space-y-2">
-                  <Label htmlFor="name">Display Name</Label>
-                  <Input
-                    id="name"
+                <div className="field">
+                  <label style={labelStyle}>Display Name</label>
+                  <input
+                    style={inputStyle}
                     value={settings.profile.name}
                     onChange={(e) => updateSetting("profile", "name", e.target.value)}
+                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                    onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="email">Email</Label>
-                  <Input
-                    id="email"
+                <div className="field">
+                  <label style={labelStyle}>Email</label>
+                  <input
+                    style={inputStyle}
                     type="email"
                     value={settings.profile.email}
                     onChange={(e) => updateSetting("profile", "email", e.target.value)}
+                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                    onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                   />
                 </div>
-                <div className="space-y-2 md:col-span-2">
-                  <Label htmlFor="bio">Bio</Label>
-                  <Input
-                    id="bio"
+                <div className="field md:col-span-2">
+                  <label style={labelStyle}>Bio</label>
+                  <input
+                    style={inputStyle}
                     value={settings.profile.bio}
                     onChange={(e) => updateSetting("profile", "bio", e.target.value)}
+                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                    onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                   />
                 </div>
-                <div className="space-y-2">
-                  <Label htmlFor="timezone">Timezone</Label>
-                  <Select
+                <div className="field">
+                  <label style={labelStyle}>Timezone</label>
+                  <select
+                    style={inputStyle}
                     value={settings.profile.timezone}
-                    onValueChange={(value) => updateSetting("profile", "timezone", value)}
+                    onChange={(e) => updateSetting("profile", "timezone", e.target.value)}
+                    onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                    onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                   >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="UTC-8">Pacific Time (UTC-8)</SelectItem>
-                      <SelectItem value="UTC-5">Eastern Time (UTC-5)</SelectItem>
-                      <SelectItem value="UTC+0">GMT (UTC+0)</SelectItem>
-                      <SelectItem value="UTC+1">Central Europe (UTC+1)</SelectItem>
-                    </SelectContent>
-                  </Select>
+                    <option value="UTC-8">Pacific Time (UTC-8)</option>
+                    <option value="UTC-5">Eastern Time (UTC-5)</option>
+                    <option value="UTC+0">GMT (UTC+0)</option>
+                    <option value="UTC+1">Central Europe (UTC+1)</option>
+                  </select>
                 </div>
               </div>
-            </CardContent>
-          </Card>
+            </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-destructive">
-                <Shield className="h-5 w-5" />
-                Danger Zone
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+            {/* Danger Zone */}
+            <div
+              style={{
+                ...cardStyle,
+                border: "1px solid rgba(220,38,38,0.3)",
+                background: "rgba(220,38,38,0.05)",
+              }}
+            >
+              <p
+                className="text-sm font-medium mb-1"
+                style={{
+                  fontWeight: 510,
+                  color: "var(--danger)",
+                  fontFeatureSettings: '"cv01", "ss03"',
+                }}
+              >
+                Zona de peligro
+              </p>
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-medium">Delete Account</p>
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-sm" style={{ color: "var(--fg-2)" }}>
+                    Delete Account
+                  </p>
+                  <p className="text-xs" style={{ color: "var(--meta)" }}>
                     Permanently delete your account and all data
                   </p>
                 </div>
-                <Button variant="destructive">Delete Account</Button>
+                <button
+                  className="btn btn-danger"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "6px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: "var(--text-xs)",
+                    fontWeight: 510,
+                    fontFeatureSettings: '"cv01", "ss03"',
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    border: "1px solid rgba(220,38,38,0.3)",
+                    background: "rgba(220,38,38,0.15)",
+                    color: "var(--danger)",
+                    transition: "background-color var(--motion-fast) var(--ease-standard)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(220,38,38,0.25)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(220,38,38,0.15)"; }}
+                >
+                  Delete Account
+                </button>
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
+            </div>
+          </>
+        )}
 
-        {/* Notifications Tab */}
-        <TabsContent value="notifications" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Bell className="h-5 w-5" />
-                Notification Preferences
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
+        {/* ── Notifications ── */}
+        {activeSection === "notifications" && (
+          <div style={cardStyle}>
+            <h3 style={{ marginBottom: 4 }}>Notification Preferences</h3>
+            <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+              Choose what updates you receive.
+            </p>
+            <div className="space-y-4">
               {[
-                { key: "email", label: "Email Notifications", description: "Receive updates via email" },
-                { key: "push", label: "Push Notifications", description: "Browser push notifications" },
-                { key: "marketing", label: "Marketing Emails", description: "Product updates and tips" },
-                { key: "clipReady", label: "Clip Ready Alerts", description: "When AI finishes generating clips" },
-                { key: "viralAlerts", label: "Viral Alerts", description: "When your clips are trending" }
+                { key: "email", label: "Email Notifications", desc: "Receive updates via email" },
+                { key: "push", label: "Push Notifications", desc: "Browser push notifications" },
+                { key: "marketing", label: "Marketing Emails", desc: "Product updates and tips" },
+                { key: "clipReady", label: "Clip Ready Alerts", desc: "When AI finishes generating clips" },
+                { key: "viralAlerts", label: "Viral Alerts", desc: "When your clips are trending" },
               ].map((item) => (
                 <div key={item.key} className="flex items-center justify-between">
                   <div>
-                    <p className="font-medium">{item.label}</p>
-                    <p className="text-sm text-muted-foreground">{item.description}</p>
+                    <p className="text-sm" style={{ color: "var(--fg-2)" }}>{item.label}</p>
+                    <p className="text-xs" style={{ color: "var(--meta)" }}>{item.desc}</p>
                   </div>
-                  <Switch
+                  <Toggle
                     checked={settings.notifications[item.key as keyof typeof settings.notifications]}
-                    onCheckedChange={(checked) => 
-                      updateSetting("notifications", item.key as any, checked)
-                    }
+                    onChange={(v) => updateSetting("notifications", item.key as any, v)}
                   />
                 </div>
               ))}
-            </CardContent>
-          </Card>
-        </TabsContent>
+            </div>
+          </div>
+        )}
 
-        {/* Preferences Tab */}
-        <TabsContent value="preferences" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Palette className="h-5 w-5" />
-                Appearance & Behavior
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="space-y-2">
-                <Label>Theme</Label>
+        {/* ── Preferences ── */}
+        {activeSection === "preferences" && (
+          <div style={cardStyle}>
+            <h3 style={{ marginBottom: 4 }}>Appearance & Behavior</h3>
+            <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+              Customize your experience.
+            </p>
+
+            <div className="space-y-6">
+              <div className="field">
+                <label style={labelStyle}>Theme</label>
                 <div className="flex gap-2">
-                  <Button
-                    variant={settings.preferences.theme === "light" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => updateSetting("preferences", "theme", "light")}
-                  >
-                    <Sun className="h-4 w-4 mr-2" />
-                    Light
-                  </Button>
-                  <Button
-                    variant={settings.preferences.theme === "dark" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => updateSetting("preferences", "theme", "dark")}
-                  >
-                    <Moon className="h-4 w-4 mr-2" />
-                    Dark
-                  </Button>
-                  <Button
-                    variant={settings.preferences.theme === "system" ? "default" : "outline"}
-                    size="sm"
-                    onClick={() => updateSetting("preferences", "theme", "system")}
-                  >
-                    <Monitor className="h-4 w-4 mr-2" />
-                    System
-                  </Button>
+                  {[
+                    { value: "light", label: "Light", icon: Sun },
+                    { value: "dark", label: "Dark", icon: Moon },
+                    { value: "system", label: "System", icon: Monitor },
+                  ].map(({ value, label, icon: Icon }) => (
+                    <button
+                      key={value}
+                      onClick={() => updateSetting("preferences", "theme", value)}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-medium transition-all"
+                      style={
+                        settings.preferences.theme === value
+                          ? {
+                              background: "rgba(94,106,210,0.12)",
+                              color: "var(--accent)",
+                              border: "1px solid rgba(94,106,210,0.2)",
+                            }
+                          : {
+                              background: "rgba(255,255,255,0.02)",
+                              color: "var(--muted)",
+                              border: "1px solid var(--border)",
+                            }
+                      }
+                    >
+                      <Icon size={14} />
+                      {label}
+                    </button>
+                  ))}
                 </div>
               </div>
 
-              <Separator />
-
-              <div className="space-y-2">
-                <Label htmlFor="language">Language</Label>
-                <Select
+              <div className="field">
+                <label style={labelStyle}>Language</label>
+                <select
+                  style={inputStyle}
                   value={settings.preferences.language}
-                  onValueChange={(value) => updateSetting("preferences", "language", value)}
+                  onChange={(e) => updateSetting("preferences", "language", e.target.value)}
+                  onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                  onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                 >
-                  <SelectTrigger className="w-[200px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="en">English</SelectItem>
-                    <SelectItem value="es">Español</SelectItem>
-                    <SelectItem value="fr">Français</SelectItem>
-                    <SelectItem value="de">Deutsch</SelectItem>
-                    <SelectItem value="pt">Português</SelectItem>
-                  </SelectContent>
-                </Select>
+                  <option value="en">English</option>
+                  <option value="es">Español</option>
+                  <option value="fr">Français</option>
+                  <option value="de">Deutsch</option>
+                  <option value="pt">Português</option>
+                </select>
               </div>
 
-              <div className="space-y-2">
-                <Label htmlFor="quality">Default Export Quality</Label>
-                <Select
+              <div className="field">
+                <label style={labelStyle}>Default Export Quality</label>
+                <select
+                  style={inputStyle}
                   value={settings.preferences.defaultQuality}
-                  onValueChange={(value) => updateSetting("preferences", "defaultQuality", value)}
+                  onChange={(e) => updateSetting("preferences", "defaultQuality", e.target.value)}
+                  onFocus={(e) => (e.currentTarget.style.borderColor = "var(--accent)")}
+                  onBlur={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
                 >
-                  <SelectTrigger className="w-[200px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="720p">720p HD</SelectItem>
-                    <SelectItem value="1080p">1080p Full HD</SelectItem>
-                    <SelectItem value="4K">4K Ultra HD</SelectItem>
-                  </SelectContent>
-                </Select>
+                  <option value="720p">720p HD</option>
+                  <option value="1080p">1080p Full HD</option>
+                  <option value="4K">4K Ultra HD</option>
+                </select>
               </div>
 
-              <Separator />
+              <div style={{ borderTop: "1px solid var(--border-soft)" }} />
 
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-medium">Auto-Publish</p>
-                  <p className="text-sm text-muted-foreground">
-                    Automatically publish clips when ready
-                  </p>
+                  <p className="text-sm" style={{ color: "var(--fg-2)" }}>Auto-Publish</p>
+                  <p className="text-xs" style={{ color: "var(--meta)" }}>Automatically publish clips when ready</p>
                 </div>
-                <Switch
+                <Toggle
                   checked={settings.preferences.autoPublish}
-                  onCheckedChange={(checked) => 
-                    updateSetting("preferences", "autoPublish", checked)
-                  }
+                  onChange={(v) => updateSetting("preferences", "autoPublish", v)}
                 />
               </div>
 
               <div className="flex items-center justify-between">
                 <div>
-                  <p className="font-medium">ViraClip Watermark</p>
-                  <p className="text-sm text-muted-foreground">
-                    Add subtle branding to exported clips
-                  </p>
+                  <p className="text-sm" style={{ color: "var(--fg-2)" }}>ViraClip Watermark</p>
+                  <p className="text-xs" style={{ color: "var(--meta)" }}>Add subtle branding to exported clips</p>
                 </div>
-                <Switch
+                <Toggle
                   checked={settings.preferences.watermark}
-                  onCheckedChange={(checked) => 
-                    updateSetting("preferences", "watermark", checked)
-                  }
+                  onChange={(v) => updateSetting("preferences", "watermark", v)}
                 />
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
+            </div>
+          </div>
+        )}
 
-        {/* Integrations Tab */}
-        <TabsContent value="integrations" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Share2 className="h-5 w-5" />
-                Connected Platforms
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
+        {/* ── Integrations ── */}
+        {activeSection === "integrations" && (
+          <>
+            <div style={cardStyle}>
+              <h3 style={{ marginBottom: 4 }}>Connected Platforms</h3>
+              <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+                Link your social media accounts.
+              </p>
+              <div className="space-y-3">
+                {[
+                  { key: "youtube", name: "YouTube", icon: "YT" },
+                  { key: "tiktok", name: "TikTok", icon: "TT" },
+                  { key: "instagram", name: "Instagram", icon: "IG" },
+                  { key: "notion", name: "Notion", icon: "N" },
+                  { key: "slack", name: "Slack", icon: "SL" },
+                ].map((platform) => {
+                  const connected = settings.integrations[platform.key as keyof typeof settings.integrations];
+                  return (
+                    <div
+                      key={platform.key}
+                      className="flex items-center justify-between px-4 py-3 rounded-sm"
+                      style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-soft)" }}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div
+                          className="w-8 h-8 rounded-md flex items-center justify-center text-xs font-bold"
+                          style={{ background: "rgba(255,255,255,0.06)", color: "var(--fg-2)" }}
+                        >
+                          {platform.icon}
+                        </div>
+                        <div>
+                          <p className="text-sm" style={{ color: "var(--fg-2)" }}>{platform.name}</p>
+                          <p className="text-xs" style={{ color: "var(--meta)" }}>
+                            {connected ? (
+                              <span className="flex items-center gap-1" style={{ color: "var(--success)" }}>
+                                <CheckCircle2 size={10} />
+                                Connected
+                              </span>
+                            ) : (
+                              "Not connected"
+                            )}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => updateSetting("integrations", platform.key as any, !connected)}
+                        className="btn btn-ghost"
+                        style={{
+                          display: "inline-flex",
+                          alignItems: "center",
+                          gap: "var(--space-2)",
+                          padding: "6px 12px",
+                          borderRadius: "var(--radius-sm)",
+                          fontFamily: "var(--font-display)",
+                          fontSize: "var(--text-xs)",
+                          fontWeight: 510,
+                          fontFeatureSettings: '"cv01", "ss03"',
+                          lineHeight: 1,
+                          cursor: "pointer",
+                          border: "1px solid rgba(36,40,44,1)",
+                          background: "rgba(255,255,255,0.02)",
+                          color: "#e2e4e7",
+                          transition: "background-color var(--motion-fast) var(--ease-standard)",
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                      >
+                        {connected ? "Disconnect" : "Connect"}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={cardStyle}>
+              <h3 style={{ marginBottom: 4 }}>API Keys</h3>
+              <p className="lead" style={{ marginBottom: "var(--space-4)" }}>
+                Generate API keys for external integrations.
+              </p>
+              <div
+                className="flex items-center justify-between px-4 py-3 rounded-sm"
+                style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-soft)" }}
+              >
+                <div>
+                  <p className="text-sm" style={{ color: "var(--fg-2)" }}>API Access</p>
+                  <p className="text-xs" style={{ color: "var(--meta)" }}>Generate API keys for external integrations</p>
+                </div>
+                <button
+                  className="btn btn-ghost"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "6px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: "var(--text-xs)",
+                    fontWeight: 510,
+                    fontFeatureSettings: '"cv01", "ss03"',
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    border: "1px solid rgba(36,40,44,1)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "#e2e4e7",
+                    transition: "background-color var(--motion-fast) var(--ease-standard)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                >
+                  <Key size={12} />
+                  Manage Keys
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ── Privacy ── */}
+        {activeSection === "privacy" && (
+          <div style={cardStyle}>
+            <h3 style={{ marginBottom: 4 }}>Privacy Settings</h3>
+            <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+              Control your privacy preferences.
+            </p>
+            <div className="space-y-4">
               {[
-                { key: "youtube", name: "YouTube", icon: "YT", color: "bg-red-600", connected: settings.integrations.youtube },
-                { key: "tiktok", name: "TikTok", icon: "TT", color: "bg-black", connected: settings.integrations.tiktok },
-                { key: "instagram", name: "Instagram", icon: "IG", color: "bg-gradient-to-br from-purple-600 to-pink-500", connected: settings.integrations.instagram },
-                { key: "notion", name: "Notion", icon: "N", color: "bg-gray-800", connected: settings.integrations.notion },
-                { key: "slack", name: "Slack", icon: "SL", color: "bg-purple-700", connected: settings.integrations.slack }
-              ].map((platform) => (
-                <div key={platform.key} className="flex items-center justify-between p-4 border rounded-lg">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-10 h-10 ${platform.color} rounded-lg flex items-center justify-center text-white font-bold text-sm`}>
-                      {platform.icon}
-                    </div>
-                    <div>
-                      <p className="font-medium">{platform.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {platform.connected ? (
-                          <span className="flex items-center gap-1 text-green-600">
-                            <CheckCircle2 className="h-3 w-3" />
-                            Connected
-                          </span>
-                        ) : (
-                          "Not connected"
-                        )}
-                      </p>
-                    </div>
+                { key: "publicProfile", label: "Public Profile", desc: "Allow others to see your profile and clips" },
+                { key: "shareAnalytics", label: "Share Analytics", desc: "Contribute to platform analytics (anonymized)" },
+                { key: "allowTagging", label: "Allow Tagging", desc: "Others can tag you in collaborative projects" },
+              ].map((item) => (
+                <div key={item.key} className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm" style={{ color: "var(--fg-2)" }}>{item.label}</p>
+                    <p className="text-xs" style={{ color: "var(--meta)" }}>{item.desc}</p>
                   </div>
-                  <Button
-                    variant={platform.connected ? "outline" : "default"}
-                    size="sm"
-                    onClick={() => updateSetting("integrations", platform.key as any, !platform.connected)}
-                  >
-                    {platform.connected ? "Disconnect" : "Connect"}
-                  </Button>
+                  <Toggle
+                    checked={settings.privacy[item.key as keyof typeof settings.privacy]}
+                    onChange={(v) => updateSetting("privacy", item.key as any, v)}
+                  />
                 </div>
               ))}
-            </CardContent>
-          </Card>
+            </div>
+          </div>
+        )}
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Key className="h-5 w-5" />
-                API Keys
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="flex items-center justify-between p-4 border rounded-lg">
-                <div>
-                  <p className="font-medium">API Access</p>
-                  <p className="text-sm text-muted-foreground">
-                    Generate API keys for external integrations
-                  </p>
-                </div>
-                <Button variant="outline" size="sm">
-                  <Key className="h-4 w-4 mr-2" />
-                  Manage Keys
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
+        {/* ── Billing / Plan ── */}
+        {activeSection === "billing" && (
+          <>
+            <div style={cardStyle}>
+              <h3 style={{ marginBottom: 4 }}>Subscription</h3>
+              <p className="lead" style={{ marginBottom: "var(--space-6)" }}>
+                Manage your plan and billing.
+              </p>
 
-        {/* Privacy Tab */}
-        <TabsContent value="privacy" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Shield className="h-5 w-5" />
-                Privacy Settings
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium">Public Profile</p>
-                  <p className="text-sm text-muted-foreground">
-                    Allow others to see your profile and clips
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.privacy.publicProfile}
-                  onCheckedChange={(checked) => 
-                    updateSetting("privacy", "publicProfile", checked)
-                  }
-                />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium">Share Analytics</p>
-                  <p className="text-sm text-muted-foreground">
-                    Contribute to platform analytics (anonymized)
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.privacy.shareAnalytics}
-                  onCheckedChange={(checked) => 
-                    updateSetting("privacy", "shareAnalytics", checked)
-                  }
-                />
+              {/* Pricing grid */}
+              <div className="grid grid-cols-3 gap-4 mb-6">
+                {[
+                  { name: "Free", price: "$0", desc: "3 clips/mes", active: false },
+                  { name: "Pro", price: "$29", desc: "Clips ilimitados", active: true },
+                  { name: "Enterprise", price: "$99", desc: "API + equipo", active: false },
+                ].map((plan) => (
+                  <div
+                    key={plan.name}
+                    className="flex flex-col gap-2 p-4 rounded-md"
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: plan.active
+                        ? "1px solid var(--accent)"
+                        : "1px solid var(--border)",
+                      boxShadow: plan.active ? "0 0 0 3px rgba(94,106,210,0.2)" : undefined,
+                    }}
+                  >
+                    <p className="text-sm font-medium" style={{ color: "var(--fg)" }}>{plan.name}</p>
+                    <p className="text-2xl font-semibold" style={{ color: "var(--fg)", fontWeight: 510, fontVariantNumeric: "tabular-nums" }}>
+                      {plan.price}
+                      <span className="text-sm" style={{ color: "var(--meta)" }}>/mes</span>
+                    </p>
+                    <p className="text-xs" style={{ color: "var(--meta)" }}>{plan.desc}</p>
+                    {plan.active && (
+                      <span
+                        className="inline-flex self-start items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                        style={{
+                          background: "rgba(94,106,210,0.15)",
+                          color: "var(--accent)",
+                          border: "1px solid rgba(94,106,210,0.35)",
+                        }}
+                      >
+                        Actual
+                      </span>
+                    )}
+                  </div>
+                ))}
               </div>
 
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="font-medium">Allow Tagging</p>
-                  <p className="text-sm text-muted-foreground">
-                    Others can tag you in collaborative projects
-                  </p>
-                </div>
-                <Switch
-                  checked={settings.privacy.allowTagging}
-                  onCheckedChange={(checked) => 
-                    updateSetting("privacy", "allowTagging", checked)
-                  }
-                />
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        {/* Billing Tab */}
-        <TabsContent value="billing" className="space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <CreditCard className="h-5 w-5" />
-                Subscription
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-6">
-              <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
-                <div>
-                  <p className="font-medium">Pro Plan</p>
-                  <p className="text-sm text-muted-foreground">
-                    $29/month • Renews Jan 15, 2024
-                  </p>
-                </div>
-                <Badge>Active</Badge>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4 text-center">
-                <div className="p-4 bg-muted rounded-lg">
-                  <p className="text-2xl font-bold">47</p>
-                  <p className="text-xs text-muted-foreground">Videos This Month</p>
-                </div>
-                <div className="p-4 bg-muted rounded-lg">
-                  <p className="text-2xl font-bold">∞</p>
-                  <p className="text-xs text-muted-foreground">Remaining</p>
-                </div>
-                <div className="p-4 bg-muted rounded-lg">
-                  <p className="text-2xl font-bold">12</p>
-                  <p className="text-xs text-muted-foreground">Days Left</p>
-                </div>
+              {/* Usage stats */}
+              <div className="grid grid-cols-3 gap-4 text-center mb-6">
+                {[
+                  { value: "47", label: "Videos This Month" },
+                  { value: "\u221e", label: "Remaining" },
+                  { value: "12", label: "Days Left" },
+                ].map((stat) => (
+                  <div
+                    key={stat.label}
+                    className="p-4 rounded-sm"
+                    style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-soft)" }}
+                  >
+                    <p className="text-2xl font-semibold" style={{ color: "var(--fg)", fontVariantNumeric: "tabular-nums" }}>
+                      {stat.value}
+                    </p>
+                    <p className="text-xs" style={{ color: "var(--meta)" }}>{stat.label}</p>
+                  </div>
+                ))}
               </div>
 
               <div className="flex gap-2">
-                <Button variant="outline">Change Plan</Button>
-                <Button variant="outline">Billing History</Button>
+                <button
+                  className="btn btn-ghost"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-sm)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: "var(--text-sm)",
+                    fontWeight: 510,
+                    fontFeatureSettings: '"cv01", "ss03"',
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    border: "1px solid rgba(36,40,44,1)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "#e2e4e7",
+                    transition: "background-color var(--motion-fast) var(--ease-standard)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                >
+                  Change Plan
+                </button>
+                <button
+                  className="btn btn-ghost"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "8px 16px",
+                    borderRadius: "var(--radius-sm)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: "var(--text-sm)",
+                    fontWeight: 510,
+                    fontFeatureSettings: '"cv01", "ss03"',
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    border: "1px solid rgba(36,40,44,1)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "#e2e4e7",
+                    transition: "background-color var(--motion-fast) var(--ease-standard)",
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+                >
+                  Billing History
+                </button>
               </div>
-            </CardContent>
-          </Card>
+            </div>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Payment Method</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="flex items-center justify-between p-4 border rounded-lg">
+            {/* Payment Method */}
+            <div style={cardStyle}>
+              <h3 style={{ marginBottom: 4 }}>Payment Method</h3>
+              <p className="lead" style={{ marginBottom: "var(--space-4)" }}>
+                Manage your payment details.
+              </p>
+              <div
+                className="flex items-center justify-between px-4 py-3 rounded-sm"
+                style={{ background: "rgba(255,255,255,0.02)", border: "1px solid var(--border-soft)" }}
+              >
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-8 bg-blue-600 rounded flex items-center justify-center text-white text-xs font-bold">
+                  <div
+                    className="w-10 h-7 rounded flex items-center justify-center text-xs font-bold"
+                    style={{ background: "rgba(255,255,255,0.06)", color: "var(--fg-2)" }}
+                  >
                     VISA
                   </div>
                   <div>
-                    <p className="font-medium">•••• 4242</p>
-                    <p className="text-sm text-muted-foreground">Expires 12/25</p>
+                    <p className="text-sm" style={{ color: "var(--fg-2)" }}>{"\u2022\u2022\u2022\u2022"} 4242</p>
+                    <p className="text-xs" style={{ color: "var(--meta)" }}>Expires 12/25</p>
                   </div>
                 </div>
-                <Button variant="outline" size="sm">Update</Button>
+                <button
+                  className="btn btn-ghost"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: "var(--space-2)",
+                    padding: "6px 12px",
+                    borderRadius: "var(--radius-sm)",
+                    fontFamily: "var(--font-display)",
+                    fontSize: "var(--text-xs)",
+                    fontWeight: 510,
+                    fontFeatureSettings: '"cv01", "ss03"',
+                    lineHeight: 1,
+                    cursor: "pointer",
+                    border: "1px solid rgba(36,40,44,1)",
+                    background: "rgba(255,255,255,0.02)",
+                    color: "#e2e4e7",
+                    transition: "background-color var
+                  }}
+                >
+                  Update
+                </button>
               </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-      </Tabs>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
-
-// Missing import
-import { Monitor } from "lucide-react";

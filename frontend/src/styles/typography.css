@@ -1,0 +1,74 @@
+/* ============================================================
+   Typography — Linear App Design System (exact from repo)
+   Source: https://github.com/nexu-io/open-design/blob/main/design-systems/linear-app/components.html
+   ============================================================ */
+
+/* ── Headings ── */
+h1, h2, h3 {
+  font-family: var(--font-display);
+  font-weight: 510;
+  margin: 0;
+  color: var(--fg);
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+  line-height: var(--leading-tight);
+}
+
+h1 {
+  font-size: var(--text-4xl);
+  letter-spacing: var(--tracking-display);
+}
+
+h2 {
+  font-size: var(--text-2xl);
+  line-height: 1.13;
+  letter-spacing: -0.022em;
+}
+
+h3 {
+  font-size: var(--text-xl);
+  line-height: 1.33;
+  letter-spacing: -0.012em;
+  font-weight: 590;
+}
+
+/* ── Eyebrow ── */
+.eyebrow {
+  font-size: var(--text-xs);
+  font-weight: 510;
+  color: var(--meta);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Lead ── */
+.lead {
+  font-size: var(--text-lg);
+  line-height: 1.60;
+  color: var(--muted);
+  font-weight: 400;
+  letter-spacing: -0.009em;
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Body helpers ── */
+.body-muted {
+  color: var(--muted);
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+}
+
+.body-sm {
+  font-size: var(--text-sm);
+  color: var(--muted);
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── Stack helpers ── */
+.stack-3 > * + * { margin-block-start: var(--space-3); }
+.stack-4 > * + * { margin-block-start: var(--space-4); }
+.stack-6 > * + * { margin-block-start: var(--space-6); }

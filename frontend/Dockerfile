@@ -43,7 +43,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 
 # Start development server with hot-reload
 # Run prisma generate first to handle volume mount scenarios where node_modules is overwritten
-CMD ["sh", "-c", "bunx prisma generate && bun run dev"]
+CMD ["sh", "-c", "bunx prisma generate && bunx prisma db push --accept-data-loss && bunx next dev"]
 
 # Builder stage (for production)
 FROM base AS builder
@@ -105,4 +105,4 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 # Run pending migrations before starting the app
-CMD ["sh", "-c", "npx prisma migrate deploy && bun server.js"]
+CMD ["sh", "-c", "bunx prisma db push --accept-data-loss && bun server.js"]

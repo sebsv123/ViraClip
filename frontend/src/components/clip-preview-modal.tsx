@@ -1,10 +1,27 @@
 "use client";
 
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
-import { Sparkles, TrendingUp, Target, Zap, Share2, Shuffle, Music, Download, Subtitles } from "lucide-react";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  X,
+  Play,
+  Pause,
+  Volume2,
+  VolumeX,
+  Sparkles,
+  TrendingUp,
+  Target,
+  Zap,
+  Share2,
+  Shuffle,
+  Music,
+  Download,
+  Subtitles,
+} from "lucide-react";
+
+/* ─────────────────────────────────────────────
+   Types
+   ───────────────────────────────────────────── */
 
 interface ClipPreviewModalProps {
   isOpen: boolean;
@@ -22,7 +39,6 @@ interface ClipPreviewModalProps {
     social_title?: string | null;
     social_description?: string | null;
     suggested_hashtags?: string[];
-    // Phase 10: Viral Polish & A/B
     cta_overlay_applied?: boolean;
     emoji_overlays_applied?: boolean;
     variants?: Array<{
@@ -34,368 +50,675 @@ interface ClipPreviewModalProps {
   };
 }
 
+/* ─────────────────────────────────────────────
+   Helpers
+   ───────────────────────────────────────────── */
+
+function formatDuration(seconds: number) {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function getScoreColor(score: number): string {
+  if (score >= 8) return "var(--success)";
+  if (score >= 6) return "var(--warn)";
+  if (score >= 4) return "var(--danger)";
+  return "var(--danger)";
+}
+
+/* ─────────────────────────────────────────────
+   Score bar — Linear style
+   ───────────────────────────────────────────── */
+
+function ScoreBar({ label, score, icon: Icon }: { label: string; score: number; icon: React.ElementType }) {
+  return (
+    <div
+      className="flex items-center justify-between px-3 py-2.5 rounded-sm transition-all"
+      style={{
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid var(--border-soft)",
+      }}
+    >
+      <div className="flex items-center gap-2">
+        <Icon size={14} style={{ color: "var(--meta)" }} />
+        <span className="text-xs font-medium" style={{ color: "var(--fg-2)" }}>
+          {label}
+        </span>
+      </div>
+      <div className="flex items-center gap-2">
+        <div
+          style={{
+            width: 80,
+            height: 4,
+            background: "rgba(255,255,255,0.08)",
+            borderRadius: "var(--radius-pill)",
+            overflow: "hidden",
+          }}
+        >
+          <div
+            style={{
+              width: `${score * 10}%`,
+              height: "100%",
+              background: getScoreColor(score),
+              borderRadius: "var(--radius-pill)",
+              transition: "width var(--motion-base) var(--ease-standard)",
+            }}
+          />
+        </div>
+        <span
+          className="text-xs font-semibold"
+          style={{
+            color: getScoreColor(score),
+            fontVariantNumeric: "tabular-nums",
+            minWidth: 28,
+            textAlign: "right",
+          }}
+        >
+          {score}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   Component
+   ───────────────────────────────────────────── */
+
 export function ClipPreviewModal({ isOpen, onClose, clip }: ClipPreviewModalProps) {
-  const getScoreColor = (score: number) => {
-    if (score >= 8) return "text-green-600";
-    if (score >= 6) return "text-yellow-600";
-    if (score >= 4) return "text-orange-600";
-    return "text-red-600";
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const progressBarRef = useRef<HTMLDivElement>(null);
+
+  /* ── Video controls ── */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    const onTimeUpdate = () => {
+      setProgress(video.currentTime / video.duration);
+    };
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+
+    video.addEventListener("timeupdate", onTimeUpdate);
+    video.addEventListener("play", onPlay);
+    video.addEventListener("pause", onPause);
+
+    return () => {
+      video.removeEventListener("timeupdate", onTimeUpdate);
+      video.removeEventListener("play", onPlay);
+      video.removeEventListener("pause", onPause);
+    };
+  }, [isOpen]);
+
+  const togglePlay = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) video.play();
+    else video.pause();
   };
 
-  const getProgressColor = (score: number) => {
-    if (score >= 8) return "bg-green-500";
-    if (score >= 6) return "bg-yellow-500";
-    if (score >= 4) return "bg-orange-500";
-    return "bg-red-500";
+  const toggleMute = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.muted = !video.muted;
+    setIsMuted(video.muted);
   };
 
-  const formatDuration = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  const handleProgressClick = (e: React.MouseEvent) => {
+    const bar = progressBarRef.current;
+    const video = videoRef.current;
+    if (!bar || !video) return;
+    const rect = bar.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    video.currentTime = x * video.duration;
+  };
+
+  /* ── Hook type description ── */
+  const hookDescriptions: Record<string, string> = {
+    question: "Abre con una pregunta convincente que crea curiosidad.",
+    statement: "Afirmación audaz que capta la atención de inmediato.",
+    statistic: "Hook basado en datos que genera credibilidad.",
+    story: "Hook narrativo que construye conexión emocional.",
+    contrast: "Comparación antes/después que muestra transformación.",
   };
 
   return (
-    <Dialog open={isOpen} onOpenChange={onClose}>
-      <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Sparkles className="w-5 h-5 text-purple-600" />
-            Clip Preview & Analytics
-          </DialogTitle>
-        </DialogHeader>
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          {/* Overlay */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.2 }}
+            className="fixed inset-0 z-[1000]"
+            style={{
+              background: "rgba(0,0,0,0.7)",
+              backdropFilter: "blur(4px)",
+            }}
+            onClick={onClose}
+          />
 
-        <div className="space-y-6">
-          {/* Video Preview */}
-          <div className="relative bg-black rounded-lg overflow-hidden aspect-[9/16] max-h-[500px] mx-auto">
-            <video
-              src={clip.video_url}
-              controls
-              autoPlay
-              loop
-              className="w-full h-full object-contain"
-            />
-            <div className="absolute bottom-2 right-2 bg-black/70 text-white text-xs px-2 py-1 rounded">
-              {formatDuration(clip.duration)}
+          {/* Container */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            transition={{ duration: 0.2, ease: [0.2, 0, 0, 1] }}
+            className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[1000] flex flex-col"
+            style={{
+              width: 420,
+              maxHeight: "90dvh",
+              background: "var(--surface)",
+              boxShadow: "var(--elev-raised)",
+              border: "var(--elev-ring)",
+              borderRadius: "var(--radius-lg)",
+              overflow: "hidden",
+            }}
+          >
+            {/* ── Header ── */}
+            <div
+              className="flex items-center justify-between shrink-0"
+              style={{
+                height: 48,
+                padding: "0 var(--space-4)",
+                borderBottom: "1px solid var(--border)",
+              }}
+            >
+              <span
+                className="text-sm font-medium"
+                style={{
+                  color: "var(--fg)",
+                  fontWeight: 510,
+                  fontFeatureSettings: '"cv01", "ss03"',
+                }}
+              >
+                Clip Preview
+              </span>
+              <button
+                onClick={onClose}
+                className="p-1 rounded-sm transition-all"
+                style={{ color: "var(--muted)" }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--fg)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--muted)")}
+              >
+                <X size={16} />
+              </button>
             </div>
-          </div>
 
-          {/* Virality Score Overview */}
-          <div className="bg-gradient-to-br from-purple-50 to-blue-50 rounded-lg p-6">
-            <div className="flex items-center justify-between mb-4">
-              <div>
-                <h3 className="text-lg font-semibold text-gray-900">Virality Score</h3>
-                <p className="text-sm text-gray-600">Predicted viral potential</p>
+            {/* ── Scrollable content ── */}
+            <div className="flex-1 overflow-y-auto">
+              {/* Video zone */}
+              <div
+                style={{
+                  aspectRatio: "9/16",
+                  background: "#000",
+                  width: "100%",
+                  maxHeight: "60dvh",
+                  position: "relative",
+                }}
+              >
+                <video
+                  ref={videoRef}
+                  src={clip.video_url}
+                  autoPlay
+                  loop
+                  className="w-full h-full"
+                  style={{ objectFit: "contain" }}
+                />
+
+                {/* Custom video controls */}
+                <div
+                  className="absolute bottom-0 left-0 right-0 flex items-center gap-2 px-3 py-2"
+                  style={{
+                    background: "linear-gradient(transparent, rgba(0,0,0,0.7))",
+                  }}
+                >
+                  {/* Play/Pause */}
+                  <button
+                    onClick={togglePlay}
+                    className="p-0.5 rounded-sm transition-all"
+                    style={{ color: "var(--fg-2)" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = "var(--fg)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = "var(--fg-2)")}
+                  >
+                    {isPlaying ? <Pause size={18} /> : <Play size={18} />}
+                  </button>
+
+                  {/* Progress bar */}
+                  <div
+                    ref={progressBarRef}
+                    onClick={handleProgressClick}
+                    className="flex-1 cursor-pointer"
+                    style={{
+                      height: 3,
+                      background: "rgba(255,255,255,0.15)",
+                      borderRadius: "var(--radius-pill)",
+                      position: "relative",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${progress * 100}%`,
+                        height: "100%",
+                        background: "var(--fg)",
+                        borderRadius: "var(--radius-pill)",
+                        transition: "width 0.1s linear",
+                      }}
+                    />
+                  </div>
+
+                  {/* Time */}
+                  <span
+                    className="text-xs"
+                    style={{
+                      color: "var(--fg-2)",
+                      fontVariantNumeric: "tabular-nums",
+                      minWidth: 32,
+                    }}
+                  >
+                    {formatDuration(clip.duration)}
+                  </span>
+
+                  {/* Volume */}
+                  <button
+                    onClick={toggleMute}
+                    className="p-0.5 rounded-sm transition-all"
+                    style={{ color: "var(--fg-2)" }}
+                    onMouseEnter={(e) => (e.currentTarget.style.color = "var(--fg)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.color = "var(--fg-2)")}
+                  >
+                    {isMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                  </button>
+                </div>
               </div>
-              <div className={`text-4xl font-bold ${getScoreColor(clip.virality_score)}`}>
-                {clip.virality_score}
-                <span className="text-xl text-gray-400">/10</span>
-              </div>
-            </div>
-            
-            <Progress 
-              value={clip.virality_score * 10} 
-              className="h-3"
-              indicatorClassName={getProgressColor(clip.virality_score)}
-            />
 
-            <div className="mt-4 flex items-center gap-2 text-sm">
-              {clip.virality_score >= 8 && (
-                <Badge className="bg-green-100 text-green-800">
-                  🔥 High Viral Potential
-                </Badge>
-              )}
-              {clip.virality_score >= 6 && clip.virality_score < 8 && (
-                <Badge className="bg-yellow-100 text-yellow-800">
-                  ⚡ Good Potential
-                </Badge>
-              )}
-              {clip.virality_score < 6 && (
-                <Badge className="bg-orange-100 text-orange-800">
-                  📈 Needs Optimization
-                </Badge>
-              )}
-            </div>
-          </div>
-
-          {/* Detailed Metrics */}
-          <div className="space-y-3">
-            <h4 className="font-semibold text-gray-900">Detailed Metrics</h4>
-
-            {/* Hook Score */}
-            {clip.hook_score !== undefined && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex items-center justify-between p-3 bg-white border rounded-lg hover:bg-gray-50 cursor-help transition-colors">
-                      <div className="flex items-center gap-2">
-                        <Target className="w-4 h-4 text-purple-600" />
-                        <span className="text-sm font-medium">Hook Score</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Progress 
-                          value={clip.hook_score * 10} 
-                          className="w-32 h-2"
-                          indicatorClassName={getProgressColor(clip.hook_score)}
-                        />
-                        <span className={`text-sm font-bold ${getScoreColor(clip.hook_score)}`}>
-                          {clip.hook_score}/10
-                        </span>
-                      </div>
+              {/* ── Content sections ── */}
+              <div className="p-4 space-y-4">
+                {/* Virality Score */}
+                <div
+                  className="p-4 rounded-md"
+                  style={{
+                    background: "rgba(255,255,255,0.02)",
+                    border: "1px solid var(--border-soft)",
+                  }}
+                >
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <p
+                        className="text-sm font-medium"
+                        style={{
+                          color: "var(--fg)",
+                          fontWeight: 510,
+                          fontFeatureSettings: '"cv01", "ss03"',
+                        }}
+                      >
+                        Virality Score
+                      </p>
+                      <p className="text-xs" style={{ color: "var(--meta)" }}>
+                        Predicted viral potential
+                      </p>
                     </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    <p className="font-semibold mb-1">Hook Quality</p>
-                    <p className="text-xs">
-                      Measures how well the first 3 seconds capture attention. 
-                      High hook scores correlate with lower scroll-away rates.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+                    <span
+                      className="text-2xl font-semibold"
+                      style={{
+                        color: getScoreColor(clip.virality_score),
+                        fontVariantNumeric: "tabular-nums",
+                      }}
+                    >
+                      {clip.virality_score}
+                      <span className="text-sm" style={{ color: "var(--meta)" }}>
+                        /10
+                      </span>
+                    </span>
+                  </div>
 
-            {/* Engagement Score */}
-            {clip.engagement_score !== undefined && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex items-center justify-between p-3 bg-white border rounded-lg hover:bg-gray-50 cursor-help transition-colors">
-                      <div className="flex items-center gap-2">
-                        <Zap className="w-4 h-4 text-yellow-600" />
-                        <span className="text-sm font-medium">Engagement Score</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Progress 
-                          value={clip.engagement_score * 10} 
-                          className="w-32 h-2"
-                          indicatorClassName={getProgressColor(clip.engagement_score)}
-                        />
-                        <span className={`text-sm font-bold ${getScoreColor(clip.engagement_score)}`}>
-                          {clip.engagement_score}/10
-                        </span>
-                      </div>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    <p className="font-semibold mb-1">Engagement Potential</p>
-                    <p className="text-xs">
-                      Predicts likelihood of comments, likes, and saves. 
-                      Content that provokes emotion or curiosity scores higher.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+                  <div
+                    style={{
+                      height: 6,
+                      background: "rgba(255,255,255,0.08)",
+                      borderRadius: "var(--radius-pill)",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${clip.virality_score * 10}%`,
+                        height: "100%",
+                        background: getScoreColor(clip.virality_score),
+                        borderRadius: "var(--radius-pill)",
+                        transition: "width var(--motion-base) var(--ease-standard)",
+                      }}
+                    />
+                  </div>
 
-            {/* Value Score */}
-            {clip.value_score !== undefined && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex items-center justify-between p-3 bg-white border rounded-lg hover:bg-gray-50 cursor-help transition-colors">
-                      <div className="flex items-center gap-2">
-                        <TrendingUp className="w-4 h-4 text-blue-600" />
-                        <span className="text-sm font-medium">Value Score</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Progress 
-                          value={clip.value_score * 10} 
-                          className="w-32 h-2"
-                          indicatorClassName={getProgressColor(clip.value_score)}
-                        />
-                        <span className={`text-sm font-bold ${getScoreColor(clip.value_score)}`}>
-                          {clip.value_score}/10
-                        </span>
-                      </div>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    <p className="font-semibold mb-1">Content Value</p>
-                    <p className="text-xs">
-                      Measures educational or entertainment value. 
-                      High-value content gets saved and shared more often.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
+                  <div className="mt-3">
+                    <span
+                      className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
+                      style={{
+                        background: clip.virality_score >= 8
+                          ? "rgba(39,166,68,0.12)"
+                          : clip.virality_score >= 6
+                          ? "rgba(234,179,8,0.12)"
+                          : "rgba(220,38,38,0.12)",
+                        color: clip.virality_score >= 8
+                          ? "var(--success)"
+                          : clip.virality_score >= 6
+                          ? "var(--warn)"
+                          : "var(--danger)",
+                        border: clip.virality_score >= 8
+                          ? "1px solid rgba(39,166,68,0.2)"
+                          : clip.virality_score >= 6
+                          ? "1px solid rgba(234,179,8,0.2)"
+                          : "1px solid rgba(220,38,38,0.2)",
+                      }}
+                    >
+                      {clip.virality_score >= 8 && "🔥 High Viral Potential"}
+                      {clip.virality_score >= 6 && clip.virality_score < 8 && "⚡ Good Potential"}
+                      {clip.virality_score < 6 && "📈 Needs Optimization"}
+                    </span>
+                  </div>
+                </div>
 
-            {/* Shareability Score */}
-            {clip.shareability_score !== undefined && (
-              <TooltipProvider>
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="flex items-center justify-between p-3 bg-white border rounded-lg hover:bg-gray-50 cursor-help transition-colors">
-                      <div className="flex items-center gap-2">
-                        <Share2 className="w-4 h-4 text-green-600" />
-                        <span className="text-sm font-medium">Shareability Score</span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <Progress 
-                          value={clip.shareability_score * 10} 
-                          className="w-32 h-2"
-                          indicatorClassName={getProgressColor(clip.shareability_score)}
-                        />
-                        <span className={`text-sm font-bold ${getScoreColor(clip.shareability_score)}`}>
-                          {clip.shareability_score}/10
-                        </span>
-                      </div>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    <p className="font-semibold mb-1">Share Potential</p>
-                    <p className="text-xs">
-                      Likelihood of viewers sharing to friends/groups. 
-                      Surprising, funny, or relatable content scores higher.
-                    </p>
-                  </TooltipContent>
-                </Tooltip>
-              </TooltipProvider>
-            )}
-          </div>
-
-          {/* Hook Type */}
-          {clip.hook_type && clip.hook_type !== "none" && (
-            <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
-              <div className="flex items-start gap-2">
-                <Target className="w-5 h-5 text-purple-600 mt-0.5" />
-                <div>
-                  <p className="font-semibold text-purple-900 mb-1">Hook Type Detected</p>
-                  <Badge className="bg-purple-100 text-purple-800 capitalize">
-                    {clip.hook_type.replace('_', ' ')}
-                  </Badge>
-                  <p className="text-sm text-purple-700 mt-2">
-                    {clip.hook_type === 'question' && 'Opens with a compelling question that creates curiosity.'}
-                    {clip.hook_type === 'statement' && 'Bold statement that grabs attention immediately.'}
-                    {clip.hook_type === 'statistic' && 'Data-driven hook that builds credibility.'}
-                    {clip.hook_type === 'story' && 'Story-based hook that builds emotional connection.'}
-                    {clip.hook_type === 'contrast' && 'Before/after or comparison hook that shows transformation.'}
+                {/* Detailed Metrics */}
+                <div className="space-y-2">
+                  <p
+                    className="text-xs font-medium uppercase tracking-wider"
+                    style={{
+                      color: "var(--meta)",
+                      letterSpacing: "0.08em",
+                      fontFeatureSettings: '"cv01", "ss03"',
+                    }}
+                  >
+                    Detailed Metrics
                   </p>
+                  {clip.hook_score !== undefined && (
+                    <ScoreBar label="Hook Score" score={clip.hook_score} icon={Target} />
+                  )}
+                  {clip.engagement_score !== undefined && (
+                    <ScoreBar label="Engagement Score" score={clip.engagement_score} icon={Zap} />
+                  )}
+                  {clip.value_score !== undefined && (
+                    <ScoreBar label="Value Score" score={clip.value_score} icon={TrendingUp} />
+                  )}
+                  {clip.shareability_score !== undefined && (
+                    <ScoreBar label="Shareability Score" score={clip.shareability_score} icon={Share2} />
+                  )}
                 </div>
-              </div>
-            </div>
-          )}
 
-          {/* Social Copy */}
-          {(clip.social_title || clip.social_description || clip.suggested_hashtags) && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 space-y-3">
-              <h4 className="font-semibold text-blue-900 flex items-center gap-2">
-                <Share2 className="w-4 h-4" />
-                Suggested Social Media Copy
-              </h4>
-              
-              {clip.social_title && (
-                <div>
-                  <p className="text-xs text-blue-700 font-medium mb-1">Title:</p>
-                  <p className="text-sm text-blue-900">{clip.social_title}</p>
-                </div>
-              )}
-
-              {clip.social_description && (
-                <div>
-                  <p className="text-xs text-blue-700 font-medium mb-1">Description:</p>
-                  <p className="text-sm text-blue-900">{clip.social_description}</p>
-                </div>
-              )}
-
-              {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
-                <div>
-                  <p className="text-xs text-blue-700 font-medium mb-1">Hashtags:</p>
-                  <div className="flex flex-wrap gap-1">
-                    {clip.suggested_hashtags.map((tag, idx) => (
-                      <Badge key={idx} variant="outline" className="text-blue-600">
-                        #{tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* Phase 10: Viral Polish */}
-          {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (() => {
-            const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-            const taskId = clip.video_url.split("/")[2];
-            return (
-              <div className="bg-gradient-to-br from-rose-950/30 to-orange-950/30 border border-rose-700/40 rounded-lg p-4">
-                <h4 className="font-semibold text-rose-400 mb-3 flex items-center gap-2">
-                  <Sparkles className="w-4 h-4" />
-                  Viral Polish Applied
-                </h4>
-
-                {/* Effect badges */}
-                {(clip.cta_overlay_applied || clip.emoji_overlays_applied) && (
-                  <div className="flex flex-wrap gap-2 mb-3">
-                    {clip.cta_overlay_applied && (
-                      <span className="flex items-center gap-1 text-xs bg-orange-900/50 text-orange-300 border border-orange-700/40 rounded-full px-2 py-0.5">
-                        <Target className="w-3 h-3" /> CTA Overlay
-                      </span>
-                    )}
-                    {clip.emoji_overlays_applied && (
-                      <span className="flex items-center gap-1 text-xs bg-pink-900/50 text-pink-300 border border-pink-700/40 rounded-full px-2 py-0.5">
-                        😀 Emoji Cues
-                      </span>
-                    )}
-                  </div>
-                )}
-
-                {/* A/B Variants */}
-                {clip.variants && clip.variants.length > 0 && (
-                  <div>
-                    <p className="text-xs text-rose-400 font-medium mb-2 flex items-center gap-1">
-                      <Shuffle className="w-3 h-3" /> A/B Variants ({clip.variants.length})
-                    </p>
-                    <div className="space-y-1.5">
-                      {clip.variants.map((v, vi) => (
-                        <div key={vi} className="flex items-center justify-between bg-black/30 rounded px-2 py-1.5">
-                          <div className="flex items-center gap-2">
-                            {v.type === "caption_style" ? (
-                              <Subtitles className="w-3 h-3 text-cyan-400 flex-shrink-0" />
-                            ) : (
-                              <Music className="w-3 h-3 text-purple-400 flex-shrink-0" />
-                            )}
-                            <span className="text-xs text-gray-300 truncate max-w-[180px]" title={v.label}>{v.label}</span>
-                          </div>
-                          <a
-                            href={`${apiUrl}/clips/${taskId}/${v.path.split("/").pop()}`}
-                            download
-                            className="text-xs text-rose-400 hover:text-rose-300 font-medium ml-2 flex-shrink-0"
-                          >
-                            <Download className="w-3 h-3" />
-                          </a>
-                        </div>
-                      ))}
+                {/* Hook Type */}
+                {clip.hook_type && clip.hook_type !== "none" && (
+                  <div
+                    className="p-3 rounded-md"
+                    style={{
+                      background: "rgba(94,106,210,0.08)",
+                      border: "1px solid rgba(94,106,210,0.15)",
+                    }}
+                  >
+                    <div className="flex items-start gap-2">
+                      <Target size={16} style={{ color: "var(--accent)", marginTop: 2, flexShrink: 0 }} />
+                      <div>
+                        <p
+                          className="text-xs font-medium mb-1"
+                          style={{ color: "var(--accent)" }}
+                        >
+                          Hook Type Detected
+                        </p>
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium capitalize"
+                          style={{
+                            background: "rgba(94,106,210,0.12)",
+                            color: "var(--accent)",
+                            border: "1px solid rgba(94,106,210,0.2)",
+                          }}
+                        >
+                          {clip.hook_type.replace("_", " ")}
+                        </span>
+                        <p className="text-xs mt-2" style={{ color: "var(--fg-2)" }}>
+                          {hookDescriptions[clip.hook_type] || ""}
+                        </p>
+                      </div>
                     </div>
                   </div>
                 )}
-              </div>
-            );
-          })()}
 
-          {/* Pro Tips */}
-          <div className="bg-gradient-to-r from-purple-50 to-pink-50 border border-purple-200 rounded-lg p-4">
-            <h4 className="font-semibold text-purple-900 mb-2 flex items-center gap-2">
-              <Sparkles className="w-4 h-4" />
-              Pro Tips to Boost Performance
-            </h4>
-            <ul className="text-sm text-purple-800 space-y-1">
-              {clip.virality_score < 7 && (
-                <li>• Consider re-editing to strengthen the hook in the first 3 seconds</li>
-              )}
-              {clip.engagement_score && clip.engagement_score < 7 && (
-                <li>• Add a call-to-action or question to boost engagement</li>
-              )}
-              {(!clip.suggested_hashtags || clip.suggested_hashtags.length === 0) && (
-                <li>• Add relevant trending hashtags when posting</li>
-              )}
-              <li>• Post during peak hours (6-9pm in your target timezone)</li>
-              <li>• Reply to first 10 comments within 30 minutes for algorithm boost</li>
-            </ul>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
+                {/* Social Copy */}
+                {(clip.social_title || clip.social_description || clip.suggested_hashtags) && (
+                  <div
+                    className="p-3 rounded-md space-y-2"
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid var(--border-soft)",
+                    }}
+                  >
+                    <p
+                      className="text-xs font-medium flex items-center gap-1.5"
+                      style={{ color: "var(--fg-2)" }}
+                    >
+                      <Share2 size={12} />
+                      Suggested Social Media Copy
+                    </p>
+                    {clip.social_title && (
+                      <div>
+                        <p className="text-xs" style={{ color: "var(--meta)" }}>Title:</p>
+                        <p className="text-sm" style={{ color: "var(--fg)" }}>{clip.social_title}</p>
+                      </div>
+                    )}
+                    {clip.social_description && (
+                      <div>
+                        <p className="text-xs" style={{ color: "var(--meta)" }}>Description:</p>
+                        <p className="text-sm" style={{ color: "var(--fg)" }}>{clip.social_description}</p>
+                      </div>
+                    )}
+                    {clip.suggested_hashtags && clip.suggested_hashtags.length > 0 && (
+                      <div>
+                        <p className="text-xs" style={{ color: "var(--meta)" }}>Hashtags:</p>
+                        <div className="flex flex-wrap gap-1 mt-1">
+                          {clip.suggested_hashtags.map((tag, idx) => (
+                            <span
+                              key={idx}
+                              className="inline-flex items-center px-2 py-0.5 rounded-full text-xs"
+                              style={{
+                                background: "rgba(255,255,255,0.04)",
+                                color: "var(--fg-2)",
+                                border: "1px solid var(--border-soft)",
+                              }}
+                            >
+                              #{tag}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Viral Polish */}
+                {(clip.cta_overlay_applied || clip.emoji_overlays_applied || (clip.variants && clip.variants.length > 0)) && (
+                  <div
+                    className="p-3 rounded-md"
+                    style={{
+                      background: "rgba(255,255,255,0.02)",
+                      border: "1px solid var(--border-soft)",
+                    }}
+                  >
+                    <p
+                      className="text-xs font-medium flex items-center gap-1.5 mb-2"
+                      style={{ color: "var(--fg-2)" }}
+                    >
+                      <Sparkles size={12} />
+                      Viral Polish Applied
+                    </p>
+                    {(clip.cta_overlay_applied || clip.emoji_overlays_applied) && (
+                      <div className="flex flex-wrap gap-2 mb-2">
+                        {clip.cta_overlay_applied && (
+                          <span
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs"
+                            style={{
+                              background: "rgba(94,106,210,0.1)",
+                              color: "var(--accent)",
+                              border: "1px solid rgba(94,106,210,0.2)",
+                            }}
+                          >
+                            <Target size={10} /> CTA Overlay
+                          </span>
+                        )}
+                        {clip.emoji_overlays_applied && (
+                          <span
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs"
+                            style={{
+                              background: "rgba(255,255,255,0.04)",
+                              color: "var(--fg-2)",
+                              border: "1px solid var(--border-soft)",
+                            }}
+                          >
+                            😀 Emoji Cues
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {clip.variants && clip.variants.length > 0 && (
+                      <div>
+                        <p className="text-xs mb-1.5 flex items-center gap-1" style={{ color: "var(--meta)" }}>
+                          <Shuffle size={10} /> A/B Variants ({clip.variants.length})
+                        </p>
+                        <div className="space-y-1">
+                          {clip.variants.map((v, vi) => (
+                            <div
+                              key={vi}
+                              className="flex items-center justify-between px-2 py-1.5 rounded-sm"
+                              style={{ background: "rgba(255,255,255,0.03)" }}
+                            >
+                              <div className="flex items-center gap-2 min-w-0">
+                                {v.type === "caption_style" ? (
+                                  <Subtitles size={12} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                                ) : (
+                                  <Music size={12} style={{ color: "var(--meta)", flexShrink: 0 }} />
+                                )}
+                                <span
+                                  className="text-xs truncate"
+                                  style={{ color: "var(--fg-2)", maxWidth: 180 }}
+                                  title={v.label}
+                                >
+                                  {v.label}
+                                </span>
+                              </div>
+                              <a
+                                href={`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/clips/${clip.video_url.split("/")[2]}/${v.path.split("/").pop()}`}
+                                download
+                                className="text-xs shrink-0 ml-2 transition-all"
+                                style={{ color: "var(--accent)" }}
+                                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--accent-hover)")}
+                                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--accent)")}
+                              >
+                                <Download size={12} />
+                              </a>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Pro Tips */}
+                <div
+                  className="p-3 rounded-md"
+                  style={{
+                    background: "rgba(255,255,255,0.02)",
+                    border: "1px solid var(--border-soft)",
+                  }}
+                >
+                  <p
+                    className="text-xs font-medium flex items-center gap-1.5 mb-2"
+                    style={{ color: "var(--fg-2)" }}
+                  >
+                    <Sparkles size={12} />
+                    Pro Tips to Boost Performance
+                  </p>
+                  <ul className="text-xs space-y-1" style={{ color: "var(--muted)" }}>
+                    {clip.virality_score < 7 && (
+                      <li>{"\u2022"} Consider re-editing to strengthen the hook in the first 3 seconds</li>
+                    )}
+                    {clip.engagement_score && clip.engagement_score < 7 && (
+                      <li>{"\u2022"} Add a call-to-action or question to boost engagement</li>
+                    )}
+                    {(!clip.suggested_hashtags || clip.suggested_hashtags.length === 0) && (
+                      <li>{"\u2022"} Add relevant trending hashtags when posting</li>
+                    )}
+                    <li>{"\u2022"} Post during peak hours (6-9pm in your target timezone)</li>
+                    <li>{"\u2022"} Reply to first 10 comments within 30 minutes for algorithm boost</li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            {/* ── Footer ── */}
+            <div
+              className="flex items-center justify-end gap-3 shrink-0"
+              style={{
+                padding: "var(--space-4)",
+                borderTop: "1px solid var(--border)",
+              }}
+            >
+              <button
+                className="btn btn-ghost"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "var(--space-2)",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-sm)",
+                  fontFamily: "var(--font-display)",
+                  fontSize: "var(--text-sm)",
+                  fontWeight: 510,
+                  fontFeatureSettings: '"cv01", "ss03"',
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  border: "1px solid rgba(36,40,44,1)",
+                  background: "rgba(255,255,255,0.02)",
+                  color: "#e2e4e7",
+                  transition: "background-color var(--motion-fast) var(--ease-standard)",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.05)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
+              >
+                Editar
+              </button>
+              <button
+                className="btn btn-primary"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: "var(--space-2)",
+                  padding: "8px 16px",
+                  borderRadius: "var(--radius-sm)",
+                  fontFamily: "var(--font-display)",
+                  fontSize: "var(--text-sm)",
+                  fontWeight: 510,
+                  fontFeatureSettings: '"cv01", "ss03"',
+                  lineHeight: 1,
+                  cursor: "pointer",
+                  border: "1px solid transparent",
+                  background: "var(--accent)",
+                  color: "#ffffff",
+                  transition: "background-color var(--motion-fast) var(--ease-standard)",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "var(--accent-hover)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "var(--accent)"; }}
+              >
+                Exportar
+              </button>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   );
 }

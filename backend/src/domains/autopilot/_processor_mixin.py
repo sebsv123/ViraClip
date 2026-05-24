@@ -358,6 +358,29 @@ class _ProcessorMixin:
                         return "hormozi"
                     return "tiktok"
 
+            # ── BUG 2 FIX: Local helper to remux MP4 in-place, fixing moov atom ──
+            async def _remux_fix(path: str) -> bool:
+                """Remux MP4 in-place to fix moov atom and sync stream durations."""
+                import subprocess as _sp
+                _in = Path(path)
+                _tmp = _in.with_suffix(".remux.mp4")
+                try:
+                    r = _sp.run(
+                        ["ffmpeg", "-y", "-i", str(_in),
+                         "-c", "copy", "-movflags", "+faststart",
+                         str(_tmp)],
+                        capture_output=True, timeout=60
+                    )
+                    if r.returncode == 0 and _tmp.exists() and _tmp.stat().st_size > 0:
+                        _in.unlink(missing_ok=True)
+                        _tmp.rename(_in)
+                        return True
+                    _tmp.unlink(missing_ok=True)
+                    return False
+                except Exception:
+                    _tmp.unlink(missing_ok=True)
+                    return False
+
             # ── P2.1 PRE-EXTRACTION: Extract all segments at once (CRITICAL OPTIMIZATION) ──
             # This is 50-100x faster than re-decoding video for each clip
             # Uses ffmpeg -c copy (stream copy, no re-encoding)
@@ -726,6 +749,12 @@ class _ProcessorMixin:
                 save_progress = 91 + int((saved_clips / max(1, total_clips - len(failed_clips))) * 4)
                 await update_progress(save_progress, f"Saving clip {saved_clips}/{total_clips - len(failed_clips)}...")
 
+                # ── BUG 2 FIX: Remux MP4 in-place to fix moov atom and sync stream durations ──
+                if clip_info is not None:
+                    _fixed = await _remux_fix(clip_info["path"])
+                    if not _fixed:
+                        logger.warning(f"[REMUX] Failed to fix moov atom for clip {i+1}, using original")
+
                 # Save to DB immediately so SSE can deliver it
                 clip_id = await self.clip_repo.create_clip(
                     self.db,
@@ -766,19 +795,6 @@ class _ProcessorMixin:
                 )
                 await self.db.commit()
                 clip_ids.append(clip_id)
-
-                # Auto-copy clip to unified exports folder for local sync
-                try:
-                    import shutil as _shutil
-                    _exports_dir = Path("/app/exports/clips")
-                    _exports_dir.mkdir(parents=True, exist_ok=True)
-                    _src = Path(clip_info["path"])
-                    if _src.exists():
-                        _dst = _exports_dir / _src.name
-                        _shutil.copy2(_src, _dst)
-                        logger.info(f"  ✓ Copied clip to exports: {_src.name}")
-                except Exception as _cp_e:
-                    logger.warning(f"  exports copy failed: {_cp_e}")
 
                 # Suggestion Studio: persist render context + seed suggestions.
                 # Safe-by-design: failures here never break clip delivery.
@@ -924,6 +940,22 @@ class _ProcessorMixin:
                         "[suggestion_applicator] Error applying suggestions to clip %s: %s",
                         clip_id, _aa_e,
                     )
+
+                # Auto-copy clip to unified exports folder for local sync
+                # NOTE: Must run AFTER suggestion_applicator so we copy the enhanced version
+                try:
+                    _clip_record_for_export = await self.clip_repo.get_clip_by_id(self.db, clip_id)
+                    if _clip_record_for_export and _clip_record_for_export.get("file_path"):
+                        _exports_dir = Path("/app/exports/clips")
+                        _exports_dir.mkdir(parents=True, exist_ok=True)
+                        _src = Path(_clip_record_for_export["file_path"])
+                        if _src.exists():
+                            _dst = _exports_dir / _src.name
+                            import shutil as _shutil
+                            _shutil.copy2(_src, _dst)
+                            logger.info(f"  ✓ Copied clip to exports: {_src.name}")
+                except Exception as _cp_e:
+                    logger.warning(f"  exports copy failed: {_cp_e}")
 
                 # Notify frontend via SSE after enhance
                 if clip_ready_callback:

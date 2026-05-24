@@ -232,6 +232,10 @@ async def create_single_clip(
     # well-bounded segment just because it has a high virality score.
     _vscore_pre = segment.get("virality_score", 50)
     _FLOOR = 30.0  # hard platform minimum — 30s minimum for viable short-form content
+    if use_extracted_segment:
+        # Segment already pre-extracted with fixed duration — do not extend.
+        # Extending causes audio/video duration mismatch (frozen frames).
+        _FLOOR = 0.0
     if duration < _FLOOR:
         if _vscore_pre >= 70:
             _target_dur = 60.0

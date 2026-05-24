@@ -1,19 +1,9 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import "@/styles/base.css";
+import "@/styles/typography.css";
+import "@/styles/skeleton.css";
 import "./globals.css";
 import { PerformanceDisplay, ReportWebVitals } from "@/lib/performance";
-
-const geistSans = Geist({ 
-  subsets: ["latin"],
-  variable: "--font-geist-sans",
-  display: "swap",
-});
-
-const geistMono = Geist_Mono({
-  subsets: ["latin"],
-  variable: "--font-geist-mono",
-  display: "swap",
-});
 
 export const metadata: Metadata = {
   title: "ViraClip - AI-Powered Viral Clip Generator",
@@ -33,8 +23,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" className="dark">
-      <body className={`${geistSans.variable} ${geistMono.variable} font-sans antialiased`}>
+    <html lang="en" data-theme="dark" className="dark">
+      <body>
         <ReportWebVitals />
         {children}
         <PerformanceDisplay />
