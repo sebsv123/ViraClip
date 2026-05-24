@@ -148,6 +148,10 @@ interface Clip {
     label: string;
     type: string;
   }>;
+  // Inspector panel fields
+  title?: string | null;
+  retention_score?: number | null;
+  has_captions?: boolean | null;
 }
 
 interface TaskDetails {
@@ -218,6 +222,7 @@ export default function TaskPage() {
   const [isRefining, setIsRefining] = useState(false);
   const [refineResult, setRefineResult] = useState<{ action: string; reasoning: string } | null>(null);
 
+  const [selectedClip, setSelectedClip] = useState<Clip | null>(null);
   const [projectFontFamily, setProjectFontFamily] = useState("TikTokSans-Regular");
   const [projectFontSize, setProjectFontSize] = useState("24");
   const [projectFontColor, setProjectFontColor] = useState("#FFFFFF");
@@ -2021,7 +2026,7 @@ export default function TaskPage() {
                     {/* Export */}
                     <div className="px-4 pt-3 pb-4">
                       <button
-                        onClick={() => handleExportClip(selectedClip.id)}
+                        onClick={() => handleExportClip(selectedClip.id, selectedClip.filename)}
                         className="w-full rounded-sm text-sm font-medium transition-all"
                         style={{
                           height: 36,
