@@ -2417,8 +2417,7 @@ class BrollService:
         
         return all_cues
 
-    @staticmethod
-    def _sanitize_broll_timeline(
+    def _sanitize_broll_timeline(self,
         pairs: List[Tuple[float, str, float]],
         clip_duration: float = 0.0,
         semantic_opportunities: int = 0,
