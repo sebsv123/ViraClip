@@ -34,7 +34,7 @@ class ComfyUIIntegrationService:
     """
     
     def __init__(self):
-        self.enabled = os.getenv("COMFYUI_ENABLED", "true").lower() == "true"
+        self.enabled = os.getenv("COMFYUI_ENABLED", "false").lower() == "true"
         # Shared `uploads` volume: worker=/app/temp/uploads/broll -> comfyui=/comfyui/input
         self.uploads_path = Path(
             os.getenv("VIRA_UPLOADS", os.getenv("COMFYUI_SHARED_INPUT_DIR", "/app/temp/uploads/broll"))

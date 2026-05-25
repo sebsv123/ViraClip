@@ -17,7 +17,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-COMFYUI_ENABLED: bool = os.environ.get("COMFYUI_ENABLED", "true").lower() == "true"
+COMFYUI_ENABLED: bool = os.environ.get("COMFYUI_ENABLED", "false").lower() == "true"
 COMFYUI_TIMEOUT: float = float(os.environ.get("COMFYUI_TIMEOUT", "90.0"))
 COMFYUI_OUTPUT_DIR: str = os.environ.get("COMFYUI_LOCAL_OUTPUT_DIR", "/app/temp/uploads/comfy_out")
 
