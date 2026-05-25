@@ -179,6 +179,10 @@ def get_insert_timestamps(
         # Don't insert B-roll in the first 0.5s (keep hook)
         timestamps = [t for t in timestamps if t >= 0.5]
         timestamps = _filter_by_transcript(timestamps)
+        if not timestamps:
+            logger.warning(
+                "[SceneBroll] Transcript filter emptied scene-based timestamps — falling through to silence"
+            )
         if timestamps:
             logger.info("[SceneBroll] Scene-based timestamps: %s", timestamps)
             return timestamps[:max_n]
@@ -187,6 +191,10 @@ def get_insert_timestamps(
     silences = _detect_silences_ffmpeg(video_path)
     if silences:
         silences = _filter_by_transcript(silences)
+        if not silences:
+            logger.warning(
+                "[SceneBroll] Transcript filter emptied silence-based timestamps — falling through to even-spacing"
+            )
         if silences:
             logger.info("[SceneBroll] Silence-based timestamps: %s", silences[:max_n])
             return silences[:max_n]
