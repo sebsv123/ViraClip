@@ -245,22 +245,29 @@ def create_karaoke_subtitles(
     max_text_width = get_subtitle_max_width(video_width)
     horizontal_padding = max(40, int(video_width * 0.06))
 
+    _measure_cache: Dict[Tuple[str, int], int] = {}
     adaptive_groups = adaptive_word_groups(relevant_words, video_width, calculated_font_size)
 
     def measure_word_group_width(word_group: List[Dict], font_size: int) -> List[int]:
         widths: List[int] = []
         for word in word_group:
-            temp_clip = TextClip(
-                text=word["text"],
-                font=font_path,
-                font_size=font_size,
-                color=normal_color,
-                stroke_color=template.get("stroke_color", "black"),
-                stroke_width=template.get("stroke_width", 1),
-                method="label",
-            )
-            widths.append(temp_clip.size[0] if temp_clip.size else 50)
-            temp_clip.close()
+            _cache_key = (word["text"], font_size)
+            if _cache_key in _measure_cache:
+                widths.append(_measure_cache[_cache_key])
+            else:
+                temp_clip = TextClip(
+                    text=word["text"],
+                    font=font_path,
+                    font_size=font_size,
+                    color=normal_color,
+                    stroke_color=template.get("stroke_color", "black"),
+                    stroke_width=template.get("stroke_width", 1),
+                    method="label",
+                )
+                _w = temp_clip.size[0] if temp_clip.size else 50
+                temp_clip.close()
+                _measure_cache[_cache_key] = _w
+                widths.append(_w)
         return widths
 
     for word_group in adaptive_groups:
