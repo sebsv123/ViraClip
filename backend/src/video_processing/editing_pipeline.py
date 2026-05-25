@@ -467,6 +467,9 @@ def _build_filter_complex(
     """
     zoom_intensity = 'off'
 
+    # Derive emphasis_ts from emphasis_items (list of timestamps for zoom punches)
+    emphasis_ts = [ts for ts, _ in (emphasis_items or [])]
+
     filters: List[str] = []
 
     # ── 0. Determine clip theme for adaptive grade + audio EQ ──────────────────
