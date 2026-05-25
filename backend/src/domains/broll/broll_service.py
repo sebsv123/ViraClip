@@ -1649,6 +1649,11 @@ class BrollService:
                     return None
                 resp.raise_for_status()
                 data = resp.json()
+                _is_insurance = bool(self._insurance_enriched_keywords(query))
+                _is_insurance = bool(self._insurance_enriched_keywords(query))
+                _is_insurance = bool(self._insurance_enriched_keywords(query))
+                _is_insurance = bool(self._insurance_enriched_keywords(query))
+                _is_insurance = bool(self._insurance_enriched_keywords(query))
                 for item in data.get("hits", []):
                     # Prefer clips with portrait dimensions and duration 3-10s
                     dur = item.get("duration", 0)
@@ -1656,12 +1661,52 @@ class BrollService:
                     h   = item.get("height", 0)
                     url = item.get("urls", {}).get("mp4_download") or item.get("url")
                     if url and 3 <= dur <= 12 and h >= 720:
+                        if _is_insurance:
+                            _item_tags = " ".join([
+                                str(item.get("title", "")),
+                                str(item.get("tags", "")),
+                                str(item.get("url", "")),
+                            ]).lower()
+                            _INSURANCE_SIGNALS = {
+                                "insurance", "policy", "claim", "coverage", "premium",
+                                "protection", "family", "savings", "advisor", "consultation",
+                                "document", "signing", "contract", "office", "medical",
+                                "health", "car accident", "home", "agent", "broker",
+                                "financial", "retirement", "planning",
+                            }
+                            _hit = any(sig in _item_tags for sig in _INSURANCE_SIGNALS)
+                            if not _hit:
+                                logger.info(
+                                    "[BRoll/Coverr] ⛔ SKIPPED non-insurance asset for query '%s': %s",
+                                    query, url[:60],
+                                )
+                                continue
                         logger.info(f"[BRoll] Coverr hit for '{query}': {url[:60]}...")
                         return url
                 # Any clip if none match portrait preference
                 for item in data.get("hits", []):
                     url = item.get("urls", {}).get("mp4_download") or item.get("url")
                     if url:
+                        if _is_insurance:
+                            _item_tags = " ".join([
+                                str(item.get("title", "")),
+                                str(item.get("tags", "")),
+                                str(item.get("url", "")),
+                            ]).lower()
+                            _INSURANCE_SIGNALS = {
+                                "insurance", "policy", "claim", "coverage", "premium",
+                                "protection", "family", "savings", "advisor", "consultation",
+                                "document", "signing", "contract", "office", "medical",
+                                "health", "car accident", "home", "agent", "broker",
+                                "financial", "retirement", "planning",
+                            }
+                            _hit = any(sig in _item_tags for sig in _INSURANCE_SIGNALS)
+                            if not _hit:
+                                logger.info(
+                                    "[BRoll/Coverr] ⛔ SKIPPED non-insurance asset for query '%s': %s",
+                                    query, url[:60],
+                                )
+                                continue
                         return url
         except Exception as e:
             logger.debug(f"[BRoll] Coverr search error: {e}")
