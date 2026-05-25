@@ -541,7 +541,7 @@ class ConfidenceSubtitleGenerator:
                     # Preservar textos originales, usar timestamps de re-transcripcion
                     # Mapear palabras originales a timestamps re-transcritos
                     _preserved = _merge_original_texts_with_realigned_timestamps(
-                        original_words, realigned_words
+                        original_words, realigned_words, clip_start=clip_start
                     )
                     if _preserved:
                         return _preserved
@@ -620,8 +620,15 @@ class ConfidenceSubtitleGenerator:
                 return False
 
             # Heuristica 3: Verificar si hay codificacion de audio multiple
-            # (indica mezcla de fuentes)
-            if "aac" in stderr and "pcm" in stderr:
+            # (indica mezcla de fuentes) — restrict to actual stream lines only
+            audio_lines = [l for l in stderr.splitlines() if "Stream #" in l and "Audio:" in l]
+            codecs_found = set()
+            for line in audio_lines:
+                if "aac" in line.lower():
+                    codecs_found.add("aac")
+                if "pcm" in line.lower():
+                    codecs_found.add("pcm")
+            if "aac" in codecs_found and "pcm" in codecs_found:
                 logger.info(
                     "[RE-ALIGN] Audio potencialmente contaminado: "
                     "mezcla de codecs de audio detectada"
@@ -653,6 +660,7 @@ def _transfer_emphasis_flags(realigned: List[Dict], original: List[Dict]):
 def _merge_original_texts_with_realigned_timestamps(
     original_words: List[Dict],
     realigned_words: List[Dict],
+    clip_start: float = 0.0,
 ) -> List[Dict]:
     """
     RULE 2 FIX: Preserva los textos originales (con acentos y puntuacion
@@ -692,7 +700,10 @@ def _merge_original_texts_with_realigned_timestamps(
                 })
             else:
                 # Mas palabras originales que re-transcritas
-                _merged.append(_ow)
+                _ow_copy = dict(_ow)
+                _ow_copy["start"] = max(0.0, _ow.get("start", 0) - clip_start)
+                _ow_copy["end"] = max(0.0, _ow.get("end", 0) - clip_start)
+                _merged.append(_ow_copy)
         return _merged
 
     # Si el numero de palabras difiere significativamente,
@@ -710,8 +721,9 @@ def _merge_original_texts_with_realigned_timestamps(
 
     _merged = []
     for _ow in original_words:
-        _ws = _ow.get("start", 0) * _scale
-        _we = _ow.get("end", 0) * _scale
+        _orig_start_offset = original_words[0].get("start", 0)
+        _ws = (_ow.get("start", 0) - _orig_start_offset) * _scale
+        _we = (_ow.get("end", 0) - _orig_start_offset) * _scale
         _merged.append({
             "word": _ow.get("word", _ow.get("text", "")),
             "text": _ow.get("text", _ow.get("word", "")),
