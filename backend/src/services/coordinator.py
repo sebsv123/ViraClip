@@ -15,6 +15,13 @@ _Path = Path
 
 logger = logging.getLogger(__name__)
 
+# ── Optional viral polish module ───────────────────────────────────────────────
+try:
+    from .video_polish_pipeline import apply_viral_polish
+    _POLISH_AVAILABLE = True
+except ImportError:
+    _POLISH_AVAILABLE = False
+
 # ── Emoji keyword map ──────────────────────────────────────────────────────────
 _EMOJI_MAP: Dict[str, str] = {
     # energy / hype
@@ -443,6 +450,13 @@ class VideoCoordinator:
             except Exception as e:
                 logger.warning(f"[Gate 2] Skipped (error): {e}")
             
+            # ── Optional viral polish post-processing ──────────────────────────────
+            if _POLISH_AVAILABLE and self.config.get("viral_polish", {}).get("enabled", False):
+                try:
+                    successful = await apply_viral_polish(successful, self.config, self.task_id)
+                except Exception as polish_err:
+                    logger.warning("viral_polish skipped: %s", polish_err)
+
             # PHASE 4: Completion
             await emit_completion(self.task_id, len(successful))
             
