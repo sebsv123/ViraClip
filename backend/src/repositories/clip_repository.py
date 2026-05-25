@@ -256,7 +256,7 @@ class ClipRepository:
                     "reasoning": row_dict["reasoning"],
                     "clip_order": row_dict["clip_order"],
                     "created_at": row_dict["created_at"].isoformat(),
-                    "video_url": f"/clips/{task_id}/{__import__('pathlib').Path(row_dict['file_path']).name if row_dict.get('file_path') else row_dict['filename']}",
+                    "video_url": f"/clips/{row_dict['id']}/stream",
                     "virality_score": row_dict.get("virality_score") or 0,
                     "hook_score": row_dict.get("hook_score") or 0,
                     "engagement_score": row_dict.get("engagement_score") or 0,
@@ -268,7 +268,7 @@ class ClipRepository:
                     "social_description": row_dict.get("social_description"),
                     "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
                     "thumbnail_filename": thumb,
-                    "thumbnail_url": f"/clips/{task_id}/{thumb}" if thumb else None,
+                    "thumbnail_url": f"/clips/{row_dict['id']}/thumbnail" if thumb else None,
                     "face_detected": row_dict.get("face_detected"),
                     "hook_preview_score": row_dict.get("hook_preview_score") or 0,
                     "user_rating": row_dict.get("user_rating"),
@@ -416,7 +416,7 @@ class ClipRepository:
             "social_description": row_dict.get("social_description"),
             "suggested_hashtags": row_dict.get("suggested_hashtags") or [],
             "thumbnail_filename": thumb,
-            "thumbnail_url": f"/clips/{row_dict['task_id']}/{thumb}" if thumb else None,
+            "thumbnail_url": f"/clips/{row_dict['id']}/thumbnail" if thumb else None,
             "face_detected": row_dict.get("face_detected"),
             "hook_preview_score": row_dict.get("hook_preview_score") or 0,
             "user_rating": row_dict.get("user_rating"),
@@ -425,7 +425,7 @@ class ClipRepository:
             "variants_json": row_dict.get("variants_json"),
             "variants": ClipRepository._parse_variants(row_dict.get("variants_json")),
             "created_at": row_dict["created_at"].isoformat(),
-            "video_url": f"/clips/{row_dict['task_id']}/{__import__('pathlib').Path(row_dict['file_path']).name if row_dict.get('file_path') else row_dict['filename']}",
+            "video_url": f"/clips/{row_dict['id']}/stream",
         }
 
     @staticmethod
