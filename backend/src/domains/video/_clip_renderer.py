@@ -1348,9 +1348,11 @@ async def create_single_clip(
             from ...domains.broll.broll_service import BrollService
             _broll_svc = BrollService()
             _broll_out = output_path.with_name(f"broll_{output_path.name}")
-            _broll_kw_override = (_clip_profile.ai_keywords
-                                  if _clip_profile and _clip_profile.ai_keywords
-                                  else None)
+            # Do NOT use _clip_profile.ai_keywords as b-roll keyword override —
+            # those are generic motivational concepts from clip_intelligence that
+            # don't reflect the actual transcript content. Let BrollService use
+            # AiBrollRecommender which has proper LLM prompt + TF-IDF fallback.
+            _broll_kw_override = None
             # RULE 4: Get or create seen_concepts set for this task
             _seen_concepts = _get_seen_concepts(task_id)
             # Snapshot pre-clip concepts to distinguish within-task vs cross-clip repeats
