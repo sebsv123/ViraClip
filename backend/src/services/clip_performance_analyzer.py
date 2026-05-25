@@ -28,6 +28,48 @@ from src.services.clip_features import (
     PerformanceMetrics,
 )
 
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
+# ── Performance predictor (opt-in) ─────────────────────────────────────────
+try:
+    from .performance_predictor import predict_performance
+    _PREDICTOR_AVAILABLE = True
+except ImportError:
+    _PREDICTOR_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # ── Thresholds ────────────────────────────────────────────────────────────────────
@@ -303,6 +345,12 @@ class ClipPerformanceAnalyzer:
             if vals
         }
 
+        if _PREDICTOR_AVAILABLE:
+            result["predicted_score"] = predict_performance(
+                transcript=transcript,
+                duration=clip_duration,
+                platform=platform,
+            )
         return result
 
     # ── Pattern analysis ──────────────────────────────────────────────────────
