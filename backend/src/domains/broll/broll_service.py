@@ -1650,10 +1650,6 @@ class BrollService:
                 resp.raise_for_status()
                 data = resp.json()
                 _is_insurance = bool(self._insurance_enriched_keywords(query))
-                _is_insurance = bool(self._insurance_enriched_keywords(query))
-                _is_insurance = bool(self._insurance_enriched_keywords(query))
-                _is_insurance = bool(self._insurance_enriched_keywords(query))
-                _is_insurance = bool(self._insurance_enriched_keywords(query))
                 for item in data.get("hits", []):
                     # Prefer clips with portrait dimensions and duration 3-10s
                     dur = item.get("duration", 0)
