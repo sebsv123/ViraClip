@@ -1379,27 +1379,14 @@ async def create_single_clip(
         except Exception as _broll_e:
             logger.warning(f"  B-roll overlay failed: {_broll_e}")
 
-    # Step 4.3b: Contextual Overlay Engine — keyword→image/video overlays (viral TikTok feature)
-    # Only runs if Step 4.3 did NOT place any B-roll (single authoritative planner).
-    _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
-    if _ctx_overlays_env and not _broll_planned and segment and words_with_confidence:
-        try:
-            from ...domains.broll.contextual_overlay_engine import ContextualOverlayEngine
-            _ctx_engine = ContextualOverlayEngine()
-            _ctx_out = output_path.with_name(f"ctx_{output_path.name}")
-            _ctx_result = await _ctx_engine.apply_overlays(
-                video_path=output_path,
-                output_path=_ctx_out,
-                transcript=segment.get("text", ""),
-                word_timings=words_with_confidence,
-                virality_score=getattr(_clip_profile, "virality_score", 70.0) if _clip_profile else 70.0,
-                overlay_frequency="adaptive",
-            )
-            if _ctx_result.success and _ctx_out.exists():
-                output_path = _ctx_out
-                logger.info(f"  ✓ Contextual overlays: {_ctx_result.overlays_applied} applied ({_ctx_result.keywords_detected} keywords)")
-        except Exception as _ctx_e:
-            logger.debug(f"  Contextual overlay engine skipped: {_ctx_e}")
+    # Step 4.3b: ContextualOverlayEngine — DESACTIVADO.
+    # Razón: es un clon sin filtros de BrollService. Todo el b-roll contextual
+    # ya está cubierto por Step 4.3 (BrollService + AiBrollRecommender) y Step 4.0c
+    # (SemanticEditPlanner). Reactivar solo si se construye con insurance guards.
+    # Para habilitar en desarrollo: CONTEXTUAL_OVERLAYS_ENABLED=true en .env
+    _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "false").lower() == "true"
+    if _ctx_overlays_env:
+        logger.debug("  [Step 4.3b] ContextualOverlayEngine desactivado por defecto.")
 
     # Step 4.3c: Viral Effects — content-aware visual enhancement
     _viral_fx_env = os.environ.get("VIRAL_EFFECTS_ENABLED", "true").lower() == "true"
