@@ -1538,6 +1538,39 @@ class BrollService:
             )
             return None
 
+    # ── Insurance tag gate ──────────────────────────────────────────────────────
+    # If the query contains insurance concepts, require at least 1 insurance
+    # tag hit in the winning asset before returning it. A score of 0.15 can
+    # still be a generic portrait with zero insurance relevance.
+    _INSURANCE_QUERY_SIGNALS = {
+        "insurance", "policy", "claim", "coverage", "premium", "protection",
+        "family", "savings", "advisor", "consultation", "document", "signing",
+        "contract", "office", "medical", "health", "accident", "agent",
+        "broker", "financial", "retirement", "planning",
+    }
+    _query_text = query.lower()
+    _is_insurance_query = any(sig in _query_text for sig in _INSURANCE_QUERY_SIGNALS)
+
+    if _is_insurance_query:
+        _INSURANCE_TAG_SIGNALS = {
+            "insurance", "policy", "claim", "coverage", "premium", "protection",
+            "family", "savings", "advisor", "consultation", "document", "signing",
+            "contract", "office", "medical", "health", "accident", "agent",
+            "broker", "financial", "retirement", "planning",
+        }
+        _best_label_lower = best_label.lower()
+        _best_url_lower = best_url.lower()
+        _tag_hit = any(sig in _best_label_lower or sig in _best_url_lower for sig in _INSURANCE_TAG_SIGNALS)
+        if not _tag_hit:
+            logger.warning(
+                "[BrollGate] PEXELS INSURANCE REJECT query='%s' best_score=%.3f — "
+                "insurance query but zero insurance tag hits in winning asset (%s). "
+                "Rejecting to prevent generic portrait leak.",
+                query, best_score, best_label,
+            )
+            return None
+
+
         logger.info(
             "[BROLL] Best match for '%s': score=%.3f from %s — %s... "
             "(evaluated %d candidates)",
@@ -1623,6 +1656,39 @@ class BrollService:
                 queries, best_score, len(all_candidates),
             )
             return None
+
+    # ── Insurance tag gate ──────────────────────────────────────────────────────
+    # If the query contains insurance concepts, require at least 1 insurance
+    # tag hit in the winning asset before returning it. A score of 0.15 can
+    # still be a generic portrait with zero insurance relevance.
+    _INSURANCE_QUERY_SIGNALS = {
+        "insurance", "policy", "claim", "coverage", "premium", "protection",
+        "family", "savings", "advisor", "consultation", "document", "signing",
+        "contract", "office", "medical", "health", "accident", "agent",
+        "broker", "financial", "retirement", "planning",
+    }
+    _query_text = " ".join(queries).lower()
+    _is_insurance_query = any(sig in _query_text for sig in _INSURANCE_QUERY_SIGNALS)
+
+    if _is_insurance_query:
+        _INSURANCE_TAG_SIGNALS = {
+            "insurance", "policy", "claim", "coverage", "premium", "protection",
+            "family", "savings", "advisor", "consultation", "document", "signing",
+            "contract", "office", "medical", "health", "accident", "agent",
+            "broker", "financial", "retirement", "planning",
+        }
+        _best_label_lower = best_label.lower()
+        _best_url_lower = best_url.lower()
+        _tag_hit = any(sig in _best_label_lower or sig in _best_url_lower for sig in _INSURANCE_TAG_SIGNALS)
+        if not _tag_hit:
+            logger.warning(
+                "[BrollGate] PEXELS INSURANCE REJECT queries=%s best_score=%.3f — "
+                "insurance query but zero insurance tag hits in winning asset (%s). "
+                "Rejecting to prevent generic portrait leak.",
+                queries, best_score, best_label,
+            )
+            return None
+
 
         logger.info(
             "[BROLL] Best Pexels match score=%.3f from %s — %s... (evaluated %d candidates)",
