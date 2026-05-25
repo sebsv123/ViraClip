@@ -136,3 +136,4 @@ env/
 coverage/
 .coverage
 htmlcov/
+package-lock.json
