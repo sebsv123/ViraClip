@@ -1060,6 +1060,7 @@ class BrollService:
         return age_days <= _CACHE_TTL_DAYS
 
     async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None, used_urls: Optional[set] = None) -> Optional[Path]:
+        return []
         """Fetch the most relevant B-roll asset for *keyword*.
 
         Strategy: controlled by BROLL_MODE env var:
