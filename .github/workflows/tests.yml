@@ -9,6 +9,9 @@ concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   # ── Path filter ──────────────────────────────────────────────────────────
   changes:
@@ -19,6 +22,8 @@ jobs:
       waitlist: ${{ steps.filter.outputs.waitlist }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -69,6 +74,8 @@ jobs:
       BACKEND_AUTH_SECRET: viraclip_test_secret
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -99,6 +106,8 @@ jobs:
       BETTER_AUTH_SECRET: viraclip_better_auth_test_secret
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -158,6 +167,8 @@ jobs:
       BETTER_AUTH_SECRET: viraclip_better_auth_test_secret
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
