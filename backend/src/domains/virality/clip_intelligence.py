@@ -306,7 +306,7 @@ Return a JSON object with EXACTLY these fields:
   "energy": <float 0.0-1.0>,
   "lut": "teal_orange|warm_film|cold_blue|vintage|high_contrast|flat",
   "caption_style": "tiktok|highlight|neon|minimal|karaoke",
-  "broll_keywords": [<3-5 specific visual concepts to illustrate the speech>],
+  "broll_keywords": [<3-5 specific visual concepts DERIVED FROM the transcript text above — use actual nouns and topics mentioned in the speech, not generic motivational concepts>],
   "bgm_category": "hype|upbeat|midtempo|slow",
   "zoom_intensity": "off|subtle|medium|strong",
   "sfx_emphasis": "curiosity_gap|cliffhanger|pattern_interrupt|scroll_stop|insight_reveal|transition",
