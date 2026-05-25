@@ -698,6 +698,7 @@ async def burn_captions_with_fallback(
     platform: str = "tiktok",
     caption_offset_y: int = 0,
     clip_start: float = 0.0,
+    clip_index: int = 0,
 ) -> bool:
     """
     Burn captions using the backend selected by CAPTION_BACKEND.
@@ -720,6 +721,7 @@ async def burn_captions_with_fallback(
                 video_path=str(video_path),
                 output_path=str(output_path),
                 words=words,
+                clip_start=clip_start,
             )
             return bool(result)
         else:
@@ -733,6 +735,7 @@ async def burn_captions_with_fallback(
                 platform=platform,
                 caption_offset_y=caption_offset_y,
                 clip_start=clip_start,
+                clip_index=clip_index,
             )
     except Exception as exc:
         logger.warning(
@@ -751,6 +754,7 @@ async def burn_captions_with_fallback(
             platform=platform,
             caption_offset_y=caption_offset_y,
             clip_start=clip_start,
+            clip_index=clip_index,
         )
 
 
