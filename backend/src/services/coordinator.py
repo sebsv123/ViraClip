@@ -15,6 +15,12 @@ _Path = Path
 
 logger = logging.getLogger(__name__)
 
+try:
+    from .video_polish_pipeline import apply_viral_polish
+    _POLISH_AVAILABLE = True
+except ImportError:
+    _POLISH_AVAILABLE = False
+
 # ── Emoji keyword map ──────────────────────────────────────────────────────────
 _EMOJI_MAP: Dict[str, str] = {
     # energy / hype
@@ -442,6 +448,13 @@ class VideoCoordinator:
                 raise
             except Exception as e:
                 logger.warning(f"[Gate 2] Skipped (error): {e}")
+
+            # PHASE 3.8: Viral polish (opt-in)
+            if _POLISH_AVAILABLE and self.config.get("viral_polish", {}).get("enabled", False):
+                try:
+                    successful = await apply_viral_polish(successful, self.config, self.task_id)
+                except Exception as polish_err:
+                    logger.warning("viral_polish skipped: %s", polish_err)
             
             # PHASE 4: Completion
             await emit_completion(self.task_id, len(successful))
@@ -932,8 +945,6 @@ class VideoCoordinator:
                         logger.debug("Timeline building skipped for clip %d: %s", index, _te)
 
                 # ── Emoji keyword overlays ─────────────────────────────────────
-                # Scan transcript for high-energy keywords → burn FFmpeg drawtext
-                # emoji at the matching word timestamp.  Purely additive / safe.
                 try:
                     _clip_path_obj = _Path(clip["path"])
                     _transcript_text = vs_segment.get("text", "") or vs_segment.get("transcript", "")
@@ -955,9 +966,6 @@ class VideoCoordinator:
                     logger.debug("Emoji overlays skipped for clip %d: %s", index, _eo_e)
 
                 # ── A/B variant generation ────────────────────────────────────
-                # Generate 2 quick variants (caption style swap + BGM swap) so
-                # the user can A/B test without waiting for a full re-render.
-                # Runs fire-and-forget; failures are non-fatal.
                 try:
                     from .variant_generator import generate_clip_variants
                     _clip_path_obj = _Path(clip["path"])
@@ -980,14 +988,12 @@ class VideoCoordinator:
                     logger.debug("Variant generation skipped for clip %d: %s", index, _ve)
 
                 # ── Transition auto-selection ──────────────────────────────────
-                # Select appropriate transition for this clip based on template and energy
                 try:
                     from .transition_selector import get_transition_selector
                     
                     selector = get_transition_selector()
                     viral_score = vs_segment.get("virality_score", 50.0)
                     
-                    # Determine if transition should be used
                     should_transition = selector.should_use_transition(
                         clip_index=index,
                         total_clips=len(segments),
@@ -995,11 +1001,9 @@ class VideoCoordinator:
                     )
                     
                     if should_transition:
-                        # Get audio energy for transition selection
                         _audio_features = clip.get("audio_features", {})
                         _energy = _audio_features.get("energy", 0.5)
                         
-                        # Select transition type
                         transition_type = selector.select_transition(
                             template_style=self.config.get("viral_template", "viral"),
                             energy_level=_energy,
@@ -1069,8 +1073,6 @@ class VideoCoordinator:
                         logger.debug("Beat sync skipped clip %d: %s", index, _bs_e)
 
                 # ── CTA overlay (last 2 s) ─────────────────────────────────────
-                # "Follow for more 🔥" / "Comment below 👇" injected as drawtext
-                # on the final clip, respecting the platform safe zone.
                 try:
                     _clip_path_obj = _Path(clip["path"])
                     _platform = self.config.get("target_platform", "tiktok")
@@ -1164,12 +1166,11 @@ class VideoCoordinator:
                         _jc_out = _jc_in.with_name(f"jc_{_jc_in.name}")
                         _jc_words = list(clip.get("words") or vs_segment.get("words") or [])
                         
-                        # Viral-style editing: aggressive 0.3s cuts + zoom transitions
                         _jc_result = await apply_jump_cuts_with_zoom(
                             video_path=str(_jc_in),
                             output_path=str(_jc_out),
                             words=_jc_words,
-                            min_silence_sec=self.config.get("jump_cut_min_silence", 0.3),  # Aggressive by default
+                            min_silence_sec=self.config.get("jump_cut_min_silence", 0.3),
                             zoom_on_cuts=self.config.get("zoom_on_cuts", True),
                             zoom_factor=self.config.get("cut_zoom_factor", 1.08),
                         )
@@ -1255,8 +1256,6 @@ class VideoCoordinator:
                 try:
                     _final_path = _Path(clip["path"])
                     _final_dir = _final_path.parent
-                    # Rename final to a clean name: final_clip_N_<stem>.mp4
-                    # Strip all known prefixes from the name so it's human-readable
                     _PREFIXES = ("sub_", "broll_", "ep_", "jc_", "centered_",
                                  "music_fb_", "music_", "duck_", "tp_", "emo_",
                                  "cta_", "brand_", "dn_", "gaze_", "efx_",
@@ -1280,16 +1279,13 @@ class VideoCoordinator:
                         _shutil.copy2(_clean_path, _exports_path)
                         logger.info("  [Export] Copied to unified folder: %s", _exports_path)
 
-                    # Delete all intermediate files for this clip index
-                    # Match by clip_X_viral pattern (timestamps vary per intermediate)
                     import re as _re
                     _clip_match = _re.search(r'clip_(\d+)_viral_\d+_\d{4}-\d{4}', _clean)
                     _removed_intermediates = 0
                     if _clip_match:
-                        _clip_pattern = f"clip_{_clip_match.group(1)}_viral_"  # e.g. "clip_1_viral_"
+                        _clip_pattern = f"clip_{_clip_match.group(1)}_viral_"
                         for _f in _final_dir.iterdir():
                             if _f.is_file() and _f.name != _clean_name:
-                                # Delete files with same clip_X_viral pattern but different prefix or timestamp
                                 if _clip_pattern in _f.name and _f.suffix in (".mp4", ".mov", ".jpg", ".wav", ".png"):
                                     _f.unlink(missing_ok=True)
                                     _removed_intermediates += 1
