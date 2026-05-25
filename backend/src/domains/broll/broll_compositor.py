@@ -438,6 +438,7 @@ def compose_overlay(
             f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB,"
             f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
             f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
+            f"{_color_match}"
             f"format=yuva420p[bv_faded]"
         )
     elif _effect == "slide_left":
@@ -447,6 +448,7 @@ def compose_overlay(
             f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
             f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
             f"crop=iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):ih:0:0,"
+            f"{_color_match}"
             f"format=yuva420p[bv_faded]"
         )
     elif _effect == "slide_right":
@@ -456,6 +458,7 @@ def compose_overlay(
             f"fade=t=in:st={timestamp:.3f}:d={fade_in_d:.3f}:alpha=1,"
             f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
             f"crop=iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):ih:iw-iw*min(1,(t-{timestamp:.3f})/{_slide_dur:.3f}):0,"
+            f"{_color_match}"
             f"format=yuva420p[bv_faded]"
         )
     elif _effect == "zoom_in":
@@ -466,6 +469,7 @@ def compose_overlay(
             f"fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}:alpha=1,"
             f"scale=iw*1.15:ih*1.15:eval=frame,"
             f"crop=iw/1.15:ih/1.15:(iw-iw/1.15)*0.5:(ih-ih/1.15)*0.5,"
+            f"{_color_match}"
             f"format=yuva420p[bv_faded]"
         )
     elif _effect == "ken_burns":
@@ -477,6 +481,7 @@ def compose_overlay(
             f"crop=iw/1.04:ih/1.04:"
             f"(iw-iw/1.04)*0.5*(t-{timestamp:.3f})/{duration:.3f}:"
             f"(ih-ih/1.04)*0.5*(t-{timestamp:.3f})/{duration:.3f},"
+            f"{_color_match}"
             f"format=yuva420p[bv_faded]"
         )
     
