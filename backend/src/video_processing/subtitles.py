@@ -519,8 +519,14 @@ def create_assemblyai_subtitles(
     video_height: int,
     template: Dict,
     font_path: str,
+    cumulative_offset: float = 0.0,
 ) -> List[Any]:
     """Create subtitles dispatching to the right animation based on template."""
+    if cumulative_offset != 0.0:
+        relevant_words = [
+            {**w, "start": w["start"] + cumulative_offset, "end": w["end"] + cumulative_offset}
+            for w in relevant_words
+        ]
     animation = template.get("animation", "none")
     if animation == "karaoke":
         return create_karaoke_subtitles(relevant_words, video_width, video_height, template, font_path)
