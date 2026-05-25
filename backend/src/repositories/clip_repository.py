@@ -176,7 +176,7 @@ class ClipRepository:
                 },
             )
         except Exception:
-            await db.rollback()
+            await db.execute(sa_text("ROLLBACK TO SAVEPOINT clip_sp"))
             result = await db.execute(
                 sa_text("""
                     INSERT INTO generated_clips
@@ -227,7 +227,7 @@ class ClipRepository:
                 {"task_id": task_id},
             )
         except Exception:
-            await db.rollback()
+            await db.execute(sa_text("ROLLBACK TO SAVEPOINT clip_sp"))
             result = await db.execute(
                 sa_text("""
                     SELECT id, filename, file_path, start_time, end_time, duration,
@@ -315,7 +315,7 @@ class ClipRepository:
             )
             await db.commit()
         except Exception as exc:
-            await db.rollback()
+            await db.execute(sa_text("ROLLBACK TO SAVEPOINT clip_sp"))
             logger.warning("Failed to persist creative_meta for clip %s: %s", clip_id, exc)
 
     @staticmethod
@@ -375,7 +375,7 @@ class ClipRepository:
                 {"clip_id": clip_id},
             )
         except Exception:
-            await db.rollback()
+            await db.execute(sa_text("ROLLBACK TO SAVEPOINT clip_sp"))
             result = await db.execute(
                 sa_text(
                     """
