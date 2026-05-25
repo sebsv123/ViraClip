@@ -1046,8 +1046,13 @@ class _ProcessorMixin:
                             if _ci.get("thumbnail_filename"):
                                 _saved_filenames.add(_ci["thumbnail_filename"])
                             if _ci.get("path"):
-                                _saved_filenames.add(Path(_ci["path"]).name)
-                                _saved_filenames.add(f"enhanced_{Path(_ci['path']).name}")
+                                _path_name = Path(_ci["path"]).name
+                                _saved_filenames.add(_path_name)
+                                # If path already has enhanced_ prefix, also protect the non-prefixed version
+                                if _path_name.startswith("enhanced_"):
+                                    _saved_filenames.add(_path_name[len("enhanced_"):])
+                                else:
+                                    _saved_filenames.add(f"enhanced_{_path_name}")
 
                     kept, removed = 0, 0
                     for f in clips_output_dir.iterdir():
@@ -1069,10 +1074,19 @@ class _ProcessorMixin:
                     logger.info(f"[CLEANUP] Source video deleted: {video_path}")
 
                 # Delete the entire task temp directory to prevent accumulation
+                # Only delete if it's different from clips_output_dir (where final clips live)
                 task_temp_dir = Path(self.config.temp_dir) / "clips" / task_id
                 if task_temp_dir.exists() and task_temp_dir != clips_output_dir:
                     shutil.rmtree(task_temp_dir, ignore_errors=True)
                     logger.info(f"[CLEANUP] Deleted task temp dir: {task_temp_dir}")
+                else:
+                    # Same dir as clips_output_dir — only remove non-clip temp files
+                    # (intermediate files like segments, pre-extracts, etc.)
+                    _temp_suffixes = {'.tmp', '.part', '.seg', '.pre', '.cache'}
+                    for _tf in clips_output_dir.iterdir():
+                        if _tf.is_file() and _tf.suffix.lower() in _temp_suffixes:
+                            _tf.unlink(missing_ok=True)
+                            logger.debug(f"[CLEANUP] Removed temp file: {_tf.name}")
 
                 # Also clean up exports folder to prevent duplicates appearing
                 exports_dir = Path("/app/exports/clips")
