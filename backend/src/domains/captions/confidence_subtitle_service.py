@@ -460,14 +460,31 @@ class ConfidenceSubtitleGenerator:
             SIMILARITY_CRITICAL_THRESHOLD = 0.30
 
             if original_words and realigned_words:
+                # Filter original_words to only include words within the clip's time range
+                # (clip_start to clip_start + estimated_duration). This prevents the
+                # similarity comparison from failing when the clip is a small segment
+                # of a much longer video.
+                _clip_end_est = clip_start + max(
+                    (w.get('end', 0) for w in realigned_words if w.get('end')),
+                    default=30.0
+                )
+                _filtered_orig = [
+                    w for w in original_words
+                    if w.get('start', 0) >= clip_start and w.get('end', 0) <= _clip_end_est
+                ]
+                if not _filtered_orig:
+                    _filtered_orig = original_words  # fallback to all words if filter yields empty
+
                 orig_text = ' '.join(
-                    w.get('word', w.get('text', '')) for w in original_words
+                    w.get('word', w.get('text', '')) for w in _filtered_orig
                 ).lower().strip()
                 new_text = ' '.join(w['word'] for w in realigned_words).lower().strip()
 
                 from difflib import SequenceMatcher
                 similarity = SequenceMatcher(None, orig_text, new_text).ratio()
-                logger.info(f"[RE-ALIGN] Similitud texto: {similarity:.1%}")
+                logger.info(f"[RE-ALIGN] Similitud texto: {similarity:.1%} "
+                           f"(clip_start={clip_start:.1f}s, orig_words={len(original_words)}, "
+                           f"filtered={len(_filtered_orig)}, realigned={len(realigned_words)})")
 
                 # ── RULE 1: Similitud criticamente baja (< 30%) ──────────────
                 # La re-transcripcion NO es fiable. Devolvemos las palabras
