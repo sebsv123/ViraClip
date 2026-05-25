@@ -489,6 +489,21 @@ export default function TaskPage() {
     [buildSupportError, params.id, taskApiUrl],
   );
 
+  // Poll task status every 3 seconds during processing/queued
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (!task) return;
+    if (task.status === "processing" || task.status === "queued") {
+      pollingRef.current = setInterval(() => {
+        void fetchTaskStatus();
+      }, 3000);
+    }
+    return () => {
+      if (pollingRef.current) clearInterval(pollingRef.current);
+    };
+  }, [task?.status, fetchTaskStatus]);
+
   // Initial fetch - runs immediately, doesn't wait for session
   useEffect(() => {
     if (!params.id) return;
