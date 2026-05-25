@@ -17,6 +17,138 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
+# ── Insurance keyword signals ────────────────────────────────────────────────
+# Used to detect insurance-domain keywords and enforce tag filtering.
+_INSURANCE_KEYWORD_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+_INSURANCE_TAG_SIGNALS: frozenset = frozenset({
+    "insurance", "policy", "claim", "coverage", "premium", "protection",
+    "family", "savings", "advisor", "consultation", "document", "signing",
+    "contract", "office", "medical", "health", "accident", "agent",
+    "broker", "financial", "retirement", "planning",
+})
+
+def _is_insurance_keyword(keyword: str) -> bool:
+    """Return True if the keyword contains insurance-domain concepts."""
+    kw = keyword.lower()
+    return any(sig in kw for sig in _INSURANCE_KEYWORD_SIGNALS)
+
+
 
 @dataclass
 class OverlayAsset:
@@ -91,8 +223,8 @@ class OverlayContentSource:
         if cached:
             return cached
         
-        # 2. Try Unsplash (photos only)
-        if self.unsplash_key and not prefer_video:
+        # 2. Try Unsplash (photos only) — skip for insurance keywords (no tag filtering available)
+        if self.unsplash_key and not prefer_video and not _is_insurance_keyword(keyword):
             unsplash_asset = await self._fetch_unsplash(keyword, category)
             if unsplash_asset:
                 return unsplash_asset
@@ -254,6 +386,24 @@ class OverlayContentSource:
                     image_url = photo.get("src", {}).get("large2x")
                     
                     if image_url:
+                        # ── Insurance tag gate ──────────────────────────────────────────
+                        # If keyword is insurance-domain, require at least 1 insurance
+                        # tag hit in the photo metadata before downloading.
+                        if _is_insurance_keyword(keyword):
+                            _alt = (photo.get("alt") or "").lower()
+                            _photographer = (photo.get("photographer") or "").lower()
+                            _tag_hit = any(
+                                sig in _alt or sig in _photographer
+                                for sig in _INSURANCE_TAG_SIGNALS
+                            )
+                            if not _tag_hit:
+                                logger.warning(
+                                    "[OverlaySource] PEXELS INSURANCE REJECT keyword='%s' — "
+                                    "insurance keyword but zero insurance tag hits in photo alt='%s'. "
+                                    "Rejecting to prevent generic portrait leak.",
+                                    keyword, _alt,
+                                )
+                                return None
                         downloaded = await self._download_file(image_url, keyword, "pexels")
                         if downloaded:
                             logger.info(f"Pexels: Downloaded image for '{keyword}'")
