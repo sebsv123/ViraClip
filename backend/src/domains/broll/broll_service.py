@@ -1891,6 +1891,9 @@ class BrollService:
     _BROLL_BLACKLIST_KEY = "broll:used_urls"
     _BROLL_BLACKLIST_MAX = 200
     _BROLL_BLACKLIST_TRIM = 50  # remove oldest 50 when over max
+    _DISCOURSE_WINDOW_S: float = 10.0  # seconds — typical speaking segment length
+    _DISCOURSE_WINDOW_S: float = 10.0  # seconds — typical speaking segment length
+    _DISCOURSE_WINDOW_S: float = 10.0  # seconds — typical speaking segment length
 
     async def _redis_add_url(self, url: str) -> None:
         """Add *url* to the global Redis B-roll blacklist ZSET with current timestamp."""
@@ -2562,7 +2565,7 @@ class BrollService:
         # Uses a 10s discourse window as a proxy for sentence boundaries.
         # Within each window, keep only the best-positioned cue (closest to
         # the window midpoint).
-        _DISCOURSE_WINDOW_S = 10.0
+        _DISCOURSE_WINDOW_S = self._DISCOURSE_WINDOW_S
         _discourse_grouped: List[Tuple[float, str, float]] = []
         _discourse_removed = 0
         _current_window_start = -_DISCOURSE_WINDOW_S
@@ -2749,7 +2752,7 @@ class BrollService:
         # Group cues that fall within the same speaking segment (~10s window).
         # Keep only the best-positioned cue per discourse window to avoid
         # micro-switching between unrelated concepts within a single thought.
-        _DISCOURSE_WINDOW_S = 10.0  # seconds — typical speaking segment length
+        _DISCOURSE_WINDOW_S = self._DISCOURSE_WINDOW_S
         _discourse_grouped: List[Tuple[float, str, float]] = []
         _discourse_removed = 0
         _current_window_start = -_DISCOURSE_WINDOW_S
