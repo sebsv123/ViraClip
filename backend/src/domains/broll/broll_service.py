@@ -2567,6 +2567,7 @@ class BrollService:
         _cooldown_removed = 0
         _last_concept = ""
         _last_concept_ts = -_CONCEPT_COOLDOWN
+        _cooldown_result: List[Tuple[float, str, float]] = []
         for ts, asset, dur in sorted_pairs:
             _concept = Path(asset).stem.lower().replace("_", " ").replace("-", " ")
             if _concept == _last_concept and ts - _last_concept_ts < _CONCEPT_COOLDOWN:
@@ -2921,7 +2922,7 @@ class BrollService:
         # Track dropped cues for "keep the better one" logic
         _dropped_for_gap: List[Tuple[float, str, float, float]] = []  # (ts, asset, dur, gap_to_prev)
         
-        for ts, asset, dur in _cooldown_result:
+        for ts, asset, dur in _continuity_result:
             # Early zone check: only allow if it reinforces the hook
             if ts < _EARLY_ZONE_END:
                 if _has_early_broll:
