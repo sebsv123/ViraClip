@@ -506,14 +506,6 @@ def get_words_in_range(words: List[Dict], start_time: float, end_time: float) ->
     ]
 
 
-def get_words_in_range(words: List[Dict], start_time: float, end_time: float) -> List[Dict]:
-    """Get words within a specific time range."""
-    return [
-        word for word in words
-        if word.get("start", 0) >= start_time and word.get("end", 0) <= end_time
-    ]
-
-
 def create_assemblyai_subtitles(
     relevant_words: List[Dict],
     video_width: int,
