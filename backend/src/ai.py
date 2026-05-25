@@ -584,6 +584,40 @@ def _normalize_segments_payload(data: dict) -> dict:
     return result
 
 
+
+def _normalize_segment(seg: dict) -> dict:
+    # 1. Remap timestamp aliases
+    if "startTimestamp" in seg and "start_time" not in seg:
+        seg["start_time"] = seg.pop("startTimestamp")
+    if "endTimestamp" in seg and "end_time" not in seg:
+        seg["end_time"] = seg.pop("endTimestamp")
+
+    # 2. Fix end_time <= start_time
+    VALID_HOOK_TYPES = {"question", "statement", "statistic", "story", "contrast", "none"}
+    MIN_CLIP_DURATION = 15  # segundos
+
+    try:
+        start = _parse_timestamp(seg.get("start_time", "00:00:00"))
+        end   = _parse_timestamp(seg.get("end_time",   "00:00:00"))
+        if end <= start:
+            seg["end_time"] = _format_timestamp(start + MIN_CLIP_DURATION)
+    except Exception:
+        pass
+
+    # 3. Normalize hook_type to valid literal
+    virality = seg.get("virality", {})
+    if isinstance(virality, dict):
+        raw_hook = virality.get("hook_type", "none").lower()
+        matched = next(
+            (h for h in VALID_HOOK_TYPES if h in raw_hook),
+            "none"
+        )
+        virality["hook_type"] = matched
+        seg["virality"] = virality
+
+    return seg
+
+
 async def get_validated_segments(
     transcript: str,
     video_duration: float,
@@ -672,6 +706,14 @@ async def get_validated_segments(
 
     # Step 4: parse with pydantic
     try:
+        # Normalize each raw segment before Pydantic validation
+        if isinstance(_parsed, dict) and "most_relevant_segments" in _parsed:
+            _parsed["most_relevant_segments"] = [
+                _normalize_segment(seg) if isinstance(seg, dict) else seg
+                for seg in _parsed["most_relevant_segments"]
+            ]
+            _clean = json.dumps(_parsed)
+
         analysis = TranscriptAnalysis.model_validate_json(_clean)
     except Exception as _parse_e:
         logger.error(
