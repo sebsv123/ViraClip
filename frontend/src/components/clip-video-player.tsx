@@ -66,7 +66,7 @@ export function ClipVideoPlayer({
   const [currentTime, setCurrentTime] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout>();
+  const controlsTimeoutRef = useRef<NodeJS.Timeout>(undefined);
   const [isLoaded, setIsLoaded] = useState(false);
 
   // Reset player state when collapsing

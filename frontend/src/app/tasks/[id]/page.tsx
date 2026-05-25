@@ -2057,6 +2057,7 @@ export default function TaskPage() {
               </AnimatePresence>
             </div>
             </div>
+          )}
           </div>
 
           <AlertDialog open={showDeleteDialog} onOpenChange={setShowDeleteDialog}>
@@ -2084,7 +2085,7 @@ export default function TaskPage() {
         clipId={suggestionStudioClipId}
         taskId={task?.id || ""}
         apiUrl={apiUrl}
-        sessionToken={session?.accessToken}
+        sessionToken={undefined}
       />
     </div>
     </>

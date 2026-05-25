@@ -42,7 +42,7 @@ export function VideoPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [copied, setCopied] = useState(false);
-  const controlsTimeoutRef = useRef<NodeJS.Timeout>();
+  const controlsTimeoutRef = useRef<NodeJS.Timeout>(undefined);
 
   useEffect(() => {
     const video = videoRef.current;

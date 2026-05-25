@@ -1,6 +1,6 @@
 "use client";
 
-import { Badge } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { TrendingUp, Flame, Sparkles, Target } from "lucide-react";
 

@@ -140,9 +140,11 @@ export function PropertiesPanel({
   onRemoveSfx,
 }: PropertiesPanelProps) {
   const selectedClip = state.clips.find((c) => c.id === state.selected_clip_id)
+  const sfxElement =
+    state.selected_element?.type === 'sfx' ? state.selected_element : null
   const selectedSfx =
-    state.selected_element?.type === 'sfx' && selectedClip
-      ? selectedClip.sfx_events.find((s) => s.id === state.selected_element.sfx_id)
+    sfxElement && selectedClip
+      ? selectedClip.sfx_events.find((s) => s.id === sfxElement.sfx_id)
       : null
 
   const [addSfxOpen, setAddSfxOpen] = useState(false)

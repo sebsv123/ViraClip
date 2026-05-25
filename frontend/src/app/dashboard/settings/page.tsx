@@ -205,7 +205,7 @@ export default function SettingsPage() {
             
             <div className="grid grid-cols-3 gap-4">
               <div className="text-center p-4 bg-gray-800 rounded-xl">
-                <div className="text-3xl font-bold text-cyan-400">{user?.clips_this_month || 0}</div>
+                <div className="text-3xl font-bold text-cyan-400">0</div>
                 <div className="text-sm text-gray-400 mt-1">Clips Created</div>
               </div>
               <div className="text-center p-4 bg-gray-800 rounded-xl">

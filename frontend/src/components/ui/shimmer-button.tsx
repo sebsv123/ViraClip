@@ -7,13 +7,17 @@ interface ShimmerButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
   children: React.ReactNode;
   className?: string;
   variant?: "default" | "secondary" | "outline";
+  size?: "sm" | "md" | "lg";
 }
 
 export function ShimmerButton({ 
   children, 
   className,
   variant = "default",
-  ...props 
+  size = "md",
+  disabled,
+  type = "button",
+  onClick,
 }: ShimmerButtonProps) {
   const sizes = {
     sm: "px-3 sm:px-4 py-2 text-xs sm:text-sm",
@@ -21,7 +25,7 @@ export function ShimmerButton({
     lg: "px-6 sm:px-8 py-3 sm:py-4 text-base sm:text-lg",
   };
 
-  const baseStyles = `relative overflow-hidden ${sizes.md} transition-all duration-300 touch-manipulation`;
+  const baseStyles = `relative overflow-hidden ${sizes[size]} transition-all duration-300 touch-manipulation`;
   
   const variants = {
     default: "bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white hover:from-violet-500 hover:to-fuchsia-500",
@@ -34,7 +38,9 @@ export function ShimmerButton({
       className={cn(baseStyles, variants[variant], className)}
       whileHover={{ scale: 1.02 }}
       whileTap={{ scale: 0.98 }}
-      {...props}
+      disabled={disabled}
+      type={type}
+      onClick={onClick}
     >
       <span className="relative z-10 flex items-center justify-center gap-2">
         {children}

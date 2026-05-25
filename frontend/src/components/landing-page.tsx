@@ -9,12 +9,20 @@ import {
   Menu,
   X,
 } from "lucide-react";
+import { isLandingOnlyModeEnabled } from "@/lib/app-flags";
 
 /* --- Types --- */
 
+interface Feature {
+  title: string;
+  description: string;
+  icon: React.ComponentType<{ size?: number }>;
+}
 
-
-
+interface Step {
+  title: string;
+  description: string;
+}
 
 /* --- Data --- */
 
@@ -177,7 +185,9 @@ export function LandingPage() {
                   onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.04)"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(255,255,255,0.02)"; }}
                 >
-                  <feature.icon size={20} style={{ color: "var(--accent)" }} />
+                  <span style={{ color: "var(--accent)", display: "inline-flex" }}>
+                    <feature.icon size={20} />
+                  </span>
                   <h3>{feature.title}</h3>
                   <p className="body-sm">{feature.description}</p>
                 </article>

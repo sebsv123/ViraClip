@@ -17,6 +17,8 @@ export interface TransitionConfig {
   semantic_category?: string
   morph_quality?: MorphQuality
   motion_blur?: boolean
+  // generado automáticamente o editado manualmente
+  source?: 'auto' | 'manual'
   // score del selector automático (read-only, informativo)
   auto_score?: {
     match_cut: number

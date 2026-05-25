@@ -873,7 +873,7 @@ export function SettingsPage() {
                     border: "1px solid rgba(36,40,44,1)",
                     background: "rgba(255,255,255,0.02)",
                     color: "#e2e4e7",
-                    transition: "background-color var
+                    transition: "background-color 0.2s ease"
                   }}
                 >
                   Update
