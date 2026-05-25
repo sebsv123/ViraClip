@@ -675,6 +675,47 @@ class BrollService:
         return merged
 
     @staticmethod
+    def _build_pexels_queries(keyword: str, transcript_context: str = "") -> List[str]:
+        """Build short visual Pexels queries from one keyword and transcript context."""
+        text = f"{keyword} {transcript_context}".lower()
+        priority_terms = [
+            "family", "home", "protection", "documents", "contract", "signing",
+            "office", "advisor", "consultation", "calculator", "savings",
+            "security", "handshake", "phone call", "laptop", "forms",
+            "certificate", "medical", "car", "accident",
+        ]
+        found = [term for term in priority_terms if term in text]
+
+        if "car" in found or "accident" in found:
+            action_query = "car accident insurance"
+        elif "medical" in found or "certificate" in found:
+            action_query = "medical consultation documents"
+        elif "phone call" in found or "laptop" in found:
+            action_query = "phone call laptop office"
+        else:
+            action_query = "signing documents office"
+
+        if any(term in found for term in ("family", "home", "protection", "security")):
+            context_query = "happy family home"
+        elif any(term in found for term in ("advisor", "consultation", "handshake")):
+            context_query = "advisor consultation handshake"
+        else:
+            context_query = "family protection"
+
+        primary_query = " ".join(found[:2]) if found else keyword
+        if "insurance" not in primary_query and any(term in text for term in ("insurance", "seguro", "póliza", "poliza")):
+            primary_query = f"{primary_query} insurance"
+
+        queries: List[str] = []
+        for query in (primary_query, action_query, context_query):
+            query = " ".join(str(query).split()[:4]).strip()
+            if query and query not in queries:
+                queries.append(query)
+            if len(queries) >= 3:
+                break
+        return queries or ["family insurance", "signing documents office", "happy family home"]
+
+    @staticmethod
     def _filter_insurance_keywords(keywords: List[str], is_insurance_content: bool) -> List[str]:
         """
         Harden b-roll keyword selection for insurance/finance content.
@@ -1059,8 +1100,7 @@ class BrollService:
         age_days = (_time.time() - path.stat().st_mtime) / 86400
         return age_days <= _CACHE_TTL_DAYS
 
-    async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None, used_urls: Optional[set] = None) -> Optional[Path]:
-        return []
+    async def fetch_broll_asset(self, keyword: str, video_path: Optional[str] = None, task_id: Optional[str] = None, used_urls: Optional[set] = None, transcript_context: str = "") -> Optional[Path]:
         """Fetch the most relevant B-roll asset for *keyword*.
 
         Strategy: controlled by BROLL_MODE env var:
@@ -1083,10 +1123,10 @@ class BrollService:
         _ltx_enabled = os.getenv("BROLL_USE_LTX", "false").lower() == "true"
         _comfy_enabled = os.getenv("COMFYUI_ENABLED", "false").lower() == "true"
         _comfy_timeout = int(os.getenv("BROLL_COMFYUI_TIMEOUT", "10"))
-        _try_generative = _broll_mode in ("hybrid", "generative") and _comfy_enabled and _ltx_enabled
+        _try_generative = False
         logger.info(
-            "[BRoll] Provider chain for '%s': BROLL_MODE=%s, ComfyUI/LTX=%s → Pexels → Coverr → Pixabay → Cache",
-            keyword, _broll_mode, _try_generative,
+            "[BRoll] Provider chain for '%s': BROLL_MODE=%s, synthetic_generation=disabled → Pexels → Coverr → Pixabay → Cache",
+            keyword, _broll_mode,
         )
         safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
         cached_video = self.broll_dir / f"{safe}.mp4"
@@ -1094,7 +1134,7 @@ class BrollService:
 
         _broll_timeout = int(os.getenv("BROLL_TIMEOUT_SECONDS", "30"))
 
-        # ── 0. ComfyUI/LTX-Video generation (BROLL_MODE=hybrid|generative) ───
+        # ── 0. ComfyUI/LTX-Video generation disabled: use real stock footage only.
         if _try_generative and task_id:
 
             # Try to acquire Redis lock (max 1 concurrent ComfyUI process)
@@ -1157,14 +1197,14 @@ class BrollService:
                     except Exception:
                         pass
 
-        # ── 1. Stock video APIs: Pexels + Coverr + Pixabay con rotación ──────
-        # Alternate primary source per keyword call to avoid visual monotony.
+        # ── 1. Stock video APIs: prioritize Pexels portrait, then Coverr/Pixabay ─
         global _BROLL_SOURCE_ROTATION
         _BROLL_SOURCE_ROTATION += 1
-        _primary_source = _BROLL_SOURCE_ROTATION % 3  # 0=Pexels, 1=Coverr, 2=Pixabay
+        pexels_queries = self._build_pexels_queries(keyword, transcript_context)
+        logger.info("[BRoll] Pexels query set for '%s': %s", keyword, pexels_queries)
 
         # Launch all searches in parallel
-        pexels_task  = asyncio.create_task(self._search_pexels(keyword))
+        pexels_task  = asyncio.create_task(self._search_pexels_queries(pexels_queries, transcript_context))
         coverr_task  = asyncio.create_task(self._search_coverr(keyword))
         pixabay_task = asyncio.create_task(self._search_pixabay(keyword))
 
@@ -1177,8 +1217,6 @@ class BrollService:
             "pixabay": results[2] if isinstance(results[2], str) else None,
         }
         _source_order = ["pexels", "coverr", "pixabay"]
-        # Rotate: put primary source first
-        _source_order = _source_order[_primary_source:] + _source_order[:_primary_source]
 
         video_urls = []
         _used_source = None
@@ -1209,7 +1247,11 @@ class BrollService:
                 return result
 
         # ── 2. Fallback: Pexels Photos API (static image) ─────────────────────
-        photo = await self._search_pexels_photos_and_download(keyword, safe)
+        photo = None
+        for query in pexels_queries:
+            photo = await self._search_pexels_photos_and_download(query, safe)
+            if photo:
+                break
         if photo:
             logger.info(f"[BRoll] API → downloaded photo for '{keyword}': {photo.name}")
             return photo
@@ -1484,12 +1526,13 @@ class BrollService:
         all_candidates.sort(key=lambda x: x[0], reverse=True)
         best_score, best_url, best_label = all_candidates[0]
 
-        # ── Minimum score threshold: reject candidates with score < 0.40 ──
+        # ── Minimum score threshold: Pexels metadata is generic, so keep weak
+        # but plausible insurance stock matches instead of forcing synthetic fallback.
         # A score-0.0 candidate has no keyword overlap, wrong orientation,
         # or wrong duration — it would produce unrelated B-roll.
-        if best_score < 0.40:
+        if best_score < 0.15:
             logger.warning(
-                "[BrollGate] PEXELS REJECT query='%s' best_score=%.3f < 0.40 — "
+                "[BrollGate] PEXELS REJECT query='%s' best_score=%.3f < 0.15 — "
                 "no suitable candidate found (evaluated %d)",
                 query, best_score, len(all_candidates),
             )
@@ -1499,6 +1542,91 @@ class BrollService:
             "[BROLL] Best match for '%s': score=%.3f from %s — %s... "
             "(evaluated %d candidates)",
             query, best_score, best_label, best_url[:60], len(all_candidates),
+        )
+        return best_url
+
+    async def _search_pexels_queries(self, queries: List[str], transcript_context: str = "") -> Optional[str]:
+        """Search Pexels with multiple short portrait queries and score them together."""
+        if not _PEXELS_KEYS:
+            logger.warning("[BRoll] No Pexels API keys configured")
+            return None
+
+        all_candidates: List[Tuple[float, str, str]] = []
+        for query in queries[:3]:
+            for attempt in range(len(_PEXELS_KEYS)):
+                key = _get_next_pexels_key()
+                key_index = (_PEXELS_KEY_INDEX - 1) % len(_PEXELS_KEYS)
+                try:
+                    async with httpx.AsyncClient(timeout=BROLL_HTTP_TIMEOUT) as client:
+                        resp = await client.get(
+                            "https://api.pexels.com/videos/search",
+                            headers={"Authorization": key},
+                            params={"query": query, "per_page": 6, "orientation": "portrait"},
+                        )
+                        if resp.status_code in (429, 401):
+                            logger.warning(f"[BROLL_PROVIDER] pexels_key_{key_index} returned {resp.status_code} — skipping")
+                            continue
+                        resp.raise_for_status()
+                        videos = resp.json().get("videos", [])
+                        logger.info(
+                            "[BROLL] Query='%s' for transcript='%s' → %d portrait results found",
+                            query, transcript_context[:60], len(videos),
+                        )
+                        for vid in videos:
+                            score = self._score_pexels_candidate(
+                                vid, query, transcript_context,
+                                target_duration=6.0,
+                            )
+                            best_url = None
+                            best_label = None
+                            portrait_files = [
+                                vf for vf in vid.get("video_files", [])
+                                if vf.get("height", 0) > vf.get("width", 0)
+                                and vf.get("file_type") == "video/mp4"
+                            ]
+                            files = portrait_files or [
+                                vf for vf in vid.get("video_files", [])
+                                if vf.get("file_type") == "video/mp4"
+                            ]
+                            if files:
+                                best_file = sorted(
+                                    files,
+                                    key=lambda vf: vf.get("height", 0) or 0,
+                                    reverse=True,
+                                )[0]
+                                best_url = best_file.get("link")
+                                best_label = (
+                                    f"pexels_key_{key_index}:portrait"
+                                    if portrait_files
+                                    else f"pexels_key_{key_index}:fallback"
+                                )
+                            if best_url:
+                                all_candidates.append((score, best_url, f"{best_label}:{query}"))
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code in (429, 401):
+                        logger.warning(f"[BROLL_PROVIDER] pexels_key_{key_index} returned {e.response.status_code} — skipping")
+                        continue
+                    logger.warning(f"[BROLL_PROVIDER] pexels_key_{key_index} error: {e}")
+                except Exception as e:
+                    logger.warning(f"[BROLL_PROVIDER] pexels_key_{key_index} error: {e}")
+
+        if not all_candidates:
+            logger.warning("[BRoll] Pexels returned no candidates for queries=%s", queries)
+            return None
+
+        all_candidates.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_url, best_label = all_candidates[0]
+        if best_score < 0.15:
+            logger.warning(
+                "[BrollGate] PEXELS REJECT queries=%s best_score=%.3f < 0.15 — "
+                "no suitable candidate found (evaluated %d)",
+                queries, best_score, len(all_candidates),
+            )
+            return None
+
+        logger.info(
+            "[BROLL] Best Pexels match score=%.3f from %s — %s... (evaluated %d candidates)",
+            best_score, best_label, best_url[:60], len(all_candidates),
         )
         return best_url
 
@@ -2336,7 +2464,7 @@ class BrollService:
         _MAX_COVERAGE = 0.40  # max 40% of clip covered by B-roll
         # ── HARD RULES (enforced before all other rules) ──────────────────────
         _MIN_CUE_DURATION = 3.0       # Rule A: reject cues shorter than 3s
-        _SEMANTIC_THRESHOLD = 0.35    # Rule B: reject cues below semantic score
+        _SEMANTIC_THRESHOLD = 0.15    # Rule B: reject cues below semantic score
         _CONCEPT_COOLDOWN = 8.0       # Rule D: block same concept within 8s
         _MAX_PER_5S_WINDOW = 1        # Rule E: max 1 cue per 5s window
         
@@ -4935,57 +5063,13 @@ class BrollService:
                     _before, _fallback_reason, clip_duration,
                 )
 
-            # ── Step 1: GPU T2V generation ──
+            # ── Step 1: GPU T2V generation (DISABLED — prefer real stock footage) ──
             if _fallback_assets_empty:
-                try:
-                    from .t2v_broll_service import T2VBrollService
-                    if T2VBrollService.is_available():
-                        _t2v = T2VBrollService()
-                        _t2v_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
-                        _t2v_out = self.broll_dir / f"t2v_{'_'.join(keywords[:1])}.mp4"
-                        _t2v_res = await _t2v.generate(
-                            prompt=_t2v_prompt,
-                            duration=_BROLL_DURATION,
-                            output_path=str(_t2v_out),
-                        )
-                        if _t2v_res and _t2v_out.exists():
-                            broll_assets.append(_t2v_out)
-                            logger.info(
-                                "[BRoll/Fallback] ✓ Step 1 (T2V): generated B-Roll for: %s",
-                                _t2v_prompt[:40],
-                            )
-                            _fallback_assets_empty = False
-                except Exception as _t2v_e:
-                    logger.debug("[BRoll/Fallback] Step 1 (T2V) skipped: %s", _t2v_e)
+                logger.debug("[BRoll/Fallback] Step 1 (T2V): disabled — skipping synthetic generation")
 
-            # ── Step 2: ComfyUI LTX-Video generation ──
+            # ── Step 2: ComfyUI LTX-Video generation (DISABLED — prefer real stock footage) ──
             if _fallback_assets_empty and COMFYUI_ENABLED:
-                try:
-                    _gen_prompt = ", ".join(keywords[:2]) if keywords else segment_text[:50]
-                    _task_ns = f"brollgen_{'_'.join(keywords[:1]) or 'fallback'}"
-                    _gen_result = await comfyui_integration.process_with_comfyui(
-                        task_id=_task_ns,
-                        video_path=None,
-                        operation="broll_generate",
-                        prompt=f"cinematic B-roll footage of {_gen_prompt}, smooth motion, 9:16 vertical",
-                        duration=_BROLL_DURATION,
-                        width=608,
-                        height=1088,
-                    )
-                    if _gen_result and Path(_gen_result).exists():
-                        _gen_out = self.broll_dir / f"gen_{'_'.join(keywords[:1]) or 'fallback'}.mp4"
-                        try:
-                            shutil.copy2(_gen_result, _gen_out)
-                        except Exception:
-                            _gen_out = Path(_gen_result)
-                        broll_assets.append(_gen_out)
-                        logger.info(
-                            "[BRoll/Fallback] ✓ Step 2 (LTX-Video): generated B-Roll for: %s",
-                            _gen_prompt[:40],
-                        )
-                        _fallback_assets_empty = False
-                except Exception as _gen_e:
-                    logger.debug("[BRoll/Fallback] Step 2 (LTX-Video) skipped: %s", _gen_e)
+                logger.debug("[BRoll/Fallback] Step 2 (LTX-Video): disabled — skipping synthetic generation")
 
             # ── Step 3: Insurance-specific overlay (for insurance/finance content) ──
             if _fallback_assets_empty:

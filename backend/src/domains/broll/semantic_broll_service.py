@@ -204,13 +204,33 @@ class SemanticBrollService:
         if best_match:
             logger.info(f"Best semantic match: {best_score:.3f} for '{transcript_segment[:50]}...'")
         
+        # Keyword fallback: if embedding score is below threshold but we have
+        # keyword overlap, boost the score to avoid rejecting all Pexels results
+        # (Pexels titles are generic and score low with all-MiniLM-L6-v2)
+        if best_score < 0.15 and best_match:
+            _seg_lower = transcript_segment.lower()
+            _title_lower = (best_match.title or "").lower()
+            _tags_lower = " ".join(best_match.tags or []).lower()
+            _combined = _title_lower + " " + _tags_lower
+            
+            # Count keyword overlap
+            _keywords = set(w for w in _seg_lower.split() if len(w) > 3)
+            _asset_words = set(w for w in _combined.split() if len(w) > 3)
+            _overlap = _keywords & _asset_words
+            
+            if len(_overlap) >= 1:
+                # Boost score based on overlap ratio
+                _boost = min(0.20, len(_overlap) * 0.05)
+                best_score = max(best_score, _boost)
+                logger.info(f"  Keyword fallback boost: {_overlap} → score={best_score:.3f}")
+        
         return best_match, best_score
     
     async def find_broll_for_segment(
         self,
         transcript_segment: str,
         segment_duration: float = 15.0,
-        min_semantic_score: float = 0.5,
+        min_semantic_score: float = 0.15,
         used_urls: Optional[set] = None
     ) -> Optional[Dict]:
         """
@@ -228,18 +248,14 @@ class SemanticBrollService:
         if used_urls is None:
             used_urls = set()
         
-        # Extract keywords from transcript for initial search
-        search_query = self._extract_keywords(transcript_segment)
-        
-        # Search Pexels
-        videos = await self.search_videos(search_query, per_page=15)
-        
-        if not videos:
-            # Fallback: search with full text (truncated)
-            videos = await self.search_videos(
-                transcript_segment[:50], 
-                per_page=10
-            )
+        # Search Pexels with short visual queries, then combine before scoring.
+        search_queries = self._extract_search_queries(transcript_segment)
+        videos_by_id: Dict[int, PexelsVideo] = {}
+        for search_query in search_queries:
+            for video in await self.search_videos(search_query, per_page=10, orientation="portrait"):
+                videos_by_id.setdefault(video.id, video)
+
+        videos = list(videos_by_id.values())
         
         if not videos:
             return None
@@ -263,12 +279,56 @@ class SemanticBrollService:
                 "pexels_id": best_video.id,
                 "duration": min(segment_duration, best_video.duration),
                 "semantic_score": score,
-                "search_query": search_query,
+                "search_query": search_queries[0] if search_queries else "",
+                "search_queries": search_queries,
                 "matched_text": transcript_segment[:100],
                 "source": "pexels_semantic"
             }
         
         return None
+
+    def _extract_search_queries(self, text: str) -> List[str]:
+        """Build three short, visual Pexels queries from transcript context."""
+        primary = self._extract_keywords(text)
+        text_lower = text.lower()
+
+        priority_terms = [
+            "family", "home", "protection", "documents", "contract", "signing",
+            "office", "advisor", "consultation", "calculator", "savings",
+            "security", "handshake", "phone call", "laptop", "forms",
+            "certificate", "medical", "car", "accident",
+        ]
+        found = [term for term in priority_terms if term in primary.lower() or term in text_lower]
+
+        if any(term in found for term in ("car", "accident")):
+            action = "car accident insurance"
+        elif any(term in found for term in ("medical", "certificate")):
+            action = "medical consultation documents"
+        elif any(term in found for term in ("phone call", "laptop")):
+            action = "phone call laptop office"
+        else:
+            action = "signing documents office"
+
+        if any(term in found for term in ("home", "family", "protection", "security")):
+            emotion = "happy family home"
+        elif any(term in found for term in ("advisor", "consultation", "handshake")):
+            emotion = "advisor consultation handshake"
+        else:
+            emotion = "family protection"
+
+        queries = [primary, action, emotion]
+        if found:
+            queries.insert(0, " ".join(found[:2]))
+
+        unique: List[str] = []
+        for query in queries:
+            query = " ".join(query.split()[:4]).strip()
+            if query and query not in unique:
+                unique.append(query)
+            if len(unique) >= 3:
+                break
+        logger.info("[SemanticBroll] Pexels queries: %s", unique)
+        return unique or ["family insurance", "signing documents office", "happy family home"]
     
     def _extract_keywords(self, text: str) -> str:
         """Extract insurance-native + emotional search queries for Pexels.
@@ -410,7 +470,7 @@ class SemanticBrollService:
     async def batch_find_broll(
         self,
         segments: List[Dict[str, Any]],
-        min_semantic_score: float = 0.3,
+        min_semantic_score: float = 0.15,
         used_urls: Optional[set] = None
     ) -> List[Optional[Dict]]:
         """Find B-roll for multiple segments in parallel.
