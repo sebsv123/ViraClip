@@ -326,6 +326,7 @@ def normalize_broll(
             _get_ffmpeg_exe(), "-y",
             "-hwaccel", "none",
             *loop_flag,
+            "-ss", f"{_stable_start:.3f}",
             "-i", str(broll_path),
             "-t", str(duration),
             "-vf", f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,crop={target_w}:{target_h},setsar=1",
