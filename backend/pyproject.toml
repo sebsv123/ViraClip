@@ -135,19 +135,7 @@ name = "pytorch-cu132"
 url = "https://download.pytorch.org/whl/cu132"
 explicit = true
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-asyncio_default_fixture_loop_scope = "session"
-testpaths = ["tests"]
-markers = [
-    "integration: marks tests requiring real external services (Redis, DB)",
-    "unit: fast isolated tests with no external dependencies",
-    "slow: tests taking longer than 5s",
-    "performance: marks performance/benchmark tests",
-    "stress: marks stress/load tests",
-]
-addopts = """
---cov=src.auth_headers
+
 --cov=src.services.billing_service
 --cov-report=term-missing
 --cov-report=html
