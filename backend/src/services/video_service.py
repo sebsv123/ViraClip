@@ -2582,6 +2582,11 @@ class VideoService:
             "value_score": segment.get("value_score", 0),
             "shareability_score": segment.get("shareability_score", 0),
             "hook_type": segment.get("hook_type"),
+            "editorial_type": segment.get("editorial_type"),
+            "matched_patterns": segment.get("matched_patterns", []),
+            "vpi_score": segment.get("vpi_score"),
+            "vpi_reason": segment.get("vpi_reason"),
+            "suggested_broll_cue_type": segment.get("suggested_broll_cue_type"),
             "social_title": segment.get("suggested_title"),
             "suggested_hashtags": viral_meta.get("hashtags") or segment.get("suggested_hashtags", []),
             "seo_title":          viral_meta.get("title") or segment.get("suggested_title", ""),
@@ -3021,6 +3026,12 @@ class VideoService:
                 "moment_type",
                 "hook_quote",
                 "editorial_score",
+                "editorial_type",
+                "matched_patterns",
+                "vpi_score",
+                "vpi_reason",
+                "vpi_generic_penalty",
+                "suggested_broll_cue_type",
                 "standalone_clarity_score",
                 "completion_score",
                 "insurance_relevance_score",
@@ -3053,7 +3064,7 @@ class VideoService:
                     return _clamp01(score / 10.0)
                 return _clamp01(score / 100.0)
 
-            def _compute_final_rank_score(seg: Dict[str, Any]) -> float:
+            def _compute_base_rank_score(seg: Dict[str, Any]) -> float:
                 editorial = _safe_float(seg.get("editorial_score"))
                 virality = _normalized_virality(seg.get("virality_score"))
 
@@ -3066,6 +3077,17 @@ class VideoService:
                 if virality is not None:
                     return virality
                 return 0.0
+
+            def _compute_final_rank_score(seg: Dict[str, Any]) -> float:
+                base = _compute_base_rank_score(seg)
+                vpi_score = _safe_float(seg.get("vpi_score"))
+                generic_penalty = _safe_float(seg.get("vpi_generic_penalty")) or 0.0
+                if vpi_score is None:
+                    return base
+
+                vpi_boost = _clamp01(vpi_score / 100.0) * 0.35
+                penalty = _clamp01(generic_penalty / 100.0) * 0.15
+                return _clamp01(base + vpi_boost - penalty)
 
             def _extract_editorial_fields(src: Any) -> Dict[str, Any]:
                 data: Dict[str, Any] = {}
@@ -3086,8 +3108,47 @@ class VideoService:
                         data[field] = value
                 return data
 
+            _vpi_scorer = None
+            if get_service_config().beta_clean:
+                try:
+                    from .vpi_editorial_scorer import VPIEditorialScorer
+                    _vpi_scorer = VPIEditorialScorer()
+                except Exception as _vpi_import_e:
+                    logger.warning("[vpi-scorer] unavailable: %s", _vpi_import_e)
+
+            def _apply_vpi_score(seg: Dict[str, Any]) -> Dict[str, Any]:
+                if _vpi_scorer is None:
+                    return seg
+
+                scored = _vpi_scorer.score(seg.get("text", ""))
+                seg["vpi_score"] = scored.vpi_score
+                seg["matched_patterns"] = scored.matched_patterns
+                seg["editorial_type"] = scored.editorial_type
+                seg["vpi_reason"] = scored.reason
+                seg["vpi_generic_penalty"] = scored.generic_penalty
+                if scored.suggested_broll_cue_type:
+                    seg["suggested_broll_cue_type"] = scored.suggested_broll_cue_type
+
+                logger.info(
+                    "[vpi-scorer] segment=%s→%s type=%s boost=%.2f patterns=%s",
+                    seg.get("start_time", "?"),
+                    seg.get("end_time", "?"),
+                    scored.editorial_type,
+                    scored.vpi_score,
+                    ",".join(scored.matched_patterns[:5]) or "-",
+                )
+                return seg
+
             def _apply_final_rank(seg: Dict[str, Any]) -> Dict[str, Any]:
+                base = _compute_base_rank_score(seg)
                 seg["final_rank_score"] = _compute_final_rank_score(seg)
+                if seg.get("vpi_score") is not None:
+                    logger.info(
+                        "[vpi-scorer] final_score=%.3f base=%.3f vpi=%.2f",
+                        seg["final_rank_score"],
+                        base,
+                        _safe_float(seg.get("vpi_score")) or 0.0,
+                    )
                 return seg
 
             def _dedupe_editorial_segments(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -3185,6 +3246,7 @@ class VideoService:
                         "elite_metadata": elite_data.model_dump() if elite_data else None,
                     }
                     item.update(_extract_editorial_fields(segment))
+                    _apply_vpi_score(item)
                     segments_json.append(_apply_final_rank(item))
                 else:
                     v_info = virality_map.get(idx, {})
@@ -3215,6 +3277,7 @@ class VideoService:
                         "elite_metadata": elite_data.model_dump() if elite_data else None,
                     }
                     item.update(_extract_editorial_fields(segment))
+                    _apply_vpi_score(item)
                     segments_json.append(_apply_final_rank(item))
 
             propagated = sorted({field for seg in segments_json for field in _editorial_fields if field in seg})
@@ -3256,6 +3319,8 @@ class VideoService:
                         "split_screen": split_screen,
                         "elite_metadata": None,
                     })
+                    _apply_vpi_score(segments_json[-1])
+                    _apply_final_rank(segments_json[-1])
                 logger.info(
                     f"[SEGMENT-PAD] Now have {len(segments_json)} segments after padding"
                 )

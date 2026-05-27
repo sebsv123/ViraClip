@@ -1037,6 +1037,11 @@ class TaskService:
                         "clip_end": clip_info.get("end_time", ""),
                         "duration": clip_info.get("duration", 0),
                         "virality_score": clip_info.get("virality_score", 0),
+                        "editorial_type": clip_info.get("editorial_type"),
+                        "matched_patterns": clip_info.get("matched_patterns", []),
+                        "vpi_score": clip_info.get("vpi_score"),
+                        "vpi_reason": clip_info.get("vpi_reason"),
+                        "suggested_broll_cue_type": clip_info.get("suggested_broll_cue_type"),
                         "caption_source": "cached_words" if clip_info.get("words") else "fallback",
                         "broll": _broll_info,
                         "created_at": _vpi_dt.now().isoformat(),
@@ -1125,6 +1130,11 @@ class TaskService:
                             "end_time": _ci.get("end_time", ""),
                             "duration": _ci.get("duration", 0),
                             "virality_score": _ci.get("virality_score", 0),
+                            "editorial_type": _ci.get("editorial_type"),
+                            "matched_patterns": _ci.get("matched_patterns", []),
+                            "vpi_score": _ci.get("vpi_score"),
+                            "vpi_reason": _ci.get("vpi_reason"),
+                            "suggested_broll_cue_type": _ci.get("suggested_broll_cue_type"),
                             "clip_health": _ci.get("clip_health", {}),
                             "caption_source": "cached_words" if _ci.get("words") else "fallback",
                             "broll": _ci.get("editorial_broll") or [],
@@ -1141,6 +1151,11 @@ class TaskService:
                         ]
                         _ts_data["output_paths"].extend(_ts_clip["output_paths"])
                         _ts_data["clips"].append(_ts_clip)
+                        logger.info(
+                            "[task-summary] vpi editorial_type=%s vpi_score=%s",
+                            _ts_clip.get("editorial_type"),
+                            _ts_clip.get("vpi_score"),
+                        )
                         logger.info("[task-summary] caption_source=%s", _ts_clip["caption_source"])
                         for _broll_item in _ts_clip["broll"]:
                             logger.info(
@@ -1174,6 +1189,10 @@ class TaskService:
                             f"",
                             f"- **Segment:** {_ts_clip['start_time']} → {_ts_clip['end_time']} ({_ts_clip['duration']}s)",
                             f"- **Virality score:** {_ts_clip['virality_score']}",
+                            f"- **VPI editorial type:** `{_ts_clip.get('editorial_type')}`",
+                            f"- **VPI score:** `{_ts_clip.get('vpi_score')}`",
+                            f"- **VPI patterns:** `{', '.join(_ts_clip.get('matched_patterns') or [])}`",
+                            f"- **VPI reason:** {_ts_clip.get('vpi_reason')}",
                             f"- **Caption source:** {_ts_clip['caption_source']}",
                             f"- **Output path:** `{_ts_clip['output_path']}`",
                             f"- **Organized output:** `{_ts_clip['organized_output_path']}`",
