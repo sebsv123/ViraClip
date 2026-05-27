@@ -1841,6 +1841,7 @@ class VideoService:
                     precomputed_keywords=None,
                     broll_fade_s=0.6,
                     task_id=task_id,
+                    suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
                 )
                 if Path(_broll_result).exists() and _broll_result != str(output_path):
                     output_path = Path(_broll_result)

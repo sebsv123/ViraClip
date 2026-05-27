@@ -1,10 +1,13 @@
 """Local heuristic planner for insurance-first editorial B-roll cues."""
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,6 +28,16 @@ class BrollCueDecision:
 class EditorialBrollPlanner:
     """Plan sober, local B-roll cues for Spanish insurance/finance clips."""
 
+    # Map suggested_broll_cue_type from VPI scorer to local asset categories.
+    _CUE_ALIASES: Dict[str, str] = {
+        "documents_admin": "documents_admin",
+        "emotional_reassurance": "emotional_reassurance",
+        "family_protection": "family_protection",
+        "financial_planning": "financial_planning",
+        "risk_warning": "risk_warning",
+        "explain_coverage": "documents_admin",
+    }
+
     _PATTERNS: Dict[str, Tuple[str, ...]] = {
         "emotional_reassurance": (
             "calma",
@@ -33,6 +46,11 @@ class EditorialBrollPlanner:
             "paz",
             "para ti y los tuyos",
             "los tuyos",
+            "proteger",
+            "proteccion",
+            "miedo",
+            "conviene proteger",
+            "organizacion",
         ),
         "lifestyle_health": (
             "estilo de vida saludable",
@@ -52,6 +70,10 @@ class EditorialBrollPlanner:
             "fallecimiento",
             "incapacidad",
             "enfermedad grave",
+            "te pasa algo",
+            "si faltas",
+            "desprotegido",
+            "desprotegida",
         ),
         "explain_coverage": (
             "cobertura",
@@ -63,6 +85,8 @@ class EditorialBrollPlanner:
             "indemnizacion",
             "carencia",
             "exclusion",
+            "seguro de vida",
+            "seguros de vida",
         ),
         "documents_admin": (
             "documentos",
@@ -72,6 +96,15 @@ class EditorialBrollPlanner:
             "recibo",
             "condiciones",
             "letra pequena",
+            "poliza",
+            "documentacion",
+            "contratar",
+            "personas mayores",
+            "mas adelante",
+            "por la edad",
+            "no es solo para",
+            "la realidad es que",
+            "no suele tener sentido",
         ),
         "family_protection": (
             "familia",
@@ -80,6 +113,10 @@ class EditorialBrollPlanner:
             "hogar",
             "proteccion familiar",
             "proteger a tu familia",
+            "dependen de ti",
+            "personas que dependen",
+            "sosteniendo",
+            "estructura",
         ),
         "financial_planning": (
             "ahorro",
@@ -89,6 +126,10 @@ class EditorialBrollPlanner:
             "pagos",
             "economia",
             "presupuesto",
+            "responsabilidad",
+            "capital",
+            "prima",
+            "proyecto",
         ),
         "revelation_hook": (
             "esto mucha gente no lo sabe",
@@ -143,6 +184,7 @@ class EditorialBrollPlanner:
         clip_duration: float,
         word_timestamps: Optional[Sequence[Dict[str, Any]]] = None,
         max_cues: Optional[int] = None,
+        suggested_broll_cue_type: Optional[str] = None,
     ) -> List[BrollCueDecision]:
         text = self._segments_to_text(transcript_segments)
         normalized = self._normalize(text)
@@ -163,6 +205,17 @@ class EditorialBrollPlanner:
         cue_limit = max_cues if max_cues is not None else self._default_max_cues(clip_duration)
         cue_limit = max(0, min(cue_limit, self._default_max_cues(clip_duration)))
         matches = self._find_matches(normalized)
+
+        # ── Use suggested_broll_cue_type from VPI scorer as strong signal ──
+        if suggested_broll_cue_type:
+            _mapped = self._CUE_ALIASES.get(suggested_broll_cue_type, suggested_broll_cue_type)
+            if _mapped in self._PATTERNS and not any(m[0] == _mapped for m in matches):
+                matches.append((_mapped, f"suggested:{suggested_broll_cue_type}", 0))
+                logger.info(
+                    "[editorial-broll] added suggested cue type=%s (mapped from %s)",
+                    _mapped, suggested_broll_cue_type,
+                )
+
         if not matches:
             return [
                 self._decision(

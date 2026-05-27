@@ -700,6 +700,7 @@ class BrollService:
         precomputed_keywords: Optional[List[str]] = None,
         broll_fade_s: float = 0.25,
         task_id: Optional[str] = None,
+        suggested_broll_cue_type: Optional[str] = None,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
@@ -724,6 +725,7 @@ class BrollService:
                 clip_duration=clip_duration or probe_duration(video_path),
                 word_timestamps=words_with_timestamps,
                 max_cues=max_overlays,
+                suggested_broll_cue_type=suggested_broll_cue_type,
             )
             approved_cues: List[BrollCueDecision] = [
                 cue for cue in cue_decisions
