@@ -945,6 +945,34 @@ class TaskService:
                 save_progress = 91 + int((saved_clips / max(1, total_clips - len(failed_clips))) * 4)
                 await update_progress(save_progress, f"Saving clip {saved_clips}/{total_clips - len(failed_clips)}...")
 
+                # ── VPI editorial metadata ──────────────────────────────
+                _vpi_meta = {}
+                if segment.get("vpi_score") is not None:
+                    _vpi_meta = {
+                        "vpi": {
+                            "editorial_type": segment.get("editorial_type"),
+                            "vpi_score": segment.get("vpi_score"),
+                            "matched_patterns": segment.get("matched_patterns", []),
+                            "vpi_reason": segment.get("vpi_reason"),
+                            "suggested_broll_cue_type": segment.get("suggested_broll_cue_type"),
+                            "final_rank_score": segment.get("final_rank_score"),
+                            "editorial_score": segment.get("editorial_score"),
+                            "virality_score": segment.get("virality_score"),
+                        }
+                    }
+                # Merge with existing variants_json (preserve previous content)
+                _existing_variants = clip_info.get("variants") or {}
+                if isinstance(_existing_variants, str):
+                    try:
+                        _existing_variants = __import__("json").loads(_existing_variants)
+                    except Exception:
+                        _existing_variants = {}
+                _merged_variants = {**_existing_variants, **_vpi_meta}
+                _variants_json_str = (
+                    __import__("json").dumps(_merged_variants)
+                    if _merged_variants else None
+                )
+
                 # Save to DB immediately so SSE can deliver it
                 clip_id = await self.clip_repo.create_clip(
                     self.db,
@@ -978,10 +1006,7 @@ class TaskService:
                     # Phase 10: viral polish
                     cta_overlay_applied=clip_info.get("cta_overlay_applied", False),
                     emoji_overlays_applied=clip_info.get("emoji_overlays_applied", False),
-                    variants_json=(
-                        __import__("json").dumps(clip_info["variants"])
-                        if clip_info.get("variants") else None
-                    ),
+                    variants_json=_variants_json_str,
                 )
                 await self.db.commit()
                 clip_ids.append(clip_id)
