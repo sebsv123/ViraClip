@@ -717,6 +717,7 @@ class VideoCoordinator:
 
                 # Phase 9: Creative Engine — enhance clip with timeline-driven effects
                 _words_for_editor = list(clip.get("words") or [])
+                _beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}
 
                 creative_meta: dict = {}
                 try:
@@ -777,7 +778,10 @@ class VideoCoordinator:
                         logger.debug("Caption service skipped clip %d: %s", index, _cap_e)
 
                 # ── Hook visual overlay (texto primeros 3s) ───────────────────────────
-                if self.config.get("add_hook_visual", True):
+                if _beta_clean:
+                    logger.info("[beta-clean] HookVisualService skipped")
+                    logger.info("[beta-clean] top text overlay skipped")
+                elif self.config.get("add_hook_visual", True):
                     try:
                         from .hook_visual_service import add_hook_overlay_to_clip as _add_hook
                         _hook_in = _Path(clip["path"])
@@ -828,54 +832,58 @@ class VideoCoordinator:
                         logger.debug("LUT skipped clip %d: %s", index, _lut_e)
 
                 # Smart Auto-Editor — viral keyword analysis + TEXT_POP overlay application
-                try:
-                    from .smart_auto_editor import SmartAutoEditor
-                    _editor = SmartAutoEditor()
-                    _transcript = vs_segment.get("transcript", "") or vs_segment.get("text", "")
-                    _edit_analysis = await _editor.analyze_and_edit(
-                        transcript=_transcript,
-                        word_timings=_words_for_editor,
-                    )
-                    _decisions = _edit_analysis.get("decisions", [])
-
-                    # Apply TEXT_POP overlays to clip (purely additive — safe after creative pipeline)
-                    _text_pops_applied = 0
-                    _hook_offset = 1.0 if creative_meta.get("hook_reorder_applied") else 0.0
-                    _clip_path_obj = _Path(clip["path"])
-                    _textpop_out = _clip_path_obj.with_name(f"tp_{_clip_path_obj.name}")
-                    _tp_result = await _editor.apply_text_pops(
-                        clip_path=_clip_path_obj,
-                        output_path=_textpop_out,
-                        decisions=_decisions,
-                        hook_offset=_hook_offset,
-                    )
-                    if _tp_result and _textpop_out.exists() and _textpop_out.stat().st_size > 0:
-                        _clip_path_obj.unlink(missing_ok=True)
-                        _textpop_out.rename(_clip_path_obj)
-                        _text_pops_applied = sum(
-                            1 for d in _decisions if d.get("type") == "text_pop"
+                if _beta_clean:
+                    logger.info("[beta-clean] template text overlay skipped")
+                    logger.info("[beta-clean] top text overlay skipped")
+                else:
+                    try:
+                        from .smart_auto_editor import SmartAutoEditor
+                        _editor = SmartAutoEditor()
+                        _transcript = vs_segment.get("transcript", "") or vs_segment.get("text", "")
+                        _edit_analysis = await _editor.analyze_and_edit(
+                            transcript=_transcript,
+                            word_timings=_words_for_editor,
                         )
-                        logger.info("  [SmartEditor] %d text-pop overlays applied", _text_pops_applied)
-                    else:
-                        _textpop_out.unlink(missing_ok=True)
+                        _decisions = _edit_analysis.get("decisions", [])
 
-                    # Merge smart-edit fields into creative_meta so they are persisted together
-                    creative_meta["smart_edit_decisions"] = _edit_analysis.get("total_decisions", 0)
-                    creative_meta["smart_edit_summary"]   = _edit_analysis.get("edit_summary", "")
-                    creative_meta["smart_edit_time_saved"] = _edit_analysis.get("estimated_time_saved", 0.0)
-                    creative_meta["text_pops_applied"] = _text_pops_applied
-                    clip["smart_edit_decisions"] = creative_meta["smart_edit_decisions"]
-                    clip["smart_edit_summary"]   = creative_meta["smart_edit_summary"]
-                    clip["smart_edit_time_saved"] = creative_meta["smart_edit_time_saved"]
-                    clip["text_pops_applied"] = _text_pops_applied
-                    logger.info(
-                        "  [SmartEditor] clip %d: %d decisions (~%.1fs saved)",
-                        index,
-                        creative_meta["smart_edit_decisions"],
-                        creative_meta["smart_edit_time_saved"],
-                    )
-                except Exception as _se:
-                    logger.debug("SmartAutoEditor skipped for clip %d: %s", index, _se)
+                        # Apply TEXT_POP overlays to clip (purely additive — safe after creative pipeline)
+                        _text_pops_applied = 0
+                        _hook_offset = 1.0 if creative_meta.get("hook_reorder_applied") else 0.0
+                        _clip_path_obj = _Path(clip["path"])
+                        _textpop_out = _clip_path_obj.with_name(f"tp_{_clip_path_obj.name}")
+                        _tp_result = await _editor.apply_text_pops(
+                            clip_path=_clip_path_obj,
+                            output_path=_textpop_out,
+                            decisions=_decisions,
+                            hook_offset=_hook_offset,
+                        )
+                        if _tp_result and _textpop_out.exists() and _textpop_out.stat().st_size > 0:
+                            _clip_path_obj.unlink(missing_ok=True)
+                            _textpop_out.rename(_clip_path_obj)
+                            _text_pops_applied = sum(
+                                1 for d in _decisions if d.get("type") == "text_pop"
+                            )
+                            logger.info("  [SmartEditor] %d text-pop overlays applied", _text_pops_applied)
+                        else:
+                            _textpop_out.unlink(missing_ok=True)
+
+                        # Merge smart-edit fields into creative_meta so they are persisted together
+                        creative_meta["smart_edit_decisions"] = _edit_analysis.get("total_decisions", 0)
+                        creative_meta["smart_edit_summary"]   = _edit_analysis.get("edit_summary", "")
+                        creative_meta["smart_edit_time_saved"] = _edit_analysis.get("estimated_time_saved", 0.0)
+                        creative_meta["text_pops_applied"] = _text_pops_applied
+                        clip["smart_edit_decisions"] = creative_meta["smart_edit_decisions"]
+                        clip["smart_edit_summary"]   = creative_meta["smart_edit_summary"]
+                        clip["smart_edit_time_saved"] = creative_meta["smart_edit_time_saved"]
+                        clip["text_pops_applied"] = _text_pops_applied
+                        logger.info(
+                            "  [SmartEditor] clip %d: %d decisions (~%.1fs saved)",
+                            index,
+                            creative_meta["smart_edit_decisions"],
+                            creative_meta["smart_edit_time_saved"],
+                        )
+                    except Exception as _se:
+                        logger.debug("SmartAutoEditor skipped for clip %d: %s", index, _se)
 
                 # Videofy Timeline Integration (optional) — build structured timeline for future use
                 if self.config.get("enable_timeline", False):

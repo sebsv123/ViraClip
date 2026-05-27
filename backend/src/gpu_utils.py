@@ -1,80 +1,65 @@
 """
-gpu_utils.py — Central GPU capability detection for ViraClip.
+gpu_utils.py — DEPRECATED wrapper.  Use ``src.utils.gpu_utils`` instead.
 
-Import this module anywhere to get encoding settings and CUDA availability.
-Results are cached at module load time — detection runs only once per process.
+This module re-exports everything from the canonical ``src.utils.gpu_utils``
+and adds backward-compatible aliases for functions that were removed during
+the consolidation.
+
+DEPRECATED — will be removed in a future release.
 """
 import logging
+import os
 import subprocess
+import warnings
 from functools import lru_cache
-from typing import Dict, Any, List
+from typing import Any, Dict, List
+
+from src.utils.gpu_utils import (
+    gpu_device_name,
+    is_ffmpeg_nvenc_runtime_available,
+    is_torch_cuda_available,
+    log_gpu_status,
+)
 
 logger = logging.getLogger(__name__)
+
+warnings.warn(
+    "src.gpu_utils is deprecated; use src.utils.gpu_utils instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
+
+
+# ── Re-exported aliases ─────────────────────────────────────────────────────────
+
+def _env_true(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).lower() in ("1", "true", "yes")
 
 
 @lru_cache(maxsize=1)
 def cuda_available() -> bool:
-    """True if a CUDA-capable GPU is available.
-    
-    Uses ctranslate2 as primary check (works even when torch is CPU-only build),
-    then falls back to nvidia-smi subprocess detection.
-    torch.cuda.is_available() is NOT used — it returns False when torch is
-    installed as a CPU-only wheel, which is unrelated to actual GPU presence.
-    """
-    # Primary: ctranslate2 (used by faster-whisper) — reliable on Windows
-    try:
-        import ctranslate2
-        types = ctranslate2.get_supported_compute_types("cuda")
-        if len(types) > 1:  # more than just float32 means real CUDA support
-            logger.info("[GPU] CUDA available via ctranslate2")
-            return True
-    except Exception:
-        pass
-    # Fallback: nvidia-smi
-    try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            logger.info("[GPU] CUDA available via nvidia-smi: %s", r.stdout.strip())
-            return True
-    except Exception:
-        pass
-    return False
+    """DEPRECATED — use ``src.utils.gpu_utils.is_torch_cuda_available``."""
+    return is_torch_cuda_available()
 
 
 @lru_cache(maxsize=1)
 def nvenc_available() -> bool:
-    """True if FFmpeg in PATH supports h264_nvenc encoder."""
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=10,
-        )
-        return "h264_nvenc" in result.stdout
-    except Exception:
+    """DEPRECATED — check ``VIRACLIP_ENABLE_NVENC`` + runtime probe directly."""
+    if _env_true("VIRACLIP_BETA_CLEAN", "false"):
         return False
+    if not _env_true("VIRACLIP_ENABLE_NVENC", "false"):
+        return False
+    return is_ffmpeg_nvenc_runtime_available()
 
 
-@lru_cache(maxsize=1)
 def gpu_name() -> str:
-    """Return GPU name string, or 'CPU' if none detected."""
-    try:
-        r = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip().split("\n")[0].strip()
-    except Exception:
-        pass
-    return "CPU"
+    """DEPRECATED — use ``gpu_device_name``."""
+    return gpu_device_name()
 
 
 @lru_cache(maxsize=1)
 def onnx_providers() -> List[str]:
-    """Return best available ONNX Runtime execution providers."""
+    """DEPRECATED — ONNX provider selection is now handled by the caller."""
     providers: List[str] = []
     if cuda_available():
         try:
@@ -91,29 +76,19 @@ def onnx_providers() -> List[str]:
 
 def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
     """
-    Return FFmpeg video encoding arguments optimised for available hardware.
-
-    GPU path  : h264_nvenc — 5-8x faster than libx264 on NVIDIA GPU.
-    CPU path  : libx264 ultrafast — safe fallback.
-
-    Returns a dict with keys: codec, preset, extra_args (list of extra ffmpeg flags).
-
-    NOTA: -rc vbr se elimina deliberadamente. Cuando MoviePy inyecta extra_args
-    via ffmpeg_params, el parámetro -rc causa "Unrecognized option" en la mayoría
-    de builds de FFmpeg con nvenc. El modo CQ (constant quality) se activa
-    correctamente con solo -cq + -b:v 0, sin necesidad de declarar -rc explícito.
+    DEPRECATED — encoding args are now selected by the caller based on flags.
     """
-    use_nvenc = nvenc_available() and cuda_available()
+    use_nvenc = nvenc_available()
 
     if use_nvenc:
-        logger.info(f"[GPU] Using h264_nvenc encoder ({gpu_name()})")
+        logger.info("[gpu] using h264_nvenc encoder (%s)", gpu_name())
         if quality == "high":
             return {
                 "codec": "h264_nvenc",
-                "preset": "p4",          # nvenc preset: p1(fast)..p7(slow), p4=balanced
+                "preset": "p4",
                 "extra_args": [
-                    "-rc", "constqp", "-qp", "22",  # constant quality, equivalente a CRF 22
-                    "-b:v", "0",          # bitrate ilimitado — deja que -qp mande
+                    "-qp", "22",
+                    "-b:v", "0",
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "main",
                     "-level", "4.0",
@@ -121,12 +96,12 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                     "-ar", "48000",
                 ],
             }
-        else:  # medium
+        else:
             return {
                 "codec": "h264_nvenc",
                 "preset": "p3",
                 "extra_args": [
-                    "-rc", "constqp", "-qp", "24",
+                    "-qp", "24",
                     "-b:v", "0",
                     "-pix_fmt", "yuv420p",
                     "-profile:v", "main",
@@ -136,7 +111,7 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
                 ],
             }
     else:
-        logger.info("[GPU] h264_nvenc unavailable — using libx264 CPU encoder")
+        logger.info("[gpu] using libx264 encoder")
         if quality == "high":
             return {
                 "codec": "libx264",
@@ -167,8 +142,7 @@ def get_ffmpeg_video_codec_args(quality: str = "high") -> Dict[str, Any]:
 
 def ffmpeg_codec_flags(quality: str = "high") -> List[str]:
     """
-    Convenience: return flat list of FFmpeg flags for use in subprocess calls.
-    e.g. [..., "-c:v", "h264_nvenc", "-preset", "p4", "-cq", "22", ...]
+    DEPRECATED — convenience wrapper around ``get_ffmpeg_video_codec_args``.
     """
     enc = get_ffmpeg_video_codec_args(quality)
     flags = ["-c:v", enc["codec"], "-preset", enc["preset"]] + enc["extra_args"]

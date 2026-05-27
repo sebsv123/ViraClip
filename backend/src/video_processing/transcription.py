@@ -46,6 +46,40 @@ _register_cuda_dll_paths()
 from ..config import Config
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_whisper_device() -> Tuple[str, str]:
+    requested = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+    torch_cuda_enabled = os.environ.get("VIRACLIP_ENABLE_TORCH_CUDA", "false").lower() in (
+        "1", "true", "yes"
+    )
+
+    if requested == "cuda":
+        if not torch_cuda_enabled:
+            logger.info(
+                "[TRANSCRIPTION] CUDA requested but disabled by "
+                "VIRACLIP_ENABLE_TORCH_CUDA=false; using CPU"
+            )
+            return "cpu", "int8"
+        try:
+            from ..utils.gpu_utils import is_torch_cuda_available
+            if not is_torch_cuda_available():
+                logger.info("[TRANSCRIPTION] CUDA requested but torch runtime unavailable; using CPU")
+                return "cpu", "int8"
+        except Exception as exc:
+            logger.info("[TRANSCRIPTION] CUDA probe failed (%s); using CPU", exc)
+            return "cpu", "int8"
+
+        try:
+            import ctranslate2
+            types = ctranslate2.get_supported_compute_types("cuda")
+            if len(types) > 0:
+                return "cuda", "float16"
+            logger.info("[TRANSCRIPTION] CUDA requested but ctranslate2 runtime unavailable; using CPU")
+        except Exception as exc:
+            logger.info("[TRANSCRIPTION] CUDA ctranslate2 probe failed (%s); using CPU", exc)
+
+    return "cpu", "int8"
 config = Config()
 
 _TRANSCRIPT_CACHE_SCHEMA_VERSION = 2
@@ -210,36 +244,7 @@ def get_whisper_model():
     global _whisper_model, _whisper_model_config
 
     model_size = os.environ.get("WHISPER_MODEL_SIZE", "medium")
-    device_setting = os.environ.get("WHISPER_DEVICE", "auto")
-    compute_type = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
-
-    def _cuda_available_via_ct2() -> bool:
-        """Check CUDA via ctranslate2 (works even when torch is CPU-only build)."""
-        try:
-            import ctranslate2
-            types = ctranslate2.get_supported_compute_types("cuda")
-            return len(types) > 0
-        except Exception:
-            return False
-
-    if device_setting == "auto":
-        if _cuda_available_via_ct2():
-            device = "cuda"
-            compute_type = "float16"
-        else:
-            device = "cpu"
-            compute_type = "int8"
-    else:
-        device = device_setting
-        if device == "cpu":
-            compute_type = "int8"
-        elif device == "cuda":
-            if not _cuda_available_via_ct2():
-                logger.warning("[TRANSCRIPTION] CUDA not available via ctranslate2 — falling back to CPU")
-                device = "cpu"
-                compute_type = "int8"
-            else:
-                compute_type = "float16"
+    device, compute_type = resolve_whisper_device()
 
     current_config = (model_size, device, compute_type)
     if _whisper_model is not None and _whisper_model_config == current_config:

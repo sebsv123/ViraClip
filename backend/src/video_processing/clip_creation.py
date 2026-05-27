@@ -9,6 +9,7 @@ import logging
 import subprocess
 import uuid
 import os
+import shutil
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -16,11 +17,41 @@ logger = logging.getLogger(__name__)
 
 def _get_ffmpeg_exe() -> str:
     """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+def _ffmpeg_codec_flags(quality: str = "high") -> List[str]:
+    from ..gpu_utils import ffmpeg_codec_flags
+
+    return ffmpeg_codec_flags(quality)
+
+
+def _libx264_flags(quality: str = "high") -> List[str]:
+    return [
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "20" if quality == "high" else "23",
+    ]
+
+
+def _run_ffmpeg_with_nvenc_fallback(
+    cmd: List[str],
+    fallback_cmd: List[str],
+    timeout: int,
+):
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 0 or "h264_nvenc" not in cmd:
+        return result
+    logger.warning("[gpu] NVENC failed; retrying with libx264")
+    logger.debug("[clip_creation] NVENC stderr: %s", result.stderr[-500:])
+    return subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=timeout)
 
 _PLATFORM_VF: dict = {
     "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
@@ -261,20 +292,25 @@ def create_optimized_clip(
             ]
             if _vf:
                 _ffmpeg_base += ["-vf", _vf]
+            _codec_flags = _ffmpeg_codec_flags("medium")
             ffmpeg_cmd = _ffmpeg_base + [
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "23",
+                *_codec_flags,
+                "-c:a", "aac",
+                "-b:a", "128k",
+                "-movflags", "+faststart",
+                str(temp_segment_path)
+            ]
+            ffmpeg_fallback_cmd = _ffmpeg_base + [
+                *_libx264_flags("medium"),
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(temp_segment_path)
             ]
 
-            ffmpeg_result = subprocess.run(
+            ffmpeg_result = _run_ffmpeg_with_nvenc_fallback(
                 ffmpeg_cmd,
-                capture_output=True,
-                text=True,
+                ffmpeg_fallback_cmd,
                 timeout=ffmpeg_timeout
             )
 
@@ -391,6 +427,8 @@ def create_optimized_clip(
             if add_subtitles:
                 logger.debug("Subtitles deferred to FFmpeg ASS burn (post crop stage)")
 
+            beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}
+
             # Split Screen
             if split_screen:
                 processed_clip = guard.track(
@@ -400,7 +438,10 @@ def create_optimized_clip(
                 final_stack[0] = processed_clip
 
             # Hook Title
-            if hook_title:
+            if hook_title and beta_clean:
+                logger.info("[beta-clean] title/headline overlay skipped")
+                logger.info("[beta-clean] top text overlay skipped")
+            elif hook_title:
                 _hook_resolved = _font_path
                 if not _hook_resolved:
                     try:
@@ -456,9 +497,18 @@ def create_optimized_clip(
                     logger.debug(f"Fade effects skipped: {_fade_e}")
 
             # 8. Write final clip
-            if gpu_encoding_settings:
-                encoding_settings = gpu_encoding_settings
-                logger.info(f"Using GPU encoding: {encoding_settings.get('codec')}")
+            # ── BETA-CLEAN: force libx264 for compatibility ──────────────
+            # h264_nvenc can fail with "Unknown encoder" in Docker/headless
+            # environments.  When VIRACLIP_BETA_CLEAN=true we skip GPU
+            # encoding entirely and use the reliable CPU path.
+            _beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes")
+            if _beta_clean:
+                encoding_settings = {
+                    "codec": "libx264",
+                    "preset": "fast",
+                    "ffmpeg_params": [],
+                }
+                logger.info("[beta-clean] clip_creation using libx264 for compatibility")
             else:
                 from ..gpu_utils import get_ffmpeg_video_codec_args as _get_enc
                 _enc = _get_enc("high")
@@ -475,12 +525,29 @@ def create_optimized_clip(
 
             # Remove audio_codec from encoding_settings to avoid duplicate with explicit arg
             encoding_settings.pop("audio_codec", None)
-            final_clip.write_videofile(
-                str(output_path),
-                temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.aac"),
-                audio_codec="aac",
-                remove_temp=True, logger=None, fps=_fps_used, **encoding_settings
-            )
+            try:
+                final_clip.write_videofile(
+                    str(output_path),
+                    temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.aac"),
+                    audio_codec="aac",
+                    remove_temp=True, logger=None, fps=_fps_used, **encoding_settings
+                )
+            except Exception:
+                if encoding_settings.get("codec") != "h264_nvenc":
+                    raise
+                logger.warning("[gpu] NVENC failed; retrying with libx264")
+                output_path.unlink(missing_ok=True)
+                final_clip.write_videofile(
+                    str(output_path),
+                    temp_audiofile=str(output_path.parent / f"temp-audio-{output_path.stem}.aac"),
+                    audio_codec="aac",
+                    remove_temp=True,
+                    logger=None,
+                    fps=_fps_used,
+                    codec="libx264",
+                    preset="fast",
+                    ffmpeg_params=["-crf", "22"],
+                )
 
             logger.info(f"✅ Render Complete: {output_path}")
             return True

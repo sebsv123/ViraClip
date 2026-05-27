@@ -20,39 +20,71 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 sys.path.insert(0, "/app/src") if "/app/src" not in sys.path else None
 
+logger = logging.getLogger(__name__)
+
+
 def _sw_fallback(quality="high"):
     return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "22" if quality == "high" else "24"]
 
-try:
-    from gpu_utils import ffmpeg_codec_flags as _raw_gpu_codec
-    # Validate NVENC flags — if they contain -rc (unsupported in some FFmpeg builds),
-    # fall back to software encoder for the entire broll_compositor module.
-    _test = _raw_gpu_codec("medium")
-    if "-rc" in _test:
-        # Quick probe: does FFmpeg actually accept -rc?
-        _probe = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1",
-             "-frames:v", "1", *_test, "-f", "null", "-"],
-            capture_output=True, timeout=5,
-        )
-        if _probe.returncode != 0:
-            _gpu_codec = _sw_fallback
-        else:
-            _gpu_codec = _raw_gpu_codec
-    else:
-        _gpu_codec = _raw_gpu_codec
-except (ImportError, Exception):
-    _gpu_codec = _sw_fallback
+
+def _resolve_codec() -> callable:
+    """
+    Resolve the codec function based on environment flags:
+      - If BROLL_FORCE_CPU=true → always use libx264
+      - If VIRACLIP_ENABLE_NVENC=false → always use libx264
+      - Otherwise → try NVENC via gpu_utils, fall back to libx264
+    """
+    _force_cpu = os.environ.get("BROLL_FORCE_CPU", "").lower() in ("1", "true", "yes")
+    _beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes")
+    _enable_nvenc = os.environ.get("VIRACLIP_ENABLE_NVENC", "false").lower() in ("1", "true", "yes")
+
+    if _force_cpu:
+        logger.info("[BrollCompositor] BROLL_FORCE_CPU=true — using libx264")
+        return _sw_fallback
+    if _beta_clean:
+        logger.info("[BrollCompositor] VIRACLIP_BETA_CLEAN=true — using libx264")
+        return _sw_fallback
+    if not _enable_nvenc:
+        logger.info("[BrollCompositor] VIRACLIP_ENABLE_NVENC=false — using libx264")
+        return _sw_fallback
+
+    try:
+        from gpu_utils import ffmpeg_codec_flags as _raw_gpu_codec
+        # Validate NVENC flags — if they contain -rc (unsupported in some FFmpeg builds),
+        # fall back to software encoder for the entire broll_compositor module.
+        _test = _raw_gpu_codec("medium")
+        if "-rc" in _test:
+            # Quick probe: does FFmpeg actually accept -rc?
+            _probe = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-f", "lavfi", "-i", "nullsrc=s=16x16:d=0.1",
+                 "-frames:v", "1", *_test, "-f", "null", "-"],
+                capture_output=True, timeout=5,
+            )
+            if _probe.returncode != 0:
+                logger.info("[BrollCompositor] NVENC -rc flag rejected — falling back to libx264")
+                return _sw_fallback
+        return _raw_gpu_codec
+    except (ImportError, Exception) as exc:
+        logger.info("[BrollCompositor] NVENC unavailable (%s) — using libx264", exc)
+        return _sw_fallback
+
+
+_gpu_codec = _resolve_codec()
+
 import tempfile
 from pathlib import Path
 from typing import Optional, Tuple
 
 
 def _get_ffmpeg_exe() -> str:
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -60,7 +92,28 @@ def _get_ffmpeg_exe() -> str:
         return "ffmpeg"
 
 
-logger = logging.getLogger(__name__)
+def _uses_nvenc(codec_flags: list[str]) -> bool:
+    return "h264_nvenc" in codec_flags
+
+
+def _run_ffmpeg_sync_with_fallback(
+    cmd: list[str],
+    fallback_cmd: list[str],
+    output_path: Path,
+    log_prefix: str,
+    timeout: int,
+):
+    result = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    if result.returncode == 0:
+        return result
+    if "h264_nvenc" not in cmd:
+        return result
+
+    logger.warning("[gpu] NVENC failed; retrying with libx264")
+    logger.debug("%s NVENC stderr: %s", log_prefix, result.stderr.decode(errors="replace")[-400:])
+    output_path.unlink(missing_ok=True)
+    return subprocess.run(fallback_cmd, capture_output=True, timeout=timeout)
+
 
 # Importar motor de efectos inteligentes
 try:
@@ -146,6 +199,8 @@ def normalize_broll(
     """
     broll_path = Path(broll_path)
     is_image = broll_path.suffix.lower() in _IMAGE_EXTS
+    source_duration = duration if is_image else probe_duration(broll_path)
+    should_loop_video = (not is_image) and source_duration > 0.2 and source_duration < duration
 
     if output_path is None:
         suffix = ".mp4"
@@ -192,39 +247,55 @@ def normalize_broll(
 
     # Build codec flags (ensure they come after input/output mapping options)
     _codec_flags = _gpu_codec("medium")
+    _fallback_flags = _sw_fallback("medium")
     
     if is_image:
         # Include silent audio (-f lavfi -i anullsrc) so the B-roll video
         # has a valid audio stream. Without this, compose_overlay_multi fails
         # when mixing AV streams because the overlay input lacks audio.
-        cmd = [
+        def _build_cmd(codec_flags: list[str]) -> list[str]:
+            return [
             _get_ffmpeg_exe(), "-y",
             "-loop", "1", "-i", str(broll_path),
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-t", str(duration),
             "-vf", vf,
             "-shortest",
-            *_codec_flags,
+            *codec_flags,
             "-c:a", "aac", "-ar", "44100",
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
-        ]
+            ]
     else:
-        cmd = [
+        def _build_cmd(codec_flags: list[str]) -> list[str]:
+            loop_args = ["-stream_loop", "-1"] if should_loop_video else []
+            if should_loop_video:
+                logger.info("[broll-duration] extended/looped to effective=%.2f", duration)
+            return [
             _get_ffmpeg_exe(), "-y",
+            *loop_args,
             "-i", str(broll_path),
             "-t", str(duration),
             "-vf", vf,
             "-an",
-            *_codec_flags,
+            *codec_flags,
             "-pix_fmt", "yuv420p",
             "-movflags", "+faststart",
             str(output_path),
-        ]
+            ]
+
+    cmd = _build_cmd(_codec_flags)
+    fallback_cmd = _build_cmd(_fallback_flags)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
+        result = _run_ffmpeg_sync_with_fallback(
+            cmd,
+            fallback_cmd,
+            output_path,
+            "[BrollCompositor] normalize_broll",
+            _FFMPEG_TIMEOUT,
+        )
         if result.returncode != 0:
             logger.error("[BrollCompositor] normalize_broll failed: %s",
                          result.stderr.decode()[-400:])
@@ -268,6 +339,9 @@ def compose_overlay(
     broll_path  = Path(broll_path)
     output_path = Path(output_path)
 
+    if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes"):
+        logger.info("[beta-clean] broll PIP disabled")
+
     w, h, _fps = probe_dimensions(main_path)
 
     # Normalise B-roll — sin fade negro para no oscurecer la imagen
@@ -284,22 +358,35 @@ def compose_overlay(
         f"[0:v][bv]overlay=enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':x=0:y=0[out]"
     )
 
-    cmd = [
+    _codec_flags = _gpu_codec("high")
+    _fallback_flags = _sw_fallback("high")
+
+    def _build_cmd(codec_flags: list[str]) -> list[str]:
+        return [
         _get_ffmpeg_exe(), "-y",
         "-i", str(main_path),
         "-i", str(norm_path),
         "-filter_complex", filter_complex,
         "-map", "[out]",
         "-map", "0:a?",
-        *_gpu_codec("high"),
+        *codec_flags,
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         str(output_path),
-    ]
+        ]
+
+    cmd = _build_cmd(_codec_flags)
+    fallback_cmd = _build_cmd(_fallback_flags)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT)
+        result = _run_ffmpeg_sync_with_fallback(
+            cmd,
+            fallback_cmd,
+            output_path,
+            "[BrollCompositor] compose_overlay",
+            _FFMPEG_TIMEOUT,
+        )
         norm_path.unlink(missing_ok=True)
         if result.returncode != 0:
             logger.error("[BrollCompositor] compose_overlay FFmpeg failed: %s",
@@ -339,6 +426,9 @@ async def compose_overlay_multi(
     main_path   = Path(main_path)
     output_path = Path(output_path)
 
+    if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes"):
+        logger.info("[beta-clean] broll PIP disabled")
+
     w, h, _fps = probe_dimensions(main_path)
 
     # Normalise each B-roll clip
@@ -375,18 +465,25 @@ async def compose_overlay_multi(
 
     filter_complex = ";".join(filter_parts)
 
-    cmd = [
+    _codec_flags = _gpu_codec("high")
+    _fallback_flags = _sw_fallback("high")
+
+    def _build_cmd(codec_flags: list[str]) -> list[str]:
+        return [
         _get_ffmpeg_exe(), "-y",
         *inputs,
         "-filter_complex", filter_complex,
         "-map", f"[{prev}]",
         "-map", "0:a?",
-        *_gpu_codec("high"),
+        *codec_flags,
         "-c:a", "copy",
         "-pix_fmt", "yuv420p",
         "-movflags", "+faststart",
         str(output_path),
-    ]
+        ]
+
+    cmd = _build_cmd(_codec_flags)
+    fallback_cmd = _build_cmd(_fallback_flags)
 
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -395,12 +492,26 @@ async def compose_overlay_multi(
             stderr=asyncio.subprocess.PIPE,
         )
         _, _err = await asyncio.wait_for(proc.communicate(), timeout=_FFMPEG_TIMEOUT)
+        if proc.returncode != 0:
+            if _uses_nvenc(_codec_flags):
+                logger.warning("[gpu] NVENC failed; retrying with libx264")
+                logger.debug("[BrollCompositor] compose_overlay_multi NVENC stderr: %s",
+                             _err.decode(errors="replace")[-400:])
+                output_path.unlink(missing_ok=True)
+                proc = await asyncio.create_subprocess_exec(
+                    *fallback_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, _err = await asyncio.wait_for(proc.communicate(), timeout=_FFMPEG_TIMEOUT)
+            if proc.returncode != 0:
+                for np_ in norm_paths:
+                    np_.unlink(missing_ok=True)
+                logger.error("[BrollCompositor] compose_overlay_multi failed: %s",
+                             _err.decode()[-400:])
+                return False
         for np_ in norm_paths:
             np_.unlink(missing_ok=True)
-        if proc.returncode != 0:
-            logger.error("[BrollCompositor] compose_overlay_multi failed: %s",
-                         _err.decode()[-400:])
-            return False
         return output_path.exists() and output_path.stat().st_size > 0
     except (asyncio.TimeoutError, Exception) as exc:
         logger.error("[BrollCompositor] compose_overlay_multi exception: %s", exc)

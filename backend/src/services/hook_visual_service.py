@@ -4,6 +4,7 @@ Añade texto grande impactante en los primeros 2 segundos para scroll-stop effec
 """
 import asyncio
 import logging
+import os
 from typing import Optional, Dict, List
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,6 +195,11 @@ class HookVisualService:
         Returns:
             Path del video resultante
         """
+        if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}:
+            logger.info("[beta-clean] HookVisualService skipped")
+            logger.info("[beta-clean] top text overlay skipped")
+            return video_path
+
         try:
             # Construir filtro
             hook_filter = self.create_hook_overlay_filter(hook)
@@ -326,5 +332,4 @@ async def add_hook_overlay_to_clip(
     )
     result = await service.add_hook_to_video(str(input_path), str(output_path), hook)
     return Path(result).exists() and Path(result).stat().st_size > 0
-
 

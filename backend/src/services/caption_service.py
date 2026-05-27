@@ -23,10 +23,14 @@ import asyncio
 import logging
 import os
 import re
+import shutil
 import tempfile
 
 
 def _get_ffmpeg_exe() -> str:
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
     try:
         import imageio_ffmpeg as _iio
         return _iio.get_ffmpeg_exe()
@@ -79,6 +83,7 @@ _BLACK   = _ass_colour(0,   0,   0)
 _YELLOW  = _ass_colour(255, 255, 0)
 _CYAN    = _ass_colour(0,   255, 255)
 _RED     = _ass_colour(255, 50,  50)
+_VPI_ORANGE = _ass_colour(255, 122, 24)
 _TRANSP  = "&H00000000"
 _SEMI_BG = "&HAA000000"   # semi-transparent black background
 
@@ -99,8 +104,16 @@ _PLATFORM_MARGIN_V: Dict[str, int] = {
 }
 
 
+def _is_beta_clean() -> bool:
+    return os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}
+
+
 def _margin_v(platform: str) -> int:
     return _PLATFORM_MARGIN_V.get(platform.lower(), _PLATFORM_MARGIN_V["default"])
+
+
+def _beta_clean_margin_v(platform: str) -> int:
+    return int(os.environ.get("CAPTION_BETA_CLEAN_MARGIN_V", _margin_v(platform)))
 
 
 # ── Font configuration ─────────────────────────────────────────────────────
@@ -108,6 +121,89 @@ _CAPTION_FONT = os.environ.get("CAPTION_FONT_BOLD", "Arial")
 _KNOWN_SAFE_FONTS = {"Arial", "DejaVu Sans", "Liberation Sans"}
 if _CAPTION_FONT not in _KNOWN_SAFE_FONTS:
     logger.info("[caption] Using custom font '%s' — ensure it's installed or pass font_dir", _CAPTION_FONT)
+
+# ── Visual presets ────────────────────────────────────────────────────────────
+_DEFAULT_BETA_CLEAN_PRESET = "vpi_clean"
+
+_VISUAL_PRESETS: Dict[str, Dict[str, Any]] = {
+    "vpi_clean": {
+        "name": "vpi_clean",
+        "caption_style": "tiktok",
+        "font": _CAPTION_FONT,
+        "font_size": int(os.environ.get("CAPTION_VPI_FONT_SIZE", "80")),
+        "primary_colour": _WHITE,
+        "highlight_colour": _VPI_ORANGE,
+        "outline_colour": _BLACK,
+        "back_colour": _SEMI_BG,
+        "bold": -1,
+        "italic": 0,
+        "underline": 0,
+        "strikeout": 0,
+        "scale_x": 100,
+        "scale_y": 100,
+        "spacing": 1,
+        "angle": 0,
+        "border_style": 1,
+        "outline": 4,
+        "shadow": 2,
+        "alignment": 2,
+        "margin_l": 10,
+        "margin_r": 10,
+        "margin_v": _PLATFORM_MARGIN_V["tiktok"],
+        "anchor": "an5",
+        "position_x_ratio": 0.5,
+        "position_y_ratio": 0.78,
+        "max_words_per_block": 4,
+        "min_duration_s": 0.65,
+        "max_duration_s": 1.8,
+        "gap_threshold_s": 0.45,
+        "emojis": False,
+        "top_titles": False,
+        "pip": False,
+    },
+}
+
+
+def _active_visual_preset_name() -> str:
+    requested = os.environ.get("VIRACLIP_VISUAL_PRESET", "").strip().lower()
+    if requested:
+        return requested
+    if _is_beta_clean():
+        return _DEFAULT_BETA_CLEAN_PRESET
+    return "default"
+
+
+def _get_visual_preset(name: str) -> Optional[Dict[str, Any]]:
+    if name in _VISUAL_PRESETS:
+        return _VISUAL_PRESETS[name]
+    if name != "default":
+        logger.warning(
+            "[vpi-preset] unknown preset=%s; falling back to %s",
+            name,
+            _DEFAULT_BETA_CLEAN_PRESET,
+        )
+        return _VISUAL_PRESETS[_DEFAULT_BETA_CLEAN_PRESET]
+    return None
+
+
+def _beta_clean_visual_preset() -> Dict[str, Any]:
+    preset = _get_visual_preset(_active_visual_preset_name())
+    if preset is None:
+        preset = _VISUAL_PRESETS[_DEFAULT_BETA_CLEAN_PRESET]
+    logger.info("[vpi-preset] using preset=%s", preset["name"])
+    return preset
+
+
+def _style_def_from_preset(preset: Dict[str, Any], margin_v: int) -> str:
+    return (
+        f"Default,{preset['font']},{preset['font_size']},"
+        f"{preset['primary_colour']},{preset['highlight_colour']},"
+        f"{preset['outline_colour']},{preset['back_colour']},"
+        f"{preset['bold']},{preset['italic']},{preset['underline']},{preset['strikeout']},"
+        f"{preset['scale_x']},{preset['scale_y']},{preset['spacing']},{preset['angle']},"
+        f"{preset['border_style']},{preset['outline']},{preset['shadow']},"
+        f"{preset['alignment']},{preset['margin_l']},{preset['margin_r']},{margin_v},1"
+    )
 
 # ── Style presets ─────────────────────────────────────────────────────────────
 # MarginV is set to a placeholder string "MARGINV" that is substituted at
@@ -186,6 +282,38 @@ def _build_karaoke_text(words: List[WordTimestamp], emphasis_threshold: float = 
     return " ".join(parts)
 
 
+def _build_beta_clean_text(words: List[WordTimestamp], active_idx: int = -1) -> str:
+    """Fixed-position text with inline highlight only; no dynamic ASS positioning."""
+    parts = []
+    for i, w in enumerate(words):
+        text = w.text
+        if i == active_idx:
+            parts.append(f"{{\\c{_YELLOW}}}{text}{{\\c{_WHITE}}}")
+        else:
+            parts.append(text)
+    return "{\\an2}" + " ".join(parts)
+
+
+def _build_beta_clean_karaoke_text(
+    words: List[WordTimestamp],
+    pos_tag: str,
+    highlight_colour: str = _VPI_ORANGE,
+) -> str:
+    """Single visual ASS event per block, with active word handled by karaoke timing."""
+    parts = []
+    for w in words:
+        duration_cs = max(1, int(round(max(0.08, w.end - w.start) * 100)))
+        parts.append(f"{{\\kf{duration_cs}\\c{highlight_colour}}}{w.text}{{\\c{_WHITE}}}")
+    return pos_tag + " ".join(parts)
+
+
+_ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
+
+
+def _normalize_caption_text(text: str) -> str:
+    return " ".join(_ASS_OVERRIDE_RE.sub("", text).lower().split())
+
+
 def _build_highlight_text(words: List[WordTimestamp], active_idx: int, emphasis_threshold: float = 0.82) -> str:
     """
     Build per-word dialogue line where the active word gets a highlight override.
@@ -232,9 +360,59 @@ def build_ass_script(
     platform: used to set platform-specific caption safe zones (MarginV).
               Supported: 'tiktok', 'reels', 'shorts', 'universal'.
     """
-    style_def = _STYLE_DEFS.get(style, _STYLE_DEFS["tiktok"])
-    style_def = style_def.replace("MARGINV", str(_margin_v(platform)))
-    is_highlight = (style == "highlight")
+    beta_clean = _is_beta_clean()
+    preset: Optional[Dict[str, Any]] = None
+    if beta_clean:
+        preset = _beta_clean_visual_preset()
+        style = str(preset["caption_style"])
+        margin_v = int(os.environ.get("CAPTION_BETA_CLEAN_MARGIN_V", preset["margin_v"]))
+        style_def = _style_def_from_preset(preset, margin_v)
+    else:
+        style_def = _STYLE_DEFS.get(style, _STYLE_DEFS["tiktok"])
+        margin_v = _margin_v(platform)
+        style_def = style_def.replace("MARGINV", str(margin_v))
+    is_highlight = (style == "highlight") and not beta_clean
+    if beta_clean:
+        assert preset is not None
+        pos_x = int(os.environ.get(
+            "CAPTION_VPI_POS_X",
+            round(play_res_x * float(preset["position_x_ratio"])),
+        ))
+        pos_y = int(os.environ.get(
+            "CAPTION_VPI_POS_Y",
+            round(play_res_y * float(preset["position_y_ratio"])),
+        ))
+        anchor = str(preset["anchor"])
+        pos_tag = f"{{\\{anchor}\\pos({pos_x},{pos_y})}}"
+        logger.info(
+            "[caption-layout] beta_clean fixed_bottom=true alignment=2 margin_v=%d",
+            margin_v,
+        )
+        logger.info(
+            "[caption-layout] preset=%s font=%s font_size=%s outline=%s shadow=%s "
+            "highlight=%s max_words=%s min_dur=%.2f max_dur=%.2f "
+            "emojis=%s top_titles=%s pip=%s",
+            preset["name"],
+            preset["font"],
+            preset["font_size"],
+            preset["outline"],
+            preset["shadow"],
+            preset["highlight_colour"],
+            preset["max_words_per_block"],
+            float(preset["min_duration_s"]),
+            float(preset["max_duration_s"]),
+            preset["emojis"],
+            preset["top_titles"],
+            preset["pip"],
+        )
+        logger.info("[caption-layout] no dynamic vertical positioning")
+        logger.info(
+            "[caption-layout] beta_clean absolute_position=true x=%d y=%d anchor=%s",
+            pos_x,
+            pos_y,
+            anchor,
+        )
+        logger.info("[caption-layout] fixed_pos_tag applied to all dialogues")
 
     header = f"""\
 [Script Info]
@@ -257,12 +435,88 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     events: List[str] = []
 
+    previous_end = 0.0
+    previous_text = ""
+    dedupe_removed = 0
+    overlap_fixed = 0
+    min_duration_applied = 0
+
     for line in lines:
         words = line.words
         if uppercase:
-            words = [WordTimestamp(w.text.upper(), w.start, w.end) for w in words]
+            words = [
+                WordTimestamp(
+                    w.text.upper(),
+                    w.start,
+                    w.end,
+                    score=w.score,
+                    emphasis=w.emphasis,
+                )
+                for w in words
+            ]
 
-        if is_highlight:
+        if beta_clean:
+            assert preset is not None
+            min_duration_s = float(preset["min_duration_s"])
+            max_duration_s = float(preset["max_duration_s"])
+            event_start = max(line.line_start, previous_end)
+            if event_start > line.line_start:
+                overlap_fixed += 1
+
+            natural_end = max(line.line_end, words[-1].end if words else line.line_end)
+            event_end = min(
+                event_start + max_duration_s,
+                max(natural_end, event_start + min_duration_s),
+            )
+            if event_end - event_start < min_duration_s:
+                event_end = event_start + min_duration_s
+                min_duration_applied += 1
+
+            text = _build_beta_clean_karaoke_text(
+                words,
+                pos_tag,
+                str(preset["highlight_colour"]),
+            )
+            normalized_text = _normalize_caption_text(text)
+            if normalized_text == previous_text:
+                dedupe_removed += 1
+                logger.info(
+                    "[caption-ass] duplicate text prev_i=%d i=%d",
+                    len(events) - 1,
+                    len(events),
+                )
+                continue
+
+            if events and event_start < previous_end:
+                logger.info(
+                    "[caption-ass] overlap prev_i=%d i=%d prev_end=%.3f start=%.3f",
+                    len(events) - 1,
+                    len(events),
+                    previous_end,
+                    event_start,
+                )
+
+            logger.info(
+                "[caption-sync] group_words=%d event_start=%.3f event_end=%.3f duration=%.3f",
+                len(words),
+                event_start,
+                event_end,
+                event_end - event_start,
+            )
+            logger.info(
+                '[caption-ass] event i=%d start=%.3f end=%.3f text="%s"',
+                len(events),
+                event_start,
+                event_end,
+                normalized_text[:120],
+            )
+            events.append(
+                f"Dialogue: 0,{_ass_time(event_start)},{_ass_time(event_end)},"
+                f"Default,,0,0,0,,{text}"
+            )
+            previous_end = event_end
+            previous_text = normalized_text
+        elif is_highlight:
             # One event per word — each word gets the highlight box while active
             for i, w in enumerate(words):
                 text = _build_highlight_text(words, i, emphasis_threshold)
@@ -277,6 +531,11 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 f"Dialogue: 0,{_ass_time(line.line_start)},{_ass_time(line.line_end)},"
                 f"Default,,0,0,0,,{text}"
             )
+
+    if beta_clean:
+        logger.info("[caption-sync] dedupe removed=%d", dedupe_removed)
+        logger.info("[caption-sync] overlap_fixed=%d", overlap_fixed)
+        logger.info("[caption-sync] min_duration_applied=%d", min_duration_applied)
 
     return header + "\n".join(events) + "\n"
 
@@ -341,6 +600,13 @@ def segment_words_into_lines(
     lines: List[CaptionLine] = []
     current: List[WordTimestamp] = []
 
+    beta_clean = _is_beta_clean()
+    if beta_clean:
+        preset = _beta_clean_visual_preset()
+        max_words_per_line = min(max_words_per_line, int(preset["max_words_per_block"]))
+        max_line_duration = min(max_line_duration, float(preset["max_duration_s"]))
+        gap_threshold = min(gap_threshold, float(preset["gap_threshold_s"]))
+
     for i, wt in enumerate(wts):
         force_break = False
         if current:
@@ -358,20 +624,26 @@ def segment_words_into_lines(
                 force_break = True
 
         if force_break and current:
+            line_end = current[-1].end if beta_clean else current[-1].end + 0.15
+            if beta_clean:
+                line_end = min(line_end, current[0].start + max_line_duration)
             lines.append(CaptionLine(
                 words=current,
                 line_start=current[0].start,
-                line_end=current[-1].end + 0.15,
+                line_end=line_end,
             ))
             current = []
 
         current.append(wt)
 
     if current:
+        line_end = current[-1].end + (0.08 if beta_clean else 0.15)
+        if beta_clean:
+            line_end = min(line_end, current[0].start + max_line_duration)
         lines.append(CaptionLine(
             words=current,
             line_start=current[0].start,
-            line_end=current[-1].end + 0.15,
+            line_end=line_end,
         ))
 
     return lines
@@ -385,16 +657,34 @@ async def _run_ffmpeg_caption(
     vf: str,
     output_path: Path,
 ) -> bool:
-    """Try NVENC first, fall back to libx264."""
-    for codec_args in [
-        ["-c:v", "h264_nvenc", "-rc", "constqp", "-qp", "20"],
-        ["-c:v", "libx264", "-preset", "fast", "-crf", "20"],
-    ]:
+    """
+    Try NVENC first, fall back to libx264 on ANY failure.
+
+    Some FFmpeg builds don't recognise the ``-rc`` option used with NVENC
+    (``-rc constqp -qp 20``), producing *"Unrecognized option 'rc'"* instead
+    of an NVENC-specific error.  The old code only retried when stderr
+    contained ``nvenc`` or ``h264_nvenc``, missing this case.
+
+    Fix: if the first attempt (NVENC) fails for *any* reason, log the
+    failure and retry with safe libx264 options.  If libx264 also fails,
+    log and return False.
+    """
+    nvenc_args = ["-c:v", "h264_nvenc", "-preset", "p4", "-qp", "20"]
+    libx264_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "20"]
+
+    # ── Beta-clean OR NVENC disabled: skip NVENC, go straight to libx264 ─
+    _beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes")
+    _enable_nvenc = os.environ.get("VIRACLIP_ENABLE_NVENC", "false").lower() in ("1", "true", "yes")
+    if _beta_clean or not _enable_nvenc:
+        reason = "beta-clean" if _beta_clean else "VIRACLIP_ENABLE_NVENC=false"
+        logger.info(
+            "[caption] Caption burn using libx264 (%s)", reason
+        )
         proc = await asyncio.create_subprocess_exec(
             ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
             "-i", str(video_path),
             "-vf", vf,
-            *codec_args,
+            *libx264_args,
             "-c:a", "copy",
             str(output_path),
             stdout=asyncio.subprocess.DEVNULL,
@@ -402,11 +692,87 @@ async def _run_ffmpeg_caption(
         )
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
         if proc.returncode == 0:
+            logger.info("[caption] libx264 caption burn succeeded for %s", output_path.name)
             return True
-        if b"nvenc" in stderr.lower() or b"h264_nvenc" in stderr.lower():
-            continue  # NVENC not available, try next
-        logger.error("[caption] FFmpeg burn-in failed: %s", stderr.decode()[-500:])
+        _err = stderr.decode("utf-8", errors="replace")[-500:]
+        logger.error(
+            "[caption] libx264 caption burn failed (exit %d): %s",
+            proc.returncode, _err,
+        )
         return False
+
+    try:
+        from ..utils.gpu_utils import is_ffmpeg_nvenc_runtime_available
+        _nvenc_available = is_ffmpeg_nvenc_runtime_available()
+    except Exception as exc:
+        logger.debug("[caption] NVENC runtime probe unavailable: %s", exc)
+        _nvenc_available = False
+
+    logger.info("[gpu] ffmpeg nvenc runtime available=%s", str(_nvenc_available).lower())
+    if not _nvenc_available:
+        logger.info("[caption] Caption burn using libx264 (NVENC runtime unavailable)")
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            *libx264_args,
+            "-c:a", "copy",
+            str(output_path),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+        if proc.returncode == 0:
+            logger.info("[caption] libx264 caption burn succeeded for %s", output_path.name)
+            return True
+        _err = stderr.decode("utf-8", errors="replace")[-500:]
+        logger.error(
+            "[caption] libx264 caption burn failed (exit %d): %s",
+            proc.returncode, _err,
+        )
+        return False
+
+    # ── Attempt 1: NVENC ────────────────────────────────────────────────
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", vf,
+        *nvenc_args,
+        "-c:a", "copy",
+        str(output_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+    if proc.returncode == 0:
+        return True
+
+    # NVENC failed — log and fall through to libx264
+    _err = stderr.decode("utf-8", errors="replace")[-500:]
+    logger.warning("[gpu] NVENC failed; retrying with libx264")
+    logger.warning("[caption] NVENC caption burn failed (exit %d): %s", proc.returncode, _err)
+
+    # ── Attempt 2: libx264 (safe fallback) ──────────────────────────────
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg_exe, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", vf,
+        *libx264_args,
+        "-c:a", "copy",
+        str(output_path),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=300.0)
+    if proc.returncode == 0:
+        logger.info("[caption] libx264 caption burn succeeded for %s", output_path.name)
+        return True
+
+    _err2 = stderr.decode("utf-8", errors="replace")[-500:]
+    logger.error(
+        "[caption] libx264 caption burn failed (exit %d): %s",
+        proc.returncode, _err2,
+    )
     return False
 
 
@@ -445,11 +811,18 @@ async def burn_captions(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
         platform=platform, emphasis_threshold=emphasis_threshold,
     )
+    if _is_beta_clean():
+        logger.info("[caption-sync] source=cached_words words=%d lines=%d", len(words), len(lines))
 
     # ── Subtitle QA: speed guard + emoji injection + profanity filter ──────────
     try:
         from ..video_processing.subtitle_qa import run_subtitle_qa as _run_qa
-        _qa_result = _run_qa(ass_content, apply_fixes=True, inject_emoji=True, censor_profanity=False)
+        _qa_result = _run_qa(
+            ass_content,
+            apply_fixes=not _is_beta_clean(),
+            add_emojis=not _is_beta_clean(),
+            censor_profanity=False,
+        )
         if _qa_result.fixed_content:
             ass_content = _qa_result.fixed_content
         if _qa_result.issues:
@@ -462,6 +835,16 @@ async def burn_captions(
     ) as f:
         f.write(ass_content)
         ass_path = f.name
+
+    if _is_beta_clean():
+        try:
+            debug_dir = Path(os.environ.get("CAPTION_DEBUG_DIR", "/app/temp/caption_debug"))
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            debug_path = debug_dir / f"{output_path.stem}.ass"
+            debug_path.write_text(ass_content, encoding="utf-8")
+            logger.info("[caption-debug] ass_path=%s", debug_path)
+        except Exception as debug_exc:
+            logger.debug("[caption-debug] failed to preserve ASS: %s", debug_exc)
 
     try:
         # Escape path for FFmpeg filter string (colons must be escaped on Linux)

@@ -31,11 +31,11 @@ import httpx
 from ..config import Config, get_config
 from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED, LTXV_ENABLED
 from .broll_compositor import compose_overlay, probe_duration
-from .scene_broll_placer import get_insert_timestamps
+from .editorial_broll_planner import BrollCueDecision, EditorialBrollPlanner
 from .broll_provider_strategy import (
     BROLL_PROVIDER_PRIORITY,
-    BROLL_ENABLE_PREMIUM,
     BROLL_ENABLE_STOCK,
+    BROLL_MIN_CLIP_DURATION_SEC,
     ProviderType,
     get_provider_order,
     diagnose_providers,
@@ -51,6 +51,9 @@ _BROLL_DURATION = float(os.environ.get("BROLL_DURATION", "2.5"))
 _FADE_DURATION = float(os.environ.get("BROLL_FADE_DURATION", "0.6"))
 _CACHE_TTL_DAYS = int(os.environ.get("BROLL_CACHE_TTL_DAYS", "7"))
 _BROLL_MAX_OVERLAYS = int(os.environ.get("BROLL_MAX_OVERLAYS", "8"))
+_BETA_CLEAN_BROLL_MIN_VISIBLE_S = 2.5
+_BETA_CLEAN_BROLL_TARGET_S = 2.8
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"}
 
 # ── Semantic keyword classification for generative B-roll ────────────────────
 _MOTION_KEYWORDS = {
@@ -114,6 +117,7 @@ class BrollService:
         self.config = config or get_config()
         self.broll_dir = Path(self.config.temp_dir) / "uploads/broll"
         self.broll_dir.mkdir(parents=True, exist_ok=True)
+        self.last_editorial_broll: List[Dict[str, Any]] = []
 
     # ──────────────────────────────────────────────────────────────────────────
     # 1. KEYWORD EXTRACTION
@@ -208,10 +212,26 @@ class BrollService:
 
     @staticmethod
     def _simple_keyword_fallback(text: str) -> List[str]:
-        """Return safe English stock-video keywords as a basic fallback."""
-        # Always return generic English terms — never pass raw transcript words
-        # (which may be in another language and return irrelevant stock footage)
-        return ["nature", "landscape", "people"]
+        """Return insurance/finance-first Spanish stock-video keywords as fallback."""
+        # Beta: insurance/finance domain in Spanish — always return domain-relevant terms
+        # that work well with Pexels/Coverr stock libraries
+        text_lower = text.lower()
+        # Detect insurance/finance context
+        if any(w in text_lower for w in ["seguro", "seguros", "póliza", "cobertura", "prima",
+                                          "indemnización", "siniestro", "reclamo", "aseguradora",
+                                          "financial", "financiero", "inversión", "ahorro",
+                                          "banco", "bank", "cuenta", "crédito", "hipoteca"]):
+            return ["oficina ejecutivos reunión", "familia protección hogar",
+                    "dinero calculadora ahorro", "documentos firma contrato",
+                    "edificio corporativo moderno"]
+        # Detect health/medical context
+        if any(w in text_lower for w in ["salud", "hospital", "médico", "doctor", "clínica",
+                                          "paciente", "enfermedad", "seguro salud"]):
+            return ["hospital pasillo doctor", "manos doctor paciente",
+                    "familia salud bienestar", "medicina laboratorio análisis"]
+        # Generic Spanish fallback
+        return ["oficina moderna profesional", "personas caminando ciudad",
+                "tecnología computadora oficina", "naturaleza paisaje tranquilo"]
 
     # ──────────────────────────────────────────────────────────────────────────
     # 2. PROVIDER DIAGNOSTICS
@@ -265,6 +285,21 @@ class BrollService:
                        "(priority=%s, order=%s)",
                        keyword, BROLL_PROVIDER_PRIORITY,
                        [p.value for p in provider_order])
+        return None
+
+    async def fetch_editorial_broll_asset(self, keyword: str) -> Optional[Path]:
+        """Fetch B-roll for editorial v1 without premium/generative providers."""
+        safe = "".join(c if c.isalnum() else "_" for c in keyword).lower()
+        for provider_type in (
+            ProviderType.LOCAL,
+            ProviderType.STOCK_VIDEO,
+            ProviderType.STOCK_IMAGE,
+            ProviderType.CACHE,
+        ):
+            result = await self._try_provider(provider_type, keyword, safe)
+            if result:
+                return result
+        logger.info("[editorial-broll] no stock/local asset for query=%s", keyword)
         return None
 
     async def _try_provider(
@@ -664,261 +699,156 @@ class BrollService:
         words_with_timestamps: Optional[List[Dict]] = None,
         precomputed_keywords: Optional[List[str]] = None,
         broll_fade_s: float = 0.25,
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Full B-roll pipeline for a single clip.
 
-        1. Extract keywords (or use precomputed_keywords from AI brain)
-        2. Fetch best asset per keyword via provider-priority cascade
-           (premium_first: LTXV → T2V → Stock | stock_first: Stock → LTXV → T2V)
-        3. Insert B-roll overlays at spoken-word timestamps or scene boundaries
+        1. Plan editorial cues locally from the Spanish transcript
+        2. Fetch stock/local assets for approved cue visual queries
+        3. Insert B-roll overlays at the planner's approved timestamps
 
         Returns *output_path* on success, *video_path* (original) on failure.
         """
         try:
-            # Step 1 — keywords: use AI brain's choices if available, else NLP extraction
-            if precomputed_keywords:
-                keywords = list(precomputed_keywords)
-                logger.info(f"[BRoll] Using AI keywords: {keywords}")
-            else:
-                keywords = await self.extract_keywords(segment_text)
-
-                # Enhanced B-roll: análisis de contexto visual para keywords más precisos
-                try:
-                    from .enhanced_broll_service import EnhancedBrollService
-                    _ebs = EnhancedBrollService()
-                    _opportunities = await _ebs.analyze_broll_opportunities(
-                        transcript=segment_text,
-                        video_path=Path(video_path),
-                        clip_duration=clip_duration,
-                    )
-                    if _opportunities:
-                        _enhanced_kws = [
-                            kw for opp in _opportunities[:2]
-                            for kw in opp.suggested_keywords[:2]
-                            if kw not in keywords
-                        ]
-                        keywords = _enhanced_kws + keywords
-                        logger.info(f"[BRoll] Enhanced context keywords: {_enhanced_kws}")
-                except Exception as _ebs_e:
-                    logger.debug(f"[BRoll] Enhanced B-roll analysis skipped: {_ebs_e}")
-
-                # YOLO augmentation: detect objects actually visible in the clip
-                try:
-                    from ..video_processing.object_detection import detect_objects_in_video
-                    yolo_kws = await detect_objects_in_video(video_path, max_frames=4)
-                    if yolo_kws:
-                        for kw in reversed(yolo_kws[:2]):
-                            if kw not in keywords:
-                                keywords.insert(0, kw)
-                        logger.info(f"[BRoll] YOLO augmented keywords: {keywords}")
-                except Exception as _yolo_e:
-                    logger.debug(f"[BRoll] YOLO augmentation skipped: {_yolo_e}")
-
-            # Semantic B-roll: Pexels + sentence-transformers para un asset semántico extra
-            try:
-                from .semantic_broll_service import create_semantic_broll_service
-                _sbs = create_semantic_broll_service()
-                _sem_result = await _sbs.find_broll_for_segment(
-                    transcript_segment=segment_text,
-                    segment_duration=clip_duration or 4.5,
-                )
-                if _sem_result and _sem_result.get("keywords"):
-                    _sem_kws = [k for k in _sem_result["keywords"] if k not in keywords]
-                    if _sem_kws:
-                        keywords = _sem_kws[:2] + keywords
-                        logger.info(f"[BRoll] Semantic keywords added: {_sem_kws[:2]}")
-            except Exception as _sbs_e:
-                logger.debug(f"[BRoll] Semantic B-roll skipped: {_sbs_e}")
-
-            if not keywords:
+            self.last_editorial_broll = []
+            # ── Duration guard: skip B-roll for very short clips ──────────────
+            if clip_duration > 0 and clip_duration < BROLL_MIN_CLIP_DURATION_SEC:
+                logger.info("[BRoll] SKIP — clip duration %.1fs < BROLL_MIN_CLIP_DURATION_SEC=%.1fs",
+                            clip_duration, BROLL_MIN_CLIP_DURATION_SEC)
                 return video_path
 
-            # Step 2 — PREMIUM GENERATION FIRST (explicit calls before cascade)
-            # Try LTXV/ComfyUI/T2V explicitly before falling back to stock APIs
+            planner = EditorialBrollPlanner()
+            cue_decisions = planner.plan(
+                transcript_segments=segment_text,
+                clip_duration=clip_duration or probe_duration(video_path),
+                word_timestamps=words_with_timestamps,
+                max_cues=max_overlays,
+            )
+            approved_cues: List[BrollCueDecision] = [
+                cue for cue in cue_decisions
+                if cue.decision == "approve" and cue.visual_query and cue.start_s is not None
+            ]
+            rejected_cues = [cue for cue in cue_decisions if cue.decision == "reject"]
+            logger.info(
+                "[editorial-broll] planned cues approved=%d rejected=%d",
+                len(approved_cues),
+                len(rejected_cues),
+            )
+            for cue in approved_cues:
+                logger.info(
+                    "[editorial-broll] approve type=%s start=%.2f dur=%.2f query=%s reason=%s",
+                    cue.cue_type,
+                    cue.start_s or 0.0,
+                    cue.duration_s,
+                    cue.visual_query,
+                    cue.reason,
+                )
+            for cue in rejected_cues:
+                logger.info(
+                    "[editorial-broll] reject type=%s reason=%s",
+                    cue.cue_type,
+                    cue.reason,
+                )
+
+            if not approved_cues:
+                logger.info("[editorial-broll] no approved cues; skipping b-roll")
+                return video_path
+
+            # Step 2 — try LocalBrollAssetBank first, then stock fetch.
+            from ..config import get_config as _get_cfg_asset
+            _cfg_asset = _get_cfg_asset()
+            _local_bank_enabled = (
+                _cfg_asset.enable_local_broll_bank
+                if hasattr(_cfg_asset, "enable_local_broll_bank")
+                else True
+            )
+
             broll_assets: List[Path] = []
-            premium_attempts = 0
-            premium_success = 0
-            
-            # >>> EXPLICIT PREMIUM ATTEMPTS (before stock fallback) <<<
-            for kw in keywords[:max(3, max_overlays)]:
+            asset_cues: List[BrollCueDecision] = []
+            asset_sources: List[str] = []
+            for cue in approved_cues:
                 if len(broll_assets) >= max_overlays:
                     break
-                
-                asset = None
-                
-                # 1. Try LTXV first (best quality, local)
-                # Note: _try_ltxv already includes quality gate internally
-                if LTXV_ENABLED:
-                    premium_attempts += 1
+
+                asset: Optional[Path] = None
+                asset_source = "none"
+
+                # Priority 1: LocalBrollAssetBank
+                if _local_bank_enabled:
                     try:
-                        asset = await self._try_ltxv(kw, kw.replace(' ', '_')[:30])
-                        if asset:  # Quality gate already applied in _try_ltxv
-                            broll_assets.append(asset)
-                            premium_success += 1
-                            logger.info("[BRoll] ✓ LTXV success for '%s': %s", kw, asset)
-                            continue
-                    except Exception as e:
-                        logger.warning("[BRoll] LTXV failed for '%s': %s", kw, e)
-                
-                # 2. Try AnimateDiff (ComfyUI local)
-                # Note: _try_animatediff already includes quality gate internally
-                if COMFYUI_ENABLED and len(broll_assets) < max_overlays:
-                    premium_attempts += 1
-                    try:
-                        asset = await self._try_animatediff(kw, kw.replace(' ', '_')[:30])
-                        if asset:  # Quality gate already applied in _try_animatediff
-                            broll_assets.append(asset)
-                            premium_success += 1
-                            logger.info("[BRoll] ✓ AnimateDiff success for '%s': %s", kw, asset)
-                            continue
-                    except Exception as e:
-                        logger.warning("[BRoll] AnimateDiff failed for '%s': %s", kw, e)
-                
-                # 3. Try T2V Replicate (cloud)
-                # Note: _try_t2v already includes quality gate internally
-                if len(broll_assets) < max_overlays:
-                    try:
-                        from .t2v_broll_service import T2VBrollService
-                        if T2VBrollService.is_available():
-                            premium_attempts += 1
-                            asset = await self._try_t2v(kw, kw.replace(' ', '_')[:30])
-                            if asset:  # Quality gate already applied in _try_t2v
-                                broll_assets.append(asset)
-                                premium_success += 1
-                                logger.info("[BRoll] ✓ T2V success for '%s': %s", kw, asset)
-                                continue
-                    except Exception as e:
-                        logger.warning("[BRoll] T2V failed for '%s': %s", kw, e)
-                
-                # 4. Stock fallback (only if premium failed)
-                if len(broll_assets) < max_overlays:
-                    logger.info("[BRoll] Premium failed for '%s', falling back to stock", kw)
-                    asset = await self.fetch_broll_asset(kw)
-                    if asset:
-                        broll_assets.append(asset)
-                        logger.info("[BRoll] ✓ Stock fallback for '%s': %s", kw, asset)
-            
-            logger.info("[BRoll] Premium stats: %d/%d successful (%d%%)", 
-                       premium_success, premium_attempts, 
-                       (premium_success/max(premium_attempts,1)*100))
+                        from .local_broll_asset_bank import find_asset as _find_local_asset
+                        from .local_broll_asset_bank import mark_used as _mark_asset_used
+                        asset = _find_local_asset(cue.cue_type or "", task_id=task_id)
+                        if asset is not None:
+                            asset_source = "local"
+                            _mark_asset_used(asset, task_id=task_id)
+                    except Exception as _local_e:
+                        logger.debug("[editorial-broll] local asset bank error: %s", _local_e)
+
+                # Priority 2: stock fetch fallback
+                if asset is None:
+                    asset = await self.fetch_editorial_broll_asset(cue.visual_query or "")
+                    if asset is not None:
+                        asset_source = "stock"
+
+                if asset:
+                    broll_assets.append(asset)
+                    asset_cues.append(cue)
+                    asset_sources.append(asset_source)
+                    logger.info("[editorial-broll] asset query=%s path=%s", cue.visual_query, asset)
 
             if not broll_assets:
-                logger.info(f"[BRoll] No assets fetched for keywords {keywords} — skipping")
+                logger.info("[editorial-broll] approved cues had no stock/local assets; skipping b-roll")
                 return video_path
 
-            # Step 3 — find timestamps: prefer exact spoken moment for each keyword
-            n_wanted = min(len(broll_assets), max_overlays)
-            insert_timestamps: List[float] = []
-
-            if words_with_timestamps:
-                # Map keyword → timestamp where it is spoken in the clip
-                for kw in keywords[:n_wanted]:
-                    kw_lower = kw.lower().strip()
-                    for w in words_with_timestamps:
-                        w_text = (w.get("word") or w.get("text") or "").lower().strip(".,!?-'\"")
-                        if kw_lower == w_text or kw_lower in w_text or w_text in kw_lower:
-                            ts = float(w.get("start", 0))
-                            # Don't place B-roll in the first 0.8s (protect hook)
-                            if ts >= 0.8 and all(abs(ts - t) > 2.5 for t in insert_timestamps):
-                                insert_timestamps.append(ts)
-                            break
-                logger.info("[BRoll] Keyword→spoken timestamps: %s",
-                            [f"{t:.1f}s" for t in insert_timestamps])
-
-            # Fill remaining slots with scene-detected timestamps
-            if len(insert_timestamps) < n_wanted:
-                scene_ts = get_insert_timestamps(
-                    video_path=video_path,
-                    max_n=n_wanted - len(insert_timestamps),
-                    clip_duration=clip_duration or None,
-                )
-                for ts in scene_ts:
-                    if all(abs(ts - t) > 2.5 for t in insert_timestamps):
-                        insert_timestamps.append(ts)
-
-            insert_timestamps.sort()
-
-            # Protect hook (0–2s) and CTA (last 2s): never overlay B-roll there.
-            _hook_guard = 2.0
-            _cta_guard  = max(0.0, (clip_duration or 0) - 2.0)
-            if _cta_guard > _hook_guard:
-                insert_timestamps = [
-                    t for t in insert_timestamps
-                    if _hook_guard <= t <= _cta_guard
-                ]
-            if not insert_timestamps and broll_assets:
-                # Fallback: midpoint is always safe
-                _mid = (clip_duration or 10.0) / 2.0
-                insert_timestamps = [_mid]
-
-            # Step 3.5 — BrollEffectsEngine: apply cinematic effect (ken burns / pan) per asset
-            _enhanced_assets: List[Path] = []
-            try:
-                from .broll_effects_engine import get_smart_broll_effect, build_broll_effect_filter
-                import subprocess as _sp
-                for _ba in broll_assets:
-                    try:
-                        _effect = get_smart_broll_effect(
-                            is_image=_ba.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"),
-                        )
-                        _efx_filter = build_broll_effect_filter(
-                            effect_type=_effect,
-                            width=1080, height=1920,
-                            duration=overlay_duration_s,
-                        )
-                        _efx_out = _ba.with_name(f"efx_{_ba.name}")
-                        _efx_cmd = [
-                            "ffmpeg", "-y", "-i", str(_ba),
-                            "-vf", _efx_filter,
-                            "-t", str(overlay_duration_s),
-                            "-c:v", "libx264", "-preset", "ultrafast", "-an",
-                            str(_efx_out),
-                        ]
-                        _efx_res = _sp.run(_efx_cmd, capture_output=True, timeout=30)
-                        if _efx_res.returncode == 0 and _efx_out.exists():
-                            _enhanced_assets.append(_efx_out)
-                            logger.info(f"[BRoll] ✓ Effect {_effect.value} applied to {_ba.name}")
-                        else:
-                            _enhanced_assets.append(_ba)
-                    except Exception:
-                        _enhanced_assets.append(_ba)
-                broll_assets = _enhanced_assets
-            except Exception as _bee_e:
-                logger.debug(f"[BRoll] Effects engine skipped: {_bee_e}")
-
-            # Step 3.6 — Apply entry/exit transitions to each enhanced asset
-            _transitioned_assets: List[Path] = []
-            for _ba in broll_assets:
-                try:
-                    _trans_out = _ba.with_name(f"trans_{_ba.name}")
-                    _trans_result = apply_broll_transitions(
-                        broll_path=str(_ba),
-                        output_path=str(_trans_out),
-                        duration=overlay_duration_s,
-                        transition_duration=0.25
-                    )
-                    if _trans_result and Path(_trans_result).exists():
-                        _transitioned_assets.append(Path(_trans_result))
-                        logger.info(f"[BRoll] ✓ Transitions applied to {_ba.name}")
-                    else:
-                        _transitioned_assets.append(_ba)
-                except Exception as _te:
-                    logger.debug(f"[BRoll] Transition skipped for {_ba.name}: {_te}")
-                    _transitioned_assets.append(_ba)
-            broll_assets = _transitioned_assets
+            insert_timestamps: List[float] = [float(cue.start_s or 0.0) for cue in asset_cues]
 
             # Step 4 — build (timestamp, asset, duration) pairs and apply in one pass
             broll_pairs: List[Tuple[float, str, float]] = []
-            for ts, asset in zip(insert_timestamps, broll_assets):
-                dur = min(overlay_duration_s, max(1.5, (clip_duration or overlay_duration_s + ts + 1) - ts - 0.5))
-                broll_pairs.append((ts, str(asset), dur))
+            broll_metadata: List[Dict[str, Any]] = []
+            for ts, asset, cue, asset_source in zip(insert_timestamps, broll_assets, asset_cues, asset_sources):
+                remaining = max(0.0, (clip_duration or cue.duration_s + ts + 1.0) - ts - 0.5)
+                requested = max(float(cue.duration_s or 0.0), _BETA_CLEAN_BROLL_TARGET_S)
+                effective = min(requested, remaining) if remaining > 0 else requested
+                is_image = asset.suffix.lower() in _IMAGE_EXTS
+                asset_duration = _BETA_CLEAN_BROLL_TARGET_S if is_image else probe_duration(asset)
+                logger.info(
+                    "[broll-duration] requested=%.2f asset_duration=%.2f effective=%.2f",
+                    requested,
+                    asset_duration,
+                    effective,
+                )
+                if effective < _BETA_CLEAN_BROLL_MIN_VISIBLE_S:
+                    logger.info("[broll-duration] skipped too short after clamp")
+                    continue
+                if not is_image and asset_duration < effective:
+                    logger.info("[broll-duration] extended/looped to effective=%.2f", effective)
+                broll_pairs.append((ts, str(asset), effective))
+                broll_metadata.append({
+                    "cue_type": cue.cue_type,
+                    "trigger_text": cue.trigger_text,
+                    "visual_query": cue.visual_query,
+                    "asset_path": str(asset),
+                    "asset_source": asset_source,
+                    "start_s": ts,
+                    "requested_duration": requested,
+                    "asset_duration": asset_duration,
+                    "effective_duration": effective,
+                    "transition": cue.transition,
+                    "reason": cue.reason,
+                })
 
+            if not broll_pairs:
+                logger.info("[editorial-broll] approved cues but no suitable asset found")
+                return video_path
+
+            editorial_fade_s = 0.0 if all(cue.transition == "clean_cut" for cue in asset_cues) else broll_fade_s
             if len(broll_pairs) == 1:
                 ts, asset_path, dur = broll_pairs[0]
                 ok = await self.insert_broll(
                     video_path=video_path,
-                    fade=broll_fade_s,
+                    fade=editorial_fade_s,
                     output_path=output_path,
                     broll_path=asset_path,
                     timestamp=ts,
@@ -927,13 +857,14 @@ class BrollService:
             else:
                 from .broll_compositor import compose_overlay_multi
                 ok = await compose_overlay_multi(
-                    fade=broll_fade_s,
+                    fade=editorial_fade_s,
                     main_path=video_path,
                     broll_pairs=broll_pairs,
                     output_path=output_path,
                 )
 
             if ok:
+                self.last_editorial_broll = broll_metadata
                 logger.info(f"[BRoll] ✓ {len(broll_pairs)} overlays applied: {[f't={t:.1f}s' for t,_,_ in broll_pairs]}")
             return output_path if ok else video_path
 

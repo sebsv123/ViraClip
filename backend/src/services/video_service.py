@@ -12,6 +12,8 @@ import subprocess
 import os
 import tempfile
 
+logger = logging.getLogger(__name__)
+
 from ..utils.async_helpers import run_in_thread
 
 
@@ -65,14 +67,38 @@ except (ImportError, Exception):
 _whisperx_model = None
 _whisperx_align_cache: Dict[str, Any] = {}  # {lang: (model, metadata)}
 _whisperx_available = False
+
+
+def resolve_whisper_device() -> Tuple[str, str]:
+    requested = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+    torch_cuda_enabled = os.environ.get("VIRACLIP_ENABLE_TORCH_CUDA", "false").lower() in (
+        "1", "true", "yes"
+    )
+
+    if requested == "cuda":
+        if not torch_cuda_enabled:
+            logger.info(
+                "[WhisperX] CUDA requested but disabled by "
+                "VIRACLIP_ENABLE_TORCH_CUDA=false; using CPU"
+            )
+            return "cpu", "int8"
+        try:
+            from ..utils.gpu_utils import is_torch_cuda_available
+            if is_torch_cuda_available():
+                return "cuda", "float16"
+            logger.info("[WhisperX] CUDA requested but runtime unavailable; using CPU")
+        except Exception as exc:
+            logger.info("[WhisperX] CUDA probe failed (%s); using CPU", exc)
+
+    return "cpu", "int8"
+
+
 try:
     import whisperx
-    import torch as _torch
-    _whisperx_available = _torch.cuda.is_available()
-    _WX_DEVICE = "cuda" if _whisperx_available else "cpu"
-    _WX_COMPUTE = "float16" if _whisperx_available else "int8"
+    _WX_DEVICE, _WX_COMPUTE = resolve_whisper_device()
+    _whisperx_available = True
     _WX_MODEL = "large-v3"
-    _WX_BATCH = 24  # optimal for 8.1GB VRAM Blackwell
+    _WX_BATCH = 24 if _WX_DEVICE == "cuda" else 8
     logger.info(f"[WhisperX] Ready — device={_WX_DEVICE} compute={_WX_COMPUTE}")
 except ImportError:
     logger.warning("[WhisperX] Not installed — using standard Whisper fallback")
@@ -96,8 +122,8 @@ from ..video_processing.editing_pipeline import EditingPipeline
 from ..video_processing.thumbnail_selector import select_best_thumbnail
 from .viral_metadata_service import generate_viral_metadata
 from ..comfyui_bridge import ComfyUIBridge, COMFYUI_ENABLED
+from types import SimpleNamespace
 
-logger = logging.getLogger(__name__)
 # Global config instance for static methods
 _config = None
 
@@ -198,8 +224,8 @@ def burn_word_subtitles(
     import tempfile
 
     try:
-        from .confidence_subtitle_service import ConfidenceSubtitleGenerator
-        gen = ConfidenceSubtitleGenerator()
+        from .confidence_subtitle_service import ConfidenceSubtitleGenerator as _LocalConfidenceSubtitleGenerator
+        gen = _LocalConfidenceSubtitleGenerator()
 
         fd, ass_path = tempfile.mkstemp(suffix=".ass")
         os.close(fd)
@@ -281,7 +307,8 @@ class VideoService:
         cfg = get_service_config()
         if url.startswith(UPLOAD_URL_PREFIX):
             filename = Path(url.removeprefix(UPLOAD_URL_PREFIX)).name
-            return Path(cfg.temp_dir) / "uploads" / filename
+            # cfg.temp_dir already points to /app/temp/uploads (set via TEMP_DIR env var)
+            return Path(cfg.temp_dir) / filename
         return Path(url)
 
     @staticmethod
@@ -654,6 +681,7 @@ class VideoService:
         add_subtitles: bool = True,
         task_id: str = "unknown",
         max_concurrent: int = 3,
+        include_broll: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Create video clips in parallel using Concurrency Optimizer.
@@ -684,6 +712,7 @@ class VideoService:
                     output_format=output_format,
                     add_subtitles=add_subtitles,
                     task_id=task_id,
+                    include_broll=include_broll,
                 )
                 return clip_info
             except Exception as e:
@@ -816,6 +845,7 @@ class VideoService:
         use_extracted_segment: bool = False,
         target_platform: str = "tiktok",
         preferred_music_category: Optional[str] = None,
+        include_broll: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
         # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
@@ -881,46 +911,52 @@ class VideoService:
             return None
 
         # PASO 1: Phi-3-mini Scroll Stop Test — hard 5s timeout to prevent Ollama hangs
-        logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
-        try:
-            phi3_service = get_phi3_service()
-            virality_result = await asyncio.wait_for(
-                phi3_service.score_segment(
-                    segment_text=segment.get("text", ""),
-                    duration=duration,
-                    audio_features=None,
-                ),
-                timeout=5.0,
-            )
-            
-            # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+        _cfg = get_service_config()
+        if not _cfg.beta_clean:
+            logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
             try:
-                from .viral_scorer_service import get_viral_scorer
-                _mlp = get_viral_scorer()
-                if _mlp.is_available():
-                    _blended = _mlp.blend_with_phi3(
-                        phi3_score=virality_result.total_score,
-                        transcript=segment.get("text", ""),
+                phi3_service = get_phi3_service()
+                virality_result = await asyncio.wait_for(
+                    phi3_service.score_segment(
+                        segment_text=segment.get("text", ""),
                         duration=duration,
-                    )
-                    logger.info(
-                        f"  ↳ MLP blend: Phi3={virality_result.total_score} "
-                        f"→ blended={_blended}"
-                    )
-                    virality_result.total_score = _blended
-            except Exception as _mlp_e:
-                logger.debug(f"  MLP blend skipped: {_mlp_e}")
+                        audio_features=None,
+                    ),
+                    timeout=5.0,
+                )
+                
+                # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+                try:
+                    from .viral_scorer_service import get_viral_scorer
+                    _mlp = get_viral_scorer()
+                    if _mlp.is_available():
+                        _blended = _mlp.blend_with_phi3(
+                            phi3_score=virality_result.total_score,
+                            transcript=segment.get("text", ""),
+                            duration=duration,
+                        )
+                        logger.info(
+                            f"  ↳ MLP blend: Phi3={virality_result.total_score} "
+                            f"→ blended={_blended}"
+                        )
+                        virality_result.total_score = _blended
+                except Exception as _mlp_e:
+                    logger.debug(f"  MLP blend skipped: {_mlp_e}")
 
-            # Actualizar segment con resultados Phi-3
-            segment["virality_score"] = virality_result.total_score
-            segment["phi3_hook_type"] = virality_result.primary_hook_type
-            segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
-            segment["recommended_duration"] = virality_result.recommended_duration
-            
-            logger.info(f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
-                       f"Hook: {virality_result.primary_hook_type}")
-        except Exception as phi3_e:
-            logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
+                # Actualizar segment con resultados Phi-3
+                segment["virality_score"] = virality_result.total_score
+                segment["phi3_hook_type"] = virality_result.primary_hook_type
+                segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
+                segment["recommended_duration"] = virality_result.recommended_duration
+                
+                logger.info(f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
+                           f"Hook: {virality_result.primary_hook_type}")
+            except Exception as phi3_e:
+                logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
+                virality_result = None
+        else:
+            logger.info("[beta-clean] advanced virality scoring skipped")
             virality_result = None
         
         # PASO 2: Audio spectral analysis — skipped when segment text exists (saves 1-3 min)
@@ -947,58 +983,85 @@ class VideoService:
             logger.info(f"[Clip {clip_index+1}] Step 2: Audio analysis skipped (transcript available)")
         
         # PASO 3: Detectar cortes narrativos inteligentes (Capa A)
-        logger.info(f"[Clip {clip_index+1}] Step 3: Narrative cut detection...")
-        try:
-            cut_engine = NarrativeCutEngine(min_silence_duration=0.5)
-            
-            # Extraer palabras del segmento (usar el texto)
-            words = segment.get("words", [])
-            if not words:
-                # Crear palabras mock del texto
-                words = [{"word": w, "start": 0, "end": 1} for w in segment.get("text", "").split()]
-            
-            silence_periods = audio_features.get("pause_moments", [])
-            silences = [(p["start"], p["start"] + p["duration"]) for p in silence_periods]
-            
-            cut_points = cut_engine.find_narrative_cuts(
-                transcript=segment.get("text", ""),
-                words_with_timestamps=words,
-                audio_silences=silences,
-                audio_energy=audio_features.get("energy_peaks_timestamps", [])
-            )
-            
-            if cut_points:
-                logger.info(f"  ✓ Found {len(cut_points)} narrative cuts")
-                for cp in cut_points[:3]:
-                    logger.info(f"    - {cp.timestamp:.1f}s: {cp.reason} ({cp.confidence:.0%})")
-            else:
-                logger.info(f"  No narrative cuts needed")
-            
-            segment["narrative_cuts"] = [{
-                "timestamp": cp.timestamp,
-                "confidence": cp.confidence,
-                "reason": cp.reason,
-                "transition": cp.suggested_transition
-            } for cp in cut_points]
-            
-        except Exception as cut_e:
-            logger.warning(f"  Narrative cut detection failed: {cut_e}")
+        if not _cfg.beta_clean:
+            logger.info(f"[Clip {clip_index+1}] Step 3: Narrative cut detection...")
+            try:
+                cut_engine = NarrativeCutEngine(min_silence_duration=0.5)
+
+                # Extraer palabras del segmento (usar el texto)
+                words = segment.get("words", [])
+                if not words:
+                    # Crear palabras mock del texto
+                    words = [{"word": w, "start": 0, "end": 1} for w in segment.get("text", "").split()]
+
+                silence_periods = audio_features.get("pause_moments", [])
+                silences = [(p["start"], p["start"] + p["duration"]) for p in silence_periods]
+
+                cut_points = cut_engine.find_narrative_cuts(
+                    transcript=segment.get("text", ""),
+                    words_with_timestamps=words,
+                    audio_silences=silences,
+                    audio_energy=audio_features.get("energy_peaks_timestamps", [])
+                )
+
+                if cut_points:
+                    logger.info(f"  ✓ Found {len(cut_points)} narrative cuts")
+                    for cp in cut_points[:3]:
+                        logger.info(f"    - {cp.timestamp:.1f}s: {cp.reason} ({cp.confidence:.0%})")
+                else:
+                    logger.info(f"  No narrative cuts needed")
+
+                segment["narrative_cuts"] = [{
+                    "timestamp": cp.timestamp,
+                    "confidence": cp.confidence,
+                    "reason": cp.reason,
+                    "transition": cp.suggested_transition
+                } for cp in cut_points]
+
+            except Exception as cut_e:
+                logger.warning(f"  Narrative cut detection failed: {cut_e}")
+                cut_points = []
+        else:
+            logger.info("[beta-clean] advanced cut detection skipped")
+            segment["narrative_cuts"] = []
             cut_points = []
 
         # ── Clip Intelligence Profile ────────────────────────────────────
         # Single analysis pass that drives: LUT, caption style, B-roll
         # density/duration, BGM category, SFX emphasis, zoom intensity.
-        try:
-            from .clip_intelligence import build_clip_profile_async as _build_profile_async
-            _clip_profile = await _build_profile_async(
-                segment=segment,
-                duration=duration,
-                clip_index=clip_index,
-                caption_template=caption_template or "viral",
+        if not _cfg.beta_clean:
+            try:
+                from .clip_intelligence import build_clip_profile_async as _build_profile_async
+                _clip_profile = await _build_profile_async(
+                    segment=segment,
+                    duration=duration,
+                    clip_index=clip_index,
+                    caption_template=caption_template or "viral",
+                )
+            except Exception as _ci_e:
+                logger.debug(f"  ClipIntelligence skipped: {_ci_e}")
+                _clip_profile = None
+        else:
+            logger.info("[beta-clean] advanced clip profile disabled; using local minimal profile")
+            _clip_profile = SimpleNamespace(
+                mood="neutral",
+                energy=0.5,
+                pace=0.5,
+                lut="none",
+                caption_style="viral",
+                broll_keywords=[],
+                bgm=None,
+                zoom_intensity="off",
+                grain=0,
+                saturation=1.0,
+                contrast=1.0,
+                content_category="general",
+                ai_keywords=None,
+                broll_count=0,
+                broll_duration=0.0,
+                broll_fade_s=0.0,
+                bgm_category=None,
             )
-        except Exception as _ci_e:
-            logger.debug(f"  ClipIntelligence skipped: {_ci_e}")
-            _clip_profile = None
 
         # PASO 4: Word-level confidence subtitles (Fase 3 del plan)
         words_with_confidence = []
@@ -1010,6 +1073,100 @@ class VideoService:
             f"{segment['end_time'].replace(':', '')}.mp4"
         )
         clip_path = output_dir / clip_filename
+
+        def _words_from_cached_transcript(_cached: Dict[str, Any], _source_label: str) -> List[Dict[str, Any]]:
+            _seg_start_ms = start_seconds * 1000.0
+            _seg_end_ms = end_seconds * 1000.0
+            _clip_dur_s = duration
+            _real_words: List[Dict[str, Any]] = []
+            for _w in _cached.get("words", []) or []:
+                _ws = float(_w.get("start", 0))
+                _we = float(_w.get("end", _ws + 200))
+                if _we <= _seg_start_ms or _ws >= _seg_end_ms:
+                    continue
+                _rel_s = max(0.0, (_ws - _seg_start_ms) / 1000.0)
+                _rel_e = min(_clip_dur_s, (_we - _seg_start_ms) / 1000.0)
+                if _rel_e <= _rel_s:
+                    continue
+                _real_words.append({
+                    "word": (_w.get("text") or "").strip(),
+                    "start": round(_rel_s, 3),
+                    "end": round(_rel_e, 3),
+                    "confidence": float(_w.get("confidence", 0.9)),
+                    "is_emphasis": float(_w.get("confidence", 0.9)) < 0.80,
+                })
+            if _real_words:
+                logger.info(
+                    "[caption-timeline] using cached word timestamps words=%d "
+                    "segment_start=%.1f segment_end=%.1f source=%s",
+                    len(_real_words), start_seconds, end_seconds, _source_label,
+                )
+                logger.info(
+                    "[caption-timeline] first_abs=%.1f first_rel=%.3f",
+                    _real_words[0]["start"] + start_seconds,
+                    _real_words[0]["start"],
+                )
+                logger.info(
+                    "[caption-timeline] last_abs=%.1f last_rel=%.3f",
+                    _real_words[-1]["end"] + start_seconds,
+                    _real_words[-1]["end"],
+                )
+            return _real_words
+
+        def _load_cached_caption_words() -> List[Dict[str, Any]]:
+            try:
+                from ..video_processing.transcription import load_cached_transcript_data as _load_cache_words
+            except Exception as _cache_import_e:
+                logger.debug("[caption-cache] import failed: %s", _cache_import_e)
+                return []
+
+            candidates: List[Path] = []
+            for _candidate in (
+                segment.get("_source_video_path"),
+                segment.get("source_video_path"),
+                segment.get("original_video_path"),
+                str(video_path),
+            ):
+                if _candidate:
+                    _p = Path(str(_candidate))
+                    if _p not in candidates:
+                        candidates.append(_p)
+                    _upload_p = Path("/app/temp/uploads") / _p.name
+                    if _upload_p not in candidates:
+                        candidates.append(_upload_p)
+
+            for _candidate in candidates:
+                logger.info("[caption-cache] trying transcript cache candidate=%s", _candidate)
+                _cached = _load_cache_words(_candidate)
+                if _cached and _cached.get("words"):
+                    _real_words = _words_from_cached_transcript(_cached, str(_candidate))
+                    if _real_words:
+                        logger.info("[caption-cache] hit candidate=%s", _candidate)
+                        return _real_words
+                logger.info("[caption-cache] miss candidate=%s", _candidate)
+
+            _segment_text = " ".join((segment.get("text") or "").lower().split())
+            _needle = " ".join(_segment_text.split()[:8])
+            if _needle:
+                for _cache_path in Path("/app/temp/uploads").glob("*.transcript_cache.json"):
+                    logger.info("[caption-cache] trying transcript cache candidate=%s", _cache_path)
+                    try:
+                        _cached = json.loads(_cache_path.read_text(encoding="utf-8"))
+                    except Exception as _cache_parse_e:
+                        logger.info("[caption-cache] miss candidate=%s", _cache_path)
+                        logger.debug("[caption-cache] parse failed: %s", _cache_parse_e)
+                        continue
+                    _cache_text = " ".join((_cached.get("text") or "").lower().split())
+                    if _needle not in _cache_text:
+                        logger.info("[caption-cache] miss candidate=%s", _cache_path)
+                        continue
+                    _real_words = _words_from_cached_transcript(_cached, str(_cache_path))
+                    if _real_words:
+                        logger.info("[caption-cache] hit candidate=%s", _cache_path)
+                        return _real_words
+                    logger.info("[caption-cache] miss candidate=%s", _cache_path)
+
+            return []
         
         if add_subtitles:
             logger.info(f"[Clip {clip_index+1}] Step 4: Generating subtitles...")
@@ -1046,8 +1203,11 @@ class VideoService:
             except Exception as _aai_e:
                 logger.warning(f"  AssemblyAI cache lookup failed: {_aai_e}")
 
-            # ── Priority 1.5: Groq Whisper API — fast cloud transcription (5s vs 5min) ──
             if not words_with_confidence:
+                words_with_confidence = _load_cached_caption_words()
+
+            # ── Priority 1.5: Groq Whisper API — fast cloud transcription (5s vs 5min) ──
+            if not _cfg.beta_clean and not words_with_confidence:
                 try:
                     _gw_key = os.environ.get("GROQ_API_KEY", "")
                     _audio_for_groq = output_dir / f"audio_gw_{clip_index}.wav"
@@ -1088,6 +1248,8 @@ class VideoService:
                     _audio_for_groq.unlink(missing_ok=True)
                 except Exception as _gw_e:
                     logger.warning(f"  Groq Whisper failed: {_gw_e}")
+            elif _cfg.beta_clean and not words_with_confidence:
+                logger.info("[beta-clean] cloud transcription disabled; using local transcription/cache")
 
             # ── Priority 2: faster-whisper local (last resort) ──────────────
             if not words_with_confidence and _confidence_subtitle_available:
@@ -1127,41 +1289,60 @@ class VideoService:
                 except Exception as sub_e:
                     logger.warning(f"  Whisper subtitle generation failed: {sub_e}")
 
+        # ── Priority 3: cached transcript word timestamps (real, not fallback) ──
+        if not words_with_confidence and segment.get("text"):
+            words_with_confidence = _load_cached_caption_words()
+
         # Fallback: no transcript cache and no Whisper — build from segment.text.
         # Emit one entry per word so the ASS karaoke grouper (3 words / line) works
         # correctly; even spacing is imprecise but still watchable.
         if not words_with_confidence and segment.get("text"):
-            logger.warning("[SUBTITLE-FALLBACK] No cache / Whisper — building from segment.text")
+            logger.warning("[SUBTITLE-FALLBACK] no word timestamps available; using text timing approximation")
             _words_list = [w for w in segment["text"].split() if w.strip()]
             if _words_list:
-                # Use ORIGINAL speech duration (not extended clip duration) to avoid
-                # subtitles appearing 2-3x slower than the speaker when clips are padded.
                 _orig_speech_dur = (
                     parse_timestamp_to_seconds(segment["end_time"])
                     - parse_timestamp_to_seconds(segment["start_time"])
                 )
-                # Proportional timing: distribute duration by character length.
-                # Short filler words (a, the, in…) get 50% of their share.
-                _FILLER = {"a","an","the","is","in","at","to","of","i","and",
-                           "or","but","on","it","he","she","we","so","do","be"}
-                _char_weights = [
-                    max(1, len(_w)) * (0.5 if _w.lower() in _FILLER else 1.0)
-                    for _w in _words_list
-                ]
-                _total_weight = sum(_char_weights) or 1
+                # Estimate speech duration from word count (0.38s/word + 1.5s buffer)
+                # This prevents subtitle stretch when clip is padded beyond real speech.
+                _words_count = len(_words_list)
+                _estimated_speech = _words_count * 0.38 + 1.5
+                _effective_dur = min(duration, _orig_speech_dur, max(6.0, _estimated_speech))
+                # Clamp per-word step to avoid too-fast or too-slow subtitles
+                _word_step = _effective_dur / max(_words_count, 1)
+                _word_step = max(0.28, min(0.50, _word_step))
+                logger.info(
+                    "[caption-timeline] fallback=true segment_start=%s clip_duration=%.1f",
+                    segment.get("start_time"), duration,
+                )
+                logger.info(
+                    "[caption-timeline] fallback words=%d orig_dur=%.1f effective_dur=%.1f step=%.3f",
+                    _words_count, _orig_speech_dur, _effective_dur, _word_step,
+                )
                 _cursor = 0.0
                 _EMPHASIS_RE = {"secret","truth","never","always","stop","wrong",
                                 "hack","real","exposed","shocking","actually"}
-                for _w, _cw in zip(_words_list, _char_weights):
-                    _wdur = max(0.06, _orig_speech_dur * _cw / _total_weight)
+                for _w in _words_list:
+                    _start = _cursor
+                    _end = min(_cursor + _word_step, duration)
+                    if _end <= _start:
+                        break
                     words_with_confidence.append({
                         "word":       _w,
-                        "start":      round(_cursor, 3),
-                        "end":        round(_cursor + _wdur, 3),
+                        "start":      round(_start, 3),
+                        "end":        round(_end, 3),
                         "confidence": 0.9,
                         "is_emphasis": _w.lower().strip(".,!?") in _EMPHASIS_RE,
                     })
-                    _cursor += _wdur
+                    _cursor += _word_step
+                if words_with_confidence:
+                    logger.info(
+                        "[caption-timeline] first_rel=%.2f last_rel=%.2f words_in_clip=%d",
+                        words_with_confidence[0]["start"],
+                        words_with_confidence[-1]["end"],
+                        len(words_with_confidence),
+                    )
                 logger.info(
                     f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
                 )
@@ -1234,16 +1415,17 @@ class VideoService:
             _realigner = None  # Initialize before try block
             try:
                 _realign_model = os.environ.get("SUBTITLE_REALIGN_MODEL", "medium")
-                _whisper_device = os.environ.get("WHISPER_DEVICE", "auto")
+                _whisper_device, _ = resolve_whisper_device()
                 _anticipation_ms = float(os.environ.get("SUBTITLE_ANTICIPATION_MS", "-80"))
 
-                from .confidence_subtitle_service import ConfidenceSubtitleGenerator
-                if ConfidenceSubtitleGenerator is None:
+                from .confidence_subtitle_service import ConfidenceSubtitleGenerator as _LocalConfidenceSubtitleGenerator
+                if _LocalConfidenceSubtitleGenerator is None:
                     raise ImportError("ConfidenceSubtitleGenerator not available")
-                _realigner = ConfidenceSubtitleGenerator(
+                _realigner = _LocalConfidenceSubtitleGenerator(
                     model_size=_realign_model,
                     device=_whisper_device
                 )
+                logger.info("[RE-ALIGN] initialized ConfidenceSubtitleGenerator OK")
                 _realigned = _realigner.realign_on_segment(
                     segment_video_path=str(output_path),
                     original_words=words_with_confidence,
@@ -1393,7 +1575,8 @@ class VideoService:
                 logger.debug(f"  Silence handling skipped: {_jc_e}")
 
         # Step 4.2d: Cut Zoom — dynamic zoom punches at jump-cut points (Hormozi/MrBeast)
-        if os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true":
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+        if os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true" and not _cfg.beta_clean:
             try:
                 from .cut_zoom_service import apply_cut_zooms
                 # Extract cut points from word boundaries (end of each word = potential cut)
@@ -1413,6 +1596,8 @@ class VideoService:
                         logger.info(f"  ✓ Cut zooms applied ({len(_cut_points[:8])} points)")
             except Exception as _cz_e:
                 logger.debug(f"  Cut zoom skipped: {_cz_e}")
+        elif os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true":
+            logger.info(f"[beta-clean] Cut zoom skipped (beta_clean mode)")
 
         # Step 4.3: B-Roll overlay — moved to after EditingPipeline (see below).
 
@@ -1472,7 +1657,8 @@ class VideoService:
             # Override via EYE_CONTACT_AUTO=false to disable.
             _eye_contact_auto = os.environ.get("EYE_CONTACT_AUTO", "true").lower() != "false"
             _is_talking_head = _face_centered and bool(words_with_confidence)
-            if eye_contact_correction or (_is_talking_head and _eye_contact_auto):
+            # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+            if (eye_contact_correction or (_is_talking_head and _eye_contact_auto)) and not _cfg.beta_clean:
                 try:
                     if "polisher" not in dir():
                         from .video_polish_service import VideoPolishService
@@ -1485,6 +1671,8 @@ class VideoService:
                             logger.info("  ✓ Eye contact correction auto-applied (talking head detected)")
                 except Exception as _ec_e:
                     logger.debug("  Eye contact correction skipped: %s", _ec_e)
+            elif eye_contact_correction or (_is_talking_head and _eye_contact_auto):
+                logger.info(f"[beta-clean] Eye contact correction skipped (beta_clean mode)")
 
         # Step 4.5c: Portrait background blur (MediaPipe Selfie Segmentation).
         # Enabled via BACKGROUND_BLUR_ENABLED=true.  Defaults off — adds ~10s/clip.
@@ -1502,7 +1690,9 @@ class VideoService:
         # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
         # When subtitles are active both layers appear simultaneously (0-2s) causing
         # a double-text overlap. The karaoke subtitle already serves as the visual hook.
-        if not words_with_confidence:
+        if _cfg.beta_clean:
+            logger.info("[beta-clean] HookVisualService skipped")
+        elif not words_with_confidence:
             try:
                 hook_service = HookVisualService()
                 hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
@@ -1523,15 +1713,18 @@ class VideoService:
         # edit-point alignment BEFORE EditingPipeline so zoom punches land on beats.
         _beat_times: List[float] = []
         _beat_bpm: float = 0.0
-        try:
-            from .beat_sync_service import analyse_bpm as _analyse_bpm
-            _bpm_result = await _analyse_bpm(audio_path=output_path)
-            _beat_bpm   = _bpm_result.get("bpm", 0.0)
-            _beat_times = _bpm_result.get("beat_times", [])
-            if _beat_times:
-                logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
-        except Exception as _bpm_e:
-            logger.debug(f"  BPM detection skipped: {_bpm_e}")
+        if not _cfg.beta_clean:
+            try:
+                from .beat_sync_service import analyse_bpm as _analyse_bpm
+                _bpm_result = await _analyse_bpm(audio_path=output_path)
+                _beat_bpm   = _bpm_result.get("bpm", 0.0)
+                _beat_times = _bpm_result.get("beat_times", [])
+                if _beat_times:
+                    logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
+            except Exception as _bpm_e:
+                logger.debug(f"  BPM detection skipped: {_bpm_e}")
+        else:
+            logger.info("  [beta-clean] BeatSync BPM analysis skipped")
 
         # Merge beat timestamps into flash_timestamps so zoom punches land on beats.
         if _beat_times:
@@ -1576,78 +1769,122 @@ class VideoService:
         # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
         # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
         # progress bar, loudness normalization (single FFmpeg pass).
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
         _lut_preset_ep = ""  # pre-init so always defined even if EP try block fails early
         _lut_vf_ep = ""
-        try:
-            _ep = EditingPipeline()
-            _ep_out = output_path.with_name(f"ep_{output_path.name}")
-            _ep_segment_text = segment.get("text", "")[:60] if segment else ""
-            # Resolve LUT filter string here so EP can bake it in one pass
-            _lut_preset_ep = (
-                (_clip_profile.lut if _clip_profile else None)
-                or os.environ.get("LUT_PRESET", "teal_orange")
-            )
-            _lut_vf_ep = ""
-            if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
-                try:
-                    from .lut_service import get_lut_vf_filter as _get_lut_vf
-                    _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
-                except Exception:
-                    _lut_vf_ep = ""
+        if not _cfg.beta_clean:
+            try:
+                _ep = EditingPipeline()
+                _ep_out = output_path.with_name(f"ep_{output_path.name}")
+                _ep_segment_text = segment.get("text", "")[:60] if segment else ""
+                # Resolve LUT filter string here so EP can bake it in one pass
+                _lut_preset_ep = (
+                    (_clip_profile.lut if _clip_profile else None)
+                    or os.environ.get("LUT_PRESET", "teal_orange")
+                )
+                _lut_vf_ep = ""
+                if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
+                    try:
+                        from .lut_service import get_lut_vf_filter as _get_lut_vf
+                        _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
+                    except Exception:
+                        _lut_vf_ep = ""
 
-            _ep_result = await _ep.apply(
-                video_path=output_path,
-                words=words_with_confidence,
-                output_path=_ep_out,
-                segment_text=_ep_segment_text,
-                flash_timestamps=None,  # Desactivado - flashes cegadores eliminados
-                gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
-                energy_level=_clip_profile.energy if _clip_profile else 0.5,
-                zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
-                grain_override=_clip_profile.grain if _clip_profile else 0,
-                lut_vf=_lut_vf_ep,
-                denoise_audio=True,
-            )
-            if _ep_result == _ep_out and _ep_out.exists():
-                output_path = _ep_out
-                logger.info("  ✓ EditingPipeline: color+cine+vignette+zoom+PI+lower-third+progress+loudnorm")
-        except Exception as _ep_e:
-            logger.warning(f"  EditingPipeline failed: {_ep_e}")
+                _ep_result = await _ep.apply(
+                    video_path=output_path,
+                    words=words_with_confidence,
+                    output_path=_ep_out,
+                    segment_text=_ep_segment_text,
+                    flash_timestamps=None,  # Desactivado - flashes cegadores eliminados
+                    gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
+                    energy_level=_clip_profile.energy if _clip_profile else 0.5,
+                    zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
+                    grain_override=_clip_profile.grain if _clip_profile else 0,
+                    lut_vf=_lut_vf_ep,
+                    denoise_audio=True,
+                )
+                if _ep_result == _ep_out and _ep_out.exists():
+                    output_path = _ep_out
+                    logger.info("  ✓ EditingPipeline: color+cine+vignette+zoom+PI+lower-third+progress+loudnorm")
+            except Exception as _ep_e:
+                logger.warning(f"  EditingPipeline failed: {_ep_e}")
+        else:
+            logger.info(f"[beta-clean] EditingPipeline skipped (beta_clean mode)")
 
         # Step 4.6b: LUT now merged into EditingPipeline — standalone pass removed.
         if _lut_vf_ep:
             logger.info(f"  ✓ LUT '{_lut_preset_ep}' baked into EditingPipeline pass")
 
         # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
-        from ..config import get_config as _get_cfg_broll
-        if _get_cfg_broll().broll_enabled:
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true (unless editorial B-roll is enabled).
+        _editorial_broll_mode = _cfg.beta_clean and _cfg.enable_editorial_broll and include_broll
+        logger.info(
+            "[editorial-broll] gate beta_clean=%s enabled=%s include_broll=%s",
+            str(_cfg.beta_clean).lower(),
+            str(_cfg.enable_editorial_broll).lower(),
+            str(include_broll).lower(),
+        )
+        if _editorial_broll_mode:
+            logger.info("[editorial-broll] enabled in beta-clean safe mode")
+            from .broll_service import BrollService
+            _broll_svc = BrollService()
+            _broll_out = output_path.with_name(f"broll_{output_path.name}")
             try:
-                from .broll_service import BrollService
-                _broll_svc = BrollService()
-                _broll_out = output_path.with_name(f"broll_{output_path.name}")
-                _broll_kw_override = (_clip_profile.ai_keywords
-                                      if _clip_profile and _clip_profile.ai_keywords
-                                      else None)
                 _broll_result = await _broll_svc.process_clip(
                     video_path=str(output_path),
                     output_path=str(_broll_out),
                     segment_text=segment.get("text", ""),
                     clip_duration=duration,
-                    max_overlays=_clip_profile.broll_count if _clip_profile else 3,
-                    overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
+                    max_overlays=3,
+                    overlay_duration_s=3.0,
                     words_with_timestamps=words_with_confidence or None,
-                    precomputed_keywords=_broll_kw_override,
-                    broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.6,
+                    precomputed_keywords=None,
+                    broll_fade_s=0.6,
+                    task_id=task_id,
                 )
                 if Path(_broll_result).exists() and _broll_result != str(output_path):
                     output_path = Path(_broll_result)
-                    logger.info(f"  ✓ B-roll overlay applied (post-EP)")
+                    logger.info(f"  ✓ Editorial B-roll overlay applied")
+                _editorial_broll_metadata = list(getattr(_broll_svc, "last_editorial_broll", []) or [])
             except Exception as _broll_e:
-                logger.warning(f"  B-roll overlay failed: {_broll_e}")
+                logger.warning(f"  Editorial B-roll overlay failed: {_broll_e}")
+                _editorial_broll_metadata = []
+        elif not _cfg.beta_clean:
+            from ..config import get_config as _get_cfg_broll
+            if _get_cfg_broll().broll_enabled:
+                try:
+                    from .broll_service import BrollService
+                    _broll_svc = BrollService()
+                    _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                    _broll_kw_override = (_clip_profile.ai_keywords
+                                          if _clip_profile and _clip_profile.ai_keywords
+                                          else None)
+                    _broll_result = await _broll_svc.process_clip(
+                        video_path=str(output_path),
+                        output_path=str(_broll_out),
+                        segment_text=segment.get("text", ""),
+                        clip_duration=duration,
+                        max_overlays=_clip_profile.broll_count if _clip_profile else 3,
+                        overlay_duration_s=_clip_profile.broll_duration if _clip_profile else 3.0,
+                        words_with_timestamps=words_with_confidence or None,
+                        precomputed_keywords=_broll_kw_override,
+                        broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.6,
+                        task_id=task_id,
+                    )
+                    if Path(_broll_result).exists() and _broll_result != str(output_path):
+                        output_path = Path(_broll_result)
+                        logger.info(f"  ✓ B-roll overlay applied (post-EP)")
+                except Exception as _broll_e:
+                    logger.warning(f"  B-roll overlay failed: {_broll_e}")
+        else:
+            logger.info(f"[beta-clean] B-roll overlay skipped (beta_clean mode)")
 
         # Step 4.3b: Contextual Overlay Engine — keyword→image/video overlays (viral TikTok feature)
         _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
-        if _ctx_overlays_env and segment and words_with_confidence:
+        if _cfg.beta_clean:
+            logger.info("[beta-clean] template text overlay skipped")
+            logger.info("[beta-clean] top text overlay skipped")
+        elif _ctx_overlays_env and segment and words_with_confidence:
             try:
                 from .contextual_overlay_engine import ContextualOverlayEngine
                 _ctx_engine = ContextualOverlayEngine()
@@ -1681,6 +1918,47 @@ class VideoService:
 
         # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
         if add_subtitles and words_with_confidence:
+            # ── Timeline validation: clamp words that exceed video duration ──
+            # After silence removal / jump cuts the word timestamps may exceed
+            # the final video duration, causing desynchronised subtitles.
+            _video_dur = VideoService._get_file_duration(output_path)
+            if _video_dur is not None and _video_dur > 0:
+                _before = len(words_with_confidence)
+                _clamped = 0
+                _dropped = 0
+                for _w in words_with_confidence:
+                    _ws = float(_w.get("start", 0))
+                    _we = float(_w.get("end", _ws + 0.3))
+                    # Clamp negative start times to 0
+                    if _ws < 0:
+                        _w["start"] = 0.0
+                        _clamped += 1
+                    # Drop words that start after the video ends
+                    if _ws >= _video_dur:
+                        _w["_drop"] = True
+                        _dropped += 1
+                        continue
+                    # Clamp end time to video duration
+                    if _we > _video_dur:
+                        _w["end"] = _video_dur
+                        _clamped += 1
+                words_with_confidence = [w for w in words_with_confidence if not w.get("_drop")]
+                _first_start = words_with_confidence[0].get("start", 0) if words_with_confidence else 0
+                _last_end = words_with_confidence[-1].get("end", 0) if words_with_confidence else 0
+                logger.info(
+                    "[TIMELINE-VALIDATION] video_dur=%.2fs words=%d→%d "
+                    "(clamped=%d dropped=%d) "
+                    "first_word_start=%.2fs last_word_end=%.2fs",
+                    _video_dur, _before, len(words_with_confidence),
+                    _clamped, _dropped,
+                    _first_start, _last_end,
+                )
+            else:
+                logger.debug(
+                    "[TIMELINE-VALIDATION] Could not determine video duration "
+                    "for %s — skipping clamp", output_path.name,
+                )
+
             try:
                 from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
                 logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
@@ -1695,20 +1973,45 @@ class VideoService:
                 )
                 if _cap_ok and subtitled_path.exists():
                     output_path = subtitled_path
+                    _caption_ass_debug_path = str(
+                        Path(os.environ.get("CAPTION_DEBUG_DIR", "/app/temp/caption_debug"))
+                        / f"{subtitled_path.stem}.ass"
+                    )
                     logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
                 else:
                     raise RuntimeError("caption_service returned False")
             except Exception as burn_e:
-                logger.warning(f"  CaptionService failed ({burn_e}), falling back to legacy subtitles")
-                try:
-                    subtitled_path = output_path.with_name(f"sub_{output_path.name}")
-                    await VideoService._burn_subtitles_word_level(
-                        str(output_path), words_with_confidence, str(subtitled_path)
+                if _cfg.beta_clean:
+                    logger.error(
+                        "[beta-clean] CaptionService.burn_captions failed (%s); "
+                        "legacy subtitle fallback disabled",
+                        burn_e,
                     )
-                    if subtitled_path.exists():
-                        output_path = subtitled_path
-                except Exception as _fb_e:
-                    logger.warning(f"  Legacy subtitle fallback also failed: {_fb_e}")
+                    logger.info("[beta-clean] legacy subtitle fallback disabled")
+                    if "subtitled_path" in locals() and subtitled_path is not None:
+                        subtitled_path.unlink(missing_ok=True)
+                    subtitled_path = None
+                else:
+                    logger.warning(
+                        "[LEGACY-FALLBACK] CaptionService.burn_captions failed (%s) — "
+                        "falling back to VideoService._burn_subtitles_word_level (legacy ASS)",
+                        burn_e,
+                    )
+                    try:
+                        subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                        await VideoService._burn_subtitles_word_level(
+                            str(output_path), words_with_confidence, str(subtitled_path)
+                        )
+                        if subtitled_path.exists():
+                            output_path = subtitled_path
+                            logger.info(
+                                "[LEGACY-FALLBACK] Legacy _burn_subtitles_word_level succeeded "
+                                "for %s", subtitled_path.name,
+                            )
+                    except Exception as _fb_e:
+                        logger.warning(
+                            "[LEGACY-FALLBACK] Legacy subtitle fallback also failed: %s", _fb_e,
+                        )
 
         # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
         if COMFYUI_ENABLED:
@@ -1724,33 +2027,37 @@ class VideoService:
                 logger.debug(f"  ComfyUI enhance skipped: {_cfy_e}")
 
         # Step 4.8: Sound Design (efectos de sonido virales)
-        try:
-            sound_service = SoundDesignService()
-            _emphasis_words = [
-                {"start": w["start"]}
-                for w in words_with_confidence
-                if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
-            ] if words_with_confidence else []
-            virality_segments = [{
-                "start": 0,
-                "end": duration,
-                "hook_type": segment.get("hook_type", "insight_reveal"),
-                "text": segment.get("text", ""),
-                "emphasis_words": _emphasis_words,
-            }]
-            sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
-            if sound_cues:
-                sound_path = output_path.with_name(f"sound_{output_path.name}")
-                await sound_service.inject_sound_effects(
-                    str(output_path),
-                    str(sound_path),
-                    sound_cues
-                )
-                if Path(sound_path).exists():
-                    output_path = sound_path
-                    logger.info(f"  ✓ {len(sound_cues)} sound effects added")
-        except Exception as sound_e:
-            logger.warning(f"  Sound design failed: {sound_e}")
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+        if not _cfg.beta_clean:
+            try:
+                sound_service = SoundDesignService()
+                _emphasis_words = [
+                    {"start": w["start"]}
+                    for w in words_with_confidence
+                    if w.get("is_emphasis") and 0 < w.get("start", 0) < duration
+                ] if words_with_confidence else []
+                virality_segments = [{
+                    "start": 0,
+                    "end": duration,
+                    "hook_type": segment.get("hook_type", "insight_reveal"),
+                    "text": segment.get("text", ""),
+                    "emphasis_words": _emphasis_words,
+                }]
+                sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
+                if sound_cues:
+                    sound_path = output_path.with_name(f"sound_{output_path.name}")
+                    await sound_service.inject_sound_effects(
+                        str(output_path),
+                        str(sound_path),
+                        sound_cues
+                    )
+                    if Path(sound_path).exists():
+                        output_path = sound_path
+                        logger.info(f"  ✓ {len(sound_cues)} sound effects added")
+            except Exception as sound_e:
+                logger.warning(f"  Sound design failed: {sound_e}")
+        else:
+            logger.info(f"[beta-clean] Sound design skipped (beta_clean mode)")
 
         # Step 4.10: Platform export — only re-encode when burning hardsubs.
         # When no subtitle file exists use stream copy (near-instant, no quality loss).
@@ -1787,45 +2094,48 @@ class VideoService:
 
         # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
         # Falls back to niche-based static track when BGM library is empty.
-        try:
-            from .beat_sync_service import get_beat_sync_service as _get_bs
-            _music_out = output_path.with_name(f"music_{output_path.name}")
-            _speech_segs = [
-                {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
-                for w in (words_with_confidence or [])[::3]
-            ]
-            _bs_result = await _get_bs().mix_bgm_beat_synced(
-                video_path=output_path,
-                output_path=_music_out,
-                speech_segments=_speech_segs,
-                bgm_volume=float(os.environ.get("BGM_VOLUME", "0.40")),  # Aumentado para audibilidad
-                preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
-                word_timings=words_with_confidence or None,
-            )
-            if _bs_result.get("success") and _music_out.exists():
-                _music_out.replace(output_path)
-                _bgm_name = (_bs_result.get("bgm_used") or "").split("/")[-1] or "?"
-                logger.info(
-                    "  ✓ Beat-synced BGM: %.1f BPM / %s / %s",
-                    _bs_result.get("bpm", 0), _bs_result.get("category", "?"), _bgm_name
-                )
-            else:
-                raise RuntimeError("beat_sync returned no output — using niche fallback")
-        except Exception as _music_e:
-            logger.debug(f"  BeatSync BGM skipped ({_music_e}), trying niche fallback")
+        if not _cfg.beta_clean:
             try:
-                from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
-                from ..config import get_config as _get_cfg
-                _cfg = _get_cfg()
-                _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
-                if _music_path:
-                    _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
-                    if _mix_bg(output_path, _music_tmp, music_volume=0.35, music_path=_music_path, word_timings=words_with_confidence or None):  # Aumentado de 0.22
-                        if _music_tmp.exists():
-                            _music_tmp.replace(output_path)
-                            logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
-            except Exception as _fb_music_e:
-                logger.warning(f"  All music paths skipped: {_fb_music_e}")
+                from .beat_sync_service import get_beat_sync_service as _get_bs
+                _music_out = output_path.with_name(f"music_{output_path.name}")
+                _speech_segs = [
+                    {"start": w["start"], "end": w.get("end", w["start"] + 0.3)}
+                    for w in (words_with_confidence or [])[::3]
+                ]
+                _bs_result = await _get_bs().mix_bgm_beat_synced(
+                    video_path=output_path,
+                    output_path=_music_out,
+                    speech_segments=_speech_segs,
+                    bgm_volume=float(os.environ.get("BGM_VOLUME", "0.40")),  # Aumentado para audibilidad
+                    preferred_category=preferred_music_category or (_clip_profile.bgm_category if _clip_profile else None),
+                    word_timings=words_with_confidence or None,
+                )
+                if _bs_result.get("success") and _music_out.exists():
+                    _music_out.replace(output_path)
+                    _bgm_name = (_bs_result.get("bgm_used") or "").split("/")[-1] or "?"
+                    logger.info(
+                        "  ✓ Beat-synced BGM: %.1f BPM / %s / %s",
+                        _bs_result.get("bpm", 0), _bs_result.get("category", "?"), _bgm_name
+                    )
+                else:
+                    raise RuntimeError("beat_sync returned no output — using niche fallback")
+            except Exception as _music_e:
+                logger.debug(f"  BeatSync BGM skipped ({_music_e}), trying niche fallback")
+                try:
+                    from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
+                    from ..config import get_config as _get_cfg
+                    _cfg = _get_cfg()
+                    _music_path = get_background_music_for_niche(segment.get("theme") or "general", _cfg)
+                    if _music_path:
+                        _music_tmp = output_path.with_name(f"music_fb_{output_path.name}")
+                        if _mix_bg(output_path, _music_tmp, music_volume=0.35, music_path=_music_path, word_timings=words_with_confidence or None):  # Aumentado de 0.22
+                            if _music_tmp.exists():
+                                _music_tmp.replace(output_path)
+                                logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
+                except Exception as _fb_music_e:
+                    logger.warning(f"  All music paths skipped: {_fb_music_e}")
+        else:
+            logger.info("  [beta-clean] Beat-synced BGM skipped (beta_clean mode)")
 
         # Step 4.10b: Audio Ducking — auto-lower BGM when speaker talks (sidechain)
         try:
@@ -1846,27 +2156,31 @@ class VideoService:
 
         # Step 4.11: Pexels B-Roll overlay (Feature A — await prefetch task started at render launch)
         # Skip if Step 4.3 (BrollService) already applied B-roll — prevents double overlay.
-        _step43_ran = _get_cfg_broll().broll_enabled
-        if _broll_prefetch_task is not None and not _step43_ran:
-            try:
-                from .pexels_service import overlay_broll_on_clip
-                _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
-                if _broll_path:
-                    _broll_out = output_path.with_name(f"broll_{output_path.name}")
-                    ok = overlay_broll_on_clip(
-                        output_path, _broll_path, _broll_out,
-                        broll_start=0.3, broll_end=0.6,
-                    )
-                    if ok and _broll_out.exists():
-                        _broll_out.replace(output_path)
-                        logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
-                else:
-                    logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
-            except asyncio.TimeoutError:
-                logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
-                _broll_prefetch_task.cancel()
-            except Exception as _br_e:
-                logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
+        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+        if not _cfg.beta_clean:
+            _step43_ran = _get_cfg_broll().broll_enabled
+            if _broll_prefetch_task is not None and not _step43_ran:
+                try:
+                    from .pexels_service import overlay_broll_on_clip
+                    _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
+                    if _broll_path:
+                        _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                        ok = overlay_broll_on_clip(
+                            output_path, _broll_path, _broll_out,
+                            broll_start=0.3, broll_end=0.6,
+                        )
+                        if ok and _broll_out.exists():
+                            _broll_out.replace(output_path)
+                            logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
+                    else:
+                        logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
+                except asyncio.TimeoutError:
+                    logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
+                    _broll_prefetch_task.cancel()
+                except Exception as _br_e:
+                    logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
+        else:
+            logger.info(f"[beta-clean] Pexels B-roll overlay skipped (beta_clean mode)")
 
         logger.info(f"Created clip {clip_index + 1}: {duration:.1f}s")
 
@@ -1915,93 +2229,115 @@ class VideoService:
             logger.debug(f"Scene analysis skipped: {e}")
 
         # ViralityEngine: unified hook+pacing+emotion+phi3 score (replaces manual blend)
-        try:
-            from .virality_engine import get_virality_engine
-            _ve = get_virality_engine()
-            _ve_pred = await _ve.predict(
-                transcript=segment.get("text", ""),
-                words=words_with_confidence or [],
-                audio_features=audio_features or {},
-                timeline_events=segment.get("timeline_events") or [],
-            )
-            final_virality = _ve_pred.score
-            text_virality = _ve_pred.score
-            if _ve_pred.improvements:
-                logger.info(f"  ✓ ViralityEngine score={_ve_pred.score} improvements={_ve_pred.improvements[:2]}")
-        except Exception as _ve_e:
-            logger.debug(f"  ViralityEngine skipped: {_ve_e}")
+        if not _cfg.beta_clean:
+            try:
+                from .virality_engine import get_virality_engine
+                _ve = get_virality_engine()
+                _ve_pred = await _ve.predict(
+                    transcript=segment.get("text", ""),
+                    words=words_with_confidence or [],
+                    audio_features=audio_features or {},
+                    timeline_events=segment.get("timeline_events") or [],
+                )
+                final_virality = _ve_pred.score
+                text_virality = _ve_pred.score
+                if _ve_pred.improvements:
+                    logger.info(f"  ✓ ViralityEngine score={_ve_pred.score} improvements={_ve_pred.improvements[:2]}")
+            except Exception as _ve_e:
+                logger.debug(f"  ViralityEngine skipped: {_ve_e}")
+        else:
+            logger.info("[beta-clean] ViralityEngine disabled")
 
         # Visual scoring via Ollama + Qwen3-VL (GPU optional, graceful fallback)
-        try:
-            from ..config import get_config
-            cfg = get_config()
-            if getattr(cfg, "vision_analysis_enabled", True):
-                from .vision_service import analyze_clip_visually, blend_with_text_score
-                vision_score = await analyze_clip_visually(
-                    output_path,
-                    transcript=segment.get("text", ""),
-                    n_frames=8,
-                )
-                final_virality = blend_with_text_score(text_virality, vision_score)
-                vision_data = {
-                    "visual_hook": vision_score.visual_hook,
-                    "facial_energy": vision_score.facial_energy,
-                    "visual_virality": vision_score.visual_virality,
-                    "vision_model": vision_score.model_used,
-                    "vision_recommendations": vision_score.recommendations,
-                    # Phase 2.4: scene intelligence
-                    "scene_context": vision_score.scene_context,
-                    "boring_frames": vision_score.boring_frames,
-                    "broll_keywords": vision_score.broll_keywords,
-                }
-                if vision_score.boring_frames:
-                    logger.info(
-                        f"  ↳ Boring frames detected: {vision_score.boring_frames} "
-                        f"→ B-roll injection candidates"
+        if not _cfg.beta_clean:
+            try:
+                from ..config import get_config
+                cfg = get_config()
+                if getattr(cfg, "vision_analysis_enabled", True):
+                    from .vision_service import analyze_clip_visually, blend_with_text_score
+                    vision_score = await analyze_clip_visually(
+                        output_path,
+                        transcript=segment.get("text", ""),
+                        n_frames=8,
                     )
-                if vision_score.broll_keywords:
-                    logger.info(
-                        f"  ↳ B-roll keywords: {vision_score.broll_keywords}"
-                    )
-        except Exception as e:
-            logger.debug(f"Vision scoring skipped: {e}")
+                    final_virality = blend_with_text_score(text_virality, vision_score)
+                    vision_data = {
+                        "visual_hook": vision_score.visual_hook,
+                        "facial_energy": vision_score.facial_energy,
+                        "visual_virality": vision_score.visual_virality,
+                        "vision_model": vision_score.model_used,
+                        "vision_recommendations": vision_score.recommendations,
+                        # Phase 2.4: scene intelligence
+                        "scene_context": vision_score.scene_context,
+                        "boring_frames": vision_score.boring_frames,
+                        "broll_keywords": vision_score.broll_keywords,
+                    }
+                    if vision_score.boring_frames:
+                        logger.info(
+                            f"  ↳ Boring frames detected: {vision_score.boring_frames} "
+                            f"→ B-roll injection candidates"
+                        )
+                    if vision_score.broll_keywords:
+                        logger.info(
+                            f"  ↳ B-roll keywords: {vision_score.broll_keywords}"
+                        )
+            except Exception as e:
+                logger.debug(f"Vision scoring skipped: {e}")
+        else:
+            logger.info("[beta-clean] Vision scoring disabled")
 
         # Thumbnail: Qwen3-VL quality scoring → pick best among 5 candidate frames
         thumbnail_filename = None
-        try:
-            from ..config import get_config
-            cfg = get_config()
-            if getattr(cfg, "vision_analysis_enabled", True):
-                from .vision_service import score_thumbnail_frame
-                from ..utils.scene_analysis import extract_representative_frames
-                import tempfile, shutil
+        if not _cfg.beta_clean:
+            try:
+                from ..config import get_config
+                cfg = get_config()
+                if getattr(cfg, "vision_analysis_enabled", True):
+                    from .vision_service import score_thumbnail_frame
+                    from ..utils.scene_analysis import extract_representative_frames
+                    import tempfile, shutil
 
-                # Extract 5 candidate frames
-                candidates = extract_representative_frames(output_path, n_frames=5)
-                if candidates:
-                    scored = []
-                    for fp in candidates:
-                        result = await score_thumbnail_frame(fp)
-                        scored.append((result.get("score", 0), fp))
-                    scored.sort(key=lambda x: x[0], reverse=True)
-                    best_score, best_frame = scored[0]
-                    thumb_path = output_path.with_suffix(".jpg")
-                    shutil.copy2(str(best_frame), str(thumb_path))
-                    thumbnail_filename = thumb_path.name
-                    logger.info(
-                        f"  ✓ Qwen3-VL thumbnail selected (score={best_score}): "
-                        f"{thumbnail_filename}"
-                    )
-                    for _, fp in candidates:
-                        try:
-                            fp.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                    # Extract 5 candidate frames
+                    candidates = extract_representative_frames(output_path, n_frames=5)
+                    if candidates:
+                        scored = []
+                        for fp in candidates:
+                            result = await score_thumbnail_frame(fp)
+                            scored.append((result.get("score", 0), fp))
+                        scored.sort(key=lambda x: x[0], reverse=True)
+                        best_score, best_frame = scored[0]
+                        thumb_path = output_path.with_suffix(".jpg")
+                        shutil.copy2(str(best_frame), str(thumb_path))
+                        thumbnail_filename = thumb_path.name
+                        logger.info(
+                            f"  ✓ Qwen3-VL thumbnail selected (score={best_score}): "
+                            f"{thumbnail_filename}"
+                        )
+                        for _, fp in candidates:
+                            try:
+                                fp.unlink(missing_ok=True)
+                            except Exception:
+                                pass
 
-            if not thumbnail_filename:
-                raise RuntimeError("Vision thumbnail skipped — fallback")
-        except Exception:
-            # Fallback: sharpness-based smart thumbnail
+                if not thumbnail_filename:
+                    raise RuntimeError("Vision thumbnail skipped — fallback")
+            except Exception:
+                # Fallback: sharpness-based smart thumbnail
+                try:
+                    thumb_path = str(output_path.with_suffix(".jpg"))
+                    result_thumb = await select_best_thumbnail(str(output_path), thumb_path)
+                    if result_thumb and Path(result_thumb).exists():
+                        thumbnail_filename = Path(result_thumb).name
+                        logger.info(f"  ✓ Smart thumbnail selected: {thumbnail_filename}")
+                    else:
+                        thumbnail_path = output_path.with_suffix(".jpg")
+                        if generate_clip_thumbnail(output_path, thumbnail_path, seek_seconds=1.0):
+                            thumbnail_filename = thumbnail_path.name
+                except Exception as e:
+                    logger.debug(f"Thumbnail generation failed: {e}")
+        else:
+            logger.info("[beta-clean] AI thumbnail generation disabled")
+            # Fallback: sharpness-based smart thumbnail (always runs)
             try:
                 thumb_path = str(output_path.with_suffix(".jpg"))
                 result_thumb = await select_best_thumbnail(str(output_path), thumb_path)
@@ -2016,7 +2352,7 @@ class VideoService:
                 logger.debug(f"Thumbnail generation failed: {e}")
 
         # AI Thumbnail variants — generate viral-optimized thumbnail alternatives
-        if os.environ.get("AI_THUMBNAIL_ENABLED", "true").lower() == "true":
+        if os.environ.get("AI_THUMBNAIL_ENABLED", "true").lower() == "true" and not _cfg.beta_clean:
             try:
                 from .ai_thumbnail_service import AIThumbnailService, ThumbnailStyle
                 _thumb_svc = AIThumbnailService(output_dir=output_path.parent)
@@ -2034,50 +2370,58 @@ class VideoService:
                     )
             except Exception as _aith_e:
                 logger.debug(f"  AI Thumbnail skipped: {_aith_e}")
+        elif _cfg.beta_clean:
+            logger.info("[beta-clean] AI thumbnail variants disabled")
 
         # Viral metadata: LLM-generated hashtags + SEO title
         viral_meta: dict = {}
-        try:
-            viral_meta = await generate_viral_metadata(
-                text=segment.get("text", ""),
-                platform=target_platform,
-            )
-            logger.info(
-                f"  ✓ Viral metadata: '{viral_meta.get('title', '')}' "
-                f"({len(viral_meta.get('hashtags', []))} hashtags)"
-            )
-        except Exception as _vm_e:
-            logger.debug(f"  Viral metadata skipped: {_vm_e}")
+        if not _cfg.beta_clean:
+            try:
+                viral_meta = await generate_viral_metadata(
+                    text=segment.get("text", ""),
+                    platform=target_platform,
+                )
+                logger.info(
+                    f"  ✓ Viral metadata: '{viral_meta.get('title', '')}' "
+                    f"({len(viral_meta.get('hashtags', []))} hashtags)"
+                )
+            except Exception as _vm_e:
+                logger.debug(f"  Viral metadata skipped: {_vm_e}")
+        else:
+            logger.info("[beta-clean] Viral metadata LLM disabled")
 
         # Phase 8.3: LSTM/CNN engagement prediction (drop-off curve)
         engagement_data: dict = {}
-        try:
-            from .engagement_prediction_service import get_engagement_predictor
-            import asyncio as _asyncio
-            _predictor = get_engagement_predictor()
-            _loop = _asyncio.get_event_loop()
-            _eng = await _loop.run_in_executor(
-                None,
-                lambda: _predictor.predict_engagement_curve(
-                    words=words_with_confidence,
-                    audio_features=audio_features,
-                    duration=duration,
-                ),
-            )
-            engagement_data = {
-                "engagement_curve":   _eng["curve"],
-                "drop_off_points":    _eng["drop_off_points"],
-                "hook_insertion_pts": _eng["hook_points"],
-                "retention_score":    _eng["retention_score"],
-                "engagement_method":  _eng["predicted_by"],
-            }
-            logger.info(
-                f"  ✓ Engagement curve [{_eng['predicted_by']}]: "
-                f"retention={_eng['retention_score']}% "
-                f"drop-offs={_eng['drop_off_points']}"
-            )
-        except Exception as _ep_e:
-            logger.debug(f"  Engagement prediction skipped: {_ep_e}")
+        if not _cfg.beta_clean:
+            try:
+                from .engagement_prediction_service import get_engagement_predictor
+                import asyncio as _asyncio
+                _predictor = get_engagement_predictor()
+                _loop = _asyncio.get_event_loop()
+                _eng = await _loop.run_in_executor(
+                    None,
+                    lambda: _predictor.predict_engagement_curve(
+                        words=words_with_confidence,
+                        audio_features=audio_features,
+                        duration=duration,
+                    ),
+                )
+                engagement_data = {
+                    "engagement_curve":   _eng["curve"],
+                    "drop_off_points":    _eng["drop_off_points"],
+                    "hook_insertion_pts": _eng["hook_points"],
+                    "retention_score":    _eng["retention_score"],
+                    "engagement_method":  _eng["predicted_by"],
+                }
+                logger.info(
+                    f"  ✓ Engagement curve [{_eng['predicted_by']}]: "
+                    f"retention={_eng['retention_score']}% "
+                    f"drop-offs={_eng['drop_off_points']}"
+                )
+            except Exception as _ep_e:
+                logger.debug(f"  Engagement prediction skipped: {_ep_e}")
+        else:
+            logger.info("[beta-clean] Engagement prediction disabled")
 
         # ── Recommendation Engine — personalized suggestions per user ─────
         _recommendations: list = []
@@ -2264,6 +2608,8 @@ class VideoService:
             "clip_health": _clip_health,
             "audio_recommendations": _audio_recs,
             "ab_variants": _variants,
+            "editorial_broll": locals().get("_editorial_broll_metadata", []),
+            "caption_ass_debug_path": locals().get("_caption_ass_debug_path"),
         }
         # Cancel prefetch task if still running
         if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
@@ -2523,30 +2869,53 @@ class VideoService:
                     logger.info(f"[CACHE] Smart cache HIT for AI analysis: {len(cached_ai['data'].get('most_relevant_segments', []))} segments")
 
             if relevant_parts is None:
-                # AI analysis with retry logic
-                relevant_parts = await execute_with_recovery(
-                    VideoService.analyze_transcript,
-                    transcript,
-                    video_duration=file_duration or 0.0,
-                    include_broll=include_broll,
-                    max_retries=2,
-                    context={"stage": "ai_analysis", "task_id": task_id}
-                )
-                # Cache in smart cache
-                cache_payload = {
-                    "summary": getattr(relevant_parts, "summary", None),
-                    "key_topics": getattr(relevant_parts, "key_topics", []),
-                    "most_relevant_segments": [
-                        s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else vars(s))
-                        for s in (relevant_parts.most_relevant_segments or [])
-                    ],
-                    "broll_opportunities": [
-                        o if isinstance(o, dict) else (o.model_dump() if hasattr(o, "model_dump") else vars(o))
-                        for o in (getattr(relevant_parts, "broll_opportunities", None) or [])
-                    ],
-                }
-                await cache_manager.set("ai_analysis", video_hash, cache_payload)
-                logger.info(f"[CACHE] Saved AI analysis to smart cache")
+                if get_service_config().beta_clean:
+                    segment_end = min(file_duration or 30.0, 60.0)
+                    end_minutes = int(segment_end) // 60
+                    end_seconds = int(segment_end) % 60
+                    logger.info("[beta-clean] local segment selection only")
+                    relevant_parts = _SimpleResult(
+                        {
+                            "summary": None,
+                            "key_topics": [],
+                            "most_relevant_segments": [
+                                {
+                                    "start_time": "00:00",
+                                    "end_time": f"{end_minutes:02d}:{end_seconds:02d}",
+                                    "text": transcript,
+                                    "relevance_score": 0.5,
+                                    "virality_score": 40,
+                                    "reasoning": "beta-clean local segment",
+                                }
+                            ],
+                            "broll_opportunities": [],
+                        }
+                    )
+                else:
+                    # AI analysis with retry logic
+                    relevant_parts = await execute_with_recovery(
+                        VideoService.analyze_transcript,
+                        transcript,
+                        video_duration=file_duration or 0.0,
+                        include_broll=include_broll,
+                        max_retries=2,
+                        context={"stage": "ai_analysis", "task_id": task_id}
+                    )
+                    # Cache in smart cache
+                    cache_payload = {
+                        "summary": getattr(relevant_parts, "summary", None),
+                        "key_topics": getattr(relevant_parts, "key_topics", []),
+                        "most_relevant_segments": [
+                            s if isinstance(s, dict) else (s.model_dump() if hasattr(s, "model_dump") else vars(s))
+                            for s in (relevant_parts.most_relevant_segments or [])
+                        ],
+                        "broll_opportunities": [
+                            o if isinstance(o, dict) else (o.model_dump() if hasattr(o, "model_dump") else vars(o))
+                            for o in (getattr(relevant_parts, "broll_opportunities", None) or [])
+                        ],
+                    }
+                    await cache_manager.set("ai_analysis", video_hash, cache_payload)
+                    logger.info(f"[CACHE] Saved AI analysis to smart cache")
 
             # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
             if progress_callback:
@@ -2564,26 +2933,40 @@ class VideoService:
                 for p in elite_plan.clips
             }
 
-            # Step 3.5: Local LLM Virality Analysis
+            # Step 3.5: Virality metadata for ranking.
             if progress_callback:
-                await progress_callback(60, "Predicting virality with local AI...", "processing")
-            
-            # Prepare segments for LLM (with improved service)
-            segment_texts = [s.get("text") if isinstance(s, dict) else s.text for s in relevant_parts.most_relevant_segments]
-            
-            # Use improved LLM service with validation + text-based fallback
-            from .llm_service_improved import ImprovedLLMService
-            llm_service = ImprovedLLMService()
-            virality_data = await llm_service.get_virality_analysis(segment_texts)
-            virality_map = {item.get("segment_index"): item for item in virality_data.get("analysis", [])}
-            
-            # Log scoring method used
-            if virality_map:
-                first_reasoning = list(virality_map.values())[0].get("reasoning", "")
-                if "fallback" in first_reasoning.lower():
-                    logger.info("📊 Using text-based virality scoring (Ollama unavailable)")
-                else:
-                    logger.info("✨ Using AI virality scoring (Ollama active)")
+                await progress_callback(60, "Predicting virality with local scoring...", "processing")
+
+            if get_service_config().beta_clean:
+                logger.info("[beta-clean] local virality scoring only")
+                virality_map = {
+                    idx: {
+                        "segment_index": idx,
+                        "virality_score": (
+                            segment.get("virality_score", 40)
+                            if isinstance(segment, dict)
+                            else getattr(segment, "virality_score", 40)
+                        ),
+                    }
+                    for idx, segment in enumerate(relevant_parts.most_relevant_segments)
+                }
+            else:
+                # Prepare segments for LLM (with improved service)
+                segment_texts = [s.get("text") if isinstance(s, dict) else s.text for s in relevant_parts.most_relevant_segments]
+
+                # Use improved LLM service with validation + text-based fallback
+                from .llm_service_improved import ImprovedLLMService
+                llm_service = ImprovedLLMService()
+                virality_data = await llm_service.get_virality_analysis(segment_texts)
+                virality_map = {item.get("segment_index"): item for item in virality_data.get("analysis", [])}
+
+                # Log scoring method used
+                if virality_map:
+                    first_reasoning = list(virality_map.values())[0].get("reasoning", "")
+                    if "fallback" in first_reasoning.lower():
+                        logger.info("Text-based virality scoring fallback active")
+                    else:
+                        logger.info("AI virality scoring active")
                     
                 # Quality check: warn if scores look suspicious
                 avg_score = sum(item.get("virality_score", 0) for item in virality_map.values()) / len(virality_map)
@@ -2634,9 +3017,111 @@ class VideoService:
 
             raw_segments = relevant_parts.most_relevant_segments
             segments_json: List[Dict[str, Any]] = []
+            _editorial_fields = (
+                "moment_type",
+                "hook_quote",
+                "editorial_score",
+                "standalone_clarity_score",
+                "completion_score",
+                "insurance_relevance_score",
+                "commercial_value_score",
+                "specificity_score",
+                "emotional_trust_score",
+                "filler_penalty",
+                "generic_motivation_penalty",
+                "incomplete_argument_penalty",
+                "long_context_penalty",
+                "duplicate_theme_key",
+            )
 
-            def _enforce_min_duration_dict(seg: Dict[str, Any], min_secs: float = 30.0) -> Dict[str, Any]:
-                """Apply 45s minimum duration to cached dict segments (Pydantic validator skipped for dicts)."""
+            def _safe_float(value: Any) -> Optional[float]:
+                try:
+                    if value is None or value == "":
+                        return None
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
+            def _clamp01(value: float) -> float:
+                return max(0.0, min(1.0, value))
+
+            def _normalized_virality(value: Any) -> Optional[float]:
+                score = _safe_float(value)
+                if score is None:
+                    return None
+                if score <= 10.0:
+                    return _clamp01(score / 10.0)
+                return _clamp01(score / 100.0)
+
+            def _compute_final_rank_score(seg: Dict[str, Any]) -> float:
+                editorial = _safe_float(seg.get("editorial_score"))
+                virality = _normalized_virality(seg.get("virality_score"))
+
+                if editorial is not None:
+                    editorial = _clamp01(editorial if editorial <= 1.0 else editorial / 100.0)
+                if editorial is not None and virality is not None:
+                    return _clamp01(0.7 * editorial + 0.3 * virality)
+                if editorial is not None:
+                    return editorial
+                if virality is not None:
+                    return virality
+                return 0.0
+
+            def _extract_editorial_fields(src: Any) -> Dict[str, Any]:
+                data: Dict[str, Any] = {}
+                virality_obj = None
+                if isinstance(src, dict):
+                    virality_obj = src.get("virality")
+                else:
+                    virality_obj = getattr(src, "virality", None)
+
+                for field in _editorial_fields:
+                    value = src.get(field) if isinstance(src, dict) else getattr(src, field, None)
+                    if value is None and virality_obj is not None:
+                        if isinstance(virality_obj, dict):
+                            value = virality_obj.get(field)
+                        else:
+                            value = getattr(virality_obj, field, None)
+                    if value is not None:
+                        data[field] = value
+                return data
+
+            def _apply_final_rank(seg: Dict[str, Any]) -> Dict[str, Any]:
+                seg["final_rank_score"] = _compute_final_rank_score(seg)
+                return seg
+
+            def _dedupe_editorial_segments(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+                best_by_key: Dict[str, Dict[str, Any]] = {}
+                result: List[Dict[str, Any]] = []
+                for item in items:
+                    _apply_final_rank(item)
+                    key = item.get("duplicate_theme_key")
+                    if not key:
+                        result.append(item)
+                        continue
+                    current = best_by_key.get(str(key))
+                    if current is None:
+                        best_by_key[str(key)] = item
+                        continue
+                    if item.get("final_rank_score", 0.0) > current.get("final_rank_score", 0.0):
+                        logger.info(
+                            "[EDITORIAL] dedup duplicate_theme_key=%s kept_later=%.3f dropped=%.3f",
+                            key,
+                            item.get("final_rank_score", 0.0),
+                            current.get("final_rank_score", 0.0),
+                        )
+                        best_by_key[str(key)] = item
+                    else:
+                        logger.info(
+                            "[EDITORIAL] dedup duplicate_theme_key=%s kept=%.3f dropped=%.3f",
+                            key,
+                            current.get("final_rank_score", 0.0),
+                            item.get("final_rank_score", 0.0),
+                        )
+                return result + list(best_by_key.values())
+
+            def _enforce_min_duration_dict(seg: Dict[str, Any], min_secs: float = 18.0, max_extension_secs: float = 3.0) -> Dict[str, Any]:
+                """Apply conservative boundary handling to cached dict segments."""
                 def _ts(ts: str) -> float:
                     try:
                         parts = ts.strip().split(":")
@@ -2647,13 +3132,28 @@ class VideoService:
                     return f"{int(s)//60:02d}:{int(s)%60:02d}"
                 start = _ts(seg.get("start_time", "00:00"))
                 end = _ts(seg.get("end_time", "00:00"))
-                if end - start < min_secs:
-                    new_end = start + min_secs
+                duration = max(0.0, end - start)
+                if duration >= min_secs:
+                    return seg
+
+                new_end = end
+                if duration > 0:
+                    new_end = end + max_extension_secs
+                    if file_duration and file_duration > 0:
+                        new_end = min(new_end, file_duration)
+
+                if new_end > end:
+                    extension = new_end - end
                     logger.warning(
-                        f"[CACHE-VALIDATOR] Segment too short ({end-start:.1f}s): "
-                        f"{seg.get('start_time')}→{seg.get('end_time')} — extending to {_fmt(new_end)}"
+                        "[EDITORIAL] short cached segment: conservative expansion +%.1fs, not forcing 18s",
+                        extension,
                     )
                     seg = dict(seg, end_time=_fmt(new_end))
+                else:
+                    logger.warning(
+                        "[EDITORIAL] short cached segment %.1fs kept unchanged; cannot safely expand",
+                        duration,
+                    )
                 return seg
 
             for idx, segment in enumerate(raw_segments):
@@ -2663,59 +3163,65 @@ class VideoService:
                     v_info = virality_map.get(idx, {})
                     elite_data = elite_map.get((segment.get("start_time"), segment.get("end_time")))
                     raw_virality = v_info.get("virality_score", segment.get("virality_score", 0))
-                    segments_json.append(
-                        {
-                            "start_time": segment.get("start_time"),
-                            "end_time": segment.get("end_time"),
-                            "text": segment.get("text", ""),
-                            "relevance_score": segment.get("relevance_score", 0.0),
-                            "reasoning": v_info.get("reasoning", segment.get("reasoning", "")),
-                            "virality_score": raw_virality,
-                            "hook_score": v_info.get("hook_score", raw_virality // 4),
-                            "engagement_score": v_info.get("engagement_score", raw_virality // 4),
-                            "value_score": v_info.get("value_score", raw_virality // 4),
-                            "shareability_score": v_info.get("shareability_score", raw_virality // 4),
-                            "hook_strength": v_info.get("hook_strength", "Medium"),
-                            "hook_type": v_info.get("hook_type"),
-                            "suggested_title": v_info.get("suggested_title", segment.get("suggested_title", "")),
-                            "suggested_hashtags": v_info.get("suggested_hashtags", segment.get("suggested_hashtags", [])),
-                            "theme": segment.get("theme"),
-                            "suggested_edits": segment.get("suggested_edits"),
-                            "viral_cues": v_info.get("viral_cues"),
-                            "split_screen": split_screen,
-                            "elite_metadata": elite_data.model_dump() if elite_data else None,
-                        }
-                    )
+                    item = {
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "text": segment.get("text", ""),
+                        "relevance_score": segment.get("relevance_score", 0.0),
+                        "reasoning": v_info.get("reasoning", segment.get("reasoning", "")),
+                        "virality_score": raw_virality,
+                        "hook_score": v_info.get("hook_score", raw_virality // 4),
+                        "engagement_score": v_info.get("engagement_score", raw_virality // 4),
+                        "value_score": v_info.get("value_score", raw_virality // 4),
+                        "shareability_score": v_info.get("shareability_score", raw_virality // 4),
+                        "hook_strength": v_info.get("hook_strength", "Medium"),
+                        "hook_type": v_info.get("hook_type"),
+                        "suggested_title": v_info.get("suggested_title", segment.get("suggested_title", "")),
+                        "suggested_hashtags": v_info.get("suggested_hashtags", segment.get("suggested_hashtags", [])),
+                        "theme": segment.get("theme"),
+                        "suggested_edits": segment.get("suggested_edits"),
+                        "viral_cues": v_info.get("viral_cues"),
+                        "split_screen": split_screen,
+                        "elite_metadata": elite_data.model_dump() if elite_data else None,
+                    }
+                    item.update(_extract_editorial_fields(segment))
+                    segments_json.append(_apply_final_rank(item))
                 else:
                     v_info = virality_map.get(idx, {})
 
                     elite_data = elite_map.get((segment.start_time, segment.end_time))
                     raw_virality = v_info.get("virality_score", 0)
                     # Distribute composite virality into 4 component scores if they aren't provided
-                    segments_json.append(
-                        {
-                            "start_time": segment.start_time,
-                            "end_time": segment.end_time,
-                            "text": segment.text,
-                            "relevance_score": segment.relevance_score,
-                            "reasoning": v_info.get("reasoning", segment.reasoning),
-                            "virality_score": raw_virality,
-                            "hook_score": v_info.get("hook_score", raw_virality // 4),
-                            "engagement_score": v_info.get("engagement_score", raw_virality // 4),
-                            "value_score": v_info.get("value_score", raw_virality // 4),
-                            "shareability_score": v_info.get("shareability_score", raw_virality // 4),
-                            "hook_strength": v_info.get("hook_strength", "Medium"),
-                            "hook_type": v_info.get("hook_type"),
-                            "suggested_title": v_info.get("suggested_title", ""),
-                            "suggested_hashtags": v_info.get("suggested_hashtags", []),
-                            "theme": segment.theme,
-                            "suggested_edits": segment.suggested_edits,
-                            "viral_cues": v_info.get("viral_cues"),
-                            "broll_suggestions": [s for s in all_broll_suggestions if s["timestamp"] >= parse_timestamp_to_seconds(segment.start_time) and s["timestamp"] <= parse_timestamp_to_seconds(segment.end_time)],
-                            "split_screen": split_screen,
-                            "elite_metadata": elite_data.model_dump() if elite_data else None,
-                        }
-                    )
+                    item = {
+                        "start_time": segment.start_time,
+                        "end_time": segment.end_time,
+                        "text": segment.text,
+                        "relevance_score": segment.relevance_score,
+                        "reasoning": v_info.get("reasoning", segment.reasoning),
+                        "virality_score": raw_virality,
+                        "hook_score": v_info.get("hook_score", raw_virality // 4),
+                        "engagement_score": v_info.get("engagement_score", raw_virality // 4),
+                        "value_score": v_info.get("value_score", raw_virality // 4),
+                        "shareability_score": v_info.get("shareability_score", raw_virality // 4),
+                        "hook_strength": v_info.get("hook_strength", "Medium"),
+                        "hook_type": v_info.get("hook_type"),
+                        "suggested_title": v_info.get("suggested_title", ""),
+                        "suggested_hashtags": v_info.get("suggested_hashtags", []),
+                        "theme": segment.theme,
+                        "suggested_edits": segment.suggested_edits,
+                        "viral_cues": v_info.get("viral_cues"),
+                        "broll_suggestions": [s for s in all_broll_suggestions if s["timestamp"] >= parse_timestamp_to_seconds(segment.start_time) and s["timestamp"] <= parse_timestamp_to_seconds(segment.end_time)],
+                        "split_screen": split_screen,
+                        "elite_metadata": elite_data.model_dump() if elite_data else None,
+                    }
+                    item.update(_extract_editorial_fields(segment))
+                    segments_json.append(_apply_final_rank(item))
+
+            propagated = sorted({field for seg in segments_json for field in _editorial_fields if field in seg})
+            if propagated:
+                logger.info("[EDITORIAL] propagated_fields=%s", ",".join(propagated))
+                logger.info("[EDITORIAL] ranking uses editorial_score/final_rank_score")
+            segments_json = _dedupe_editorial_segments(segments_json)
 
             # ── CAUSA 5 guard: pad with synthetic segments if AI returned too few ──
             if len(segments_json) < num_clips and file_duration and file_duration > 0:
@@ -2753,6 +3259,8 @@ class VideoService:
                 logger.info(
                     f"[SEGMENT-PAD] Now have {len(segments_json)} segments after padding"
                 )
+            segments_json = _dedupe_editorial_segments(segments_json)
+            segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
             # ── Render a buffer of +2 extra segments so that if 1-2 clips fail to
             # render the save loop can still fill the requested quota.
             # The save loop in task_service.py caps successful saves at num_clips.
@@ -2798,8 +3306,9 @@ class VideoService:
                     if not segment.get("hook_type") and hook_result["hook_analysis"]["primary_hook_type"]:
                         segment["hook_type"] = hook_result["hook_analysis"]["primary_hook_type"]
             
-            # Re-sort segments by enhanced virality score
-            segments_json.sort(key=lambda x: x.get("virality_score", 0), reverse=True)
+            # Re-rank after hook re-score while preserving editorial priority.
+            segments_json = _dedupe_editorial_segments(segments_json)
+            segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
             
             # Add niche info to segments
             for segment in segments_json:
@@ -2839,6 +3348,7 @@ class VideoService:
                         caption_template=caption_template,
                         output_format=output_format,
                         add_subtitles=add_subtitles,
+                        include_broll=include_broll,
                     )
                     logger.info(f"[CLIP RENDERING] ✅ Successfully rendered {len([c for c in clips_info if c])} clips")
                 except Exception as render_error:

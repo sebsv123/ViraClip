@@ -5,6 +5,7 @@ FFmpeg-based rendering: full-screen overlay with speaker in corner bubble.
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -59,6 +60,10 @@ class OverlayRenderer:
             return OverlayResult(success=False, error="No overlay events")
         
         sorted_events = sorted(overlay_events, key=lambda e: e.start_time)
+        beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}
+        if beta_clean:
+            logger.info("[beta-clean] broll PIP disabled")
+            style = OverlayStyle.FULL_SCREEN_BUBBLE
         
         try:
             # Build FFmpeg command
@@ -66,13 +71,14 @@ class OverlayRenderer:
             for event in sorted_events:
                 inputs.extend(["-i", event.overlay_path])
             
-            # Build filter: full-screen overlay with 25% corner bubble
-            filter_parts = ["[0:v]split=2[base][speaker]"]
+            # Build filter. Beta Clean never renders a speaker inset/PIP.
+            filter_parts = ["[0:v]null[base]"] if beta_clean else ["[0:v]split=2[base][speaker]"]
             
-            # Speaker bubble (270x480 = 25% with border)
-            filter_parts.append(
-                "[speaker]scale=270:480,pad=278:488:4:4:color=white[bubble]"
-            )
+            if not beta_clean:
+                # Speaker bubble (270x480 = 25% with border)
+                filter_parts.append(
+                    "[speaker]scale=270:480,pad=278:488:4:4:color=white[bubble]"
+                )
             
             # Process overlays
             current = "base"
@@ -90,8 +96,11 @@ class OverlayRenderer:
                 filter_parts.append(overlay_filter)
                 current = next_name
             
-            # Add speaker bubble to bottom-right
-            filter_parts.append(f"[{current}][bubble]overlay=W-w-20:H-h-20")
+            if not beta_clean:
+                # Add speaker bubble to bottom-right
+                filter_parts.append(f"[{current}][bubble]overlay=W-w-20:H-h-20")
+            else:
+                filter_parts.append(f"[{current}]null")
             
             filter_complex = ";".join(filter_parts)
             

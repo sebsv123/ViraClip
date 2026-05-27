@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Dict, Any, Optional, Callable, List, Tuple
 import logging
 import asyncio
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 import json
@@ -306,6 +307,7 @@ class TaskService:
         """
         try:
             logger.info(f"Starting processing for task {task_id} (force_fresh={force_fresh})")
+            logger.info("[tasks] process include_broll=%s", str(include_broll).lower())
             started_at = datetime.now(timezone.utc)
             stage_timings: Dict[str, float] = {}
             cache_key = self._build_cache_key(url, source_type, processing_mode)
@@ -430,6 +432,19 @@ class TaskService:
             # Get segments to render
             segments_to_render = result.get("segments_to_render", [])
             total_clips = len(segments_to_render)
+            
+            # ── BETA-CLEAN: cap segments to num_clips BEFORE extraction ──
+            # Prevents wasting time extracting/render-buffering segments that
+            # will be discarded.  The pipeline returns render_buffer = num_clips+2
+            # segments; we trim to exactly num_clips here.
+            if len(segments_to_render) > num_clips:
+                logger.info(
+                    f"[task] requested_num_clips={num_clips} "
+                    f"candidate_segments={len(segments_to_render)} "
+                    f"final_segments_to_render={num_clips}"
+                )
+                segments_to_render = segments_to_render[:num_clips]
+                total_clips = num_clips
             
             # CRITICAL VALIDATION: Check if we have segments
             if total_clips == 0:
@@ -581,6 +596,7 @@ class TaskService:
                             gpu_encoding_settings=gpu_settings,  # Pass GPU settings for fast encoding
                             use_extracted_segment=(extracted_segment_paths[i] is not None),
                             target_platform=target_platform,
+                            include_broll=include_broll,
                         )
                     except Exception as clip_error:
                         logger.error(
@@ -594,7 +610,8 @@ class TaskService:
                     # Applies: hook-flash reorder, zoom punch, B-roll overlay,
                     # audio mastering (EBU R128), QA check, learning-loop manifest.
                     # All steps are independently guarded — never breaks clip delivery.
-                    if info is not None:
+                    # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+                    if info is not None and not self.config.beta_clean:
                         try:
                             from .creative_pipeline import get_creative_pipeline
                             _cp = get_creative_pipeline()
@@ -626,9 +643,11 @@ class TaskService:
                             )
                             info.pop("words", None)
                             info.pop("audio_features", None)
+                    elif info is not None:
+                        logger.info("[beta-clean] Phase 9 CreativePipeline skipped (beta_clean mode)")
                     
                     # ── Viral Editing: Audio Denoise (opt-in) ────────────────────────
-                    if info is not None and denoise_audio:
+                    if info is not None and denoise_audio and not self.config.beta_clean:
                         try:
                             from .audio_denoiser import denoise_audio as _denoise
                             from pathlib import Path as _Path
@@ -656,9 +675,11 @@ class TaskService:
                                 _dn_out.unlink(missing_ok=True)
                         except Exception as _dn_e:
                             logger.debug("Audio denoiser skipped for clip %d: %s", i, _dn_e)
+                    elif info is not None and denoise_audio:
+                        logger.info("[beta-clean] Audio denoise skipped (beta_clean mode)")
                     
                     # ── Viral Editing: Jump Cuts + Zoom Transitions (opt-in) ─────────
-                    if info is not None and jump_cut:
+                    if info is not None and jump_cut and not self.config.beta_clean:
                         try:
                             from .cut_zoom_service import apply_jump_cuts_with_zoom
                             from pathlib import Path as _Path
@@ -696,6 +717,8 @@ class TaskService:
                                 logger.warning("  [Clip %d] JumpCut+Zoom failed: %s", i + 1, _jc_result.get("error"))
                         except Exception as _jc_e:
                             logger.error("Jump-cut+zoom failed for clip %d: %s", i, _jc_e, exc_info=True)
+                    elif info is not None and jump_cut:
+                        logger.info("[beta-clean] Jump cut + zoom skipped (beta_clean mode)")
                     # ─────────────────────────────────────────────────────────────────
 
                     # ── Phase 10: ComfyUI AI Enhancement (opt-in) ─────────────────────
@@ -772,9 +795,9 @@ class TaskService:
             segments_temp_dir = Path(self.config.temp_dir) / "segments" / task_id
             segments_temp_dir.mkdir(parents=True, exist_ok=True)
 
-            # Bug B fix: update each segment's end_time to match virality-based
-            # dynamic duration BEFORE extraction so the pre-extracted file has
-            # the correct length (45-120s, not the original LLM 30s).
+            # Preserve editorial clip boundaries from AI selection.  Only apply a
+            # small defensive extension for very short clips; do not pad by
+            # virality, because that can pull in a second idea.
             # Also inject _source_video_path so subtitle generation can look up
             # the AssemblyAI transcript cache keyed on the original video.
 
@@ -796,39 +819,60 @@ class TaskService:
 
             for _seg in segments_to_render:
                 _seg["_source_video_path"] = str(video_path)
-                _vscore = _seg.get("virality_score", 50)
-                if _vscore >= 70:
-                    _tdur = 90.0
-                elif _vscore >= 50:
-                    _tdur = 60.0
-                else:
-                    _tdur = 45.0
-                _tdur = max(45.0, min(120.0, _tdur))
                 _s0 = parse_timestamp_to_seconds(_seg["start_time"])
                 _e0 = parse_timestamp_to_seconds(_seg["end_time"])
-                if (_e0 - _s0) < _tdur:
-                    _new_end = _s0 + _tdur
-                    # Cap at video end to prevent FFmpeg silent truncation
-                    if _video_dur and _new_end > _video_dur - 1.0:
-                        _new_end = max(_s0 + 10.0, _video_dur - 1.0)
-                        logger.debug(f"  [pre-extract] Capped at video end: {_new_end:.1f}s")
+                _dur = max(0.0, _e0 - _s0)
+                if _dur >= 18.0:
+                    logger.info(
+                        "[pre-extract] preserving editorial boundaries %s → %s (%.1fs)",
+                        _seg.get("start_time"),
+                        _seg.get("end_time"),
+                        _dur,
+                    )
+                    continue
+
+                _new_end = _e0
+                if _dur > 0:
+                    _new_end = min(_s0 + 18.0, _e0 + 3.0)
+                    if _video_dur:
+                        _new_end = min(_new_end, max(_s0 + _dur, _video_dur - 1.0))
+
+                if _new_end > _e0:
                     _seg["end_time"] = f"{int(_new_end) // 60:02d}:{int(_new_end) % 60:02d}"
-                    logger.debug(
-                        f"  [pre-extract] Segment updated to {_tdur:.0f}s "
-                        f"({_seg['start_time']} → {_seg['end_time']})"
+                    logger.warning(
+                        "[pre-extract] short editorial segment %.1fs extended conservatively to %s",
+                        _dur,
+                        _seg["end_time"],
+                    )
+                else:
+                    logger.warning(
+                        "[pre-extract] short editorial segment %.1fs kept unchanged; cannot safely infer same idea",
+                        _dur,
                     )
 
+            # When subtitles are enabled, use exact seek (re-encode) so the
+            # pre-extracted segment starts at the exact frame — critical for
+            # word-timestamp sync.  Without subtitles, fast stream copy is fine.
+            _exact_seek = bool(add_subtitles)
+            if _exact_seek:
+                logger.info(
+                    "[extract] exact_seek enabled because subtitles are enabled "
+                    "— using precise re-encode for %d segments",
+                    total_clips,
+                )
             extracted_segment_paths = await extract_segments_fast(
                 video_path=video_path,
                 segments=segments_to_render,
                 output_dir=segments_temp_dir,
-                task_id=task_id
+                task_id=task_id,
+                exact_seek=_exact_seek,
             )
             
             # Log extraction success rate
             successful_extractions = sum(1 for p in extracted_segment_paths if p is not None)
+            mode = "exact" if _exact_seek else "fast"
             logger.info(
-                f"Pre-extraction complete: {successful_extractions}/{total_clips} segments "
+                f"Pre-extraction complete ({mode}): {successful_extractions}/{total_clips} segments "
                 f"extracted in {segments_temp_dir}"
             )
             
@@ -954,6 +998,219 @@ class TaskService:
                         logger.info(f"  ✓ Copied clip to exports: {_src.name}")
                 except Exception as _cp_e:
                     logger.warning(f"  exports copy failed: {_cp_e}")
+
+                # ── VPI output organization ──────────────────────────────
+                try:
+                    import shutil as _vpi_shutil
+                    import json as _vpi_json
+                    from datetime import datetime as _vpi_dt
+                    _vpi_date = _vpi_dt.now().strftime("%Y-%m-%d")
+                    _vpi_task_short = task_id.replace("-", "")[:12]
+                    _vpi_dir = Path(f"/app/outputs/vpi/{_vpi_date}/task_{_vpi_task_short}")
+                    _vpi_dir.mkdir(parents=True, exist_ok=True)
+                    _clip_idx = i + 1
+                    _vpi_clip_name = f"clip_{_clip_idx:02d}.mp4"
+                    _vpi_src = Path(clip_info["path"])
+                    _vpi_dst = None
+                    if _vpi_src.exists():
+                        _vpi_dst = _vpi_dir / _vpi_clip_name
+                        _vpi_shutil.copy2(_vpi_src, _vpi_dst)
+                        logger.info(f"[output-vpi] copied final clip to {_vpi_dst}")
+                    _vpi_ass_dst = None
+                    _caption_ass_raw = clip_info.get("caption_ass_debug_path")
+                    _caption_ass_src = Path(str(_caption_ass_raw)) if _caption_ass_raw else None
+                    if _caption_ass_src is not None and _caption_ass_src.exists():
+                        _vpi_ass_dst = _vpi_dir / f"clip_{_clip_idx:02d}_captions.ass"
+                        _vpi_shutil.copy2(_caption_ass_src, _vpi_ass_dst)
+                        logger.info(f"[output-vpi] copied captions ass to {_vpi_ass_dst}")
+                    _broll_info = clip_info.get("editorial_broll") or []
+                    # Metadata
+                    _vpi_meta = {
+                        "task_id": task_id,
+                        "source_url": url,
+                        "clip_index": _clip_idx,
+                        "output_path": str(_vpi_src),
+                        "organized_output_path": str(_vpi_dst) if _vpi_dst else None,
+                        "caption_ass_debug_path": str(_caption_ass_src) if _caption_ass_src and _caption_ass_src.exists() else None,
+                        "organized_captions_ass_path": str(_vpi_ass_dst) if _vpi_ass_dst else None,
+                        "clip_start": clip_info.get("start_time", ""),
+                        "clip_end": clip_info.get("end_time", ""),
+                        "duration": clip_info.get("duration", 0),
+                        "virality_score": clip_info.get("virality_score", 0),
+                        "caption_source": "cached_words" if clip_info.get("words") else "fallback",
+                        "broll": _broll_info,
+                        "created_at": _vpi_dt.now().isoformat(),
+                    }
+                    _vpi_meta_path = _vpi_dir / f"clip_{_clip_idx:02d}_metadata.json"
+                    with open(_vpi_meta_path, "w") as _vpi_f:
+                        _vpi_json.dump(_vpi_meta, _vpi_f, indent=2, ensure_ascii=False)
+                    logger.info(f"[output-vpi] wrote metadata to {_vpi_meta_path}")
+                    # Transcript
+                    _vpi_text = clip_info.get("text", "")
+                    if _vpi_text:
+                        _vpi_txt_path = _vpi_dir / f"clip_{_clip_idx:02d}_transcript.txt"
+                        with open(_vpi_txt_path, "w") as _vpi_f:
+                            _vpi_f.write(_vpi_text)
+                    # Source info
+                    _vpi_src_info = {
+                        "task_id": task_id,
+                        "source_url": url,
+                        "source_title": getattr(self, "_source_title", ""),
+                        "created_at": _vpi_dt.now().isoformat(),
+                    }
+                    _vpi_src_path = _vpi_dir / "source_info.json"
+                    with open(_vpi_src_path, "w") as _vpi_f:
+                        _vpi_json.dump(_vpi_src_info, _vpi_f, indent=2, ensure_ascii=False)
+                except Exception as _vpi_e:
+                    logger.warning(f"[output-vpi] copy failed: {_vpi_e}")
+
+                # ── Task summary report ──────────────────────────────────
+                try:
+                    import json as _ts_json
+                    from datetime import datetime as _ts_dt
+                    _ts_data = {
+                        "task_id": task_id,
+                        "source_url": url,
+                        "source_title": getattr(self, "_source_title", ""),
+                        "status": "completed",
+                        "clips_generated": len(clip_ids),
+                        "beta_clean": self.config.beta_clean,
+                        "enable_editorial_broll": self.config.enable_editorial_broll,
+                        "whisper_device": "cpu",
+                        "flags": {
+                            "VIRACLIP_BETA_CLEAN": os.getenv("VIRACLIP_BETA_CLEAN"),
+                            "VIRACLIP_ENABLE_EDITORIAL_BROLL": os.getenv("VIRACLIP_ENABLE_EDITORIAL_BROLL"),
+                            "VIRACLIP_ENABLE_LOCAL_BROLL_BANK": os.getenv("VIRACLIP_ENABLE_LOCAL_BROLL_BANK"),
+                            "WHISPER_DEVICE": os.getenv("WHISPER_DEVICE"),
+                            "VIRACLIP_ENABLE_TORCH_CUDA": os.getenv("VIRACLIP_ENABLE_TORCH_CUDA"),
+                            "VIRACLIP_ENABLE_NVENC": os.getenv("VIRACLIP_ENABLE_NVENC"),
+                            "BROLL_FORCE_CPU": os.getenv("BROLL_FORCE_CPU"),
+                            "T2V_ENABLED": os.getenv("T2V_ENABLED"),
+                            "COMFYUI_ENABLED": os.getenv("COMFYUI_ENABLED"),
+                        },
+                        "resolved_flags": {
+                            "VIRACLIP_BETA_CLEAN": self.config.beta_clean,
+                            "VIRACLIP_ENABLE_EDITORIAL_BROLL": self.config.enable_editorial_broll,
+                            "VIRACLIP_ENABLE_LOCAL_BROLL_BANK": getattr(self.config, "enable_local_broll_bank", True),
+                            "WHISPER_DEVICE": os.getenv("WHISPER_DEVICE", "cpu"),
+                            "VIRACLIP_ENABLE_TORCH_CUDA": getattr(self.config, "enable_torch_cuda", False),
+                            "VIRACLIP_ENABLE_NVENC": getattr(self.config, "enable_nvenc", False),
+                            "BROLL_FORCE_CPU": os.getenv("BROLL_FORCE_CPU"),
+                            "T2V_ENABLED": os.getenv("T2V_ENABLED"),
+                            "COMFYUI_ENABLED": os.getenv("COMFYUI_ENABLED"),
+                        },
+                        "output_paths": [],
+                        "created_at": _ts_dt.now().isoformat(),
+                        "clips": [],
+                        "warnings": [],
+                    }
+                    for _ci_idx, (_ri, _ci, _elapsed) in enumerate(render_results):
+                        if _ci is None:
+                            _seg = segments_to_render[_ri] if _ri < len(segments_to_render) else {}
+                            _ts_data["warnings"].append(
+                                f"Clip {_ri+1} failed to render "
+                                f"({_seg.get('start_time','?')} → {_seg.get('end_time','?')})"
+                            )
+                            continue
+                        _organized_clip_path = _vpi_dir / f"clip_{_ri + 1:02d}.mp4"
+                        _organized_ass_path = _vpi_dir / f"clip_{_ri + 1:02d}_captions.ass"
+                        _ts_clip = {
+                            "clip_index": _ri + 1,
+                            "filename": _ci.get("filename", ""),
+                            "output_path": _ci.get("path", ""),
+                            "organized_output_path": str(_organized_clip_path) if _organized_clip_path.exists() else None,
+                            "caption_ass_debug_path": _ci.get("caption_ass_debug_path"),
+                            "organized_captions_ass_path": str(_organized_ass_path) if _organized_ass_path.exists() else None,
+                            "start_time": _ci.get("start_time", ""),
+                            "end_time": _ci.get("end_time", ""),
+                            "duration": _ci.get("duration", 0),
+                            "virality_score": _ci.get("virality_score", 0),
+                            "clip_health": _ci.get("clip_health", {}),
+                            "caption_source": "cached_words" if _ci.get("words") else "fallback",
+                            "broll": _ci.get("editorial_broll") or [],
+                            "transcript_snippet": (_ci.get("text", "") or "")[:120],
+                        }
+                        _ts_clip["output_paths"] = [
+                            p for p in [
+                                _ts_clip["output_path"],
+                                _ts_clip["organized_output_path"],
+                                _ts_clip["caption_ass_debug_path"],
+                                _ts_clip["organized_captions_ass_path"],
+                            ]
+                            if p
+                        ]
+                        _ts_data["output_paths"].extend(_ts_clip["output_paths"])
+                        _ts_data["clips"].append(_ts_clip)
+                        logger.info("[task-summary] caption_source=%s", _ts_clip["caption_source"])
+                        for _broll_item in _ts_clip["broll"]:
+                            logger.info(
+                                "[task-summary] broll cue_type=%s asset=%s source=%s",
+                                _broll_item.get("cue_type"),
+                                _broll_item.get("asset_path"),
+                                _broll_item.get("asset_source"),
+                            )
+                    # Write JSON
+                    _ts_json_path = _vpi_dir / "task_summary.json"
+                    with open(_ts_json_path, "w") as _ts_f:
+                        _ts_json.dump(_ts_data, _ts_f, indent=2, ensure_ascii=False)
+                    # Write Markdown
+                    _ts_md_lines = [
+                        f"# Task Summary: `{task_id[:12]}...`",
+                        "",
+                        f"**Status:** completed",
+                        f"**Source:** [{url}]({url})",
+                        f"**Clips generated:** {len(clip_ids)}",
+                        f"**Beta Clean:** {self.config.beta_clean}",
+                        f"**Editorial B-roll:** {self.config.enable_editorial_broll}",
+                        f"**Whisper:** cpu",
+                        f"**Created:** {_ts_dt.now().isoformat()}",
+                        "",
+                        "## Clips",
+                        "",
+                    ]
+                    for _ts_clip in _ts_data["clips"]:
+                        _ts_md_lines.extend([
+                            f"### Clip {_ts_clip['clip_index']}: `{_ts_clip['filename']}`",
+                            f"",
+                            f"- **Segment:** {_ts_clip['start_time']} → {_ts_clip['end_time']} ({_ts_clip['duration']}s)",
+                            f"- **Virality score:** {_ts_clip['virality_score']}",
+                            f"- **Caption source:** {_ts_clip['caption_source']}",
+                            f"- **Output path:** `{_ts_clip['output_path']}`",
+                            f"- **Organized output:** `{_ts_clip['organized_output_path']}`",
+                            f"- **Caption ASS debug:** `{_ts_clip['caption_ass_debug_path']}`",
+                            f"- **Organized captions ASS:** `{_ts_clip['organized_captions_ass_path']}`",
+                            f"- **Transcript:** {_ts_clip['transcript_snippet']}...",
+                            f"",
+                        ])
+                        if _ts_clip["broll"]:
+                            for _ts_broll in _ts_clip["broll"]:
+                                _ts_md_lines.extend([
+                                    f"- **B-roll cue:** `{_ts_broll.get('cue_type')}`",
+                                    f"- **B-roll source:** `{_ts_broll.get('asset_source')}`",
+                                    f"- **B-roll asset:** `{_ts_broll.get('asset_path')}`",
+                                    f"- **B-roll query:** `{_ts_broll.get('visual_query')}`",
+                                    f"- **B-roll duration:** `{_ts_broll.get('effective_duration')}`",
+                                    "",
+                                ])
+                        else:
+                            _ts_md_lines.extend([
+                                "- **B-roll cue:** `none`",
+                                "- **B-roll source:** `none`",
+                                "- **B-roll asset:** `none`",
+                                "",
+                            ])
+                    if _ts_data["warnings"]:
+                        _ts_md_lines.extend(["## Warnings", ""])
+                        for _ts_w in _ts_data["warnings"]:
+                            _ts_md_lines.append(f"- ⚠️ {_ts_w}")
+                        _ts_md_lines.append("")
+                    _ts_md_path = _vpi_dir / "task_summary.md"
+                    with open(_ts_md_path, "w") as _ts_f:
+                        _ts_f.write("\n".join(_ts_md_lines))
+                    logger.info(f"[task-summary] wrote {_ts_json_path}")
+                    logger.info(f"[task-summary] wrote {_ts_md_path}")
+                except Exception as _ts_e:
+                    logger.warning(f"[task-summary] write failed: {_ts_e}")
 
                 # Notify frontend via SSE immediately
                 if clip_ready_callback:

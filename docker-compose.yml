@@ -61,6 +61,8 @@ services:
     container_name: viraclip-backend
     platform: linux/amd64
     command: [".venv/bin/uvicorn", "src.main_refactored:app", "--host", "0.0.0.0", "--port", "8000"]
+    devices:
+      - "nvidia.com/gpu=all"
     ports:
       - "8000:8000"
     volumes:
@@ -72,6 +74,7 @@ services:
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
+      - ./assets/broll:/app/assets/broll
       - ./backend/music:/app/assets/sounds
       - ./backend/comfy_workflows:/app/comfy_workflows
       - llm_datasets:/app/datasets
@@ -98,8 +101,12 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_DEVICE=cpu
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-false}
+      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-false}
+      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-false}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
@@ -231,16 +238,12 @@ services:
       - LLM_ROUTING_ENABLED=${LLM_ROUTING_ENABLED:-false}
       - DSPY_OPTIMIZED_PROMPT_PATH=${DSPY_OPTIMIZED_PROMPT_PATH:-/app/datasets/dspy_optimized_prompt.txt}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
+      - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
+      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-false}
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - VIRACLIP_BETA_CLEAN=${VIRACLIP_BETA_CLEAN:-true}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -269,14 +272,18 @@ services:
     container_name: viraclip-worker
     platform: linux/amd64
     command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
+    devices:
+      - "nvidia.com/gpu=all"
     volumes:
       - ./backend/src:/app/src
+      - ./backend/scripts:/app/scripts:ro
       - shared_temp:/app/temp
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
+      - ./assets/broll:/app/assets/broll
       - ./backend/music:/app/assets/sounds
       - ./backend/comfy_workflows:/app/comfy_workflows
     environment:
@@ -302,8 +309,12 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
+      - WHISPER_DEVICE=cpu
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-false}
+      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-false}
+      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-false}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
@@ -500,365 +511,18 @@ services:
       - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
+      - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
+      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-false}
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
+      - VIRACLIP_BETA_CLEAN=${VIRACLIP_BETA_CLEAN:-true}
     restart: always
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-
-  worker-2:
-    build: ./backend
-    container_name: viraclip-worker-2
-    command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
-    volumes:
-      - ./backend/src:/app/src
-      - shared_temp:/app/temp
-      - ./exports/clips:/app/exports/clips
-      - whisper_models:/app/models
-      - ./backend/fonts:/app/fonts
-      - ./backend/transitions:/app/transitions
-      - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
-      - ./backend/music:/app/assets/sounds
-      - ./backend/comfy_workflows:/app/comfy_workflows
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
-      - TEMP_DIR=/app/temp/uploads
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
-      - APIFY_API_TOKEN=${APIFY_API_TOKEN}
-      - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
-      - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
-      - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.1-8b-instant}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
-      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
-      - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
-      - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
-      - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
-      - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
-      - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
-      - SELF_HOST=${SELF_HOST:-true}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}
-      - FREESOUND_API_KEY=${FREESOUND_API_KEY}
-      - FREESOUND_AUTO_MATCH=${FREESOUND_AUTO_MATCH:-true}
-      - FREESOUND_SFX_ENABLED=${FREESOUND_SFX_ENABLED:-true}
-      - CONTEXTUAL_OVERLAYS_ENABLED=${CONTEXTUAL_OVERLAYS_ENABLED:-true}
-      - OVERLAY_FREQUENCY=${OVERLAY_FREQUENCY:-adaptive}
-      - MAX_OVERLAYS_PER_CLIP=${MAX_OVERLAYS_PER_CLIP:-8}
-      - OVERLAY_MIN_VIRALITY=${OVERLAY_MIN_VIRALITY:-60.0}
-      - OVERLAY_CACHE_DIR=${OVERLAY_CACHE_DIR:-/app/storage/overlay_cache}
-      - SPEED_CONTROL_ENABLED=${SPEED_CONTROL_ENABLED:-true}
-      - SCENE_DETECTION_ENABLED=${SCENE_DETECTION_ENABLED:-true}
-      - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
-      - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - VIGNETTE_ENABLED=${VIGNETTE_ENABLED:-true}
-      - VIGNETTE_ANGLE=${VIGNETTE_ANGLE:-PI/15}
-      - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
-      - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
-      - COMFYUI_PORT=${COMFYUI_PORT:-8188}
-      - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      # ── Viral Boost flags ────────────────────────────────────────────
-      - LTXV_ENABLED=${LTXV_ENABLED:-false}
-      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
-      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
-      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
-      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
-      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
-      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
-      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
-      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
-      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
-      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
-      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
-      - T2V_MODEL=${T2V_MODEL:-cogvideox}
-      - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
-      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
-      - T2V_CACHE_DIR=${T2V_CACHE_DIR:-/app/models/t2v}
-      - RVC_ENABLED=${RVC_ENABLED:-false}
-      - RVC_MODEL_PATH=${RVC_MODEL_PATH:-/app/models/rvc/model.pth}
-      - ESRGAN_ENABLED=${ESRGAN_ENABLED:-false}
-      - ESRGAN_SCALE=${ESRGAN_SCALE:-2}
-      - UPSCALING_MODEL=${UPSCALING_MODEL:-realesrgan-x2}
-      - UPSCALING_MODELS_DIR=${UPSCALING_MODELS_DIR:-/app/models/esrgan}
-      - TTS_NARRATION_ENABLED=${TTS_NARRATION_ENABLED:-false}
-      - TTS_MODEL=${TTS_MODEL:-xtts-v2}
-      - TTS_LANGUAGE=${TTS_LANGUAGE:-en}
-      - TTS_SNR_THRESHOLD_DB=${TTS_SNR_THRESHOLD_DB:-15.0}
-      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
-      - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
-      - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-
-  worker-3:
-    build: ./backend
-    container_name: viraclip-worker-3
-    command: [".venv/bin/arq", "src.workers.tasks.WorkerSettings"]
-    volumes:
-      - ./backend/src:/app/src
-      - shared_temp:/app/temp
-      - ./exports/clips:/app/exports/clips
-      - whisper_models:/app/models
-      - ./backend/fonts:/app/fonts
-      - ./backend/transitions:/app/transitions
-      - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
-      - ./backend/music:/app/assets/sounds
-      - ./backend/comfy_workflows:/app/comfy_workflows
-    environment:
-      - PYTHONPATH=/app
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql+asyncpg://viraclip:viraclip_password@postgres:5432/viraclip
-      - TEMP_DIR=/app/temp/uploads
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - ASSEMBLY_AI_API_KEY=${ASSEMBLY_AI_API_KEY}
-      - APIFY_API_TOKEN=${APIFY_API_TOKEN}
-      - APIFY_YOUTUBE_DEFAULT_QUALITY=${APIFY_YOUTUBE_DEFAULT_QUALITY:-1080}
-      - YOUTUBE_DATA_API_KEY=${YOUTUBE_DATA_API_KEY}
-      - YOUTUBE_METADATA_PROVIDER=${YOUTUBE_METADATA_PROVIDER:-yt_dlp}
-      - LLM=${LLM:-groq:llama-3.1-8b-instant}
-      - GROQ_API_KEY=${GROQ_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
-      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
-      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
-      - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
-      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=${WHISPER_DEVICE:-cuda}
-      - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
-      - SFX_LIBRARY_PATH=/app/assets/sounds
-      - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
-      - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
-      - FAST_MODE_MAX_CLIPS=${FAST_MODE_MAX_CLIPS:-3}
-      - MAX_ELITE_CLIPS=${MAX_ELITE_CLIPS:-3}
-      - RENDER_CONCURRENCY=4  # Más concurrencia para aprovechar CPU
-      - FAST_MODE_TRANSCRIPT_MODEL=${FAST_MODE_TRANSCRIPT_MODEL:-nano}
-      - SELF_HOST=${SELF_HOST:-true}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - UNSPLASH_ACCESS_KEY=${UNSPLASH_ACCESS_KEY}
-      - FREESOUND_API_KEY=${FREESOUND_API_KEY}
-      - FREESOUND_AUTO_MATCH=${FREESOUND_AUTO_MATCH:-true}
-      - FREESOUND_SFX_ENABLED=${FREESOUND_SFX_ENABLED:-true}
-      - CONTEXTUAL_OVERLAYS_ENABLED=${CONTEXTUAL_OVERLAYS_ENABLED:-true}
-      - OVERLAY_FREQUENCY=${OVERLAY_FREQUENCY:-adaptive}
-      - MAX_OVERLAYS_PER_CLIP=${MAX_OVERLAYS_PER_CLIP:-8}
-      - OVERLAY_MIN_VIRALITY=${OVERLAY_MIN_VIRALITY:-60.0}
-      - OVERLAY_CACHE_DIR=${OVERLAY_CACHE_DIR:-/app/storage/overlay_cache}
-      - SPEED_CONTROL_ENABLED=${SPEED_CONTROL_ENABLED:-true}
-      - SCENE_DETECTION_ENABLED=${SCENE_DETECTION_ENABLED:-true}
-      - AUDIO_DUCKING_ENABLED=${AUDIO_DUCKING_ENABLED:-true}
-      - AUDIO_LIBRARY_PATH=${AUDIO_LIBRARY_PATH:-/app/assets/sounds}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - SAM2_ENABLED=${SAM2_ENABLED:-false}
-      - COMFYUI_ENABLED=${COMFYUI_ENABLED:-false}
-      - COMFYUI_HOST=${COMFYUI_HOST:-comfyui}
-      - COMFYUI_PORT=${COMFYUI_PORT:-8188}
-      - COMFYUI_TIMEOUT=${COMFYUI_TIMEOUT:-600}
-      # ── Viral Boost flags ────────────────────────────────────────────
-      - LTXV_ENABLED=${LTXV_ENABLED:-false}
-      - LTXV_INTRO_ENABLED=${LTXV_INTRO_ENABLED:-true}
-      - LTXV_BROLL_MAX_PER_CLIP=${LTXV_BROLL_MAX_PER_CLIP:-2}
-      - LTXV_CLIP_TIMEOUT_SEC=${LTXV_CLIP_TIMEOUT_SEC:-180}
-      - BROLL_PROVIDER_PRIORITY=${BROLL_PROVIDER_PRIORITY:-premium_first}
-      - BROLL_ENABLE_PREMIUM=${BROLL_ENABLE_PREMIUM:-true}
-      - BROLL_ENABLE_STOCK=${BROLL_ENABLE_STOCK:-true}
-      - HOOK_VISUAL_ENABLED=${HOOK_VISUAL_ENABLED:-true}
-      - CINEMATIC_INTRO_ENABLED=${CINEMATIC_INTRO_ENABLED:-true}
-      - BROLL_USE_IMAGES=${BROLL_USE_IMAGES:-true}
-      - BROLL_MAX_OVERLAYS=${BROLL_MAX_OVERLAYS:-8}
-      - BROLL_SLOT_TIMEOUT_SEC=${BROLL_SLOT_TIMEOUT_SEC:-30}
-      - BROLL_MIN_SPACING_SEC=${BROLL_MIN_SPACING_SEC:-3.0}
-      - T2V_ENABLED=${T2V_ENABLED:-false}
-      - T2V_MODEL=${T2V_MODEL:-cogvideox}
-      - T2V_RESOLUTION=${T2V_RESOLUTION:-720p}
-      - REPLICATE_API_TOKEN=${REPLICATE_API_TOKEN:-}
-      - T2V_CACHE_DIR=${T2V_CACHE_DIR:-/app/models/t2v}
-      - RVC_ENABLED=${RVC_ENABLED:-false}
-      - RVC_MODEL_PATH=${RVC_MODEL_PATH:-/app/models/rvc/model.pth}
-      - ESRGAN_ENABLED=${ESRGAN_ENABLED:-false}
-      - ESRGAN_SCALE=${ESRGAN_SCALE:-2}
-      - UPSCALING_MODEL=${UPSCALING_MODEL:-realesrgan-x2}
-      - UPSCALING_MODELS_DIR=${UPSCALING_MODELS_DIR:-/app/models/esrgan}
-      - TTS_NARRATION_ENABLED=${TTS_NARRATION_ENABLED:-false}
-      - TTS_MODEL=${TTS_MODEL:-xtts-v2}
-      - TTS_LANGUAGE=${TTS_LANGUAGE:-en}
-      - TTS_SNR_THRESHOLD_DB=${TTS_SNR_THRESHOLD_DB:-15.0}
-      - TTS_CACHE_DIR=${TTS_CACHE_DIR:-/app/models/tts}
-      - LORA_OUTPUT_DIR=${LORA_OUTPUT_DIR:-/app/models/lora}
-      - LORA_CACHE_DIR=${LORA_CACHE_DIR:-/app/models/lora_cache}
-      - MUSIC_DUCKING_ENABLED=${MUSIC_DUCKING_ENABLED:-true}
-      # ── Silence / Speed-ramp ─────────────────────────────────────────
-      - SILENCE_MODE=${SILENCE_MODE:-cut}              # cut | ramp
-      - SILENCE_RAMP_SPEED=${SILENCE_RAMP_SPEED:-2.0}
-      - SILENCE_THRESHOLD_SECONDS=${SILENCE_THRESHOLD_SECONDS:-0.4}
-      # ── EditingPipeline tuning ────────────────────────────────────────
-      - EP_SATURATION=${EP_SATURATION:-1.25}
-      - EP_CONTRAST=${EP_CONTRAST:-1.10}
-      - EP_BRIGHTNESS=${EP_BRIGHTNESS:-0.02}
-      - EP_SHARPNESS=${EP_SHARPNESS:-0.8}
-      - EP_ZOOM_FACTOR=${EP_ZOOM_FACTOR:-1.12}
-      - EP_ZOOM_FRAMES=${EP_ZOOM_FRAMES:-8}
-      - EP_KB_ZOOM_RATE=${EP_KB_ZOOM_RATE:-0.00004}
-      - EP_PI_INTERVAL=${EP_PI_INTERVAL:-3.5}
-      - EP_PI_ZOOM=${EP_PI_ZOOM:-1.04}
-      - EP_PI_FRAMES=${EP_PI_FRAMES:-12}
-      - EP_LUFS_TARGET=${EP_LUFS_TARGET:--14.0}
-      - EP_LOWER_THIRD=${EP_LOWER_THIRD:-true}
-      - EP_PROGRESS_H=${EP_PROGRESS_H:-6}
-      - EP_PROGRESS_COLOR=${EP_PROGRESS_COLOR:-ff4444}
-      - EP_PROGRESS_STYLE=${EP_PROGRESS_STYLE:-solid}
-      # ── EditingPipeline — new effects ─────────────────────────────────────────
-      - EP_VOICE_COMPRESS=${EP_VOICE_COMPRESS:-true}
-      - EP_FILM_GRAIN=${EP_FILM_GRAIN:-0}
-      - EP_WORD_CALLOUT=${EP_WORD_CALLOUT:-true}
-      - EP_FACE_ZOOM=${EP_FACE_ZOOM:-true}
-      - EP_CALLOUT_FONT_SIZE=${EP_CALLOUT_FONT_SIZE:-88}
-      - EP_FONT_PATH=${EP_FONT_PATH:-/app/fonts/THEBOLDFONT.ttf}
-      - EP_CALLOUT_DURATION=${EP_CALLOUT_DURATION:-0.45}
-      - EP_HOOK_ZOOM_ON=${EP_HOOK_ZOOM_ON:-true}
-      - EP_BEAT_SYNC_ON=${EP_BEAT_SYNC_ON:-false}
-      - EP_FADE_ON=${EP_FADE_ON:-true}
-      - EP_FADE_DURATION=${EP_FADE_DURATION:-0.25}
-      - EP_CTA_ON=${EP_CTA_ON:-false}
-      - EP_CTA_TEXT=${EP_CTA_TEXT:-Follow for more!}
-      - EP_CTA_DURATION=${EP_CTA_DURATION:-2.0}
-      - EP_CTA_FONT_SIZE=${EP_CTA_FONT_SIZE:-54}
-      - EP_SAT_PULSE_ON=${EP_SAT_PULSE_ON:-true}
-      - EP_SAT_PULSE_STRENGTH=${EP_SAT_PULSE_STRENGTH:-1.20}
-      - EP_LETTERBOX_ON=${EP_LETTERBOX_ON:-false}
-      - EP_LETTERBOX_H=${EP_LETTERBOX_H:-0.07}
-      - EP_WATERMARK_ON=${EP_WATERMARK_ON:-false}
-      - EP_WATERMARK_TEXT=${EP_WATERMARK_TEXT:-}
-      - EP_THEME_GRADE_ON=${EP_THEME_GRADE_ON:-true}
-      - EP_THEME_EQ_ON=${EP_THEME_EQ_ON:-true}
-      # ── Hook slow-motion ─────────────────────────────────────────────
-      - HOOK_SLOWMO_ENABLED=${HOOK_SLOWMO_ENABLED:-true}
-      - HOOK_SLOWMO_DURATION=${HOOK_SLOWMO_DURATION:-1.5}
-      - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
-      - BROLL_ENABLED=${BROLL_ENABLED:-true}
-      - PEXELS_API_KEY=${PEXELS_API_KEY}
-      - COVERR_API_KEY=${COVERR_API_KEY}
-      - PIXABAY_API_KEY=${PIXABAY_API_KEY}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    restart: always
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      ollama:
-        condition: service_healthy
-
 
   gpu_worker:
     profiles: ["gpu"]
@@ -957,6 +621,7 @@ services:
 
 
   ollama:
+    profiles: ["llm"]
     image: ollama/ollama:latest
     container_name: viraclip-ollama
     volumes:
@@ -1046,6 +711,7 @@ services:
 
 
   rust-agent:
+    profiles: ["agent"]
     build:
       context: ./rust-agent
       dockerfile: Dockerfile

@@ -126,6 +126,15 @@ class Config:
         self.feedback_enabled = self._get_bool_env("FEEDBACK_ENABLED", False)
         self.notifications_enabled = self._get_bool_env("NOTIFICATIONS_ENABLED", False)
         self.music_ducking_enabled = self._get_bool_env("MUSIC_DUCKING_ENABLED", True)
+        self.beta_clean = self._get_bool_env("VIRACLIP_BETA_CLEAN", False)
+        self.enable_editorial_broll = self._get_bool_env("VIRACLIP_ENABLE_EDITORIAL_BROLL", False)
+        self.enable_local_broll_bank = self._get_bool_env("VIRACLIP_ENABLE_LOCAL_BROLL_BANK", True)
+        self.local_broll_asset_dir = os.getenv("LOCAL_BROLL_ASSET_DIR", "/app/assets/broll")
+
+        # GPU detection & enable flags — all off by default
+        self.gpu_probe_on_start = self._get_bool_env("VIRACLIP_GPU_PROBE_ON_START", False)
+        self.enable_torch_cuda = self._get_bool_env("VIRACLIP_ENABLE_TORCH_CUDA", False)
+        self.enable_nvenc = self._get_bool_env("VIRACLIP_ENABLE_NVENC", False)
 
         # Subtitle Re-alignment
         self.subtitle_realign_enabled = self._get_bool_env("SUBTITLE_REALIGN_ENABLED", True)
@@ -175,8 +184,10 @@ class Config:
         if not os.path.exists(self.temp_dir):
             logger.warning(f"[WARN] Temp directory not found: {self.temp_dir}. Will be created on first use.")
         
-        # Log configured LLM
-        logger.info(f"[LLM] configured: {self.llm}")
+        # Log configured LLM — only once per process to avoid log spam
+        if not hasattr(Config, "_llm_config_logged"):
+            logger.info(f"[LLM] configured: {self.llm}")
+            Config._llm_config_logged = True
 
     @staticmethod
     def _get_optional_env(name: str):
