@@ -210,9 +210,12 @@ class EditorialBrollPlanner:
         if suggested_broll_cue_type:
             _mapped = self._CUE_ALIASES.get(suggested_broll_cue_type, suggested_broll_cue_type)
             if _mapped in self._PATTERNS and not any(m[0] == _mapped for m in matches):
-                matches.append((_mapped, f"suggested:{suggested_broll_cue_type}", 0))
+                # Use a negative char_start to mark this as a suggested cue
+                # (no real text position). _estimate_start_s will detect this
+                # and assign a safe start time.
+                matches.insert(0, (_mapped, f"suggested:{suggested_broll_cue_type}", -1))
                 logger.info(
-                    "[editorial-broll] added suggested cue type=%s (mapped from %s)",
+                    "[editorial-broll] added suggested cue type=%s (mapped from %s) priority=first",
                     _mapped, suggested_broll_cue_type,
                 )
 
@@ -369,6 +372,13 @@ class EditorialBrollPlanner:
         return deduped
 
     @classmethod
+    def _safe_suggested_start_s(cls, clip_duration: float) -> float:
+        """Return a safe start time for suggested cues (no real text position)."""
+        if clip_duration >= 25.0:
+            return 6.0
+        return max(3.5, clip_duration * 0.20)
+
+    @classmethod
     def _estimate_start_s(
         cls,
         normalized: str,
@@ -377,6 +387,16 @@ class EditorialBrollPlanner:
         clip_duration: float,
         word_timestamps: Optional[Sequence[Dict[str, Any]]],
     ) -> Optional[float]:
+        # Suggested cues (char_start == -1) have no real text position.
+        # Assign a safe start time that avoids hook protection.
+        if char_start == -1:
+            safe_start = cls._safe_suggested_start_s(clip_duration)
+            logger.info(
+                "[editorial-broll] suggested cue safe_start=%.1fs clip_duration=%.1fs",
+                safe_start, clip_duration,
+            )
+            return safe_start
+
         timestamp = cls._timestamp_from_words(trigger, word_timestamps)
         if timestamp is not None:
             return round(max(0.0, timestamp), 2)
@@ -442,6 +462,9 @@ class EditorialBrollPlanner:
 
     @staticmethod
     def _confidence_for(trigger: str) -> float:
+        # Suggested cues from VPI scorer get maximum confidence
+        if trigger.startswith("suggested:"):
+            return 0.95
         word_count = len(trigger.split())
         if word_count >= 4:
             return 0.9
