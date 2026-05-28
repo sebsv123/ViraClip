@@ -71,6 +71,18 @@ class PublishableGateResult:
     retention_quality_score: int = 0
     retention_quality_status: str = ""
     retention_missing_layers: List[str] = field(default_factory=list)
+    private_premium_status: str = ""
+    private_premium_editorial_quality: str = ""
+    private_premium_postproduction_richness: str = ""
+    private_premium_limited_assets: bool = False
+
+    # ── FASE 5: Editorial Fluency fields ──────────────────────────────────
+    editorial_fluency_ok: bool = True
+    editorial_fluency_score: float = 0.0
+    complete_idea_score: float = 0.0
+    fluency_score_after: float = 0.0
+    hook_fit_acceptable: bool = False
+    editorial_fluency_warnings: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -96,6 +108,16 @@ class PublishableGateResult:
             "retention_quality_score": self.retention_quality_score,
             "retention_quality_status": self.retention_quality_status,
             "retention_missing_layers": self.retention_missing_layers,
+            "private_premium_status": self.private_premium_status,
+            "private_premium_editorial_quality": self.private_premium_editorial_quality,
+            "private_premium_postproduction_richness": self.private_premium_postproduction_richness,
+            "private_premium_limited_assets": self.private_premium_limited_assets,
+            "editorial_fluency_ok": self.editorial_fluency_ok,
+            "editorial_fluency_score": self.editorial_fluency_score,
+            "complete_idea_score": self.complete_idea_score,
+            "fluency_score_after": self.fluency_score_after,
+            "hook_fit_acceptable": self.hook_fit_acceptable,
+            "editorial_fluency_warnings": self.editorial_fluency_warnings,
         }
 
 
@@ -232,6 +254,146 @@ def assess_retention_quality(clip_info: Dict[str, Any]) -> Dict[str, Any]:
         "retention_quality_status": status,
         "retention_missing_layers": missing,
         "recommended_next_fix": next_fix,
+    }
+
+
+def assess_private_premium_status(
+    *,
+    content_quality_reject: bool,
+    complete_idea_score: float,
+    fluency_score_after: float,
+    hook_first3_ok: bool,
+    hook_fit_acceptable: bool,
+    tech_qc_ok: bool,
+    audio_qc_ok: bool,
+    captions_ok: bool,
+    branding_ok: bool,
+    silence_plan: Dict[str, Any],
+    visual_effects_meta: Dict[str, Any],
+    transitions_meta: Dict[str, Any],
+    sfx_meta: Dict[str, Any],
+    broll_items: List[Dict[str, Any]],
+    editing_richness_status: str,
+    editing_richness_warnings: List[str],
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    visual_events = list(visual_effects_meta.get("visual_effects_events") or [])
+    visual_quality = str(
+        visual_effects_meta.get("visual_effect_quality")
+        or visual_effects_meta.get("visual_effects_quality")
+        or ""
+    )
+    has_premium_visual = bool(
+        visual_quality == "premium_visual_effect"
+        or any((event or {}).get("visual_effect_classification") == "premium_visual_effect" for event in visual_events)
+    )
+    has_basic_motion = bool(
+        visual_quality == "basic_motion"
+        or any((event or {}).get("visual_effect_classification") == "basic_motion" for event in visual_events)
+    )
+    contextual_transition = bool(
+        transitions_meta.get("transition_contextual")
+        or any((event or {}).get("contextual") for event in transitions_meta.get("transition_events") or [])
+    )
+    contextual_sfx = bool(
+        sfx_meta.get("sfx_contextual")
+        or any((event or {}).get("contextual") for event in (sfx_meta.get("sfx_design_events") or sfx_meta.get("sfx_events") or []))
+    )
+    meaningful_silence = bool(
+        silence_plan.get("rendered")
+        or float(silence_plan.get("total_removed_s") or 0.0) > 0.15
+        or (silence_plan.get("summary") or {}).get("tension_silences_preserved")
+    )
+    has_broll = bool(broll_items)
+    perceptible_editorial_action = bool(
+        meaningful_silence
+        or has_premium_visual
+        or contextual_transition
+        or contextual_sfx
+        or has_broll
+        or hook_first3_ok
+    )
+    broll_missing_opportunity = any(
+        str(item) in {"broll_asset_missing_or_conflict", "broll_editorial_opportunity_unfulfilled"}
+        for item in (editing_richness_warnings or [])
+    )
+    limited_assets = (not has_broll and not has_premium_visual and not contextual_transition) or broll_missing_opportunity
+
+    if has_broll or has_premium_visual or contextual_transition:
+        richness = "rich" if contextual_sfx or visual_effects_meta.get("visual_effects_applied") else "moderate"
+    elif has_basic_motion or contextual_sfx or meaningful_silence:
+        richness = "moderate"
+    else:
+        richness = "limited"
+
+    # ── CAMBIO 5: first3_visual_contract downgrade ──────────────────────────
+    _first3_contract = first3_visual_contract or {}
+    _first3_fail_count = int(_first3_contract.get("first3_visual_fail_count") or 0)
+    _first3_contract_failed = _first3_fail_count >= 2
+
+    if content_quality_reject:
+        status = "DO_NOT_UPLOAD"
+        editorial_quality = "blocked_bts_or_low_speech"
+        reason = "bts_contamination"
+    elif complete_idea_score < 0.75:
+        status = "DO_NOT_UPLOAD"
+        editorial_quality = "incomplete"
+        reason = "incomplete_idea"
+    elif fluency_score_after < 0.70:
+        status = "DO_NOT_UPLOAD"
+        editorial_quality = "disfluent"
+        reason = "visible_disfluency"
+    elif not tech_qc_ok or not audio_qc_ok or not captions_ok:
+        status = "DO_NOT_UPLOAD"
+        editorial_quality = "technical_blocked"
+        reason = "technical_audio_or_caption_failure"
+    elif not hook_first3_ok:
+        status = "PRIVATE_PREMIUM_REVIEW"
+        editorial_quality = "review_hook"
+        reason = "weak_hook"
+    elif _first3_contract_failed:
+        status = "PRIVATE_PREMIUM_REVIEW"
+        editorial_quality = "review_first3_visual_contract"
+        reason = f"first3_visual_contract_failed:{_first3_fail_count}_failures"
+    elif not perceptible_editorial_action:
+        status = "PRIVATE_PREMIUM_REVIEW"
+        editorial_quality = "review_editorial_action"
+        reason = "no_perceptible_editorial_action"
+    elif limited_assets:
+        status = "PRIVATE_PREMIUM_LIMITED_ASSETS"
+        editorial_quality = "solid"
+        reason = "limited_assets"
+    else:
+        status = "PRIVATE_PREMIUM_READY"
+        editorial_quality = "solid"
+        reason = "complete_fluent_contextual_hook"
+
+    if editing_richness_status == "rich" and (
+        complete_idea_score < 0.75
+        or (not hook_first3_ok and not hook_fit_acceptable)
+        or ("visually_too_plain" in editing_richness_warnings)
+        or (limited_assets and not has_premium_visual)
+    ):
+        logger.info("[quality-gate] rich_blocked reason=private_premium_honesty")
+
+    if status == "PRIVATE_PREMIUM_READY":
+        logger.info("[quality-gate] ready reason=%s", reason)
+    elif status == "PRIVATE_PREMIUM_REVIEW":
+        logger.info("[quality-gate] review reason=%s", reason)
+
+    logger.info("[private-premium] status=%s", status)
+    logger.info("[private-premium] editorial_quality=%s", editorial_quality)
+    logger.info("[private-premium] postproduction_richness=%s", richness)
+    logger.info("[private-premium] limited_assets=%s", str(limited_assets).lower())
+    if broll_missing_opportunity:
+        logger.info("[private-premium] limited_assets=true reason=broll_asset_missing")
+    return {
+        "private_premium_status": status,
+        "private_premium_editorial_quality": editorial_quality,
+        "private_premium_postproduction_richness": richness,
+        "private_premium_limited_assets": limited_assets,
+        "private_premium_reason": reason,
+        "private_premium_perceptible_editorial_action": perceptible_editorial_action,
     }
 
 
@@ -543,6 +705,7 @@ def _compute_base_score(
 def evaluate_clip_publishability(
     clip_info: Dict[str, Any],
     segment: Optional[Dict[str, Any]] = None,
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
 ) -> PublishableGateResult:
     """Evaluate a single clip's publishability.
 
@@ -552,6 +715,8 @@ def evaluate_clip_publishability(
                    brand_treatment, words, caption_source, etc.)
         segment: Optional segment dict with editorial metadata
                  (editorial_type, vpi_score, virality_score, etc.)
+        first3_visual_contract: Optional result from first3_visual_contract()
+                                used to downgrade private premium status.
 
     Returns:
         PublishableGateResult with full classification.
@@ -647,6 +812,93 @@ def evaluate_clip_publishability(
         content_quality.get("content_quality_label") == "reject"
         or content_quality.get("content_quality_reason") == "behind_the_scenes_low_speech"
     )
+
+    # ── 1.5. Assess editorial fluency (FASE 5) ──────────────────────────────
+    editorial_fluency_ok = True
+    editorial_fluency_score = 0.0
+    complete_idea_score = 0.0
+    fluency_score_after = 0.0
+    hook_fit_acceptable = False
+    editorial_fluency_warnings: List[str] = []
+    try:
+        from .vpi_editorial_fluency_service import assess_editorial_fluency
+
+        fluency_result = assess_editorial_fluency(
+            text=segment_text,
+            editorial_type=editorial_type,
+            hook_plan=hook_plan,
+            silence_plan=silence_plan,
+            duration_s=float(clip_info.get("duration_s") or 0.0),
+        )
+        editorial_fluency_score = float(fluency_result.get("editorial_fluency_score", 0.0))
+        complete_idea_score = float(fluency_result.get("complete_idea_score", 0.0))
+        fluency_score_after = float(fluency_result.get("fluency_score_after", 0.0))
+        hook_fit_acceptable = bool(fluency_result.get("hook_fit", {}).get("hook_fit_acceptable", False))
+        editorial_fluency_warnings = list(fluency_result.get("editorial_fluency_warnings", []))
+
+        # Block conditions for READY_TO_UPLOAD
+        if complete_idea_score < 0.75:
+            editorial_fluency_ok = False
+            editorial_fluency_warnings.append("incomplete_idea")
+        if fluency_score_after < 0.70:
+            editorial_fluency_ok = False
+            if "low_fluency" not in editorial_fluency_warnings:
+                editorial_fluency_warnings.append("low_fluency")
+        hook_first3_score = int(hook_plan.get("hook_first3_score") or 0)
+        if hook_first3_score < 5 and not hook_fit_acceptable:
+            editorial_fluency_ok = False
+            if "hook_fit_unacceptable" not in editorial_fluency_warnings:
+                editorial_fluency_warnings.append("hook_fit_unacceptable")
+        # Check for at least one perceptible editorial action
+        fluency_plan = fluency_result.get("fluency_plan", {})
+        edit_list = fluency_result.get("edit_decision_list", {})
+        has_editorial_action = bool(
+            fluency_plan.get("edits")
+            or edit_list.get("decisions")
+            or fluency_result.get("complete_idea_assessment") == "expanded"
+        )
+        if not has_editorial_action:
+            editorial_fluency_ok = False
+            if "no_editorial_action" not in editorial_fluency_warnings:
+                editorial_fluency_warnings.append("no_editorial_action")
+    except Exception as exc:
+        logger.warning("[editorial-fluency] gate_check_skipped reason=%s", exc)
+        editorial_fluency_ok = True  # don't block if service unavailable
+
+    # ── 1.6. Weak hook gate (FASE 4) ─────────────────────────────────────────
+    # If hook-first3 stays weak (< 5) and unresolved, force REVIEW_MANUALLY,
+    # never READY, never rich.  Try before giving up: adjust start, subtitle
+    # emphasis before 1.5s, micro pause/cut entry, visual contextual.
+    hook_fit_unresolved = False
+    hook_first3_score = int(hook_plan.get("hook_first3_score") or 0)
+    if hook_first3_score < 5 and hook_plan.get("hook_type") != "weak_intro":
+        try:
+            from .vpi_hook_engine import is_weak_hook_unresolved, assess_hook_fit
+
+            hook_fit_result = assess_hook_fit(
+                text=segment_text,
+                editorial_type=editorial_type,
+                hook_type=str(hook_plan.get("hook_type") or ""),
+                hook_plan=hook_plan,
+            )
+            if is_weak_hook_unresolved(hook_plan, hook_fit_result=hook_fit_result):
+                hook_fit_unresolved = True
+                logger.info(
+                    "[hook-fit] status=weak_unresolved "
+                    "score=%d intent=%s style=%s",
+                    hook_first3_score,
+                    hook_fit_result.get("intent", "unknown"),
+                    hook_fit_result.get("style", "unknown"),
+                )
+                logger.info(
+                    "[quality-gate] rich_blocked reason=weak_contextual_hook"
+                )
+                # Force editorial_fluency_ok to False to block READY
+                editorial_fluency_ok = False
+                if "hook_fit_unresolved" not in editorial_fluency_warnings:
+                    editorial_fluency_warnings.append("hook_fit_unresolved")
+        except Exception as exc:
+            logger.warning("[hook-fit] gate_check_skipped reason=%s", exc)
 
     # ── 2. Compute editing activity score ───────────────────────────────────
     editing_activity = _count_editing_activities(clip_info)
@@ -861,6 +1113,7 @@ def evaluate_clip_publishability(
         and not no_post_layers
         and editing_richness_status not in {"too_plain"}
         and "visually_too_plain" not in editing_richness_warnings
+        and editorial_fluency_ok
     ):
         status = PublishableStatus.READY_TO_UPLOAD
         recommendation = UploadRecommendation.GOOD_CANDIDATE
@@ -903,6 +1156,26 @@ def evaluate_clip_publishability(
     else:
         recommended_next_fix = "manual_review"
 
+    private_premium = assess_private_premium_status(
+        content_quality_reject=content_quality_reject,
+        complete_idea_score=complete_idea_score,
+        fluency_score_after=fluency_score_after,
+        hook_first3_ok=hook_first3_ok,
+        hook_fit_acceptable=hook_fit_acceptable,
+        tech_qc_ok=tech_qc_ok,
+        audio_qc_ok=audio_qc_ok,
+        captions_ok=captions_ok,
+        branding_ok=branding_ok,
+        silence_plan=silence_plan or {},
+        visual_effects_meta=visual_effects_meta or {},
+        transitions_meta=transitions_meta or {},
+        sfx_meta=sfx_meta or {},
+        broll_items=broll_items,
+        editing_richness_status=editing_richness_status,
+        editing_richness_warnings=editing_richness_warnings,
+        first3_visual_contract=first3_visual_contract,
+    )
+
     result = PublishableGateResult(
         publishable_status=status,
         publishable_score=round(final_score, 1),
@@ -925,6 +1198,17 @@ def evaluate_clip_publishability(
         retention_quality_score=int(retention_gate["retention_quality_score"]),
         retention_quality_status=str(retention_gate["retention_quality_status"]),
         retention_missing_layers=list(retention_gate["retention_missing_layers"]),
+        private_premium_status=str(private_premium["private_premium_status"]),
+        private_premium_editorial_quality=str(private_premium["private_premium_editorial_quality"]),
+        private_premium_postproduction_richness=str(private_premium["private_premium_postproduction_richness"]),
+        private_premium_limited_assets=bool(private_premium["private_premium_limited_assets"]),
+        # ── FASE 5: Editorial Fluency ──────────────────────────────────────
+        editorial_fluency_ok=editorial_fluency_ok,
+        editorial_fluency_score=round(editorial_fluency_score, 2),
+        complete_idea_score=round(complete_idea_score, 2),
+        fluency_score_after=round(fluency_score_after, 2),
+        hook_fit_acceptable=hook_fit_acceptable,
+        editorial_fluency_warnings=editorial_fluency_warnings,
     )
     logger.info("[publishable-gate] upload_recommendation=%s", result.upload_recommendation.value)
     return result

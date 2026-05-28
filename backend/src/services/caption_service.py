@@ -87,6 +87,30 @@ _VPI_ORANGE = _ass_colour(255, 122, 24)
 _TRANSP  = "&H00000000"
 _SEMI_BG = "&HAA000000"   # semi-transparent black background
 
+_CAPTION_KEYWORDS: Dict[str, List[str]] = {
+    "decesos": ["alivio", "familia", "momento dificil", "momento difícil", "acompañamiento", "menos carga", "cuidado", "responsabilidad"],
+    "salud": ["salud", "no siempre avisa", "especialistas", "pruebas", "tranquilidad", "organizacion", "organización", "respaldo"],
+    "autonomos": ["autonomo", "autónomo", "autonomos", "autónomos", "motor", "estabilidad", "ingresos", "continuidad", "estrategia", "bolsillo", "imprevisto"],
+    "vida": ["proteccion", "protección", "familia", "futuro", "tranquilidad", "responsabilidad", "ingresos", "ausencia"],
+}
+
+_ICON_CONCEPTS: Dict[str, List[str]] = {
+    "familia": ["family", "familia", "heart", "shield"],
+    "salud": ["health", "salud", "cross", "heart"],
+    "autonomo": ["briefcase", "autonomo", "autónomo", "user", "work"],
+    "riesgo": ["warning", "alert", "riesgo", "alerta"],
+    "tranquilidad": ["calm", "tranquilidad", "shield"],
+    "decesos": ["heart", "family", "support", "familia", "apoyo"],
+}
+
+_ICON_DIRS = (
+    "/app/assets/icons",
+    "/app/assets/brand/icons",
+    "assets/icons",
+    "backend/assets/icons",
+    "frontend/public/icons",
+)
+
 
 # ── Platform-aware caption safe zones ────────────────────────────────────────
 # These MarginV values keep captions above platform UI overlays:
@@ -303,7 +327,13 @@ def _build_beta_clean_karaoke_text(
     parts = []
     for w in words:
         duration_cs = max(1, int(round(max(0.08, w.end - w.start) * 100)))
-        parts.append(f"{{\\kf{duration_cs}\\c{highlight_colour}}}{w.text}{{\\c{_WHITE}}}")
+        if w.emphasis:
+            parts.append(
+                f"{{\\kf{duration_cs}\\c{highlight_colour}\\b1\\fscx108\\fscy108}}"
+                f"{w.text}{{\\c{_WHITE}\\b0\\fscx100\\fscy100}}"
+            )
+        else:
+            parts.append(f"{{\\kf{duration_cs}\\c{highlight_colour}}}{w.text}{{\\c{_WHITE}}}")
     return pos_tag + " ".join(parts)
 
 
@@ -312,6 +342,279 @@ _ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
 
 def _normalize_caption_text(text: str) -> str:
     return " ".join(_ASS_OVERRIDE_RE.sub("", text).lower().split())
+
+
+def _strip_accents(text: str) -> str:
+    return str(text or "").translate(str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN")).lower()
+
+
+def _topic_from_text(text: str, editorial_type: str = "") -> str:
+    haystack = _strip_accents(f"{editorial_type} {text}")
+    if "deceso" in haystack or "momento dificil" in haystack or "menos carga" in haystack:
+        return "decesos"
+    if "salud" in haystack or "especialista" in haystack or "prueba" in haystack:
+        return "salud"
+    if "autonom" in haystack or "motor" in haystack or "ingreso" in haystack:
+        return "autonomos"
+    if "vida" in haystack or "proteccion" in haystack or "ausencia" in haystack:
+        return "vida"
+    return ""
+
+
+def _select_caption_keywords(text: str, editorial_type: str = "") -> List[str]:
+    topic = _topic_from_text(text, editorial_type)
+    haystack = _strip_accents(text)
+    candidates = list(_CAPTION_KEYWORDS.get(topic) or [])
+    if not candidates:
+        for terms in _CAPTION_KEYWORDS.values():
+            candidates.extend(terms)
+    selected: List[str] = []
+    for term in candidates:
+        if _strip_accents(term) in haystack and term not in selected:
+            selected.append(term)
+        if len(selected) >= 4:
+            break
+    return selected
+
+
+def _discover_caption_icon_assets() -> List[Path]:
+    root = Path(__file__).resolve().parents[3]
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
+    assets: List[Path] = []
+    for item in _ICON_DIRS:
+        directory = Path(item)
+        if not directory.is_absolute():
+            directory = root / directory
+        if not directory.exists() or not directory.is_dir():
+            continue
+        assets.extend(path for path in sorted(directory.rglob("*")) if path.is_file() and path.suffix.lower() in exts)
+    return assets
+
+
+def _match_caption_icon(concept: str, assets: List[Path]) -> Optional[Path]:
+    needles = [_strip_accents(term) for term in _ICON_CONCEPTS.get(concept, [concept])]
+    for asset in assets:
+        name = _strip_accents(asset.stem)
+        if any(term and term in name for term in needles):
+            return asset
+    return None
+
+
+def _hook_overlay_text(text: str, hook_intent: str) -> str:
+    lowered = _strip_accents(text)
+    original = " ".join(str(text or "").replace("\n", " ").split())
+    if hook_intent == "myth_flip":
+        for marker in ("no va de miedo", "no es postureo", "no es lujo"):
+            if marker in lowered:
+                return marker.capitalize()
+    if hook_intent == "risk_warning":
+        if "la salud no siempre avisa" in lowered:
+            return "La salud no siempre avisa"
+        if "manana" in lowered:
+            return "¿Y si mañana no puedes?"
+    if hook_intent == "practical_advice":
+        if "antes de mirar" in lowered:
+            return "Antes de mirar precios..."
+        if "vida real" in lowered:
+            return "Mira tu vida real"
+    if hook_intent == "autonomous_business_stakes":
+        if "autonom" in lowered:
+            return "Si eres autónomo..."
+        if "motor" in lowered:
+            return "Tú eres el motor"
+    if hook_intent == "emotional_closure":
+        if "cuando mas falta hace" in lowered or "cuando más falta hace" in original.lower():
+            return "Cuando más falta hace"
+        if "menos carga" in lowered and "familia" in lowered:
+            return "Menos carga para tu familia"
+    return ""
+
+
+def plan_caption_overlay_pack(
+    text: str,
+    *,
+    hook_intent: str = "",
+    editorial_type: str = "",
+    words: Optional[List[Dict[str, Any]]] = None,
+    subtitle_already_strong: bool = False,
+    local_icon_assets: Optional[List[Path]] = None,
+    enable_lower_third: bool = True,
+    composition_decision: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    text = str(text or "")
+    words = list(words or [])
+    hook_intent = str(hook_intent or "")
+    keyword_terms = _select_caption_keywords(text, editorial_type)
+    if keyword_terms:
+        logger.info("[caption-overlay] keyword_emphasis applied=true words=%s", "|".join(keyword_terms[:4]))
+    else:
+        logger.info("[caption-overlay] skipped reason=no_keywords")
+
+    word_count = len(words) if words else len(text.split())
+    caption_start_s = float(words[0].get("start", 0.0)) if words else 0.0
+    long_subtitle = word_count >= 18 or len(text) > 160
+    sensitive_tone = _topic_from_text(text, editorial_type) == "decesos" and hook_intent == "risk_warning"
+    actions: List[str] = []
+    density_actions: List[Dict[str, str]] = []
+
+    overlay_text = _hook_overlay_text(text, hook_intent)
+    if subtitle_already_strong:
+        hook_overlay = {"applied": False, "reason": "subtitle_already_strong"}
+        logger.info("[caption-overlay] hook_overlay skipped reason=subtitle_already_strong")
+    elif sensitive_tone:
+        hook_overlay = {"applied": False, "reason": "sensitive_tone"}
+        logger.info("[caption-overlay] hook_overlay skipped reason=sensitive_tone")
+    elif long_subtitle:
+        hook_overlay = {"applied": False, "reason": "density_guard_long_subtitle"}
+        density_actions.append({"action": "skip_overlay", "reason": "too_many_elements"})
+        logger.info("[caption-overlay] density_guard action=skip_overlay reason=too_many_elements")
+    elif overlay_text:
+        hook_overlay = {"applied": True, "text": overlay_text, "start_s": 0.05, "duration_s": 1.1, "safe_zone": "upper_third"}
+        actions.append("hook_overlay")
+        logger.info('[caption-overlay] hook_overlay applied=true text="%s" duration=%.1f', overlay_text, 1.1)
+    else:
+        hook_overlay = {"applied": False, "reason": "no_hook_text"}
+        logger.info("[caption-overlay] hook_overlay skipped reason=no_hook_text")
+
+    concept = _topic_from_text(text, editorial_type) or ("autonomo" if "autonom" in _strip_accents(text) else "")
+    icon_assets = local_icon_assets if local_icon_assets is not None else _discover_caption_icon_assets()
+    icon: Dict[str, Any] = {"applied": False, "concept": concept, "reason": "not_useful"}
+    if long_subtitle or hook_overlay.get("applied"):
+        icon["reason"] = "too_many_elements"
+        density_actions.append({"action": "skip_icon", "reason": "too_many_elements"})
+        logger.info("[caption-overlay] density_guard action=skip_icon reason=too_many_elements")
+    elif sensitive_tone:
+        icon["reason"] = "sensitive_tone"
+        logger.info("[caption-icon] skipped reason=sensitive_tone")
+    elif concept:
+        asset = _match_caption_icon(concept, icon_assets)
+        if asset:
+            icon = {"applied": True, "concept": concept, "asset": str(asset), "start_s": 0.2, "duration_s": 1.2}
+            actions.append("semantic_icon")
+            logger.info("[caption-icon] concept=%s asset=%s applied=true", concept, asset)
+        else:
+            icon["reason"] = "no_local_asset"
+            logger.info("[caption-icon] skipped reason=no_local_asset")
+    else:
+        logger.info("[caption-icon] skipped reason=not_useful")
+
+    topic = _topic_from_text(text, editorial_type)
+    lower_text = {
+        "salud": "Seguro de salud",
+        "decesos": "Seguro de decesos",
+        "autonomos": "Protección para autónomos",
+        "vida": "Valentín Protección Integral",
+    }.get(topic, "")
+    if not enable_lower_third:
+        lower_third = {"applied": False, "reason": "branding_conflict"}
+        logger.info("[caption-overlay] lower_third skipped reason=branding_conflict")
+    elif long_subtitle:
+        lower_third = {"applied": False, "reason": "layout_conflict"}
+        logger.info("[caption-overlay] lower_third skipped reason=layout_conflict")
+    elif hook_overlay.get("applied"):
+        lower_third = {"applied": True, "text": lower_text or "Valentín Protección Integral", "start_s": 1.45, "duration_s": 1.8, "delayed": True}
+        actions.append("lower_third")
+        density_actions.append({"action": "delay_lower_third", "reason": "too_many_elements"})
+        logger.info("[caption-overlay] density_guard action=delay reason=too_many_elements")
+        logger.info("[caption-overlay] lower_third applied=true text=%s", lower_third["text"])
+    elif lower_text:
+        lower_third = {"applied": True, "text": lower_text, "start_s": 0.4, "duration_s": 1.8, "delayed": False}
+        actions.append("lower_third")
+        logger.info("[caption-overlay] lower_third applied=true text=%s", lower_text)
+    else:
+        lower_third = {"applied": False, "reason": "layout_conflict"}
+        logger.info("[caption-overlay] lower_third skipped reason=layout_conflict")
+
+    if keyword_terms:
+        actions.insert(0, "keyword_emphasis")
+
+    # ── VPI Premium Composition Pack v1: resolve visual layer conflicts ──
+    composition_allowed_layers: List[str] = []
+    composition_skipped_layers: List[Dict[str, Any]] = []
+    composition_decision_applied = False
+    layer_overload = False
+    if composition_decision and isinstance(composition_decision, dict) and composition_decision.get("composition_pack"):
+        try:
+            from .vpi_visual_effects_service import resolve_visual_layer_conflicts as _resolve_visual_layer_conflicts
+            _layers_to_resolve: List[Dict[str, Any]] = []
+            if hook_overlay.get("applied"):
+                _layers_to_resolve.append({
+                    "type": "hook_overlay",
+                    "start_s": hook_overlay.get("start_s", 0.0),
+                    "duration_s": hook_overlay.get("duration_s", 1.1),
+                    "text": hook_overlay.get("text", ""),
+                })
+            if icon.get("applied"):
+                _layers_to_resolve.append({
+                    "type": "icon",
+                    "start_s": icon.get("start_s", 0.2),
+                    "duration_s": icon.get("duration_s", 1.2),
+                    "text": icon.get("text", "") or icon.get("concept", ""),
+                })
+            if lower_third.get("applied"):
+                _layers_to_resolve.append({
+                    "type": "lower_third",
+                    "start_s": lower_third.get("start_s", 0.4),
+                    "duration_s": lower_third.get("duration_s", 1.8),
+                    "text": lower_third.get("text", ""),
+                })
+            _resolved = _resolve_visual_layer_conflicts(_layers_to_resolve, composition_decision)
+            _resolved_layers = list(_resolved.get("allowed_layers") or [])
+            _resolved_types = {l.get("type") for l in _resolved_layers}
+            composition_allowed_layers = [str(item.get("type") or "") for item in _resolved_layers]
+            composition_skipped_layers = list(_resolved.get("skipped_layers") or [])
+            composition_decision_applied = bool(_resolved.get("composition_decision_applied"))
+            layer_overload = bool(_resolved.get("layer_overload"))
+            if "hook_overlay" not in _resolved_types and hook_overlay.get("applied"):
+                logger.info("[caption-overlay] composition_allowed name=hook_overlay yes=false reason=composition_conflict_resolver")
+                hook_overlay = {"applied": False, "reason": "composition_conflict_resolver"}
+                if "hook_overlay" in actions:
+                    actions.remove("hook_overlay")
+            else:
+                logger.info("[caption-overlay] composition_allowed name=hook_overlay yes=%s reason=%s", "true" if "hook_overlay" in _resolved_types else "false", "allowed" if "hook_overlay" in _resolved_types else "not_planned")
+            if "icon" not in _resolved_types and icon.get("applied"):
+                logger.info("[caption-overlay] composition_allowed name=icon yes=false reason=composition_conflict_resolver")
+                icon = {"applied": False, "concept": icon.get("concept", ""), "reason": "composition_conflict_resolver"}
+                if "semantic_icon" in actions:
+                    actions.remove("semantic_icon")
+            else:
+                logger.info("[caption-overlay] composition_allowed name=icon yes=%s reason=%s", "true" if "icon" in _resolved_types else "false", "allowed" if "icon" in _resolved_types else "not_planned")
+            if "lower_third" not in _resolved_types and lower_third.get("applied"):
+                logger.info("[caption-overlay] composition_allowed name=lower_third yes=false reason=composition_conflict_resolver")
+                lower_third = {"applied": False, "reason": "composition_conflict_resolver"}
+                if "lower_third" in actions:
+                    actions.remove("lower_third")
+            else:
+                logger.info("[caption-overlay] composition_allowed name=lower_third yes=%s reason=%s", "true" if "lower_third" in _resolved_types else "false", "allowed" if "lower_third" in _resolved_types else "not_planned")
+            if composition_skipped_layers:
+                for skipped in composition_skipped_layers:
+                    logger.info("[caption-overlay] density_guard action=%s reason=composition_conflict", f"skip_{skipped.get('type')}")
+        except Exception as _comp_resolve_e:
+            logger.debug("[composition-pack] conflict_resolver skipped reason=%s", _comp_resolve_e)
+
+    pack_applied = bool(actions)
+    logger.info("[caption-overlay] pack_applied=%s actions=%s", str(pack_applied).lower(), "|".join(actions) or "none")
+    logger.info(
+        "[editing-richness] caption_overlay_pack=%s reason=%s",
+        str(pack_applied).lower(),
+        "caption_overlay_actions" if pack_applied else "normal_subtitles_only",
+    )
+    return {
+        "caption_overlay_pack": pack_applied,
+        "caption_overlay_actions": actions,
+        "keyword_emphasis_applied": bool(keyword_terms),
+        "keyword_emphasis_terms": keyword_terms[:4],
+        "hook_overlay": hook_overlay,
+        "caption_icon": icon,
+        "lower_third": lower_third,
+        "caption_start_s": caption_start_s,
+        "density_guard_actions": density_actions,
+        "composition_allowed_layers": composition_allowed_layers,
+        "composition_skipped_layers": composition_skipped_layers,
+        "composition_decision_applied": composition_decision_applied,
+        "layer_overload": layer_overload,
+        "caption_overlay_pack_reason": "caption_overlay_actions" if pack_applied else "normal_subtitles_only",
+    }
 
 
 def _build_highlight_text(words: List[WordTimestamp], active_idx: int, emphasis_threshold: float = 0.82) -> str:
@@ -349,6 +652,7 @@ def build_ass_script(
     uppercase: bool = True,
     platform: str = "tiktok",
     emphasis_threshold: float = 0.82,
+    overlay_plan: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build a complete ASS script from caption lines.
@@ -428,6 +732,8 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, \
 BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: {style_def}
+Style: HookOverlay,{_CAPTION_FONT},58,{_WHITE},{_VPI_ORANGE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,1,3,2,8,40,40,120,1
+Style: LowerThird,{_CAPTION_FONT},42,{_WHITE},{_VPI_ORANGE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,3,1,0,1,42,42,360,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -536,6 +842,26 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         logger.info("[caption-sync] dedupe removed=%d", dedupe_removed)
         logger.info("[caption-sync] overlap_fixed=%d", overlap_fixed)
         logger.info("[caption-sync] min_duration_applied=%d", min_duration_applied)
+
+    overlay_plan = overlay_plan or {}
+    hook_overlay = overlay_plan.get("hook_overlay") or {}
+    if hook_overlay.get("applied") and hook_overlay.get("text"):
+        start = float(hook_overlay.get("start_s") or 0.05)
+        end = start + float(hook_overlay.get("duration_s") or 1.1)
+        text = str(hook_overlay.get("text") or "").replace("{", "").replace("}", "")
+        events.append(
+            f"Dialogue: 1,{_ass_time(start)},{_ass_time(end)},HookOverlay,,0,0,0,,"
+            f"{{\\an8\\pos({play_res_x // 2},{int(play_res_y * 0.16)})\\fad(80,120)}}{text}"
+        )
+    lower = overlay_plan.get("lower_third") or {}
+    if lower.get("applied") and lower.get("text"):
+        start = float(lower.get("start_s") or 1.45)
+        end = start + float(lower.get("duration_s") or 1.8)
+        text = str(lower.get("text") or "").replace("{", "").replace("}", "")
+        events.append(
+            f"Dialogue: 1,{_ass_time(start)},{_ass_time(end)},LowerThird,,0,0,0,,"
+            f"{{\\an1\\pos(54,{int(play_res_y * 0.66)})\\fad(100,160)}}{text}"
+        )
 
     return header + "\n".join(events) + "\n"
 
@@ -961,11 +1287,24 @@ async def burn_captions(
     highlighted_terms = list(caption_decisions.get("highlighted_terms") or [])
     hook_emphasis_words = list(caption_decisions.get("hook_emphasis_words") or [])
     hook_subtitle_text = str(caption_decisions.get("hook_subtitle_text") or "")
+    segment_text = str(caption_decisions.get("segment_text") or " ".join(str(w.get("word") or w.get("text") or "") for w in words))
     editorial_type = str(caption_decisions.get("editorial_type") or "")
+    hook_intent = str(caption_decisions.get("hook_intent") or "")
+    composition_decision = caption_decisions.get("composition_decision") if isinstance(caption_decisions.get("composition_decision"), dict) else {}
     hook_first3_status = str(caption_decisions.get("hook_first3_status") or "")
     hook_first3_score = int(caption_decisions.get("hook_first3_score") or 0)
     rendered_highlights = False
-    combined_terms = hook_emphasis_words + highlighted_terms
+    overlay_plan = plan_caption_overlay_pack(
+        segment_text,
+        hook_intent=hook_intent,
+        editorial_type=editorial_type,
+        words=words,
+        subtitle_already_strong=bool(caption_decisions.get("hook_caption_applied")),
+        composition_decision=composition_decision,
+    )
+    caption_decisions["caption_overlay_pack"] = overlay_plan
+    caption_overlay_terms = list(overlay_plan.get("keyword_emphasis_terms") or [])
+    combined_terms = hook_emphasis_words + highlighted_terms + caption_overlay_terms
     # v3.2 metadata
     captions_highlight_count = 0
     hook_caption_applied = False
@@ -1041,6 +1380,7 @@ async def burn_captions(
     ass_content = build_ass_script(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
         platform=platform, emphasis_threshold=emphasis_threshold,
+        overlay_plan=overlay_plan,
     )
     if _is_beta_clean():
         logger.info("[caption-sync] source=cached_words words=%d lines=%d", len(words), len(lines))

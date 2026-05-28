@@ -133,22 +133,134 @@ def select_deep_boom_variant(
     return selected, f"deep_boom_{booms.index(selected) + 1}", not repeated
 
 
+def sync_sfx_with_motion(
+    intent: str,
+    visual_profile: str,
+    *,
+    transition_type: str = "",
+    assets: Optional[Dict[str, List[Path]]] = None,
+    low_value_moment: bool = False,
+    composition_mode: str = "",
+) -> Dict[str, Any]:
+    resolved_intent = str(intent or "neutral_explanation")
+    profile = str(visual_profile or "")
+    transition = str(transition_type or "")
+    comp_mode = str(composition_mode or "")
+    assets = assets or {"low_riser": [], "high_riser": [], "magic_whoosh": [], "deep_boom": []}
+
+    if low_value_moment:
+        logger.info(
+            "[sfx-motion-sync] intent=%s visual_profile=%s sfx=none applied=false reason=low_value_moment",
+            resolved_intent,
+            profile,
+        )
+        return {
+            "sfx_motion_sync_applied": False,
+            "sfx_motion_sync_type": "",
+            "sfx_motion_sync_reason": "low_value_moment",
+            "aggressive_impact_allowed": False,
+        }
+
+    sfx_type = ""
+    asset_key = ""
+    aggressive_allowed = False
+    reason = "no_motion_sfx_needed"
+    if transition in {"sweeping_reveal", "sweeping_object_reveal"}:
+        sfx_type = "magic_whoosh"
+        asset_key = "magic_whoosh"
+        reason = "sweeping_reveal"
+    elif resolved_intent == "risk_warning" and profile == "tension_push":
+        sfx_type = "dark_riser"
+        asset_key = "low_riser"
+        reason = "risk_warning_tension_push"
+    elif resolved_intent == "autonomous_business_stakes" and profile == "business_punch":
+        sfx_type = "deep_boom"
+        asset_key = "deep_boom"
+        aggressive_allowed = True
+        reason = "business_punch_soft_impact"
+    elif resolved_intent == "emotional_closure":
+        reason = "emotional_no_aggressive_impact"
+    if comp_mode == "emotional_soft" and sfx_type == "deep_boom":
+        sfx_type = ""
+        asset_key = ""
+        aggressive_allowed = False
+        reason = "composition_blocked_deep_boom"
+    if comp_mode == "minimal_safe" and sfx_type and resolved_intent == "neutral_explanation":
+        sfx_type = ""
+        asset_key = ""
+        aggressive_allowed = False
+        reason = "composition_blocked_minimal_safe"
+
+    available = bool(asset_key and assets.get(asset_key))
+    applied = bool(sfx_type and available)
+    logger.info(
+        "[sfx-motion-sync] intent=%s visual_profile=%s sfx=%s applied=%s reason=%s",
+        resolved_intent,
+        profile,
+        sfx_type or "none",
+        str(applied).lower(),
+        reason,
+    )
+    logger.info("[sfx-motion-sync] composition_mode=%s applied=%s reason=%s", comp_mode or "none", str(applied).lower(), reason)
+    return {
+        "sfx_motion_sync_applied": applied,
+        "sfx_motion_sync_type": sfx_type,
+        "sfx_motion_sync_asset_type": asset_key,
+        "sfx_motion_sync_reason": reason,
+        "aggressive_impact_allowed": aggressive_allowed,
+        "sfx_motion_sync_available": available,
+        "composition_decision_applied": bool(comp_mode),
+    }
+
+
 def build_sfx_design_plan(
     *,
     hook_plan: Optional[Dict[str, Any]] = None,
     broll_events: Optional[List[Dict[str, Any]]] = None,
     transition_events: Optional[List[Dict[str, Any]]] = None,
     editorial_type: str = "",
+    segment_text: str = "",
     clip_duration_s: float = 0.0,
     task_id: Optional[str] = None,
     assets: Optional[Dict[str, List[Path]]] = None,
     used_deep_boom_assets: Optional[Iterable[str]] = None,
+    composition_decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     assets = assets or discover_sfx_assets()
     events: List[Dict[str, Any]] = []
     missing: List[str] = []
+    if segment_text:
+        try:
+            from .vpi_retention_editing_service import evaluate_content_quality
+
+            quality = evaluate_content_quality({"text": segment_text, "start_time": "0", "end_time": str(clip_duration_s or 30.0)})
+            if quality.get("content_quality_reason") == "behind_the_scenes_low_speech":
+                logger.info("[sfx-qc] contextual=false reason=sfx_on_low_value_moment")
+                return {
+                    "sfx_design_applied": False,
+                    "sfx_design_events": [],
+                    "sfx_design_missing_assets": [],
+                    "sfx_assets_available": {
+                        "low_risers": len(assets.get("low_riser") or []),
+                        "high_risers": len(assets.get("high_riser") or []),
+                        "whooshes": len(assets.get("magic_whoosh") or []),
+                        "booms": len(assets.get("deep_boom") or []),
+                    },
+                    "sfx_repetition_guard": {"task_id": task_id, "deep_boom_guarded": False},
+                    "sfx_contextual": False,
+                    "sfx_warning": "sfx_on_low_value_moment",
+                }
+        except Exception as exc:
+            logger.debug("[sfx-qc] content_quality_check_skipped reason=%s", exc)
     hook_type = str((hook_plan or {}).get("hook_type") or "")
     strong_hook = hook_type not in {"", "weak_intro"} and int((hook_plan or {}).get("hook_first3_score") or 0) >= 5
+    motion_sync = sync_sfx_with_motion(
+        str((hook_plan or {}).get("hook_intent") or editorial_type or "neutral_explanation"),
+        str((hook_plan or {}).get("visual_profile") or (hook_plan or {}).get("motion_pack_profile") or ""),
+        assets=assets,
+        low_value_moment=False,
+        composition_mode=str((composition_decision or {}).get("composition_mode") or ""),
+    )
 
     low = (assets.get("low_riser") or [None])[0]
     high = (assets.get("high_riser") or [None])[0]
@@ -161,6 +273,7 @@ def build_sfx_design_plan(
             events.append({
                 "event": "hook",
                 "type": "dark_riser_combo",
+                "contextual": True,
                 "start_s": 0.25,
                 "duration_s": 0.9,
                 "volume": 0.24,
@@ -178,6 +291,7 @@ def build_sfx_design_plan(
         events.append({
             "event": "key_moment",
             "type": "magic_whoosh",
+            "contextual": True,
             "start_s": round(max(0.0, start), 2),
             "duration_s": 0.45,
             "volume": 0.20,
@@ -197,6 +311,7 @@ def build_sfx_design_plan(
             events.append({
                 "event": f"transition_{transition_type}",
                 "type": "magic_whoosh",
+                "contextual": True,
                 "start_s": round(float((transition or {}).get("start_time") or (transition or {}).get("start_s") or 0.5), 2),
                 "duration_s": 0.35,
                 "volume": 0.16,
@@ -209,16 +324,32 @@ def build_sfx_design_plan(
             missing.append(hint)
             logger.info("[transition-sfx] missing=%s transition=%s", hint, transition_type)
 
+    # ── Composition Pack v1: block deep_boom in emotional_soft mode ──────────
+    _comp_mode = str((composition_decision or {}).get("composition_mode") or "")
+    _comp_pack_active = bool((composition_decision or {}).get("composition_pack"))
+    _deep_boom_blocked_by_composition = bool(_comp_pack_active and _comp_mode == "emotional_soft")
+    if _deep_boom_blocked_by_composition:
+        logger.info(
+            "[composition-pack] sfx deep_boom blocked reason=emotional_soft composition_mode=%s",
+            _comp_mode,
+        )
+        logger.info("[sfx-qc] composition_allowed=false reason=emotional_soft_no_deep_boom")
+    elif _comp_pack_active and _comp_mode == "minimal_safe" and editorial_type not in {"risk_warning"}:
+        logger.info("[sfx-qc] composition_allowed=false reason=minimal_safe_no_noncontextual_sfx")
+    elif _comp_pack_active:
+        logger.info("[sfx-qc] composition_allowed=true reason=%s", _comp_mode)
+
     boom, variant_id, guard_ok = select_deep_boom_variant(
         assets,
         task_id=task_id,
         used_assets=used_deep_boom_assets,
     )
     impact_editorial = editorial_type in {"risk_warning", "emotional_protection", "myth_debunk"}
-    if boom and impact_editorial:
+    if boom and impact_editorial and not _deep_boom_blocked_by_composition:
         events.append({
             "event": "impact",
             "type": "deep_boom",
+            "contextual": True,
             "start_s": round(min(max(clip_duration_s * 0.45, 2.6), max(2.6, clip_duration_s - 0.8)), 2),
             "duration_s": 0.55,
             "volume": 0.18,
@@ -229,11 +360,12 @@ def build_sfx_design_plan(
             "reason": "impact_phrase_weight",
         })
         logger.info("[sfx-design] applied event=impact type=deep_boom asset=%s", boom)
-    elif impact_editorial:
+    elif impact_editorial and not _deep_boom_blocked_by_composition:
         missing.append("deep_boom")
 
     if missing:
         logger.info("[sfx-design] skipped reason=missing_asset_type types=%s", "|".join(sorted(set(missing))))
+    logger.info("[sfx-qc] contextual=%s reason=%s", str(bool(events)).lower(), "hook_or_editorial_moment" if events else "no_contextual_sfx_event")
     return {
         "sfx_design_applied": bool(events),
         "sfx_design_events": events[:4],
@@ -245,6 +377,10 @@ def build_sfx_design_plan(
             "booms": len(assets.get("deep_boom") or []),
         },
         "sfx_repetition_guard": {"task_id": task_id, "deep_boom_guarded": bool(events)},
+        "sfx_contextual": bool(events),
+        "composition_mode": _comp_mode,
+        "composition_blocked_deep_boom": _deep_boom_blocked_by_composition,
+        **motion_sync,
     }
 
 
@@ -550,7 +686,9 @@ def apply_sfx_bed(
     broll_events: Optional[List[Dict[str, Any]]] = None,
     transition_events: Optional[List[Dict[str, Any]]] = None,
     editorial_type: str = "",
+    segment_text: str = "",
     task_id: Optional[str] = None,
+    composition_decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Apply intentional local SFX if matching local assets exist.
 
@@ -563,11 +701,16 @@ def apply_sfx_bed(
         broll_events=broll_events,
         transition_events=transition_events,
         editorial_type=editorial_type,
+        segment_text=segment_text,
         task_id=task_id,
+        composition_decision=composition_decision,
     )
     events = list(design.get("sfx_design_events") or [])
     if not events:
-        warning = "sfx_missing_worker_assets" if design.get("sfx_design_missing_assets") else "no_sfx_moment"
+        warning = str(
+            design.get("sfx_warning")
+            or ("sfx_missing_worker_assets" if design.get("sfx_design_missing_assets") else "no_sfx_moment")
+        )
         logger.info("[sfx-design] final_output_uses_sfx=false")
         return {
             "sfx_applied": False,

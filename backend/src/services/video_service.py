@@ -5,6 +5,7 @@ Video service - handles video processing business logic.
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Awaitable, cast, Tuple
 from datetime import datetime
+from dataclasses import asdict
 import asyncio
 import logging
 import json
@@ -1072,6 +1073,208 @@ class VideoService:
         except Exception as _parse_e:
             logger.error(f"Failed to parse timestamps: {_parse_e}")
             return None
+        logger.info(
+            "[editorial-runtime] candidate_id=%s start=%.2f end=%.2f",
+            segment.get("id") or segment.get("candidate_id") or clip_index + 1,
+            start_seconds,
+            end_seconds,
+        )
+
+        # ── FASE 2: Editorial boundary adjustment (complete idea) ──────────────
+        # Before rendering, check if the segment boundaries can be improved to
+        # capture a complete idea. This runs BEFORE any render step so the clip
+        # captures a natural thought boundary.
+        _editorial_boundary_adjusted = False
+        _editorial_boundary_old_start = start_seconds
+        _editorial_boundary_old_end = end_seconds
+        _editorial_boundary_old_duration = duration
+        _complete_idea_metadata: Dict[str, Any] = {}
+        try:
+            from .vpi_editorial_fluency_service import (
+                score_complete_idea as _score_complete_idea,
+                expand_to_nearest_complete_idea as _expand_to_nearest_complete_idea,
+                _parse_transcript_lines as _parse_transcript_lines_ef,
+            )
+            _segment_text = segment.get("text", "")
+            if _segment_text:
+                _transcript_lines = _parse_transcript_lines_ef(_segment_text)
+                _idea_result = _score_complete_idea(_segment_text)
+                _idea_score = float((_idea_result or {}).get("complete_idea_score") or 0.0)
+                _complete_idea_metadata = {
+                    "complete_idea_score": _idea_score,
+                    "has_opening": bool((_idea_result or {}).get("has_opening")),
+                    "has_development": bool((_idea_result or {}).get("has_development")),
+                    "has_closure": bool((_idea_result or {}).get("has_closure")),
+                    "boundary_adjustment_reason": "already_complete" if _idea_score >= 0.75 else "incomplete_idea",
+                }
+                if _transcript_lines and _idea_score < 0.75:
+                        _expansion = _expand_to_nearest_complete_idea(
+                            start_seconds, end_seconds, _transcript_lines
+                        )
+                        _adjusted_start = _expansion.get("adjusted_start_s", start_seconds)
+                        _adjusted_end = _expansion.get("adjusted_end_s", end_seconds)
+                        if _adjusted_start != start_seconds or _adjusted_end != end_seconds:
+                            _editorial_boundary_adjusted = True
+                            _editorial_boundary_old_start = start_seconds
+                            _editorial_boundary_old_end = end_seconds
+                            start_seconds = _adjusted_start
+                            end_seconds = _adjusted_end
+                            duration = end_seconds - start_seconds
+                            _complete_idea_metadata.update({
+                                "complete_idea_score": float(_expansion.get("complete_idea_score", _idea_score) or _idea_score),
+                                "has_opening": bool(_expansion.get("has_opening", _complete_idea_metadata["has_opening"])),
+                                "has_development": bool(_expansion.get("has_development", _complete_idea_metadata["has_development"])),
+                                "has_closure": bool(_expansion.get("has_closure", _complete_idea_metadata["has_closure"])),
+                                "boundary_adjustment_reason": str(_expansion.get("reason") or _expansion.get("boundary_adjustment_reason") or "include_closure"),
+                            })
+                            logger.info(
+                                "[complete-idea] boundary_applied=true "
+                                "score=%.2f old_start=%.1f old_end=%.1f "
+                                "new_start=%.1f new_end=%.1f "
+                                "reason=%s",
+                                float(_complete_idea_metadata.get("complete_idea_score") or _idea_score),
+                                _editorial_boundary_old_start,
+                                _editorial_boundary_old_end,
+                                start_seconds,
+                                end_seconds,
+                                _complete_idea_metadata.get("boundary_adjustment_reason", "complete_idea"),
+                            )
+                if not _editorial_boundary_adjusted:
+                    logger.info(
+                        "[complete-idea] score=%.2f boundary_applied=false old=%.2f-%.2f new=%.2f-%.2f reason=%s",
+                        _idea_score,
+                        _editorial_boundary_old_start,
+                        _editorial_boundary_old_end,
+                        start_seconds,
+                        end_seconds,
+                        _complete_idea_metadata.get("boundary_adjustment_reason") or ("no_timestamp_lines" if not _transcript_lines else "not_needed"),
+                    )
+                    if _idea_score < 0.75:
+                        logger.info("[complete-idea] reject reason=incomplete_thought")
+                segment.update(_complete_idea_metadata)
+        except Exception as _ef_e:
+            logger.debug("[complete-idea] boundary_adjustment_skipped reason=%s", _ef_e)
+
+        # ── FASE 3: Fluency edit plan (pre-render disfluency detection) ────────
+        # Detect disfluencies (false starts, repetitions, filler words) BEFORE
+        # rendering so the silence editor or a pre-render step can address them.
+        _fluency_edit_plan = None
+        _editorial_rhythm_plan = None
+        try:
+            from .vpi_editorial_fluency_service import (
+                build_fluency_edit_plan as _build_fluency_edit_plan,
+                build_edit_decision_list as _build_edit_decision_list,
+                _parse_transcript_lines as _parse_transcript_lines_fluency,
+            )
+            _segment_text = segment.get("text", "")
+            if _segment_text:
+                _transcript_lines = _parse_transcript_lines_fluency(_segment_text)
+                if _transcript_lines:
+                    _fluency_plan_obj = _build_fluency_edit_plan(_transcript_lines)
+                    _fluency_edit_plan = {
+                        "enabled": _fluency_plan_obj.enabled,
+                        "fluency_score_before": _fluency_plan_obj.fluency_score_before,
+                        "fluency_score_after": _fluency_plan_obj.fluency_score_after,
+                        "disfluency_count": _fluency_plan_obj.disfluency_count,
+                        "false_start_count": _fluency_plan_obj.false_start_count,
+                        "repetition_groups": _fluency_plan_obj.repetition_groups,
+                        "fluency_edit_applied": _fluency_plan_obj.fluency_edit_applied,
+                        "edits": [
+                            asdict(e) if hasattr(e, "__dataclass_fields__") else dict(e)
+                            for e in (_fluency_plan_obj.edits or [])
+                        ],
+                    }
+                    _editorial_rhythm_obj = _build_edit_decision_list(
+                        _transcript_lines,
+                        fluency_plan=_fluency_plan_obj,
+                        silence_plan={},
+                        duration_s=duration,
+                    )
+                    _editorial_rhythm_plan = asdict(_editorial_rhythm_obj)
+                    segment["fluency_edit_plan"] = _fluency_edit_plan
+                    segment["fluency_score_before"] = _fluency_edit_plan["fluency_score_before"]
+                    segment["fluency_score_after"] = _fluency_edit_plan["fluency_score_after"]
+                    segment["disfluency_count"] = _fluency_edit_plan["disfluency_count"]
+                    segment["false_start_count"] = _fluency_edit_plan["false_start_count"]
+                    segment["repetition_groups"] = _fluency_edit_plan["repetition_groups"]
+                    segment["editorial_rhythm"] = _editorial_rhythm_plan
+                    logger.info(
+                        "[fluency-edit] plan_created=true "
+                        "score_before=%.2f score_after=%.2f "
+                        "disfluencies=%d false_starts=%d media_applied=false",
+                        _fluency_plan_obj.fluency_score_before,
+                        _fluency_plan_obj.fluency_score_after,
+                        _fluency_plan_obj.disfluency_count,
+                        _fluency_plan_obj.false_start_count,
+                    )
+                    logger.info(
+                        "[editorial-rhythm] edl_actions=%d pauses_cut=%d pauses_kept=%d jump_cuts=%d",
+                        len(_editorial_rhythm_plan.get("decisions") or []),
+                        sum(1 for d in (_editorial_rhythm_plan.get("decisions") or []) if d.get("source") == "silence" and d.get("action") == "cut"),
+                        sum(1 for d in (_editorial_rhythm_plan.get("decisions") or []) if d.get("source") == "pause" and d.get("action") == "keep"),
+                        int(_editorial_rhythm_plan.get("jump_cuts_count") or 0),
+                    )
+                else:
+                    logger.info("[fluency-edit] plan_created=false cuts=0 media_applied=false reason=no_timestamp_lines")
+        except Exception as _fe_e:
+            logger.debug("[fluency-edit] plan_skipped reason=%s", _fe_e)
+
+        # ── FASE 4: Hook Fit start adjustment — before media extraction ──────
+        # Only adjust when timestamped transcript lines prove a stronger nearby
+        # opening exists. Plain metadata-only hook fit happens later as well.
+        try:
+            from .vpi_hook_engine import (
+                assess_hook_fit as _assess_hook_fit_runtime,
+                find_better_hook_start as _find_better_hook_start_runtime,
+            )
+            from .vpi_editorial_fluency_service import _parse_transcript_lines as _parse_transcript_lines_hookfit
+
+            _segment_text_hf_pre = str(segment.get("text") or "")
+            _hook_lines_pre = _parse_transcript_lines_hookfit(_segment_text_hf_pre)
+            _first_hook_phrase = str((_hook_lines_pre[0] if _hook_lines_pre else {}).get("text") or _segment_text_hf_pre)
+            _hook_fit_pre = _assess_hook_fit_runtime(
+                _first_hook_phrase,
+                editorial_type=str(segment.get("editorial_type") or ""),
+                hook_type=str(segment.get("hook_type") or ""),
+                hook_plan={"start_s": start_seconds, "duration_s": duration},
+            )
+            _hook_start_adjustment = _find_better_hook_start_runtime(_first_hook_phrase, _hook_lines_pre)
+            _adjusted_hook_start = float(_hook_start_adjustment.get("adjusted_start_s") or 0.0)
+            if (
+                _hook_start_adjustment.get("adjusted_start")
+                and _adjusted_hook_start > start_seconds + 0.05
+                and _adjusted_hook_start < end_seconds - 3.0
+            ):
+                _old_hook_start = start_seconds
+                start_seconds = _adjusted_hook_start
+                duration = max(end_seconds - start_seconds, 0.1)
+                segment["hook_start_adjusted"] = True
+                segment["hook_start_adjustment_reason"] = _hook_start_adjustment.get("reason", "stronger_opening_phrase")
+                logger.info(
+                    "[hook-fit] intent=%s style=%s confidence=%.2f adjusted_start=%.2f reason=%s",
+                    _hook_fit_pre.get("intent", "unknown"),
+                    _hook_fit_pre.get("style", "unknown"),
+                    float(_hook_fit_pre.get("confidence") or 0.0),
+                    start_seconds,
+                    _hook_start_adjustment.get("reason", ""),
+                )
+                logger.info(
+                    "[hook-fit] adjusted_start from=%.2f to=%.2f reason=%s",
+                    _old_hook_start,
+                    start_seconds,
+                    _hook_start_adjustment.get("reason", ""),
+                )
+            else:
+                logger.info(
+                    "[hook-fit] intent=%s style=%s confidence=%.2f adjusted_start=false reason=%s",
+                    _hook_fit_pre.get("intent", "unknown"),
+                    _hook_fit_pre.get("style", "unknown"),
+                    float(_hook_fit_pre.get("confidence") or 0.0),
+                    _hook_start_adjustment.get("reason", "no_adjustment"),
+                )
+        except Exception as _hf_pre_e:
+            logger.debug("[hook-fit] pre_render_adjustment_skipped reason=%s", _hf_pre_e)
+
         _premium_runtime = premium_runtime_contract(beta_clean=False)
 
         # Platform minimum enforcement — respect the LLM's natural speech boundary.
@@ -1894,6 +2097,35 @@ class VideoService:
             except Exception as _bl_e:
                 logger.debug("  Background blur skipped: %s", _bl_e)
 
+        _caption_decisions: Dict[str, Any] = {}
+        _transition_metadata: Dict[str, Any] = {}
+        _sfx_metadata: Dict[str, Any] = {}
+        _publishable_metadata: Dict[str, Any] = {}
+
+        # ── VPI Premium Composition Pack v1: build composition decision ──────────
+        _composition_decision: Dict[str, Any] = {}
+        try:
+            from .vpi_visual_effects_service import build_composition_decision as _build_composition_decision
+            _hook_intent_for_comp = str((_hook_plan_data or {}).get("hook_intent") or segment.get("editorial_type") or "")
+            _composition_decision = _build_composition_decision(
+                hook_intent=_hook_intent_for_comp,
+                visual_profile=str((_hook_plan_data or {}).get("visual_profile") or ""),
+                caption_overlay_pack=_caption_decisions if isinstance(_caption_decisions, dict) else {},
+                transition_plan=_transition_metadata if isinstance(_transition_metadata, dict) else {},
+                sfx_plan=_sfx_metadata if isinstance(_sfx_metadata, dict) else {},
+                private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                segment_text=str(segment.get("text") or ""),
+            )
+            logger.info(
+                "[composition-pack] runtime_connected=true mode=%s priority=%s max_layers=%d",
+                _composition_decision.get("composition_mode", "unknown"),
+                _composition_decision.get("screen_priority", "unknown"),
+                _composition_decision.get("max_simultaneous_layers", 0),
+            )
+        except Exception as _comp_e:
+            logger.debug("[composition-pack] runtime skipped reason=%s", _comp_e)
+            _composition_decision = {}
+
         # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
         # When subtitles are active both layers appear simultaneously (0-2s) causing
         # a double-text overlap. The karaoke subtitle already serves as the visual hook.
@@ -2045,6 +2277,7 @@ class VideoService:
             from .vpi_hook_engine import build_hook_plan as _build_hook_plan
             from .vpi_silence_editor import apply_silence_edit_plan as _apply_silence_edit_plan
             from .vpi_silence_editor import build_silence_edit_plan as _build_silence_edit_plan
+            from .vpi_silence_editor import _build_offset_map as _build_silence_offset_map
             from .vpi_silence_editor import remap_events as _remap_silence_events
             from .vpi_silence_editor import remap_hook_plan as _remap_silence_hook_plan
             from .vpi_silence_editor import remap_word_timestamps as _remap_silence_words
@@ -2078,6 +2311,51 @@ class VideoService:
                 theme=_vpi_theme,
             )
             _hook_plan_data = _hook_plan_obj.to_dict()
+
+            # ── FASE 4: Hook Fit integration (intent + style) ──────────────────
+            # After building the hook plan, classify the hook intent and assess
+            # hook fit so the render step can use intent-aware visual treatment.
+            try:
+                from .vpi_hook_engine import (
+                    classify_hook_intent as _classify_hook_intent,
+                    assess_hook_fit as _assess_hook_fit_hook,
+                    choose_hook_style as _choose_hook_style,
+                )
+                _segment_text_hf = segment.get("text", "")
+                _editorial_type_hf = segment.get("editorial_type") or ""
+                _hook_intent_result = _classify_hook_intent(
+                    _segment_text_hf,
+                    editorial_type=_editorial_type_hf,
+                )
+                _hook_fit_result = _assess_hook_fit_hook(
+                    _segment_text_hf,
+                    editorial_type=_editorial_type_hf,
+                    hook_type=str(_hook_plan_data.get("hook_type") or ""),
+                    hook_plan=_hook_plan_data,
+                )
+                _hook_plan_data["hook_intent"] = _hook_intent_result.get("intent", "unknown")
+                _hook_plan_data["hook_intent_confidence"] = _hook_intent_result.get("confidence", 0.0)
+                _hook_plan_data["hook_style"] = _hook_fit_result.get("style", "clean_explanation")
+                _hook_plan_data["hook_fit_confidence"] = _hook_fit_result.get("confidence", 0.0)
+                _hook_plan_data["hook_fit_acceptable"] = _hook_fit_result.get("hook_fit_acceptable", False)
+                _hook_plan_data["hook_fit_reason"] = _hook_fit_result.get("hook_fit_reason", "")
+                _hook_plan_data["recommended_visual"] = _hook_fit_result.get("recommended_visual", "")
+                _hook_plan_data["recommended_sfx"] = _hook_fit_result.get("recommended_sfx", "")
+                _hook_plan_data["subtitle_emphasis"] = _hook_fit_result.get("subtitle_emphasis", "")
+                _hook_plan_data["hook_start_adjusted"] = _hook_fit_result.get("start_adjusted", False)
+                _hook_plan_data["hook_start_adjustment_reason"] = _hook_fit_result.get("start_adjustment_reason", "")
+                logger.info(
+                    "[hook-fit] intent=%s style=%s confidence=%.2f acceptable=%s",
+                    _hook_plan_data["hook_intent"],
+                    _hook_plan_data["hook_style"],
+                    _hook_plan_data["hook_fit_confidence"],
+                    str(_hook_plan_data["hook_fit_acceptable"]).lower(),
+                )
+            except Exception as _hf_e:
+                logger.debug("[hook-fit] integration_skipped reason=%s", _hf_e)
+                _hook_plan_data.setdefault("hook_intent", "unknown")
+                _hook_plan_data.setdefault("hook_style", "clean_explanation")
+                _hook_plan_data.setdefault("hook_fit_acceptable", False)
             if _hook_plan_data.get("zoom_event"):
                 _existing_zoom_events = list(_editing_plan_data.get("smart_zoom_events") or [])
                 _editing_plan_data["smart_zoom_events"] = [_hook_plan_data["zoom_event"]] + _existing_zoom_events
@@ -2095,10 +2373,71 @@ class VideoService:
                 mode=_silence_mode,
                 enabled=True,
             )
+            _fluency_media_cuts: List[Dict[str, Any]] = []
+            try:
+                _fluency_edits = list((_fluency_edit_plan or {}).get("edits") or [])
+                _fluency_total_cut = 0.0
+                if _fluency_edits and len(_fluency_edits) <= 4:
+                    for _edit in _fluency_edits:
+                        _raw_start = float((_edit or {}).get("start_s") or 0.0)
+                        _raw_end = float((_edit or {}).get("end_s") or _raw_start)
+                        _rel_start = _raw_start - start_seconds if _raw_start >= start_seconds else _raw_start
+                        _rel_end = _raw_end - start_seconds if _raw_end >= start_seconds else _raw_end
+                        _rel_start = max(0.0, min(float(duration or 0.0), _rel_start))
+                        _rel_end = max(_rel_start, min(float(duration or 0.0), _rel_end))
+                        _removed = round(max(0.0, _rel_end - _rel_start), 3)
+                        if _removed < 0.08:
+                            continue
+                        if _fluency_total_cut + _removed > 3.0:
+                            break
+                        _fluency_media_cuts.append({
+                            "start_s": round(_rel_start, 3),
+                            "end_s": round(_rel_end, 3),
+                            "removed_s": _removed,
+                            "target_duration_s": 0.0,
+                            "pause_start_s": round(_rel_start, 3),
+                            "pause_end_s": round(_rel_end, 3),
+                            "pause_type": "fluency_edit",
+                            "action": "cut",
+                            "reason": str((_edit or {}).get("reason") or (_edit or {}).get("type") or "fluency_cleanup"),
+                        })
+                        _fluency_total_cut = round(_fluency_total_cut + _removed, 3)
+                    if _fluency_media_cuts:
+                        _silence_plan_obj.cuts = sorted(
+                            list(_silence_plan_obj.cuts or []) + _fluency_media_cuts,
+                            key=lambda item: float(item.get("start_s", 0.0) or 0.0),
+                        )
+                        _silence_plan_obj.offset_map = _build_silence_offset_map(_silence_plan_obj.cuts)
+                        _silence_plan_obj.total_removed_s = round(
+                            sum(float(cut.get("removed_s", 0.0) or 0.0) for cut in _silence_plan_obj.cuts),
+                            3,
+                        )
+                        _silence_plan_obj.summary["fluency_cuts_added"] = len(_fluency_media_cuts)
+                elif _fluency_edits:
+                    logger.info(
+                        "[editorial-rhythm] clip rejected reason=too_fragmented_after_fluency_edit cuts=%d",
+                        len(_fluency_edits),
+                    )
+            except Exception as _fluency_cut_e:
+                logger.debug("[fluency-edit] media_cut_bridge_skipped reason=%s", _fluency_cut_e)
             _silence_edit_plan_data = _silence_plan_obj.to_dict()
             _silence_out = output_path.with_name(f"silence_{output_path.name}")
             _silence_input = output_path
             _silence_result = _apply_silence_edit_plan(output_path, _silence_out, _silence_plan_obj, duration)
+            if _fluency_media_cuts:
+                logger.info(
+                    "[fluency-edit] applied=%s removed_seconds=%.2f cuts=%d",
+                    str(bool(_silence_result.get("rendered"))).lower(),
+                    sum(float(cut.get("removed_s", 0.0) or 0.0) for cut in _fluency_media_cuts),
+                    len(_fluency_media_cuts),
+                )
+                logger.info(
+                    "[fluency-edit] media_applied=%s removed_seconds=%.2f",
+                    str(bool(_silence_result.get("rendered"))).lower(),
+                    sum(float(cut.get("removed_s", 0.0) or 0.0) for cut in _fluency_media_cuts),
+                )
+            elif (_fluency_edit_plan or {}).get("fluency_edit_applied"):
+                logger.info("[fluency-edit] media_applied=false reason=no_safe_cuts")
             _silence_edit_plan_data["rendered"] = bool(_silence_result.get("rendered"))
             _silence_edit_plan_data["output_path"] = _silence_result.get("output_path")
             _silence_edit_plan_data["apply_warnings"] = list(_silence_result.get("warnings") or [])
@@ -2159,8 +2498,11 @@ class VideoService:
                     and any((event or {}).get("hook") for event in (_smart_reframe_metadata.get("events") or []))
                 )
                 logger.info(
-                    "[hook-render] treatment=%s rendered=%s method=%s",
+                    "[hook-render] treatment=%s intent=%s style=%s generic_fallback=%s rendered=%s method=%s",
                     _hook_plan_data.get("visual_treatment"),
+                    _hook_plan_data.get("hook_intent") or "unknown",
+                    _hook_plan_data.get("hook_style") or "unknown",
+                    str((_hook_plan_data.get("hook_intent") in {"", None, "unknown"}) or (_hook_plan_data.get("hook_style") in {"", None})).lower(),
                     str(_hook_plan_data["rendered"]).lower(),
                     _smart_reframe_metadata.get("reason") or _smart_reframe_metadata.get("method") or "smart_reframe",
                 )
@@ -2197,7 +2539,11 @@ class VideoService:
                     _hook_plan_data["hook_motion_duration_s"] = float((_fallback_event or {}).get("duration_s", 0.0) or 0.0)
                     _hook_plan_data.setdefault("warnings", []).append("emotional_hook_dynamic_fallback")
                     logger.info("[emotional-hook] fallback_static_push_in applied=true output=%s", output_path)
-                    logger.info("[hook-render] treatment=emotional_push_in rendered=true method=fallback_static_push_in")
+                    logger.info(
+                        "[hook-render] treatment=emotional_push_in intent=%s style=%s generic_fallback=false rendered=true method=fallback_static_push_in",
+                        _hook_plan_data.get("hook_intent") or "emotional_closure",
+                        _hook_plan_data.get("hook_style") or "soft_cinematic_push",
+                    )
                 else:
                     _hook_plan_data["hook_motion_rendered"] = False
                     _hook_plan_data["hook_motion_method"] = "none"
@@ -2322,7 +2668,75 @@ class VideoService:
 
         # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
         # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true (unless editorial B-roll is enabled).
+        _broll_editorial_decision: Dict[str, Any] = {}
+        _broll_asset_match: Dict[str, Any] = {}
+        _broll_editorial_opportunity = False
+        _broll_editorial_fallback = "none"
+        _broll_composition_allowed = True
         _editorial_broll_mode = _cfg.beta_clean and _cfg.enable_editorial_broll and include_broll
+        if _editorial_broll_mode:
+            try:
+                from .vpi_broll_intent import build_broll_editorial_decision as _build_broll_editorial_decision
+                from .vpi_broll_intent import match_broll_asset as _match_broll_asset
+                from .vpi_visual_effects_service import resolve_visual_layer_conflicts as _resolve_visual_layer_conflicts
+
+                _broll_editorial_decision = _build_broll_editorial_decision(
+                    segment_text=str(segment.get("text") or ""),
+                    hook_intent=str((_hook_plan_data or {}).get("hook_intent") or segment.get("editorial_type") or ""),
+                    topic=str(segment.get("editorial_type") or ""),
+                    private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                    composition_decision=_composition_decision,
+                    first3_visual_contract={},
+                    visual_profile=str((_hook_plan_data or {}).get("visual_profile") or ""),
+                )
+                _broll_editorial_opportunity = bool(_broll_editorial_decision.get("should_use_broll"))
+                _broll_editorial_fallback = str(_broll_editorial_decision.get("fallback") or "none")
+                if _broll_editorial_opportunity:
+                    _broll_asset_match = _match_broll_asset(
+                        broll_intent=str(_broll_editorial_decision.get("broll_intent") or ""),
+                        topic=str(segment.get("editorial_type") or ""),
+                        segment_text=str(segment.get("text") or ""),
+                    )
+                    if not _broll_asset_match.get("matched"):
+                        _editorial_broll_mode = False
+                        _broll_editorial_decision["should_use_broll"] = False
+                        _broll_editorial_decision["skip_reason"] = "no_assets"
+                        logger.info("[broll-editorial] skipped reason=no_assets")
+                    else:
+                        _layers_for_broll = []
+                        if bool((_hook_plan_data or {}).get("overlay_rendered")):
+                            _layers_for_broll.append({"type": "hook_overlay", "start_s": 0.0, "duration_s": 1.2})
+                        _layers_for_broll.append({
+                            "type": "broll",
+                            "start_s": float(_broll_editorial_decision.get("start_offset") or 1.8),
+                            "duration_s": float(_broll_editorial_decision.get("duration") or 1.2),
+                            "caption_text": str(segment.get("text") or ""),
+                        })
+                        _resolved_broll_layers = _resolve_visual_layer_conflicts(_layers_for_broll, _composition_decision or {})
+                        _broll_composition_allowed = "broll" in list(_resolved_broll_layers.get("layers_final") or [])
+                        logger.info(
+                            "[broll-editorial] composition_allowed=%s reason=%s",
+                            str(_broll_composition_allowed).lower(),
+                            "allowed" if _broll_composition_allowed else "composition_conflict",
+                        )
+                        if not _broll_composition_allowed:
+                            _editorial_broll_mode = False
+                            _broll_editorial_decision["should_use_broll"] = False
+                            _broll_editorial_decision["skip_reason"] = "composition_conflict"
+                            logger.info("[broll-editorial] skipped reason=composition_conflict")
+                else:
+                    _editorial_broll_mode = False
+                    _broll_editorial_decision["skip_reason"] = _broll_editorial_decision.get("skip_reason") or "no_editorial_gain"
+            except Exception as _broll_decision_e:
+                logger.debug("[broll-editorial] decision skipped reason=%s", _broll_decision_e)
+                _broll_editorial_decision = {
+                    "should_use_broll": False,
+                    "broll_intent": "no_broll_needed",
+                    "reason": "decision_failed",
+                    "fallback": "none",
+                    "skip_reason": "decision_failed",
+                }
+                _editorial_broll_mode = False
         logger.info(
             "[editorial-broll] gate beta_clean=%s enabled=%s include_broll=%s",
             str(_cfg.beta_clean).lower(),
@@ -2361,6 +2775,11 @@ class VideoService:
                 if _editing_plan_data:
                     _editing_plan_data["has_broll"] = bool(_editorial_broll_metadata)
                     _editing_plan_data["broll_selection_stats"] = _broll_selection_stats
+                    _editing_plan_data["broll_editorial_decision"] = _broll_editorial_decision
+                    _editing_plan_data["broll_asset_match"] = _broll_asset_match
+                    _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
+                    _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
+                    _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
                     for _stat_key in (
                         "broll_no_broll_reason",
                         "broll_candidates_total",
@@ -2375,6 +2794,12 @@ class VideoService:
                 logger.warning(f"  Editorial B-roll overlay failed: {_broll_e}")
                 _editorial_broll_metadata = []
                 _broll_selection_stats = {}
+                if _editing_plan_data:
+                    _editing_plan_data["broll_editorial_decision"] = _broll_editorial_decision
+                    _editing_plan_data["broll_asset_match"] = _broll_asset_match
+                    _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
+                    _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
+                    _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
         elif not _cfg.beta_clean:
             from ..config import get_config as _get_cfg_broll
             if _get_cfg_broll().broll_enabled:
@@ -2405,6 +2830,19 @@ class VideoService:
                     logger.warning(f"  B-roll overlay failed: {_broll_e}")
         else:
             logger.info(f"[beta-clean] B-roll overlay skipped (beta_clean mode)")
+        if _editing_plan_data and "broll_editorial_decision" not in _editing_plan_data:
+            _editing_plan_data["broll_editorial_decision"] = _broll_editorial_decision
+            _editing_plan_data["broll_asset_match"] = _broll_asset_match
+            _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
+            _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
+            _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
+        if _broll_editorial_opportunity:
+            _broll_fulfilled = bool(locals().get("_editorial_broll_metadata") or [])
+            logger.info(
+                "[broll-editorial] opportunity=true fulfilled=%s fallback=%s",
+                str(_broll_fulfilled).lower(),
+                _broll_editorial_fallback,
+            )
 
         # Step 4.3b: Contextual Overlay Engine — keyword→image/video overlays (viral TikTok feature)
         _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
@@ -2492,20 +2930,27 @@ class VideoService:
                 _cap_style_raw = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
                 _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw  # Nunca usar minimal - texto invisible
                 subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                _caption_decisions = {
+                    "highlighted_terms": (_editing_plan_data or {}).get("highlighted_terms", []),
+                    "hook_emphasis_words": (_hook_plan_data or {}).get("emphasis_words", []),
+                    "hook_headline_text": (_hook_plan_data or {}).get("headline_text"),
+                    "hook_subtitle_text": (_hook_plan_data or {}).get("subtitle_hook_text"),
+                    "hook_type": (_hook_plan_data or {}).get("hook_type"),
+                    "hook_intent": (_hook_plan_data or {}).get("hook_intent"),
+                    "hook_first3_status": (_hook_plan_data or {}).get("hook_first3_status"),
+                    "hook_first3_score": (_hook_plan_data or {}).get("hook_first3_score"),
+                    "editorial_type": segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type"),
+                    "segment_text": segment.get("text") or "",
+                    "composition_decision": _composition_decision,
+                }
                 _cap_ok = await _burn_caps(
                     output_path, subtitled_path,
                     words_with_confidence,
                     style=_cap_style,
                     platform=target_platform,
-                    caption_decisions={
-                        "highlighted_terms": (_editing_plan_data or {}).get("highlighted_terms", []),
-                        "hook_emphasis_words": (_hook_plan_data or {}).get("emphasis_words", []),
-                        "hook_headline_text": (_hook_plan_data or {}).get("headline_text"),
-                        "hook_subtitle_text": (_hook_plan_data or {}).get("subtitle_hook_text"),
-                        "hook_type": (_hook_plan_data or {}).get("hook_type"),
-                        "editorial_type": segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type"),
-                    },
+                    caption_decisions=_caption_decisions,
                 )
+                _caption_overlay_pack_metadata = dict(_caption_decisions.get("caption_overlay_pack") or {})
                 if _cap_ok and subtitled_path.exists():
                     _caption_input = output_path
                     output_path = subtitled_path
@@ -3092,6 +3537,7 @@ class VideoService:
         _output_qc: dict = {}
         _publishable_metadata: dict = {}
         _subtitle_intelligence_metadata: dict = {}
+        _caption_overlay_pack_metadata: dict = {}
         _music_metadata: dict = {}
         _sfx_metadata: dict = {}
         _visual_effects_metadata: dict = {}
@@ -3117,6 +3563,22 @@ class VideoService:
 
             _editorial_broll_for_status = locals().get("_editorial_broll_metadata", []) or []
             _broll_selection_stats = locals().get("_broll_selection_stats", {}) or {}
+            if not _caption_overlay_pack_metadata and isinstance(_caption_decisions, dict):
+                _caption_overlay_pack_metadata = dict(_caption_decisions.get("caption_overlay_pack") or {})
+            try:
+                from .vpi_visual_effects_service import build_composition_decision as _build_composition_decision
+                _composition_decision = _build_composition_decision(
+                    hook_intent=str((_hook_plan_data or {}).get("hook_intent") or segment.get("editorial_type") or ""),
+                    visual_profile=str((_hook_plan_data or {}).get("visual_profile") or ""),
+                    caption_overlay_pack=_caption_overlay_pack_metadata,
+                    transition_plan=_transition_metadata,
+                    sfx_plan=_sfx_metadata,
+                    private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                    segment_text=str(segment.get("text") or ""),
+                )
+                logger.info("[composition-pack] runtime_connected=true")
+            except Exception as _comp_refresh_e:
+                logger.debug("[composition-pack] runtime refresh skipped reason=%s", _comp_refresh_e)
 
             # ── Post-production visual effects v3.6 — CPU-only, speaker-safe ──
             try:
@@ -3135,6 +3597,11 @@ class VideoService:
                     output_path = _visual_out
                     _log_premium_pipeline_step("vfx", _vfx_input, output_path)
                     logger.info("[visual-effects] final_output_uses_vfx=true final_path=%s", output_path)
+                if _hook_plan_data and (_visual_effects_metadata.get("visual_effects_events") or []):
+                    _motion_event = (_visual_effects_metadata.get("visual_effects_events") or [{}])[0] or {}
+                    _hook_plan_data["visual_profile"] = _motion_event.get("visual_profile") or _hook_plan_data.get("visual_profile") or ""
+                    _hook_plan_data["motion_pack_profile"] = _motion_event.get("motion_pack_profile") or _hook_plan_data.get("motion_pack_profile") or ""
+                    _hook_plan_data["motion_pack_applied"] = bool(_visual_effects_metadata.get("motion_pack_applied"))
             except Exception as _vfx_e:
                 logger.warning("[visual-effects] failed reason=%s", _vfx_e)
                 _visual_effects_metadata = {
@@ -3152,6 +3619,7 @@ class VideoService:
                 )
                 _transition_context = {
                     "editorial_type": str(segment.get("editorial_type") or ""),
+                    "hook_intent": str((_hook_plan_data or {}).get("hook_intent") or ""),
                     "reason": str(segment.get("text") or "")[:180],
                     "start_time": 0.45 if float(duration or 0.0) <= 8.0 else min(3.2, max(0.45, float(duration or 0.0) * 0.18)),
                     "important_broll": bool(_editorial_broll_for_status),
@@ -3169,6 +3637,8 @@ class VideoService:
                     ),
                     "shape_morph_viable": True,
                     "frame_rhythm_group": "hook_transition",
+                    "composition_decision": _composition_decision,
+                    "hook_overlay_active": bool(((_caption_overlay_pack_metadata or {}).get("hook_overlay") or {}).get("applied")),
                 }
                 _transition_plan = _plan_transition_events(_transition_context)
                 _transition_out = output_path.with_name(f"trans_{output_path.name}")
@@ -3240,6 +3710,7 @@ class VideoService:
                     transition_events=(_transition_metadata or {}).get("transition_events") or [],
                     editorial_type=str(segment.get("editorial_type") or ""),
                     segment_text=str(segment.get("text") or ""),
+                    composition_decision=_composition_decision,
                 )
                 if _sfx_metadata.get("sfx_applied") and _sfx_out.exists():
                     _sfx_input = output_path
@@ -3337,6 +3808,12 @@ class VideoService:
                 "hook_highlight_applied": bool(_hook_terms),
                 "rendered": bool(_subtitle_terms),
                 "reason": "emphasis_indices" if _subtitle_terms else "no_terms",
+                "caption_overlay_pack": bool((_caption_overlay_pack_metadata or {}).get("caption_overlay_pack")),
+                "caption_overlay_actions": list((_caption_overlay_pack_metadata or {}).get("caption_overlay_actions") or []),
+                "keyword_emphasis_terms": list((_caption_overlay_pack_metadata or {}).get("keyword_emphasis_terms") or []),
+                "hook_overlay": (_caption_overlay_pack_metadata or {}).get("hook_overlay") or {},
+                "caption_icon": (_caption_overlay_pack_metadata or {}).get("caption_icon") or {},
+                "lower_third": (_caption_overlay_pack_metadata or {}).get("lower_third") or {},
             }
             if _hook_plan_data:
                 _first3_signals: List[str] = []
@@ -3356,7 +3833,11 @@ class VideoService:
                 if _motion_in_first3:
                     _first3_score += 2
                     _first3_signals.append("visible_hook_motion")
-                if bool(_hook_terms) or _subtitle_intelligence_metadata.get("hook_highlight_applied"):
+                if (
+                    bool(_hook_terms)
+                    or _subtitle_intelligence_metadata.get("hook_highlight_applied")
+                    or _subtitle_intelligence_metadata.get("caption_overlay_pack")
+                ):
                     _first3_score += 2
                     _first3_signals.append("hook_subtitle_before_1_5s")
                 try:
@@ -3372,7 +3853,12 @@ class VideoService:
                 if _headline and _segment_text and _headline.lower()[:18] in _segment_text.lower()[:180]:
                     _first3_score += 1
                     _first3_signals.append("strong_phrase_before_2s")
-                if (_hook_plan_data or {}).get("overlay_rendered") or (_hook_plan_data or {}).get("lower_third_applied"):
+                if (
+                    (_hook_plan_data or {}).get("overlay_rendered")
+                    or (_hook_plan_data or {}).get("lower_third_applied")
+                    or ((_subtitle_intelligence_metadata.get("hook_overlay") or {}).get("applied"))
+                    or ((_subtitle_intelligence_metadata.get("lower_third") or {}).get("applied"))
+                ):
                     _first3_score += 1
                     _first3_signals.append("visual_emphasis")
                 if any(str((event or {}).get("event") or "").startswith("hook") for event in (_sfx_metadata or {}).get("sfx_events", []) or []):
@@ -3390,7 +3876,11 @@ class VideoService:
                 _missing = []
                 if not _motion_in_first3:
                     _missing.append("hook_motion")
-                if not (bool(_hook_terms) or _subtitle_intelligence_metadata.get("hook_highlight_applied")):
+                if not (
+                    bool(_hook_terms)
+                    or _subtitle_intelligence_metadata.get("hook_highlight_applied")
+                    or _subtitle_intelligence_metadata.get("caption_overlay_pack")
+                ):
                     _missing.append("hook_subtitle_before_1_5s")
                 if not ((_silence_edit_plan_data or {}).get("rendered")):
                     _missing.append("rhythm")
@@ -3628,6 +4118,80 @@ class VideoService:
                     _broll_without_transition = True
                 if bool((_broll_item or {}).get("broll_is_image")) and not bool((_broll_item or {}).get("broll_ken_burns_applied")):
                     _static_broll_without_kenburns = True
+            _broll_editorial_decision_final = dict((_editing_plan_data or {}).get("broll_editorial_decision") or {})
+            _broll_asset_match_final = dict((_editing_plan_data or {}).get("broll_asset_match") or {})
+            _broll_editorial_opportunity_final = bool((_editing_plan_data or {}).get("broll_editorial_opportunity"))
+            _broll_composition_allowed_final = bool((_editing_plan_data or {}).get("broll_composition_allowed", True))
+            _broll_start = float(_broll_editorial_decision_final.get("start_offset") or 0.0)
+            _broll_duration = float(_broll_editorial_decision_final.get("duration") or 0.0)
+            _broll_timing_valid = bool(1.2 <= _broll_start <= 5.0 and 0.8 <= _broll_duration <= 2.2)
+            _expected_broll_asset = str(_broll_asset_match_final.get("asset") or "")
+            _expected_broll_asset_norm = _expected_broll_asset.replace("\\", "/").lower()
+            _actual_broll_assets = [
+                str((_item or {}).get("asset_path") or (_item or {}).get("path") or (_item or {}).get("asset_url") or "")
+                for _item in _editorial_broll_for_status
+            ]
+            _actual_broll_assets = [item for item in _actual_broll_assets if item]
+            _actual_broll_assets_norm = [item.replace("\\", "/").lower() for item in _actual_broll_assets]
+            _broll_asset_applied_match = bool(
+                _expected_broll_asset_norm
+                and any(
+                    _expected_broll_asset_norm.endswith(_actual)
+                    or _actual.endswith(_expected_broll_asset_norm)
+                    for _actual in _actual_broll_assets_norm
+                )
+            )
+            _broll_runtime_blocked_by_status = str((_publishable_metadata or {}).get("private_premium_status") or "") == "DO_NOT_UPLOAD"
+            _broll_true = bool(
+                _editorial_broll_for_status
+                and _broll_composition_allowed_final
+                and _broll_timing_valid
+                and bool(_broll_asset_match_final.get("matched"))
+                and _broll_asset_applied_match
+                and not _broll_runtime_blocked_by_status
+            )
+            _broll_opportunity_unfulfilled = bool(_broll_editorial_opportunity_final and not _broll_true)
+            _broll_unfulfilled_reason = str(_broll_editorial_decision_final.get("skip_reason") or "")
+            if _broll_editorial_opportunity_final and not _broll_true and not _broll_unfulfilled_reason:
+                if _broll_runtime_blocked_by_status:
+                    _broll_unfulfilled_reason = "private_premium_do_not_upload"
+                elif not _broll_asset_applied_match:
+                    _broll_unfulfilled_reason = "applied_asset_mismatch"
+                elif not _broll_composition_allowed_final:
+                    _broll_unfulfilled_reason = "composition_conflict"
+                elif not _broll_timing_valid:
+                    _broll_unfulfilled_reason = "invalid_timing"
+                else:
+                    _broll_unfulfilled_reason = "not_applied"
+            _broll_limited_assets = bool(
+                _broll_opportunity_unfulfilled
+                and _broll_unfulfilled_reason in {"no_assets", "no_local_asset", "composition_conflict", "applied_asset_mismatch"}
+            )
+            logger.info(
+                "[broll-asset] applied_match=%s expected=%s actual=%s",
+                str(_broll_asset_applied_match).lower(),
+                _expected_broll_asset or "none",
+                "|".join(_actual_broll_assets) or "none",
+            )
+            logger.info(
+                "[editing-richness] broll=%s reason=%s",
+                str(_broll_true).lower(),
+                "editorial_asset_timing_composition" if _broll_true else (_broll_unfulfilled_reason or "not_fulfilled_or_not_needed"),
+            )
+            logger.info(
+                "[editing-richness] broll_editorial_opportunity=%s reason=%s",
+                str(_broll_opportunity_unfulfilled).lower(),
+                _broll_unfulfilled_reason or "none",
+            )
+            logger.info(
+                "[editing-richness] limited_assets=%s reason=%s",
+                str(_broll_limited_assets).lower(),
+                _broll_unfulfilled_reason or "none",
+            )
+            if _broll_true and not _good_broll_phrase_fit:
+                _good_broll_phrase_fit = True
+            if not _broll_true:
+                _good_broll_phrase_fit = False
             _final_name = Path(output_path).name
             _music_in_final = bool(_music_metadata.get("music_applied") and "music_" in _final_name)
             _sfx_in_final = bool(_sfx_metadata.get("sfx_applied") and "sfx_" in _final_name)
@@ -3650,6 +4214,33 @@ class VideoService:
                 broll_events=_editorial_broll_for_status,
             )
             logger.info("[premium-pipeline] final_path=%s", output_path)
+            _composition_allowed_layers = list((_caption_overlay_pack_metadata or {}).get("composition_allowed_layers") or [])
+            _composition_skipped_layers = list((_caption_overlay_pack_metadata or {}).get("composition_skipped_layers") or [])
+            _composition_runtime_applied = bool(
+                (_caption_overlay_pack_metadata or {}).get("composition_decision_applied")
+                or _composition_skipped_layers
+                or any(
+                    str(_warning).startswith("composition_blocked_")
+                    for _warning in ((_transition_metadata or {}).get("transition_warnings") or [])
+                )
+                or bool((_sfx_metadata or {}).get("composition_decision_applied"))
+            )
+            _composition_layer_overload = bool(
+                (_caption_overlay_pack_metadata or {}).get("layer_overload")
+            )
+            _composition_pack_active = bool(
+                _composition_decision
+                and _composition_decision.get("composition_mode")
+                and _composition_decision.get("composition_mode") not in ("", "unknown")
+                and _composition_runtime_applied
+            )
+            _composition_quality = "poor"
+            if _composition_pack_active and not _composition_layer_overload:
+                _composition_quality = "good" if _composition_skipped_layers or _composition_allowed_layers else "ok"
+            elif _composition_decision and _composition_runtime_applied:
+                _composition_quality = "ok"
+            elif _composition_decision:
+                _composition_quality = "poor"
             _editing_richness_score = 0
             if (_hook_plan_data or {}).get("hook_first3_perceptible"):
                 _editing_richness_score += 2
@@ -3671,6 +4262,15 @@ class VideoService:
                 _editing_richness_score += 1
             if _speaker_focus_metadata.get("speaker_focus_enhanced"):
                 _editing_richness_score += 1
+            if _composition_pack_active:
+                _editing_richness_score += 1
+            logger.info(
+                "[editing-richness] composition_pack=%s reason=%s",
+                str(_composition_pack_active).lower(),
+                "runtime_connected_and_applied" if _composition_pack_active else "no_runtime_applied_layers",
+            )
+            logger.info("[editing-richness] composition_quality=%s", _composition_quality)
+            logger.info("[editing-richness] layer_overload=%s", str(_composition_layer_overload).lower())
             _no_music_sfx_good_broll = (
                 not _music_metadata.get("music_applied")
                 and not _sfx_metadata.get("sfx_applied")
@@ -3708,9 +4308,56 @@ class VideoService:
                 _richness_warnings.append("broll_without_transition")
             if _static_broll_without_kenburns:
                 _richness_warnings.append("static_broll_without_kenburns")
+            if _broll_opportunity_unfulfilled:
+                _richness_warnings.append("broll_editorial_opportunity_unfulfilled")
+            if _broll_limited_assets:
+                _richness_warnings.append("broll_asset_missing_or_conflict")
             if _sfx_metadata.get("sfx_warning") == "missing_sfx_worker_assets":
                 _richness_warnings.append("sfx_missing_worker_assets")
             _richness_warnings.extend(_final_contract_metadata.get("final_contract_warnings") or [])
+
+            # ── FASE 5: Honest Quality Gate — block false "rich" ──────────────────
+            # If hook is weak (< 5) and there is no meaningful editorial action
+            # (no fluency edit, no silence cut, no broll, no visual effects),
+            # then the clip cannot be "rich" or "good".
+            _hook_first3_score_f5 = int((_hook_plan_data or {}).get("hook_first3_score") or 0)
+            _hook_fit_acceptable_f5 = bool((_hook_plan_data or {}).get("hook_fit_acceptable"))
+            _complete_idea_score_f5 = float(segment.get("complete_idea_score") or 1.0)
+            _fluency_score_after_f5 = float(
+                segment.get("fluency_score_after")
+                or ((_fluency_edit_plan or {}).get("fluency_score_after") if _fluency_edit_plan else 1.0)
+                or 1.0
+            )
+            _has_editorial_action_f5 = bool(
+                (_fluency_edit_plan or {}).get("fluency_edit_applied")
+                or (_silence_edit_plan_data or {}).get("rendered")
+                or _good_broll_phrase_fit
+                or _visual_effects_metadata.get("visual_effects_applied")
+            )
+            _honest_gate_reason_f5 = ""
+            if _complete_idea_score_f5 < 0.75:
+                _honest_gate_reason_f5 = "incomplete_idea"
+            elif _fluency_score_after_f5 < 0.70:
+                _honest_gate_reason_f5 = "low_fluency"
+            elif _hook_first3_score_f5 < 5 and not _hook_fit_acceptable_f5:
+                _honest_gate_reason_f5 = "weak_hook"
+            elif _hook_first3_score_f5 < 5 and not _has_editorial_action_f5:
+                _honest_gate_reason_f5 = "weak_hook_or_no_editorial_action"
+            if _honest_gate_reason_f5:
+                if _editing_richness_status in {"good", "rich"}:
+                    _editing_richness_status = "acceptable"
+                _richness_warnings.append(f"rich_blocked_{_honest_gate_reason_f5}")
+                logger.info("[quality-gate] rich_blocked reason=%s", _honest_gate_reason_f5)
+                logger.info(
+                    "[quality-gate] complete_idea=%.2f fluency=%.2f hook_fit=%s editorial_action=%s final_status=%s",
+                    _complete_idea_score_f5,
+                    _fluency_score_after_f5,
+                    str(_hook_fit_acceptable_f5).lower(),
+                    str(_has_editorial_action_f5).lower(),
+                    _editing_richness_status,
+                )
+                logger.info("[editing-richness] honest=true status=%s warnings=%s", _editing_richness_status, "|".join(_richness_warnings) or "none")
+
             try:
                 from .vpi_retention_editing_service import build_retention_editing_plan as _build_retention_editing_plan
                 from .vpi_retention_editing_service import retention_plan_metadata as _retention_plan_metadata
@@ -3734,12 +4381,63 @@ class VideoService:
                 "editing_richness_status": _editing_richness_status,
                 "editing_richness_warnings": _richness_warnings,
                 "editing_richness_good_broll_phrase_fit": _good_broll_phrase_fit,
+                "broll": _broll_true,
+                "broll_editorial_opportunity": _broll_opportunity_unfulfilled,
+                "broll_limited_assets": _broll_limited_assets,
+                "broll_editorial_decision": _broll_editorial_decision_final,
+                "broll_asset_match": _broll_asset_match_final,
                 "editing_richness_final_verified": True,
                 **_retention_metadata,
                 **_final_contract_metadata,
             }
             logger.info("[editing-richness] final_verified=true score=%d status=%s warnings=%s", _editing_richness_score, _editing_richness_status, "|".join(_richness_warnings) or "none")
             _publish_warnings.extend(_richness_warnings)
+
+            # ── CAMBIO 5: first3_visual_contract — check first 3s visual quality ──
+            _first3_visual_contract_result: Dict[str, Any] = {}
+            try:
+                from .vpi_visual_effects_service import first3_visual_contract as _first3_visual_contract
+                _first3_visual_contract_result = _first3_visual_contract(
+                    hook_plan=_hook_plan_data,
+                    caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    composition_decision=_composition_decision,
+                    visual_effects=(_visual_effects_metadata or {}).get("visual_effects_events") or [],
+                    transition_plan=_transition_metadata if isinstance(_transition_metadata, dict) else {},
+                )
+                _first3_passed = _first3_visual_contract_result.get("first3_visual_passed", False)
+                _first3_fail_count = _first3_visual_contract_result.get("first3_visual_fail_count", 0)
+                logger.info(
+                    "[first3-visual-contract] runtime=true passed=%s fail_count=%d",
+                    str(_first3_passed).lower(),
+                    _first3_fail_count,
+                )
+            except Exception as _f3_e:
+                logger.debug("[first3-visual-contract] runtime skipped reason=%s", _f3_e)
+                _first3_visual_contract_result = {}
+
+            _composition_runtime_applied = bool(
+                _composition_runtime_applied
+                or (_first3_visual_contract_result or {}).get("status") == "pass"
+            )
+            _composition_pack_active = bool(
+                _composition_decision
+                and _composition_decision.get("composition_mode")
+                and _composition_decision.get("composition_mode") not in ("", "unknown")
+                and _composition_runtime_applied
+            )
+            if (_first3_visual_contract_result or {}).get("status") == "pass" and not _composition_layer_overload:
+                _composition_quality = "strong" if (_composition_skipped_layers or _composition_allowed_layers) else "good"
+            elif _composition_pack_active and not _composition_layer_overload:
+                _composition_quality = "good" if (_composition_skipped_layers or _composition_allowed_layers) else "ok"
+            elif _composition_decision and _composition_runtime_applied:
+                _composition_quality = "ok"
+            else:
+                _composition_quality = "poor"
+            if isinstance(_composition_decision, dict):
+                _composition_decision["composition_pack"] = _composition_pack_active
+                _composition_decision["composition_quality"] = _composition_quality
+                _composition_decision["layer_overload"] = _composition_layer_overload
+                _composition_decision["runtime_connected"] = _composition_runtime_applied
 
             _publishable_metadata = _determine_publishable_status(
                 task_completed=True,
@@ -3752,7 +4450,39 @@ class VideoService:
                 repeated_exact_broll_same_task=_repeated_exact_broll_same_clip,
                 weak_intro_forced_broll=_weak_intro_forced_broll,
                 warnings=_publish_warnings,
+                first3_visual_contract=_first3_visual_contract_result,
             )
+            _composition_downgrade = bool(
+                (_first3_visual_contract_result or {}).get("downgrade_required")
+                and str(_publishable_metadata.get("private_premium_status") or "") == "PRIVATE_PREMIUM_REVIEW"
+            )
+            logger.info(
+                "[private-premium] status_after_composition=%s",
+                str(_publishable_metadata.get("private_premium_status") or ""),
+            )
+            logger.info(
+                "[private-premium] composition_downgrade=%s reason=%s",
+                str(_composition_downgrade).lower(),
+                (
+                    "|".join((_first3_visual_contract_result or {}).get("failed_checks") or [])
+                    or "none"
+                ),
+            )
+            _editing_richness_metadata.update({
+                "composition_decision": _composition_decision,
+                "composition_pack": _composition_pack_active,
+                "composition_quality": _composition_quality,
+                "layer_overload": _composition_layer_overload,
+                "first3_visual_contract": _first3_visual_contract_result,
+                "composition_runtime_applied": _composition_runtime_applied,
+            })
+            logger.info(
+                "[editing-richness] composition_pack=%s reason=%s",
+                str(_composition_pack_active).lower(),
+                "runtime_connected_and_applied" if _composition_pack_active else "no_runtime_applied_layers",
+            )
+            logger.info("[editing-richness] composition_quality=%s", _composition_quality)
+            logger.info("[editing-richness] layer_overload=%s", str(_composition_layer_overload).lower())
             if _editing_plan_data:
                 _editing_plan_data["brand_treatment"] = _brand_metadata
                 _editing_plan_data["hook_plan"] = _hook_plan_data
@@ -3773,6 +4503,8 @@ class VideoService:
                 _editing_plan_data["premium_runtime_enabled"] = _premium_runtime["premium_runtime_enabled"]
                 _editing_plan_data["premium_layers_requested"] = list(_premium_runtime["premium_layers_requested"])
                 _editing_plan_data["speaker_focus"] = _speaker_focus_metadata
+                _editing_plan_data["composition_decision"] = _composition_decision
+                _editing_plan_data["first3_visual_contract"] = _first3_visual_contract_result
                 _editing_plan_data.update(_editing_richness_metadata)
                 _editing_plan_data.update(_publishable_metadata)
                 _editing_plan_data["hook_quality"] = _hook_quality
@@ -3858,6 +4590,7 @@ class VideoService:
             "music": _music_metadata,
             "sfx": _sfx_metadata,
             "speaker_focus": _speaker_focus_metadata,
+            "composition_decision": _composition_decision,
             "premium_runtime": _premium_runtime,
             "premium_runtime_enabled": _premium_runtime["premium_runtime_enabled"],
             "premium_layers_requested": list(_premium_runtime["premium_layers_requested"]),

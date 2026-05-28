@@ -19,6 +19,46 @@ logger = logging.getLogger(__name__)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 
+_LOCAL_BROLL_SEARCH_ROOTS: Tuple[str, ...] = (
+    "/app/assets/broll",
+    "/app/assets/videos/broll",
+    "assets/broll",
+    "backend/assets/broll",
+    "frontend/public/broll",
+)
+
+_BROLL_INTENT_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    "family_relief": ("alivio", "familia", "menos carga", "acompanamiento", "acompañamiento", "respaldo"),
+    "health_access": ("salud", "especialistas", "pruebas", "acceso rapido", "acceso rápido", "consulta"),
+    "autonomous_work_stability": ("autonomo", "autónomo", "motor", "ingresos", "estabilidad", "negocio", "continuidad"),
+    "risk_warning_context": ("no siempre avisa", "imprevisto", "riesgo", "si manana", "si mañana"),
+    "practical_explanation": ("antes de", "mira tu vida real", "organizacion", "organización", "consejo"),
+    "emotional_support": ("cuando mas falta hace", "cuando más falta hace", "apoyo", "tranquilidad", "familia"),
+}
+
+_BROLL_FILENAME_TERMS: Dict[str, Tuple[str, ...]] = {
+    "family_relief": ("family", "familia", "home", "couple", "parents", "child", "support"),
+    "health_access": ("health", "salud", "doctor", "clinic", "medical", "specialist", "consulta"),
+    "autonomous_work_stability": ("autonom", "business", "work", "office", "laptop", "entrepreneur", "income"),
+    "risk_warning_context": ("risk", "warning", "concern", "worry", "insurance", "planning"),
+    "practical_explanation": ("advisor", "consultation", "explaining", "documents", "plan", "strategy"),
+    "emotional_support": ("support", "family", "embrace", "care", "home", "calm"),
+}
+
+_SENSITIVE_DECESOS_BLOCKLIST: Tuple[str, ...] = (
+    "cement",
+    "cemeter",
+    "grave",
+    "coffin",
+    "ataud",
+    "ataúd",
+    "funeral",
+    "mortuary",
+    "morgue",
+)
+
+_LOCAL_BROLL_CACHE: Optional[List[Path]] = None
+
 _FORBIDDEN_BROLL_TERMS: Dict[str, Tuple[str, ...]] = {
     "tea_or_wellness": (
         "tea",
@@ -1069,3 +1109,231 @@ def select_best_candidates(
             break
     logger.info("[broll-select] final_count=%d intent=%s", len(selected), intent.intent_type)
     return selected
+
+
+def _list_local_broll_assets() -> List[Path]:
+    global _LOCAL_BROLL_CACHE
+    if _LOCAL_BROLL_CACHE is not None:
+        return list(_LOCAL_BROLL_CACHE)
+    assets: List[Path] = []
+    seen: set[str] = set()
+    for root_str in _LOCAL_BROLL_SEARCH_ROOTS:
+        root = Path(root_str)
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in IMAGE_EXTS.union(VIDEO_EXTS):
+                continue
+            key = str(path.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            assets.append(path)
+    _LOCAL_BROLL_CACHE = assets
+    return list(assets)
+
+
+def build_broll_editorial_decision(
+    *,
+    segment_text: str,
+    hook_intent: str = "",
+    topic: str = "",
+    private_premium_status: str = "",
+    composition_decision: Optional[Dict[str, Any]] = None,
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+    visual_profile: str = "",
+) -> Dict[str, Any]:
+    text_norm = normalize_text(segment_text or "")
+    hook_intent_norm = normalize_text(hook_intent or "")
+    topic_norm = normalize_text(topic or "")
+    comp_mode = str((composition_decision or {}).get("composition_mode") or "")
+    first3_status = str((first3_visual_contract or {}).get("status") or "")
+
+    if str(private_premium_status or "") == "DO_NOT_UPLOAD":
+        decision = {
+            "should_use_broll": False,
+            "broll_intent": "no_broll_needed",
+            "moment_type": "none",
+            "start_offset": 0.0,
+            "duration": 0.0,
+            "reason": "private_premium_do_not_upload",
+            "confidence": 0.0,
+            "fallback": "none",
+            "composition_allowed": False,
+            "skip_reason": "sensitive_tone",
+        }
+        logger.info("[broll-editorial] should_use=false intent=no_broll_needed confidence=0.00 reason=private_premium_do_not_upload")
+        logger.info("[broll-editorial] skipped reason=sensitive_tone")
+        return decision
+
+    broll_intent = "no_broll_needed"
+    confidence = 0.2
+    reason = "no_editorial_gain"
+    moment_type = "none"
+    start_offset = 1.8
+    duration = 1.4
+    fallback = "none"
+
+    _has_family_relief = _contains(text_norm, _BROLL_INTENT_KEYWORDS["family_relief"])
+    _has_health_access = _contains(text_norm, _BROLL_INTENT_KEYWORDS["health_access"])
+    _has_autonomous = _contains(text_norm, _BROLL_INTENT_KEYWORDS["autonomous_work_stability"])
+    _has_risk_context = _contains(text_norm, _BROLL_INTENT_KEYWORDS["risk_warning_context"])
+    _has_practical = _contains(text_norm, _BROLL_INTENT_KEYWORDS["practical_explanation"])
+    _has_emotional_support = _contains(text_norm, _BROLL_INTENT_KEYWORDS["emotional_support"])
+
+    if hook_intent_norm == "risk_warning" or _has_risk_context:
+        broll_intent = "risk_warning_context"
+        confidence = 0.76
+        reason = "risk_context_support"
+        moment_type = "risk_phrase"
+        start_offset = 1.6
+        duration = 1.2
+    elif hook_intent_norm == "autonomous_business_stakes" or _has_autonomous:
+        broll_intent = "autonomous_work_stability"
+        confidence = 0.82
+        reason = "business_stability_context"
+        moment_type = "topic_shift"
+        start_offset = 1.7
+        duration = 1.6
+    elif hook_intent_norm == "practical_advice" or _has_practical:
+        broll_intent = "practical_explanation"
+        confidence = 0.72
+        reason = "abstract_explanation_needs_visual_clarity"
+        moment_type = "explanation_example"
+        start_offset = 2.0
+        duration = 1.5
+    elif hook_intent_norm == "emotional_closure" or _has_emotional_support:
+        broll_intent = "emotional_support"
+        confidence = 0.65
+        reason = "soft_emotional_support"
+        moment_type = "emotional_pause"
+        start_offset = 2.4
+        duration = 1.0
+    elif _has_health_access:
+        broll_intent = "health_access"
+        confidence = 0.73
+        reason = "health_access_example"
+        moment_type = "clarity_example"
+        start_offset = 1.8
+        duration = 1.4
+    elif _has_family_relief or (topic_norm == "decesos" and _has_emotional_support):
+        broll_intent = "family_relief"
+        confidence = 0.7
+        reason = "family_relief_metaphor"
+        moment_type = "emotional_pause"
+        start_offset = 1.9
+        duration = 1.3
+
+    should_use = broll_intent != "no_broll_needed" and confidence >= 0.62
+    composition_allowed = True
+    skip_reason = ""
+
+    if comp_mode == "minimal_safe":
+        should_use = False
+        composition_allowed = False
+        skip_reason = "composition_conflict"
+    elif comp_mode == "emotional_soft" and broll_intent not in {"emotional_support", "family_relief"}:
+        should_use = False
+        composition_allowed = False
+        skip_reason = "sensitive_tone"
+    elif first3_status in {"review", "fail"} and (first3_visual_contract or {}).get("first3_visual_contract", {}).get("no_layer_overload") is False:
+        should_use = False
+        composition_allowed = False
+        skip_reason = "composition_conflict"
+
+    if should_use and start_offset < 1.5:
+        old_start = start_offset
+        start_offset = 1.5
+        logger.info(
+            "[broll-editorial] timing_adjusted=true old=%.2f new=%.2f reason=avoid_hook_or_caption",
+            old_start,
+            start_offset,
+        )
+
+    duration = max(0.8, min(2.2, duration))
+    if should_use:
+        fallback = "motion_only" if visual_profile else "caption_overlay"
+        if comp_mode in {"hook_driven", "business_punch"}:
+            fallback = "sweeping_reveal"
+    elif skip_reason:
+        fallback = "none"
+
+    decision = {
+        "should_use_broll": bool(should_use),
+        "broll_intent": broll_intent,
+        "moment_type": moment_type,
+        "start_offset": round(start_offset, 2),
+        "duration": round(duration, 2),
+        "reason": reason,
+        "confidence": round(confidence, 3),
+        "fallback": fallback,
+        "composition_allowed": bool(composition_allowed),
+        "skip_reason": skip_reason or ("no_editorial_gain" if not should_use else ""),
+    }
+
+    logger.info(
+        "[broll-editorial] should_use=%s intent=%s confidence=%.2f reason=%s",
+        str(bool(should_use)).lower(),
+        broll_intent,
+        confidence,
+        reason,
+    )
+    if not should_use:
+        logger.info("[broll-editorial] skipped reason=%s", decision["skip_reason"] or "no_editorial_gain")
+    else:
+        logger.info(
+            "[broll-editorial] timing start_offset=%.2f duration=%.2f reason=%s",
+            decision["start_offset"],
+            decision["duration"],
+            moment_type or "editorial",
+        )
+    return decision
+
+
+def match_broll_asset(
+    *,
+    broll_intent: str,
+    topic: str = "",
+    segment_text: str = "",
+) -> Dict[str, Any]:
+    intent = str(broll_intent or "no_broll_needed")
+    topic_norm = normalize_text(topic or "")
+    text_norm = normalize_text(segment_text or "")
+    if intent == "no_broll_needed":
+        return {"matched": False, "asset": None, "reason": "no_editorial_gain"}
+
+    assets = _list_local_broll_assets()
+    terms = _BROLL_FILENAME_TERMS.get(intent, tuple())
+    best_match: Optional[Path] = None
+    best_score = -1
+    for asset in assets:
+        blob = normalize_text(str(asset))
+        if topic_norm == "decesos" and any(block in blob for block in _SENSITIVE_DECESOS_BLOCKLIST):
+            continue
+        score = 0
+        for term in terms:
+            if normalize_text(term) in blob:
+                score += 2
+        if topic_norm and topic_norm in blob:
+            score += 2
+        if any(token in text_norm for token in ("familia", "salud", "autonomo", "autónomo", "riesgo")) and any(token in blob for token in ("family", "health", "autonom", "risk", "support")):
+            score += 1
+        if score > best_score:
+            best_score = score
+            best_match = asset
+
+    if not best_match or best_score <= 0:
+        logger.info("[broll-asset] intent=%s matched=false asset=", intent)
+        logger.info("[broll-asset] skipped reason=no_local_asset")
+        return {"matched": False, "asset": None, "reason": "no_local_asset", "score": 0}
+
+    logger.info("[broll-asset] intent=%s matched=true asset=%s", intent, str(best_match))
+    return {
+        "matched": True,
+        "asset": str(best_match),
+        "asset_path": best_match,
+        "score": best_score,
+        "reason": "local_asset_match",
+    }

@@ -73,6 +73,7 @@ PREMIUM_TYPES = {
     "glitch_clean",
     "shape_morph_beta",
     "mask_reveal",
+    "sweeping_reveal",
     "sweeping_object_reveal",
 }
 
@@ -121,8 +122,8 @@ def choose_transition_type(context: Dict[str, Any]) -> str:
         logger.info("[transition-select] chosen=mask_reveal reason=bbox_or_subject_focus")
         return "mask_reveal"
     if narrative in {"block_change", "hook_to_explanation", "idea_shift"} or important_broll:
-        logger.info("[transition-select] chosen=sweeping_object_reveal reason=narrative_block_or_broll")
-        return "sweeping_object_reveal"
+        logger.info("[transition-select] chosen=sweeping_reveal reason=narrative_block_or_broll")
+        return "sweeping_reveal"
     if continuity:
         logger.info("[transition-select] chosen=match_cut reason=visual_or_semantic_continuity")
         return "match_cut"
@@ -131,7 +132,7 @@ def choose_transition_type(context: Dict[str, Any]) -> str:
 
 
 def _sfx_hint_for(transition_type: str, context: Dict[str, Any]) -> str:
-    if transition_type in {"sweeping_object_reveal", "mask_reveal", "shape_morph_beta"}:
+    if transition_type in {"sweeping_reveal", "sweeping_object_reveal", "mask_reveal", "shape_morph_beta"}:
         return "magic_whoosh"
     if transition_type == "glitch_clean":
         return "glitch_tick"
@@ -181,14 +182,40 @@ def plan_transition_events(context: Dict[str, Any]) -> TransitionPlan:
         logger.info("[transition-glitch] skipped reason=not_editorially_justified")
         return TransitionPlan(enabled=False, transition_warnings=["glitch_not_editorially_justified"])
 
+    # ── VPI Premium Composition Pack v1: block transitions based on composition_mode ──
+    _composition_decision = context.get("composition_decision")
+    if _composition_decision and isinstance(_composition_decision, dict) and _composition_decision.get("composition_pack"):
+        _comp_mode = str(_composition_decision.get("composition_mode") or "")
+        _screen_priority = str(_composition_decision.get("screen_priority") or "")
+        _hook_overlay_active = bool(context.get("hook_overlay_active"))
+        if transition_type in {"sweeping_reveal", "sweeping_object_reveal", "mask_reveal"}:
+            if _comp_mode == "emotional_soft":
+                logger.info("[composition-pack] transition blocked=%s reason=emotional_soft_no_strong_transition", transition_type)
+                logger.info("[transition-qc] composition_allowed=false reason=emotional_soft_no_strong_transition")
+                return TransitionPlan(enabled=False, transition_warnings=[f"composition_blocked_{transition_type}_emotional_soft"])
+            if _comp_mode == "minimal_safe":
+                logger.info("[composition-pack] transition blocked=%s reason=minimal_safe_no_transition", transition_type)
+                logger.info("[transition-qc] composition_allowed=false reason=minimal_safe_no_transition")
+                return TransitionPlan(enabled=False, transition_warnings=[f"composition_blocked_{transition_type}_minimal_safe"])
+            if (_screen_priority == "hook_overlay" or _hook_overlay_active) and transition_type in {"sweeping_reveal", "sweeping_object_reveal"}:
+                logger.info("[composition-pack] transition blocked=%s reason=hook_overlay_priority_no_sweep", transition_type)
+                logger.info("[transition-qc] composition_allowed=false reason=hook_overlay_text_conflict")
+                return TransitionPlan(enabled=False, transition_warnings=[f"composition_blocked_{transition_type}_hook_overlay"])
+        if transition_type == "glitch_clean" and _comp_mode == "emotional_soft":
+            logger.info("[composition-pack] transition blocked=glitch_clean reason=emotional_soft_no_glitch")
+            logger.info("[transition-qc] composition_allowed=false reason=emotional_soft_no_glitch")
+            return TransitionPlan(enabled=False, transition_warnings=["composition_blocked_glitch_emotional_soft"])
+        logger.info("[composition-pack] transition allowed=%s mode=%s", transition_type, _comp_mode)
+        logger.info("[transition-qc] composition_allowed=true reason=%s", _comp_mode or "composition_context")
+
     start = float(context.get("start_time") or context.get("start_s") or 0.25)
     base_frames = int(context.get("duration_frames") or (10 if transition_type in {"shape_morph_beta", "mask_reveal"} else 5))
     if transition_type == "shape_morph_beta":
         base_frames = min(15, max(10, base_frames))
     elif transition_type == "glitch_clean":
         base_frames = min(10, max(5, base_frames))
-    elif transition_type in {"mask_reveal", "sweeping_object_reveal"}:
-        base_frames = 10 if context.get("important_moment") else min(10, max(5, base_frames))
+    elif transition_type in {"mask_reveal", "sweeping_reveal", "sweeping_object_reveal"}:
+        base_frames = min(12, max(8, base_frames if context.get("duration_frames") else 10))
 
     bbox = context.get("target_bbox") or context.get("bbox") or context.get("subject_bbox")
     event = TransitionEvent(
@@ -202,7 +229,7 @@ def plan_transition_events(context: Dict[str, Any]) -> TransitionPlan:
         subject_hint=str(context.get("subject_hint") or context.get("subject") or ""),
         sfx_hint=_sfx_hint_for(transition_type, context),
         frame_rhythm_group=str(context.get("frame_rhythm_group") or transition_type),
-        safe_fallback="short_fade" if transition_type == "sweeping_object_reveal" else ("mask_reveal" if transition_type == "shape_morph_beta" else "clean_cut"),
+        safe_fallback="short_fade" if transition_type in {"sweeping_reveal", "sweeping_object_reveal"} else ("mask_reveal" if transition_type == "shape_morph_beta" else "clean_cut"),
         metadata=_metadata_for_event(transition_type, context, base_frames, bbox),
     )
     related = context.get("related_events")
@@ -268,16 +295,70 @@ def _metadata_for_event(transition_type: str, context: Dict[str, Any], frames: i
             "mask_reveal_bbox": _safe_bbox(bbox),
             "mask_reveal_direction": str(context.get("direction") or "center_out"),
             "mask_reveal_opacity_keyframes": [{"frame": 0, "opacity": 0.0}, {"frame": frames, "opacity": 1.0}],
+            "mask_reveal_alpha_ramp": True,
+            "mask_reveal_feather": "light",
         }
-    if transition_type == "sweeping_object_reveal":
+    if transition_type in {"sweeping_reveal", "sweeping_object_reveal"}:
         return {
             "sweeping_reveal_applied": False,
             "sweeping_reveal_direction": str(context.get("direction") or "left_to_right"),
             "sweeping_reveal_mask_used": True,
-            "sweeping_reveal_scale_keyframes": [{"frame": 0, "scale": 1.0}, {"frame": 5, "scale": 1.04}, {"frame": 15, "scale": 1.0}],
-            "sweeping_reveal_position_keyframes": [{"frame": 0, "x": -0.25}, {"frame": 5, "x": 0.45}, {"frame": 15, "x": 1.25}],
+            "sweeping_reveal_alpha_ramp": [{"frame": 0, "alpha": 0.0}, {"frame": frames, "alpha": 1.0}],
+            "sweeping_reveal_scale_keyframes": [{"frame": 0, "scale": 1.0}, {"frame": 5, "scale": 1.025}, {"frame": frames, "scale": 1.0}],
+            "sweeping_reveal_position_keyframes": [{"frame": 0, "x": -0.16}, {"frame": 5, "x": 0.42}, {"frame": frames, "x": 1.16}],
+            "transition_pack_contextual": True,
         }
     return {}
+
+
+def plan_sweeping_reveal(context: Dict[str, Any]) -> Dict[str, Any]:
+    intent = str(context.get("hook_intent") or context.get("intent") or "")
+    reason = str(context.get("reason") or context.get("narrative_event") or context.get("event") or "")
+    contextual = any(term in reason for term in ("topic_shift", "contrast", "hook", "block_change", "idea_shift")) or bool(context.get("important_broll"))
+    if intent == "emotional_closure":
+        logger.info("[transition-pack] skipped reason=not_contextual")
+        return {"applied": False, "transition_type": "short_fade", "skipped_reason": "emotional_closure_softness"}
+    if not contextual:
+        logger.info("[transition-pack] skipped reason=not_contextual")
+        return {"applied": False, "transition_type": "clean_cut", "skipped_reason": "not_contextual"}
+    frames = min(12, max(8, int(context.get("duration_frames") or 10)))
+    logger.info("[transition-pack] type=sweeping_reveal applied=true frames=%d", frames)
+    logger.info("[transition-pack] contextual=true reason=%s", reason or "hook")
+    return {
+        "applied": True,
+        "transition_type": "sweeping_reveal",
+        "duration_frames": frames,
+        "alpha_ramp": True,
+        "horizontal_shift": "subtle",
+        "contextual": True,
+        "reason": reason or "hook",
+    }
+
+
+def plan_mask_reveal(context: Dict[str, Any]) -> Dict[str, Any]:
+    bbox = context.get("bbox") or context.get("target_bbox") or context.get("subject_bbox")
+    if not bbox:
+        logger.info("[mask-reveal] fallback=sweeping_reveal reason=no_bbox")
+        fallback = plan_sweeping_reveal({**context, "reason": context.get("reason") or "hook"})
+        return {
+            **fallback,
+            "fallback": "sweeping_reveal",
+            "fallback_used": True,
+            "fallback_reason": "no_bbox",
+        }
+    frames = min(12, max(8, int(context.get("duration_frames") or 10)))
+    safe = _safe_bbox(bbox)
+    logger.info("[mask-reveal] applied=true bbox=%s", safe)
+    return {
+        "applied": True,
+        "transition_type": "mask_reveal",
+        "duration_frames": frames,
+        "bbox": safe,
+        "feather": "light",
+        "alpha_ramp": [{"frame": 0, "opacity": 0.0}, {"frame": frames, "opacity": 1.0}],
+        "contextual": True,
+        "reason": str(context.get("reason") or "bbox_reveal"),
+    }
 
 
 def _probe_size(path: Path) -> tuple[int, int]:
@@ -315,7 +396,9 @@ def _vf_for_event(event: TransitionEvent, width: int, height: int) -> str:
     cx = int((bbox["x"] + bbox["w"] / 2.0) * width)
     cy = int((bbox["y"] + bbox["h"] / 2.0) * height)
 
-    if event.transition_type == "match_cut":
+    transition_type = "sweeping_object_reveal" if event.transition_type == "sweeping_reveal" else event.transition_type
+
+    if transition_type == "match_cut":
         scale_expr = f"if({t}\\,1.045\\,1)"
         blur = f",gblur=sigma='if({t},0.65,0)'"
         return (
@@ -324,7 +407,7 @@ def _vf_for_event(event: TransitionEvent, width: int, height: int) -> str:
             f"scale={width}:{height}{blur}"
         )
 
-    if event.transition_type == "glitch_clean":
+    if transition_type == "glitch_clean":
         band_h = max(4, int(height * 0.035))
         y1 = int(height * 0.28)
         y2 = int(height * 0.52)
@@ -335,7 +418,7 @@ def _vf_for_event(event: TransitionEvent, width: int, height: int) -> str:
             "format=yuv420p"
         )
 
-    if event.transition_type == "shape_morph_beta":
+    if transition_type == "shape_morph_beta":
         size = max(32, int(min(width, height) * 0.22))
         x = int(width * 0.5 - size / 2)
         y = int(height * 0.5 - size / 2)
@@ -345,7 +428,7 @@ def _vf_for_event(event: TransitionEvent, width: int, height: int) -> str:
             f"color=white@0.20:t=6:enable='{t}'"
         )
 
-    if event.transition_type == "mask_reveal":
+    if transition_type == "mask_reveal":
         x = int(bbox["x"] * width)
         y = int(bbox["y"] * height)
         w = int(bbox["w"] * width)
@@ -355,7 +438,7 @@ def _vf_for_event(event: TransitionEvent, width: int, height: int) -> str:
             f"drawbox=x={x}:y={y}:w={w}:h={h}:color=white@0.40:t=5:enable='{t}'"
         )
 
-    if event.transition_type == "sweeping_object_reveal":
+    if transition_type == "sweeping_object_reveal":
         sweep_w = int(width * 0.22)
         return (
             f"drawbox=x='if({t}, -{sweep_w} + (t-{start:.3f})/{max(0.001, end-start):.3f}*{width + 2*sweep_w}, -{sweep_w})':"
@@ -391,12 +474,13 @@ def _metadata_applied(event: TransitionEvent) -> Dict[str, Any]:
             event.duration_frames,
             metadata.get("mask_reveal_opacity_keyframes"),
         )
-    elif event.transition_type == "sweeping_object_reveal":
+    elif event.transition_type in {"sweeping_reveal", "sweeping_object_reveal"}:
         metadata["sweeping_reveal_applied"] = True
         logger.info(
             "[transition-sweep] applied=true direction=%s frames=5,10 mask=true scale_keyframes=true",
             metadata.get("sweeping_reveal_direction"),
         )
+        logger.info("[transition-pack] type=sweeping_reveal applied=true frames=%s", event.duration_frames)
     return metadata
 
 
@@ -513,7 +597,13 @@ def apply_transition_plan(
     for idx, event in enumerate(transition_plan.events[:2]):
         target = output_path if idx == len(transition_plan.events[:2]) - 1 else output_path.with_name(f"trans_step{idx}_{output_path.name}")
         result = apply_transition(current, current, target, event)
-        applied_events.append({**event.to_dict(), **result.to_dict()})
+        contextual = str(event.reason or "") not in {"", "generic", "default"} and event.transition_type not in {"clean_cut", ""}
+        logger.info(
+            "[transition-qc] contextual=%s reason=%s",
+            str(contextual).lower(),
+            event.reason or "no_editorial_reason",
+        )
+        applied_events.append({**event.to_dict(), **result.to_dict(), "contextual": contextual})
         if result.applied and Path(result.output_path).exists():
             current = Path(result.output_path)
         else:
@@ -525,6 +615,7 @@ def apply_transition_plan(
         "transitions_applied": final_verified,
         "transition_events": applied_events,
         "transition_types": [event.transition_type for event in transition_plan.events],
+        "transition_contextual": any(bool(item.get("contextual")) for item in applied_events),
         "transition_warnings": warnings,
         "frame_rhythm_applied": transition_plan.frame_rhythm_applied,
         "frame_rhythm_pattern": transition_plan.frame_rhythm_pattern,
