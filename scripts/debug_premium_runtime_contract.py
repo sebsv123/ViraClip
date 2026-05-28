@@ -14,6 +14,12 @@ from src.services.vpi_premium_runtime import (  # noqa: E402
     verify_final_filename_contract,
 )
 from src.services.vpi_publishable_gate import evaluate_clip_publishability  # noqa: E402
+from src.services.vpi_music_service import DEFAULT_MUSIC_TARGET_DB  # noqa: E402
+from src.services.vpi_retention_editing_service import (  # noqa: E402
+    build_delivery_contract,
+    evaluate_content_quality,
+    filter_content_quality_candidates,
+)
 
 
 def _strong_clip(**overrides):
@@ -62,6 +68,12 @@ def _strong_clip(**overrides):
         "vpi_score": 95,
         "virality_score": 90,
         "editorial_type": "risk_warning",
+        "text": (
+            "Un seguro de vida protege a tu familia si mañana ocurre un riesgo serio. "
+            "La cobertura da tranquilidad y responsabilidad cuando hay hipoteca o hijos."
+        ),
+        "start_time": "00:10",
+        "end_time": "00:40",
     }
     clip.update(overrides)
     return clip
@@ -89,9 +101,19 @@ def main() -> int:
         sfx={"sfx_applied": True},
         transitions={"transitions_applied": True},
         visual_effects={"visual_effects_applied": True},
-        broll_events=[{"asset": "x"}],
+        broll_events=[{"asset_path": "x", "broll_final_verified": True}],
     )
     assert contract["final_contract_ok"] is True
+
+    no_broll_contract = verify_final_filename_contract(
+        Path("mastered_sfx_music_brand_trans_vfx_sub_reframe_silence_clip_01.mp4"),
+        music={"music_applied": True},
+        sfx={"sfx_applied": True},
+        transitions={"transitions_applied": True},
+        visual_effects={"visual_effects_applied": True},
+        broll_events=[],
+    )
+    assert no_broll_contract["final_contract"]["broll"] is False
 
     no_music = _strong_clip(music={"music_tracks_found": 1, "music_applied": True, "music_final_verified": False})
     assert evaluate_clip_publishability(no_music).publishable_status.value != "ready_to_upload"
@@ -146,6 +168,41 @@ def main() -> int:
     }
     assert evaluate_clip_publishability(plain).publishable_status.value != "ready_to_upload"
 
+    bts = {
+        "text": "Claro ok ahi esta ya si papa cheverisimo listo perfecto",
+        "start_time": "00:00",
+        "end_time": "00:30",
+    }
+    assert evaluate_content_quality(bts)["content_quality_reason"] == "behind_the_scenes_low_speech"
+    assert evaluate_clip_publishability(_strong_clip(**bts)).publishable_status.value == "do_not_upload"
+
+    insurance = {
+        "text": (
+            "El seguro de vida no es solo para mayores, protege a tu familia y cubre "
+            "responsabilidades como hipoteca, hijos y tranquilidad ante un riesgo real. "
+            "También ayuda a organizar cobertura, protección, estabilidad económica, "
+            "acompañamiento, consejo profesional y margen para reaccionar ante un imprevisto "
+            "importante, cuidando opciones, tiempos, decisiones, ingresos y continuidad familiar."
+        ),
+        "start_time": "00:30",
+        "end_time": "01:00",
+        "bts_contamination_ratio": 0.0,
+        "useful_content_ratio": 0.8,
+    }
+    assert evaluate_content_quality(insurance)["content_quality_label"] == "accept"
+
+    valid_candidates = [dict(insurance, start_time=f"00:{30 + i:02d}", end_time=f"01:{i:02d}") for i in range(6)]
+    accepted, rejected = filter_content_quality_candidates(valid_candidates, requested=3)
+    assert len(accepted) >= 3
+    assert build_delivery_contract(requested=3, delivered=3, rejected_reasons=rejected)["shortage_reason"] == ""
+
+    accepted, rejected = filter_content_quality_candidates([insurance, bts], requested=3)
+    shortage = build_delivery_contract(requested=3, delivered=len(accepted), rejected_reasons=rejected)
+    assert shortage["delivered_num_clips"] == 1
+    assert shortage["shortage_reason"] == "insufficient_valid_candidates"
+
+    assert int(DEFAULT_MUSIC_TARGET_DB) == -21
+
     print("premium_runtime_enabled=true")
     print("pipeline_order_contract=true")
     print("music_required_if_tracks_found=true")
@@ -155,6 +212,10 @@ def main() -> int:
     print("hook_first3_strong_required=true")
     print("filename_contract=true")
     print("retention_gate_blocks_plain_outputs=true")
+    print("behind_the_scenes_rejected=true")
+    print("requested_3_delivers_3_when_candidates_valid=true")
+    print("requested_3_shortage_logged_when_only_1_valid=true")
+    print("music_target_db=-21")
     return 0
 
 

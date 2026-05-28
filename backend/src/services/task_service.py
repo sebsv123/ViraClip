@@ -41,7 +41,12 @@ from ..utils.resource_manager import (
     should_throttle_processing,
 )
 from .comfyui_integration import comfyui_integration
-from .vpi_publishable_gate import evaluate_clip_publishability, rank_clips
+from .vpi_publishable_gate import (
+    UploadRecommendation,
+    evaluate_clip_publishability,
+    rank_clips,
+)
+from .vpi_retention_editing_service import build_delivery_contract
 
 logger = logging.getLogger(__name__)
 
@@ -434,18 +439,12 @@ class TaskService:
             segments_to_render = result.get("segments_to_render", [])
             total_clips = len(segments_to_render)
             
-            # ── BETA-CLEAN: cap segments to num_clips BEFORE extraction ──
-            # Prevents wasting time extracting/render-buffering segments that
-            # will be discarded.  The pipeline returns render_buffer = num_clips+2
-            # segments; we trim to exactly num_clips here.
-            if len(segments_to_render) > num_clips:
-                logger.info(
-                    f"[task] requested_num_clips={num_clips} "
-                    f"candidate_segments={len(segments_to_render)} "
-                    f"final_segments_to_render={num_clips}"
-                )
-                segments_to_render = segments_to_render[:num_clips]
-                total_clips = num_clips
+            logger.info(
+                "[clip-count] requested=%d candidates=%d selected=%d rendered=0 exported=0",
+                num_clips,
+                len(segments_to_render),
+                len(segments_to_render),
+            )
             
             # CRITICAL VALIDATION: Check if we have segments
             if total_clips == 0:
@@ -929,6 +928,7 @@ class TaskService:
 
             # Persist results sequentially (DB ops must be on the event loop thread)
             saved_clips = 0
+            rejected_candidate_reasons: List[Dict[str, Any]] = []
             for i, clip_info, elapsed in render_results:
                 # Stop once we've saved the requested number of clips.
                 # Extra buffer segments are only used when earlier clips fail.
@@ -940,12 +940,16 @@ class TaskService:
                 clip_render_times[i + 1] = elapsed
 
                 if clip_info is None:
-                    failed_clips.append({
+                    failure = {
                         "clip_index": i + 1,
                         "start_time": segment.get("start_time"),
                         "end_time": segment.get("end_time"),
                         "render_time_s": elapsed,
-                    })
+                        "reason": "render_failed",
+                    }
+                    failed_clips.append(failure)
+                    rejected_candidate_reasons.append(failure)
+                    logger.info("[clip-count] rejected index=%d reason=render_failed", i + 1)
                     logger.warning(
                         f"Clip {i+1}/{total_clips} failed to render in {elapsed:.1f}s "
                         f"({segment.get('start_time')} → {segment.get('end_time')})"
@@ -1007,6 +1011,28 @@ class TaskService:
                     clip_info.setdefault("publishable_score", 0.0)
                     clip_info.setdefault("publishable_warnings", [])
                     clip_info.setdefault("publishable_reasons", [f"gate_evaluation_error: {_pg_e}"])
+
+                _publishable_status = str(clip_info.get("publishable_status") or "").lower()
+                _upload_recommendation = str(clip_info.get("upload_recommendation") or "").lower()
+                _discard_recommended = bool(clip_info.get("discard_recommended"))
+                if (
+                    _discard_recommended
+                    or _upload_recommendation == UploadRecommendation.DISCARD_RECOMMENDED.value
+                    or _publishable_status in {"do_not_upload", "needs_fix", "not_ready"}
+                ):
+                    _reject_reason = (
+                        "publishable_gate_blocked:"
+                        + ",".join(str(r) for r in (clip_info.get("publishable_reasons") or [])[:4])
+                    )
+                    rejected_candidate_reasons.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "reason": _reject_reason,
+                        "publishable_status": _publishable_status,
+                    })
+                    logger.info("[clip-count] rejected index=%d reason=%s", i + 1, _reject_reason)
+                    continue
 
                 translated_text = clip_info.get("translated_text")
                 saved_clips += 1
@@ -1428,6 +1454,31 @@ class TaskService:
                             logger.info(f"✅ A/B variant B saved: clip {b_clip_id}")
                     except Exception as _ab_e:
                         logger.warning(f"A/B variant B failed for clip {i+1}: {_ab_e}")
+
+            delivery_contract = build_delivery_contract(
+                requested=num_clips,
+                delivered=saved_clips,
+                rejected_reasons=rejected_candidate_reasons,
+            )
+            stage_timings["task_summary"] = delivery_contract
+            stage_timings["requested_num_clips"] = num_clips
+            stage_timings["delivered_num_clips"] = saved_clips
+            stage_timings["rejected_candidate_reasons"] = rejected_candidate_reasons
+            if saved_clips < num_clips:
+                logger.info(
+                    "[clip-count] delivered_less_than_requested requested=%d delivered=%d reason=%s",
+                    num_clips,
+                    saved_clips,
+                    delivery_contract.get("shortage_reason") or "unknown",
+                )
+            logger.info(
+                "[clip-count] requested=%d candidates=%d selected=%d rendered=%d exported=%d",
+                num_clips,
+                len(segments_to_render),
+                len(segments_to_render),
+                successful_renders,
+                saved_clips,
+            )
 
             # ── Single bulk update of task.clip_ids after all clips complete ──
             if clip_ids:

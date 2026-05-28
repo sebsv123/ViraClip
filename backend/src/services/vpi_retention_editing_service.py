@@ -11,11 +11,413 @@ Core principle:
 from __future__ import annotations
 
 import logging
+import re
+import unicodedata
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_BTS_TERMS = {
+    "claro", "vale", "ok", "chevere", "cheverisima", "cheverisimo",
+    "ahi esta", "ya si", "papa", "espera", "prueba", "camara", "graba",
+    "listo", "empezamos", "otra vez", "perfecto", "dame", "vamos",
+    "ruido", "se escucha", "mira", "vamos aqui", "dale de nuevo",
+    "repite", "joder", "cono", "coño", "como se sube", "no lo puedo subir",
+    "voy a leer", "cambio", "outfit", "hazlo de nuevo", "bien",
+}
+_CONTENT_VALUE_TERMS = {
+    "seguro", "vida", "salud", "decesos", "proteccion", "proteger",
+    "cobertura", "familia", "tranquilidad", "responsabilidad", "consejo",
+    "objecion", "mito", "advertencia", "riesgo", "hipoteca", "pareja",
+    "hijos", "contratar", "poliza", "cliente", "autonomo", "autonomos",
+    "estabilidad", "acompanamiento", "imprevisto", "organizar", "economia",
+    "cuidar", "especialista", "pruebas",
+}
+_SHORT_INTERJECTIONS = {
+    "claro", "vale", "ok", "chevere", "cheverisima", "cheverisimo",
+    "ahi", "esta", "ya", "si", "papa", "listo", "perfecto",
+}
+
+
+def _normalize_text(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _word_count(text: str) -> int:
+    return len([word for word in _normalize_text(text).split() if word])
+
+
+def _contains_term(normalized_text: str, term: str) -> bool:
+    normalized_term = _normalize_text(term)
+    if not normalized_term:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized_term)}(?![a-z0-9])", normalized_text))
+
+
+def _segment_duration_s(segment: Dict[str, Any]) -> float:
+    def parse(value: Any) -> float:
+        raw = str(value or "0").strip()
+        try:
+            parts = raw.split(":")
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            return float(raw)
+        except Exception:
+            return 0.0
+
+    start = parse(segment.get("start_time") or segment.get("start") or segment.get("start_s"))
+    end = parse(segment.get("end_time") or segment.get("end") or segment.get("end_s"))
+    return max(0.0, end - start)
+
+
+def _format_ts(seconds: float) -> str:
+    seconds = max(0.0, float(seconds or 0.0))
+    return f"{int(seconds) // 60:02d}:{int(seconds) % 60:02d}"
+
+
+def _parse_transcript_lines(transcript: str) -> List[Dict[str, Any]]:
+    pattern = re.compile(r"\[(\d{2}:\d{2}(?::\d{2})?)\s*-\s*(\d{2}:\d{2}(?::\d{2})?)\]\s*([^\[]+)")
+
+    def parse_ts(value: str) -> float:
+        parts = str(value or "0").split(":")
+        try:
+            if len(parts) == 2:
+                return int(parts[0]) * 60 + float(parts[1])
+            if len(parts) == 3:
+                return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+            return float(value)
+        except Exception:
+            return 0.0
+
+    lines: List[Dict[str, Any]] = []
+    for match in pattern.finditer(transcript or ""):
+        text = match.group(3).strip()
+        if not text:
+            continue
+        start = parse_ts(match.group(1))
+        end = max(start, parse_ts(match.group(2)))
+        normalized = _normalize_text(text)
+        bts = any(_contains_term(normalized, term) for term in _BTS_TERMS)
+        useful_terms = [term for term in _CONTENT_VALUE_TERMS if _contains_term(normalized, term)]
+        topic = detect_clean_take_topic(text)
+        lines.append({
+            "start": start,
+            "end": end,
+            "text": text,
+            "normalized": normalized,
+            "bts": bts,
+            "useful": bool(useful_terms),
+            "useful_terms": useful_terms,
+            "topic": topic,
+        })
+    return lines
+
+
+def detect_clean_take_topic(text: str) -> str:
+    normalized = _normalize_text(text)
+    if any(_contains_term(normalized, term) for term in ("decesos", "ausencia", "momento dificil")):
+        return "decesos"
+    if any(_contains_term(normalized, term) for term in ("salud", "especialista", "pruebas", "cita previa")):
+        return "salud"
+    if any(_contains_term(normalized, term) for term in ("autonomo", "autonomos", "factura", "cliente", "estabilidad", "bolsillo")):
+        return "autonomos"
+    if any(_contains_term(normalized, term) for term in ("familia", "proteccion", "proteger", "responsabilidad")):
+        return "proteccion"
+    return "generic"
+
+
+def _candidate_from_lines(lines: List[Dict[str, Any]], *, reason: str) -> Optional[Dict[str, Any]]:
+    if not lines:
+        return None
+    start = float(lines[0]["start"])
+    end = float(lines[-1]["end"])
+    duration = end - start
+    if duration < 18.0 or duration > 48.0:
+        return None
+    text = " ".join(str(line.get("text") or "") for line in lines).strip()
+    if not text:
+        return None
+    bts_lines = sum(1 for line in lines if line.get("bts"))
+    useful_lines = sum(1 for line in lines if line.get("useful"))
+    bts_ratio = bts_lines / max(1, len(lines))
+    useful_ratio = useful_lines / max(1, len(lines))
+    topic_votes: Dict[str, int] = {}
+    for line in lines:
+        topic = str(line.get("topic") or "generic")
+        if topic != "generic":
+            topic_votes[topic] = topic_votes.get(topic, 0) + 1
+    topic = max(topic_votes, key=topic_votes.get) if topic_votes else detect_clean_take_topic(text)
+    segment = {
+        "start_time": _format_ts(start),
+        "end_time": _format_ts(end),
+        "text": text,
+        "relevance_score": 0.72,
+        "reasoning": reason,
+        "virality_score": 62 if topic != "generic" else 45,
+        "hook_score": 16,
+        "engagement_score": 15,
+        "value_score": 18,
+        "shareability_score": 13,
+        "hook_strength": "Medium",
+        "hook_type": "content",
+        "suggested_title": topic.replace("_", " ").title(),
+        "suggested_hashtags": [],
+        "clean_take_topic": topic,
+        "clean_take_score": round((useful_ratio * 0.75) + ((1.0 - bts_ratio) * 0.25), 3),
+        "bts_contamination_ratio": round(bts_ratio, 3),
+        "useful_content_ratio": round(useful_ratio, 3),
+        "clean_take_useful_lines": useful_lines,
+        "clean_take_bts_lines": bts_lines,
+        "duplicate_theme_key": f"{topic}:{int(start // 20)}",
+    }
+    logger.info(
+        "[clean-take] start=%s end=%s useful_lines=%d bts_lines=%d topic=%s",
+        segment["start_time"],
+        segment["end_time"],
+        useful_lines,
+        bts_lines,
+        topic,
+    )
+    if bts_ratio > 0.25:
+        logger.info("[clean-take] reject start=%s end=%s reason=bts_contaminated", segment["start_time"], segment["end_time"])
+    return segment
+
+
+def build_clean_take_candidates(
+    transcript: str,
+    *,
+    transcript_duration_s: float = 0.0,
+    num_clips: int = 3,
+) -> Dict[str, Any]:
+    lines = _parse_transcript_lines(transcript)
+    word_count = _word_count(transcript)
+    duration = transcript_duration_s or (max((float(line["end"]) for line in lines), default=0.0))
+    min_candidates = min(12, max(num_clips + 5, 8))
+    logger.info("[candidate-pool-source] transcript_duration=%.2f word_count=%d", duration, word_count)
+
+    sliding: List[Dict[str, Any]] = []
+    if duration > 90.0:
+        step = 12.0
+        window = 30.0
+        cursor = 0.0
+        while cursor + 20.0 <= duration:
+            win_lines = [line for line in lines if float(line["end"]) >= cursor and float(line["start"]) <= cursor + window]
+            candidate = _candidate_from_lines(win_lines, reason="sliding_transcript_window")
+            if candidate:
+                sliding.append(candidate)
+            cursor += step
+    logger.info("[candidate-pool-source] sliding_windows=%d", len(sliding))
+
+    hook_windows: List[Dict[str, Any]] = []
+    for line in lines:
+        if not line.get("useful") or line.get("bts"):
+            continue
+        anchor = float(line["start"])
+        for offset in (0.0, -4.0):
+            start = max(0.0, anchor + offset)
+            end = min(duration or start + 32.0, start + 32.0)
+            win_lines = [item for item in lines if float(item["end"]) >= start and float(item["start"]) <= end]
+            candidate = _candidate_from_lines(win_lines, reason="hook_anchored_clean_take")
+            if candidate:
+                hook_windows.append(candidate)
+    logger.info("[candidate-pool-source] hook_windows=%d", len(hook_windows))
+
+    clean_takes: List[Dict[str, Any]] = []
+    current: List[Dict[str, Any]] = []
+    for line in lines:
+        gap = float(line["start"]) - float(current[-1]["end"]) if current else 0.0
+        if line.get("bts") or gap > 4.0:
+            if current:
+                clean_takes.extend(_split_clean_block(current))
+            current = []
+            continue
+        current.append(line)
+    if current:
+        clean_takes.extend(_split_clean_block(current))
+    logger.info("[clean-take] generated=%d", len(clean_takes))
+
+    all_candidates = sliding + hook_windows + clean_takes
+    logger.info("[candidate-pool-source] generated_before_filter=%d", len(all_candidates))
+    # Stable dedupe by approximate boundary and topic; keep higher clean score.
+    best: Dict[str, Dict[str, Any]] = {}
+    for candidate in all_candidates:
+        key = f"{candidate.get('clean_take_topic')}:{candidate.get('start_time')}:{candidate.get('end_time')}"
+        current_best = best.get(key)
+        if current_best is None or float(candidate.get("clean_take_score") or 0.0) > float(current_best.get("clean_take_score") or 0.0):
+            best[key] = candidate
+    candidates = sorted(
+        best.values(),
+        key=lambda item: (
+            {"decesos": 4, "salud": 3, "autonomos": 2, "proteccion": 1}.get(str(item.get("clean_take_topic")), 0),
+            float(item.get("clean_take_score") or 0.0),
+            float(item.get("virality_score") or 0.0),
+        ),
+        reverse=True,
+    )
+    return {
+        "segments": candidates[:max(min_candidates, len(candidates))],
+        "generated_before_filter": len(all_candidates),
+        "sliding_windows": len(sliding),
+        "hook_windows": len(hook_windows),
+        "clean_takes": len(clean_takes),
+        "topics": sorted({str(item.get("clean_take_topic")) for item in candidates if item.get("clean_take_topic")}),
+        "transcript_duration": duration,
+        "word_count": word_count,
+    }
+
+
+def _split_clean_block(lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not lines:
+        return []
+    block_start = float(lines[0]["start"])
+    block_end = float(lines[-1]["end"])
+    duration = block_end - block_start
+    chunks: List[Dict[str, Any]] = []
+    if duration <= 45.0:
+        candidate = _candidate_from_lines(lines, reason="continuous_clean_take")
+        return [candidate] if candidate else []
+    cursor = block_start
+    while cursor + 20.0 <= block_end:
+        end = min(cursor + 35.0, block_end)
+        win_lines = [line for line in lines if float(line["end"]) >= cursor and float(line["start"]) <= end]
+        candidate = _candidate_from_lines(win_lines, reason="split_long_clean_take")
+        if candidate:
+            chunks.append(candidate)
+        cursor += 28.0
+    return chunks
+
+
+def evaluate_content_quality(segment: Dict[str, Any]) -> Dict[str, Any]:
+    text = str(segment.get("text") or "")
+    normalized = _normalize_text(text)
+    words = normalized.split()
+    duration = _segment_duration_s(segment)
+    total_words = len(words)
+    bts_ratio_meta = segment.get("bts_contamination_ratio")
+    useful_ratio_meta = segment.get("useful_content_ratio")
+    useful_words = [
+        word for word in words
+        if len(word) >= 4 and word not in _SHORT_INTERJECTIONS
+    ]
+    bts_hits = [term for term in sorted(_BTS_TERMS, key=len, reverse=True) if _contains_term(normalized, term)]
+    value_hits = [term for term in sorted(_CONTENT_VALUE_TERMS) if _contains_term(normalized, term)]
+    words_per_second = total_words / max(duration, 1.0)
+    useful_ratio = len(useful_words) / max(total_words, 1)
+    speech_density = max(0.0, min(1.0, (words_per_second / 2.0) * 0.65 + useful_ratio * 0.35))
+    behind_scenes = max(0.0, min(1.0, (len(bts_hits) / 4.0) + (0.35 if total_words < 18 and bts_hits else 0.0)))
+    content_value = max(0.0, min(1.0, len(value_hits) / 5.0 + (0.20 if total_words >= 35 else 0.0)))
+    bts_contamination_ratio = (
+        float(bts_ratio_meta)
+        if bts_ratio_meta is not None
+        else max(behind_scenes, min(1.0, len(bts_hits) / max(1, len(value_hits) + len(bts_hits))))
+    )
+    useful_content_ratio = (
+        float(useful_ratio_meta)
+        if useful_ratio_meta is not None
+        else min(1.0, (len(value_hits) / max(1, len(value_hits) + len(bts_hits))) if value_hits else 0.0)
+    )
+    speech_density_ratio = min(1.0, words_per_second / 2.5)
+
+    if bts_contamination_ratio > 0.25:
+        label = "reject"
+        reason = "bts_contamination_too_high" if content_value >= 0.35 else "behind_the_scenes_low_speech"
+        if content_value >= 0.35:
+            logger.info("[content-quality] split reason=mixed_bts_and_content")
+    elif behind_scenes >= 0.55 and (speech_density < 0.45 or content_value < 0.35):
+        label = "reject"
+        reason = "behind_the_scenes_low_speech"
+    elif len(useful_words) < 10 and content_value < 0.4:
+        label = "reject"
+        reason = "too_few_useful_words"
+    elif (
+        useful_content_ratio >= 0.65
+        and bts_contamination_ratio <= 0.20
+        and len(useful_words) >= 35
+        and speech_density_ratio >= 0.45
+        and content_value >= 0.35
+    ):
+        label = "accept"
+        reason = "clean_insurance_take"
+    else:
+        label = "review"
+        reason = "content_quality_marginal"
+
+    result = {
+        "speech_density_score": round(speech_density, 3),
+        "behind_the_scenes_score": round(behind_scenes, 3),
+        "content_value_score": round(content_value, 3),
+        "content_quality_label": label,
+        "content_quality_reason": reason,
+        "useful_word_count": len(useful_words),
+        "speech_density_ratio": round(speech_density_ratio, 3),
+        "bts_contamination_ratio": round(bts_contamination_ratio, 3),
+        "useful_content_ratio": round(useful_content_ratio, 3),
+        "bts_terms": bts_hits,
+        "content_value_terms": value_hits,
+    }
+    logger.info(
+        "[content-quality] speech_density=%.3f behind_scenes=%.3f content_value=%.3f",
+        result["speech_density_score"],
+        result["behind_the_scenes_score"],
+        result["content_value_score"],
+    )
+    if label == "reject":
+        logger.info("[content-quality] reject reason=%s", reason)
+    elif label == "accept":
+        logger.info("[content-quality] accept reason=%s", reason)
+    return result
+
+
+def apply_content_quality(segment: Dict[str, Any]) -> Dict[str, Any]:
+    quality = evaluate_content_quality(segment)
+    segment.update(quality)
+    penalty = 0.45 if quality["content_quality_label"] == "reject" else (0.18 if quality["content_quality_label"] == "review" else 0.0)
+    bonus = quality["content_value_score"] * 0.10
+    current = float(segment.get("final_rank_score") or 0.0)
+    segment["final_rank_score"] = round(max(0.0, min(1.0, current + bonus - penalty)), 4)
+    return segment
+
+
+def filter_content_quality_candidates(segments: List[Dict[str, Any]], *, requested: int) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    accepted: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    for idx, segment in enumerate(segments):
+        apply_content_quality(segment)
+        if segment.get("content_quality_label") == "reject":
+            rejected.append({
+                "index": idx,
+                "reason": segment.get("content_quality_reason"),
+                "start_time": segment.get("start_time"),
+                "end_time": segment.get("end_time"),
+            })
+            logger.info("[clip-count] rejected index=%d reason=%s", idx, segment.get("content_quality_reason"))
+            continue
+        accepted.append(segment)
+    if len(accepted) < requested:
+        logger.info("[clip-count] shortage reason=content_quality_filter accepted=%d requested=%d", len(accepted), requested)
+    return accepted, rejected
+
+
+def build_delivery_contract(*, requested: int, delivered: int, rejected_reasons: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if delivered < requested:
+        reason = "insufficient_valid_candidates"
+        logger.info("[delivery-contract] requested=%d delivered=%d status=shortage reason=%s", requested, delivered, reason)
+    else:
+        reason = ""
+        logger.info("[delivery-contract] requested=%d delivered=%d status=ok", requested, delivered)
+    return {
+        "requested_num_clips": requested,
+        "delivered_num_clips": delivered,
+        "shortage_reason": reason,
+        "rejected_candidate_reasons": rejected_reasons,
+    }
 
 
 # ── Retention Editing Plan ─────────────────────────────────────────────────────

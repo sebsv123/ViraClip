@@ -568,6 +568,12 @@ def evaluate_clip_publishability(
     audio_qc = clip_info.get("audio_qc")
     silence_plan = clip_info.get("silence_edit_plan")
     segment_text = str(segment.get("text") or clip_info.get("text") or "")
+    if not segment_text and isinstance(clip_info.get("words"), list):
+        segment_text = " ".join(
+            str((word or {}).get("word") or "")
+            for word in clip_info.get("words") or []
+            if isinstance(word, dict)
+        ).strip()
     editing_richness_score = int(
         clip_info.get("editing_richness_score")
         or (clip_info.get("editing_plan") or {}).get("editing_richness_score")
@@ -621,6 +627,26 @@ def evaluate_clip_publishability(
         missing_layers.append("sfx")
     no_post_layers = all(layer in missing_layers for layer in ("broll", "visual_effects", "music", "sfx"))
     retention_gate = assess_retention_quality(clip_info)
+    content_quality: Dict[str, Any] = {}
+    try:
+        from .vpi_retention_editing_service import evaluate_content_quality
+
+        quality_source = dict(segment or {})
+        if segment_text and not quality_source.get("text"):
+            quality_source["text"] = segment_text
+        content_quality = evaluate_content_quality(quality_source)
+        clip_info.update(content_quality)
+        segment.update(content_quality)
+    except Exception as exc:
+        logger.warning("[content-quality] gate_check_skipped reason=%s", exc)
+        content_quality = {
+            "content_quality_label": str(clip_info.get("content_quality_label") or ""),
+            "content_quality_reason": str(clip_info.get("content_quality_reason") or ""),
+        }
+    content_quality_reject = (
+        content_quality.get("content_quality_label") == "reject"
+        or content_quality.get("content_quality_reason") == "behind_the_scenes_low_speech"
+    )
 
     # ── 2. Compute editing activity score ───────────────────────────────────
     editing_activity = _count_editing_activities(clip_info)
@@ -691,6 +717,11 @@ def evaluate_clip_publishability(
         total_penalty += BROLL_GENERIC_DOCUMENTS_PENALTY
         for reason in generic_broll_reasons:
             warnings.append(f"generic_broll_{reason}")
+    if content_quality_reject:
+        total_penalty += 60.0
+        reason = str(content_quality.get("content_quality_reason") or "content_quality_reject")
+        status_reasons.append(f"content_quality_{reason}")
+        warnings.append("behind_the_scenes_or_low_speech")
 
     # Editing activity penalty
     if editing_activity < EDITING_ACTIVITY_NEEDS_FIX_THRESHOLD:
@@ -769,6 +800,8 @@ def evaluate_clip_publishability(
         marker_mismatches.append("vfx_marker_missing_or_false_positive")
     if broll_items and "broll_" not in final_name:
         marker_mismatches.append("broll_marker_missing_or_false_positive")
+    if not broll_items and "broll_" in final_name:
+        marker_mismatches.append("broll_marker_false_positive")
     if marker_mismatches:
         total_penalty += 10.0
         warnings.extend(marker_mismatches)
@@ -809,6 +842,11 @@ def evaluate_clip_publishability(
     if is_forbidden_broll:
         status = PublishableStatus.DO_NOT_UPLOAD
         recommendation = UploadRecommendation.DISCARD_RECOMMENDED
+    elif content_quality_reject:
+        status = PublishableStatus.DO_NOT_UPLOAD
+        recommendation = UploadRecommendation.DISCARD_RECOMMENDED
+        if "content_quality_rejected" not in status_reasons:
+            status_reasons.append("content_quality_rejected")
     elif (
         final_score >= SCORE_READY_MIN
         and editing_activity_ok

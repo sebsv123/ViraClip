@@ -58,12 +58,22 @@ def verify_final_filename_contract(
     broll_events: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     name = final_path.name
+    broll_count = len(broll_events or [])
+    broll_final_verified = any(
+        bool((item or {}).get("broll_final_verified"))
+        or bool((item or {}).get("broll_transition_applied"))
+        or bool((item or {}).get("broll_ken_burns_applied"))
+        or bool((item or {}).get("asset_path"))
+        or bool((item or {}).get("asset_url"))
+        for item in (broll_events or [])
+    )
+    broll_actual = bool(broll_count > 0 and broll_final_verified and ("broll_" in name or broll_count > 0))
     checks = {
         "music": bool((music or {}).get("music_applied") and "music_" in name),
         "sfx": bool((sfx or {}).get("sfx_applied") and "sfx_" in name),
         "trans": bool((transitions or {}).get("transitions_applied") and "trans_" in name),
         "vfx": bool((visual_effects or {}).get("visual_effects_applied") and "vfx_" in name),
-        "broll": bool(broll_events) == ("broll_" in name),
+        "broll": broll_actual,
     }
     warnings: List[str] = []
     if (music or {}).get("music_applied") != ("music_" in name):
@@ -74,8 +84,10 @@ def verify_final_filename_contract(
         warnings.append("trans_marker_missing_or_false_positive")
     if (visual_effects or {}).get("visual_effects_applied") != ("vfx_" in name):
         warnings.append("vfx_marker_missing_or_false_positive")
-    if bool(broll_events) != ("broll_" in name):
-        warnings.append("broll_marker_missing_or_false_positive")
+    if "broll_" in name and not broll_actual:
+        warnings.append("broll_marker_false_positive")
+    elif broll_count > 0 and not broll_actual:
+        warnings.append("broll_planned_not_final_verified")
     logger.info(
         "[final-contract] music=%s sfx=%s trans=%s vfx=%s broll=%s path=%s",
         str(checks["music"]).lower(),
@@ -3227,6 +3239,7 @@ class VideoService:
                     broll_events=_editorial_broll_for_status,
                     transition_events=(_transition_metadata or {}).get("transition_events") or [],
                     editorial_type=str(segment.get("editorial_type") or ""),
+                    segment_text=str(segment.get("text") or ""),
                 )
                 if _sfx_metadata.get("sfx_applied") and _sfx_out.exists():
                     _sfx_input = output_path
@@ -4124,24 +4137,34 @@ class VideoService:
 
             if relevant_parts is None:
                 if get_service_config().beta_clean:
-                    segment_end = min(file_duration or 30.0, 60.0)
-                    end_minutes = int(segment_end) // 60
-                    end_seconds = int(segment_end) % 60
                     logger.info("[beta-clean] local segment selection only")
+                    from .vpi_retention_editing_service import build_clean_take_candidates
+
+                    _pool = build_clean_take_candidates(
+                        transcript,
+                        transcript_duration_s=float(file_duration or 0.0),
+                        num_clips=num_clips,
+                    )
+                    _segments = list(_pool.get("segments") or [])
+                    if not _segments:
+                        segment_end = min(file_duration or 30.0, 60.0)
+                        end_minutes = int(segment_end) // 60
+                        end_seconds = int(segment_end) % 60
+                        _segments = [
+                            {
+                                "start_time": "00:00",
+                                "end_time": f"{end_minutes:02d}:{end_seconds:02d}",
+                                "text": transcript,
+                                "relevance_score": 0.5,
+                                "virality_score": 40,
+                                "reasoning": "beta-clean local segment fallback",
+                            }
+                        ]
                     relevant_parts = _SimpleResult(
                         {
                             "summary": None,
-                            "key_topics": [],
-                            "most_relevant_segments": [
-                                {
-                                    "start_time": "00:00",
-                                    "end_time": f"{end_minutes:02d}:{end_seconds:02d}",
-                                    "text": transcript,
-                                    "relevance_score": 0.5,
-                                    "virality_score": 40,
-                                    "reasoning": "beta-clean local segment",
-                                }
-                            ],
+                            "key_topics": _pool.get("topics", []),
+                            "most_relevant_segments": _segments,
                             "broll_opportunities": [],
                         }
                     )
@@ -4170,6 +4193,34 @@ class VideoService:
                     }
                     await cache_manager.set("ai_analysis", video_hash, cache_payload)
                     logger.info(f"[CACHE] Saved AI analysis to smart cache")
+
+            if get_service_config().beta_clean:
+                try:
+                    from .vpi_retention_editing_service import build_clean_take_candidates
+
+                    _existing_segments = list(getattr(relevant_parts, "most_relevant_segments", []) or [])
+                    _pool = build_clean_take_candidates(
+                        transcript,
+                        transcript_duration_s=float(file_duration or 0.0),
+                        num_clips=num_clips,
+                    )
+                    _pool_segments = list(_pool.get("segments") or [])
+                    if len(_pool_segments) > len(_existing_segments):
+                        relevant_parts.most_relevant_segments = _pool_segments
+                        relevant_parts.key_topics = _pool.get("topics", [])
+                        logger.info(
+                            "[candidate-pool-source] replacing_initial_segments existing=%d clean_pool=%d",
+                            len(_existing_segments),
+                            len(_pool_segments),
+                        )
+                    else:
+                        logger.info(
+                            "[candidate-pool-source] keeping_initial_segments existing=%d clean_pool=%d",
+                            len(_existing_segments),
+                            len(_pool_segments),
+                        )
+                except Exception as _pool_e:
+                    logger.warning("[candidate-pool-source] failed reason=%s", _pool_e)
 
             # Step 3.1: Elite Creative Direction — bypassed (Groq 400/429 always fails)
             if progress_callback:
@@ -4400,6 +4451,14 @@ class VideoService:
                     )
                 return seg
 
+            def _apply_content_quality_filter(items: List[Dict[str, Any]]) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+                try:
+                    from .vpi_retention_editing_service import filter_content_quality_candidates
+                    return filter_content_quality_candidates(items, requested=num_clips)
+                except Exception as _cq_e:
+                    logger.warning("[content-quality] skipped reason=%s", _cq_e)
+                    return items, []
+
             def _dedupe_editorial_segments(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 best_by_key: Dict[str, Dict[str, Any]] = {}
                 result: List[Dict[str, Any]] = []
@@ -4534,6 +4593,13 @@ class VideoService:
                 logger.info("[EDITORIAL] propagated_fields=%s", ",".join(propagated))
                 logger.info("[EDITORIAL] ranking uses editorial_score/final_rank_score")
             segments_json = _dedupe_editorial_segments(segments_json)
+            _candidate_pool_generated = len(segments_json)
+            segments_json, _content_quality_rejections = _apply_content_quality_filter(segments_json)
+            logger.info(
+                "[candidate-pool] generated=%d after_quality_filter=%d",
+                _candidate_pool_generated,
+                len(segments_json),
+            )
 
             # ── CAUSA 5 guard: pad with synthetic segments if AI returned too few ──
             if len(segments_json) < num_clips and file_duration and file_duration > 0:
@@ -4574,16 +4640,50 @@ class VideoService:
                     f"[SEGMENT-PAD] Now have {len(segments_json)} segments after padding"
                 )
             segments_json = _dedupe_editorial_segments(segments_json)
+            _candidate_pool_after_pad = len(segments_json)
+            segments_json, _more_quality_rejections = _apply_content_quality_filter(segments_json)
+            _content_quality_rejections.extend(_more_quality_rejections)
+            logger.info(
+                "[candidate-pool] generated=%d after_quality_filter=%d",
+                _candidate_pool_after_pad,
+                len(segments_json),
+            )
             segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
+            if get_service_config().beta_clean and num_clips >= 3:
+                _topic_priority = ("decesos", "salud", "autonomos")
+                _selected_topic_segments: List[Dict[str, Any]] = []
+                _selected_ids: set[int] = set()
+                for _topic in _topic_priority:
+                    _topic_match = next(
+                        (
+                            seg for seg in segments_json
+                            if str(seg.get("clean_take_topic") or "") == _topic
+                            and id(seg) not in _selected_ids
+                        ),
+                        None,
+                    )
+                    if _topic_match is not None:
+                        _selected_topic_segments.append(_topic_match)
+                        _selected_ids.add(id(_topic_match))
+                        logger.info(
+                            "[clip-topic] selected topic=%s start=%s end=%s",
+                            _topic,
+                            _topic_match.get("start_time"),
+                            _topic_match.get("end_time"),
+                        )
+                if len(_selected_topic_segments) >= min(num_clips, len(_topic_priority)):
+                    _rest = [seg for seg in segments_json if id(seg) not in _selected_ids]
+                    segments_json = _selected_topic_segments + _rest
             # ── Render a buffer of +2 extra segments so that if 1-2 clips fail to
             # render the save loop can still fill the requested quota.
             # The save loop in task_service.py caps successful saves at num_clips.
-            render_buffer = num_clips + 2
+            render_buffer = min(max(num_clips + 5, 8), 12)
             segments_json = segments_json[:render_buffer]
             logger.info(
                 f"[PIPELINE] Selected {len(segments_json)} segments for render "
                 f"(quota={num_clips}, buffer={render_buffer})"
             )
+            logger.info("[candidate-pool] after_diversity=%d", len(segments_json))
 
             # Step 4.5: Apply hook pattern analysis to enhance virality scoring
             if progress_callback:
@@ -4697,6 +4797,7 @@ class VideoService:
             if isinstance(_diversity_metadata, dict):
                 _diversity_metadata["weak_intro_excluded_count"] = _weak_intro_excluded_count
                 _diversity_metadata["weak_intro_selected_reason"] = _weak_intro_selected_reason
+                _diversity_metadata["content_quality_rejections"] = _content_quality_rejections
                 _diversity_metadata["editorial_mix_selected"] = [
                     str(seg.get("editorial_type") or "") for seg in segments_json[:num_clips]
                 ]

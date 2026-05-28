@@ -8,7 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from src.services.vpi_publishable_gate import evaluate_clip_publishability  # noqa: E402
-from src.services.vpi_retention_editing_service import build_retention_editing_plan, retention_plan_metadata  # noqa: E402
+from src.services.vpi_music_service import DEFAULT_MUSIC_TARGET_DB  # noqa: E402
+from src.services.vpi_retention_editing_service import (  # noqa: E402
+    build_delivery_contract,
+    build_retention_editing_plan,
+    evaluate_content_quality,
+    filter_content_quality_candidates,
+    retention_plan_metadata,
+)
 from src.services.vpi_silence_editor import build_silence_edit_plan  # noqa: E402
 
 
@@ -83,11 +90,50 @@ def main() -> int:
         "output_qc": {"passed": True, "overall_score": 95},
         "vpi_score": 95,
         "virality_score": 90,
+        "text": (
+            "Un seguro de vida protege a tu familia, cubre responsabilidades y da "
+            "tranquilidad si aparece un riesgo serio con hipoteca o hijos."
+        ),
+        "start_time": "00:30",
+        "end_time": "01:00",
     })
     assert strong.retention_quality_status == "strong"
+
+    bts = {
+        "text": "Claro ok ahi esta ya si papa cheverisimo listo perfecto",
+        "start_time": "00:00",
+        "end_time": "00:30",
+    }
+    assert evaluate_content_quality(bts)["content_quality_reason"] == "behind_the_scenes_low_speech"
+
+    insurance = {
+        "text": (
+            "El seguro de vida protege a tu familia, cubre responsabilidades y ayuda "
+            "a mantener tranquilidad cuando existe hipoteca, hijos o un riesgo real. "
+            "También organiza cobertura, protección, estabilidad económica, acompañamiento, "
+            "consejo profesional y margen para reaccionar ante un imprevisto importante, "
+            "cuidando opciones, tiempos, decisiones, ingresos y continuidad familiar."
+        ),
+        "start_time": "00:30",
+        "end_time": "01:00",
+        "bts_contamination_ratio": 0.0,
+        "useful_content_ratio": 0.8,
+    }
+    assert evaluate_content_quality(insurance)["content_quality_label"] == "accept"
+    accepted, rejected = filter_content_quality_candidates([insurance] * 6, requested=3)
+    assert len(accepted) >= 3
+    assert build_delivery_contract(requested=3, delivered=3, rejected_reasons=rejected)["shortage_reason"] == ""
+    accepted, rejected = filter_content_quality_candidates([insurance, bts], requested=3)
+    assert build_delivery_contract(requested=3, delivered=len(accepted), rejected_reasons=rejected)["shortage_reason"]
+    assert int(DEFAULT_MUSIC_TARGET_DB) == -21
+
     print("hook_subtitle_only_fails=true")
     print("silence_preserve_and_cut=true")
     print("retention_gate_strong=true")
+    print("behind_the_scenes_rejected=true")
+    print("insurance_content_passes=true")
+    print("delivery_contract_shortage_logged=true")
+    print("music_target_db=-21")
     print(f"retention_score={plan.retention_score}")
     return 0
 
