@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration (read once at import, stable for process lifetime) ──────────
 
-BROLL_PROVIDER_PRIORITY = os.environ.get("BROLL_PROVIDER_PRIORITY", "premium_first")
-BROLL_ENABLE_PREMIUM = os.environ.get("BROLL_ENABLE_PREMIUM", "true").lower() not in ("false", "0", "no")
+# Beta defaults: stock_first, premium disabled, stock enabled
+BROLL_PROVIDER_PRIORITY = os.environ.get("BROLL_PROVIDER_PRIORITY", "stock_first")
+BROLL_ENABLE_PREMIUM = os.environ.get("BROLL_ENABLE_PREMIUM", "false").lower() not in ("false", "0", "no")
 BROLL_ENABLE_STOCK = os.environ.get("BROLL_ENABLE_STOCK", "true").lower() not in ("false", "0", "no")
 
 # Quality gate thresholds — RAISED for WOW quality (reject mediocre assets)
@@ -36,6 +37,10 @@ _MIN_ASSET_SIZE_BYTES = int(os.environ.get("BROLL_MIN_ASSET_SIZE", "50000"))    
 _MIN_ASSET_DURATION = float(os.environ.get("BROLL_MIN_ASSET_DURATION", "2.0"))    # 2.0 s (was 0.8) — ensures meaningful B-roll
 _MIN_VERTICAL_AR = float(os.environ.get("BROLL_MIN_VERTICAL_AR", "0.75"))          # h/w ≥ 0.75 (was 0.7) — stricter vertical
 _MIN_RESOLUTION_HEIGHT = int(os.environ.get("BROLL_MIN_RESOLUTION_HEIGHT", "720"))  # ≥ 720 px (was 480) — HD minimum
+
+# Duration guard constants for B-roll cue placement
+BROLL_MIN_CLIP_DURATION_SEC = float(os.environ.get("BROLL_MIN_CLIP_DURATION_SEC", "4.0"))   # skip B-roll on clips shorter than this
+BROLL_MAX_DURATION_RATIO = float(os.environ.get("BROLL_MAX_DURATION_RATIO", "0.6"))          # B-roll overlay ≤ 60% of clip duration
 
 
 # ── Provider enum ─────────────────────────────────────────────────────────────

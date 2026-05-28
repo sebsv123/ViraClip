@@ -290,7 +290,15 @@ async def worker_startup(ctx: Dict[str, Any]) -> None:
 
     logger.info("Worker starting up...")
 
+    # ── GPU probe: log GPU capability status at startup ───────────────────
+    try:
+        from ..utils.gpu_utils import log_gpu_status as _log_gpu
+        _log_gpu()
+    except Exception as _gpu_e:
+        logger.debug("[gpu] Worker startup probe skipped: %s", _gpu_e)
+
     # ── FIX: Limpiar locks fantasma de sesiones anteriores ────────────────
+
     redis = ctx.get('redis')
     if redis:
         try:

@@ -235,12 +235,13 @@ class SemanticBrollService:
         return None
     
     def _extract_keywords(self, text: str) -> str:
-        """Extract key nouns and verbs for search query"""
+        """Extract key nouns and verbs for search query (EN + ES)"""
         # Simple keyword extraction (could use NLP for better results)
         words = text.lower().split()
         
-        # Remove common stop words
+        # Remove common stop words (English + Spanish)
         stop_words = {
+            # English
             "the", "a", "an", "is", "are", "was", "were", 
             "be", "been", "being", "have", "has", "had",
             "do", "does", "did", "will", "would", "could",
@@ -248,7 +249,27 @@ class SemanticBrollService:
             "can", "need", "dare", "ought", "used", "to",
             "and", "but", "or", "yet", "so", "for", "nor",
             "at", "by", "from", "in", "into", "of", "off",
-            "on", "onto", "out", "over", "to", "up", "with"
+            "on", "onto", "out", "over", "to", "up", "with",
+            # Spanish
+            "el", "la", "los", "las", "un", "una", "unos", "unas",
+            "es", "son", "era", "eran", "ser", "estar", "está",
+            "están", "estaba", "estaban", "ha", "han", "había",
+            "habían", "he", "has", "hemos", "haber",
+            "y", "e", "o", "u", "pero", "sino", "porque",
+            "que", "cual", "cuales", "quien", "quienes",
+            "como", "cuando", "donde", "por qué", "para qué",
+            "no", "si", "ni", "también", "solo", "solamente",
+            "muy", "más", "menos", "tan", "tanto",
+            "con", "sin", "de", "del", "en", "por", "para",
+            "hacia", "entre", "sobre", "tras", "durante",
+            "este", "esta", "estos", "estas", "ese", "esa",
+            "esos", "esas", "aquel", "aquella", "aquellos", "aquellas",
+            "mi", "tu", "su", "nuestro", "vuestro", "sus",
+            "yo", "tú", "él", "ella", "nosotros", "vosotros", "ellos",
+            "me", "te", "se", "nos", "os", "lo", "la", "le",
+            "ya", "bien", "casi", "quizás", "tal vez",
+            "después", "antes", "ahora", "luego", "entonces",
+            "aquí", "allí", "ahí", "allá"
         }
         
         keywords = [w for w in words if w not in stop_words and len(w) > 3]

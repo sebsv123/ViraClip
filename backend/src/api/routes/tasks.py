@@ -66,6 +66,20 @@ def _get_user_id_from_headers(request: Request) -> str:
     return user_id
 
 
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
 async def _require_task_owner(
     request: Request, task_service: TaskService, db: AsyncSession, task_id: str
 ):
@@ -127,7 +141,8 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     font_size = _normalize_font_size(font_options.get("font_size", 24))
     font_color = _normalize_font_color(font_options.get("font_color", "#FFFFFF"))
     caption_template = data.get("caption_template", "default")
-    include_broll = data.get("include_broll", False)
+    include_broll = _parse_bool(data.get("include_broll"), False)
+    logger.info("[tasks] create include_broll=%s", str(include_broll).lower())
     processing_mode = data.get("processing_mode", config.default_processing_mode)
     
     # Viral editing features
@@ -190,7 +205,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
     if target_platform not in {"tiktok", "reels", "shorts", "all"}:
         target_platform = "all"
     generate_ab_variants = bool(data.get("generate_ab_variants", False))  # P3.5
-    num_clips = max(3, min(10, int(data.get("num_clips", 6))))
+    num_clips = max(1, min(10, int(data.get("num_clips", 6))))
     if not raw_source or not raw_source.get("url"):
         raise HTTPException(status_code=400, detail="Source URL is required")
 
@@ -290,6 +305,7 @@ async def create_task(request: Request, db: AsyncSession = Depends(get_db)):
         return {
             "task_id": task_id,
             "job_id": job_id,
+            "include_broll": include_broll,
             "message": "Task created and queued for processing",
         }
 
@@ -358,7 +374,7 @@ async def batch_start(request: Request, db: AsyncSession = Depends(get_db)):
         "font_size": _normalize_font_size(font_options.get("font_size", 24)),
         "font_color": _normalize_font_color(font_options.get("font_color", "#FFFFFF")),
         "caption_template": data.get("caption_template", "default"),
-        "include_broll": data.get("include_broll", False),
+        "include_broll": _parse_bool(data.get("include_broll"), False),
         "processing_mode": data.get("processing_mode", config.default_processing_mode),
         "output_format": data.get("output_format", "vertical"),
         "add_subtitles": data.get("add_subtitles", True),
@@ -1127,7 +1143,7 @@ async def apply_task_settings(
         font_size = _normalize_font_size(payload.get("font_size", 24))
         font_color = _normalize_font_color(payload.get("font_color", "#FFFFFF"))
         caption_template = payload.get("caption_template", "default")
-        include_broll = bool(payload.get("include_broll", False))
+        include_broll = _parse_bool(payload.get("include_broll"), False)
         apply_to_existing = bool(payload.get("apply_to_existing", False))
 
         task_service = TaskService(db)

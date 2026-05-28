@@ -216,7 +216,10 @@ class GeneratedClip(Base):
     __tablename__ = "generated_clips"
 
     id: Mapped[str] = mapped_column(
-        String(36), primary_key=True, default=generate_uuid_string
+        String(36),
+        primary_key=True,
+        default=generate_uuid_string,
+        server_default=sql_text("gen_random_uuid()::text"),
     )
     task_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False

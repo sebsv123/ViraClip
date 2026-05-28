@@ -9,6 +9,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from ..config import get_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,10 @@ class VideoPolishService:
         
         If SAM2_ENABLED=true, uses enhanced multi-subject tracking instead.
         """
+        # Beta-clean mode: skip expensive face-tracking crop
+        if get_config().beta_clean:
+            return False
+
         # Check if enhanced tracking should be used
         sam2_enabled = os.environ.get("SAM2_ENABLED", "false").lower() == "true"
         
@@ -320,6 +326,10 @@ class VideoPolishService:
 
         Falls back to pass-through if face detection fails entirely.
         """
+        # Beta-clean mode: skip expensive gaze correction
+        if get_config().beta_clean:
+            return
+
         logger.info(f"👁 Applying OpenCV gaze correction to {input_path.name}")
 
         CORRECTION_FACTOR = 0.30   # 0=no change, 1=full center; 0.30 = subtle
@@ -700,6 +710,10 @@ class VideoPolishService:
 
         Falls back to a simple FFmpeg boxblur pass when MediaPipe is unavailable.
         """
+        # Beta-clean mode: skip expensive background blur
+        if get_config().beta_clean:
+            return False
+
         logger.info("🌫️  Starting background blur: %s", input_path.name)
         BLUR_STR = f"{blur_radius}:{blur_radius}"
 

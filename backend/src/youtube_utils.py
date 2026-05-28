@@ -4,6 +4,7 @@ Optimized for Apify-first downloads with direct yt-dlp fallback.
 """
 
 import asyncio
+import shutil
 from datetime import datetime
 import logging
 import os
@@ -21,6 +22,60 @@ from .apify_youtube_downloader import ApifyDownloadError, download_video_via_api
 from .config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+
+def _resolve_task_scoped_path(
+    temp_dir: Path,
+    video_id: str,
+    task_id: Optional[str] = None,
+) -> Path:
+    """
+    Return a task-scoped source path for the given video_id.
+
+    When task_id is provided:
+      1. Create a task-scoped directory: {temp_dir}/tasks/{task_id}/
+      2. If a shared cache file {temp_dir}/{video_id}.mp4 already exists,
+         copy it to the task-scoped path (do NOT move — other tasks may need it).
+      3. Return the task-scoped path.
+
+    When task_id is None, return the shared path {temp_dir}/{video_id}.mp4
+    (legacy behaviour).
+    """
+    if not task_id:
+        return temp_dir / f"{video_id}.mp4"
+
+    task_dir = temp_dir / "tasks" / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    task_path = task_dir / f"{video_id}.mp4"
+
+    # If the task-scoped file already exists, return it directly
+    if task_path.exists():
+        return task_path
+
+    # Look for a shared cache file to copy from
+    shared_path = temp_dir / f"{video_id}.mp4"
+    if shared_path.exists():
+        logger.info(
+            "[download] Copying shared cache %s → task-scoped %s",
+            shared_path, task_path,
+        )
+        shutil.copy2(shared_path, task_path)
+    else:
+        # Try to find any video file matching video_id.* in temp_dir
+        candidates = list(temp_dir.glob(f"{video_id}.*"))
+        video_extensions = {".mp4", ".mkv", ".webm", ".mov", ".m4v"}
+        for c in candidates:
+            if c.suffix.lower() in video_extensions:
+                logger.info(
+                    "[download] Copying shared cache %s → task-scoped %s",
+                    c, task_path,
+                )
+                shutil.copy2(c, task_path)
+                break
+
+    return task_path
+
 
 
 def _get_browser_cookies_config():
@@ -626,6 +681,22 @@ def _download_youtube_video_with_ytdlp(
                 logger.info(
                     f"Download successful: {best_downloaded_file.name} ({file_size // 1024 // 1024}MB, {width}x{height})"
                 )
+
+                # Resolve task-scoped path to avoid shared-file races between tasks
+                if task_id:
+                    task_scoped = _resolve_task_scoped_path(
+                        downloader.temp_dir, video_id, task_id,
+                    )
+                    # If the best file is not already the task-scoped path, copy it
+                    if best_downloaded_file.resolve() != task_scoped.resolve():
+                        logger.info(
+                            "[download] Copying %s → task-scoped %s",
+                            best_downloaded_file.name, task_scoped,
+                        )
+                        shutil.copy2(best_downloaded_file, task_scoped)
+                        logger.info("[download] task-scoped source path: %s", task_scoped)
+                        return task_scoped
+
                 return best_downloaded_file
 
             logger.warning("No video file found after download attempt %s", attempt + 1)
@@ -680,7 +751,7 @@ def download_youtube_video(
     _remove_cached_downloads(downloader.temp_dir, video_id)
 
     config = get_config()
-    if config.apify_api_token:
+    if config.apify_api_token and not config.beta_clean:
         try:
             downloaded_path = download_youtube_video_with_apify(url, video_id)
             file_size = downloaded_path.stat().st_size
@@ -692,6 +763,20 @@ def download_youtube_video(
                 width,
                 height,
             )
+            # Resolve task-scoped path to avoid shared-file races between tasks
+            if task_id:
+                task_scoped = _resolve_task_scoped_path(
+                    downloader.temp_dir, video_id, task_id,
+                )
+                # If the downloaded file is not already the task-scoped path, copy it
+                if downloaded_path.resolve() != task_scoped.resolve():
+                    logger.info(
+                        "[download] Copying Apify result %s → task-scoped %s",
+                        downloaded_path.name, task_scoped,
+                    )
+                    shutil.copy2(downloaded_path, task_scoped)
+                    logger.info("[download] task-scoped source path: %s", task_scoped)
+                    return task_scoped
             return downloaded_path
         except ApifyDownloadError as exc:
             logger.warning("Apify download failed for %s, falling back to yt-dlp: %s", url, exc)

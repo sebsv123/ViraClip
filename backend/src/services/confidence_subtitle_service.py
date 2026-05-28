@@ -28,6 +28,8 @@ class ConfidenceSubtitleGenerator:
         stroke_color: str = "&H00000000",       # negro
         position_y_pct: float = 0.75,
         emphasis_threshold: float = EMPHASIS_SCORE_THRESHOLD,
+        model_size: Optional[str] = None,
+        device: Optional[str] = None,
     ):
         self.font_name = font_name
         self.font_size = font_size
@@ -37,6 +39,8 @@ class ConfidenceSubtitleGenerator:
         self.stroke_color = stroke_color
         self.position_y_pct = position_y_pct
         self.emphasis_threshold = emphasis_threshold
+        self.model_size = model_size
+        self.device = device
     
     def _word_color(self, word: dict) -> str:
         """
@@ -152,6 +156,42 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             return ""
 
         return self.generate_ass(all_words, video_width, video_height, output_path)
+
+    def transcribe_with_confidence(self, audio_path: str) -> list:
+        """
+        Compatibility shim for legacy callers.
+
+        This lightweight generator no longer owns Whisper transcription. Returning
+        an empty list lets the caller continue to the next subtitle source without
+        raising constructor or attribute errors.
+        """
+        logger.warning(
+            "[Subtitles] transcribe_with_confidence unavailable in lightweight generator; "
+            "returning no segments for %s",
+            audio_path,
+        )
+        return []
+
+    def realign_on_segment(
+        self,
+        segment_video_path: str,
+        original_words: List[Dict[str, Any]],
+        language: Optional[str] = None,
+        anticipation_offset_ms: float = 0.0,
+    ) -> list:
+        """
+        Compatibility shim for the realignment hook.
+
+        No forced-alignment model is available in this class, so do not invent new
+        timings. Return an empty result and let video_service keep the current
+        adjusted timeline.
+        """
+        logger.warning(
+            "[RE-ALIGN] ConfidenceSubtitleGenerator has no alignment backend; "
+            "keeping existing words for %s",
+            segment_video_path,
+        )
+        return []
 
 
 # Legacy compatibility functions

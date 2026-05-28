@@ -41,6 +41,7 @@ from ..utils.resource_manager import (
     should_throttle_processing,
 )
 from .comfyui_integration import comfyui_integration
+from .vpi_publishable_gate import evaluate_clip_publishability, rank_clips
 
 logger = logging.getLogger(__name__)
 
@@ -911,6 +912,19 @@ class TaskService:
                 f"[RENDER SUMMARY] {successful_renders}/{total_clips} OK — "
                 f"saving up to {num_clips} clips to DB"
             )
+            _batch_broll_counts: Dict[str, int] = {}
+            for _ri, _rinfo, _relapsed in render_results:
+                if not _rinfo:
+                    continue
+                for _broll_item in (_rinfo.get("editorial_broll") or []):
+                    _asset_id = str(
+                        _broll_item.get("asset_id")
+                        or _broll_item.get("asset_path")
+                        or _broll_item.get("asset_url")
+                        or ""
+                    )
+                    if _asset_id:
+                        _batch_broll_counts[_asset_id] = _batch_broll_counts.get(_asset_id, 0) + 1
             # ──────────────────────────────────────────────────────────────────
 
             # Persist results sequentially (DB ops must be on the event loop thread)
@@ -938,6 +952,62 @@ class TaskService:
                     )
                     continue
 
+                _clip_broll_asset_ids = [
+                    str(
+                        item.get("asset_id")
+                        or item.get("asset_path")
+                        or item.get("asset_url")
+                        or ""
+                    )
+                    for item in (clip_info.get("editorial_broll") or [])
+                    if item
+                ]
+                _clip_broll_asset_ids = [item for item in _clip_broll_asset_ids if item]
+                if any(_batch_broll_counts.get(item, 0) > 1 for item in _clip_broll_asset_ids):
+                    _warnings = list(clip_info.get("publishable_warnings") or [])
+                    if "repeated_exact_broll_same_task" not in _warnings:
+                        _warnings.append("repeated_exact_broll_same_task")
+                    clip_info["publishable_status"] = "not_ready"
+                    clip_info["publishable_warnings"] = _warnings
+                    clip_info["publishable_score"] = 0.0
+                    if isinstance(clip_info.get("editing_plan"), dict):
+                        clip_info["editing_plan"]["publishable_status"] = "not_ready"
+                        clip_info["editing_plan"]["publishable_warnings"] = _warnings
+                        clip_info["editing_plan"]["publishable_score"] = 0.0
+
+                # ── VPI Publishable Gate v3.1: evaluate clip publishability ──
+                try:
+                    _gate_result = evaluate_clip_publishability(clip_info, segment)
+                    clip_info["publishable_status"] = _gate_result.publishable_status.value
+                    clip_info["publishable_score"] = _gate_result.publishable_score
+                    clip_info["publishable_reasons"] = _gate_result.publishable_reasons
+                    clip_info["publishable_warnings"] = _gate_result.publishable_warnings
+                    clip_info["upload_recommendation"] = _gate_result.upload_recommendation.value
+                    clip_info["best_candidate"] = _gate_result.best_candidate
+                    clip_info["discard_recommended"] = _gate_result.discard_recommended
+                    clip_info["publishable_gate"] = _gate_result.to_dict()
+                    if isinstance(clip_info.get("editing_plan"), dict):
+                        clip_info["editing_plan"]["publishable_status"] = _gate_result.publishable_status.value
+                        clip_info["editing_plan"]["publishable_score"] = _gate_result.publishable_score
+                        clip_info["editing_plan"]["publishable_warnings"] = _gate_result.publishable_warnings
+                        clip_info["editing_plan"]["upload_recommendation"] = _gate_result.upload_recommendation.value
+                        clip_info["editing_plan"]["best_candidate"] = _gate_result.best_candidate
+                        clip_info["editing_plan"]["discard_recommended"] = _gate_result.discard_recommended
+                    logger.info(
+                        "[publishable-gate] clip %d status=%s score=%.1f reasons=%s",
+                        i + 1,
+                        _gate_result.publishable_status.value,
+                        _gate_result.publishable_score,
+                        _gate_result.publishable_reasons,
+                    )
+                except Exception as _pg_e:
+                    logger.warning("[publishable-gate] evaluation failed for clip %d: %s", i + 1, _pg_e)
+                    # Fallback: keep existing publishable fields if set, else defaults
+                    clip_info.setdefault("publishable_status", "unknown")
+                    clip_info.setdefault("publishable_score", 0.0)
+                    clip_info.setdefault("publishable_warnings", [])
+                    clip_info.setdefault("publishable_reasons", [f"gate_evaluation_error: {_pg_e}"])
+
                 translated_text = clip_info.get("translated_text")
                 saved_clips += 1
 
@@ -960,6 +1030,26 @@ class TaskService:
                             "virality_score": segment.get("virality_score"),
                         }
                     }
+                _daily_meta = {
+                    "daily_publishing": {
+                        "editing_plan": clip_info.get("editing_plan"),
+                        "hook_plan": clip_info.get("hook_plan"),
+                        "silence_edit_plan": clip_info.get("silence_edit_plan"),
+                        "output_qc": clip_info.get("output_qc"),
+                        "publishable_status": clip_info.get("publishable_status"),
+                        "publishable_warnings": clip_info.get("publishable_warnings", []),
+                        "publishable_score": clip_info.get("publishable_score"),
+                        "brand_treatment": clip_info.get("brand_treatment"),
+                        "music": clip_info.get("music"),
+                        "sfx": clip_info.get("sfx"),
+                        "speaker_focus": clip_info.get("speaker_focus"),
+                        "editing_richness_score": clip_info.get("editing_richness_score"),
+                        "editing_richness_status": clip_info.get("editing_richness_status"),
+                        "editing_richness_warnings": clip_info.get("editing_richness_warnings", []),
+                        "smart_reframe": clip_info.get("smart_reframe"),
+                        "subtitle_intelligence": clip_info.get("subtitle_intelligence"),
+                    }
+                }
                 # Merge with existing variants_json (preserve previous content)
                 _existing_variants = clip_info.get("variants") or {}
                 if isinstance(_existing_variants, str):
@@ -967,7 +1057,7 @@ class TaskService:
                         _existing_variants = __import__("json").loads(_existing_variants)
                     except Exception:
                         _existing_variants = {}
-                _merged_variants = {**_existing_variants, **_vpi_meta}
+                _merged_variants = {**_existing_variants, **_vpi_meta, **_daily_meta}
                 _variants_json_str = (
                     __import__("json").dumps(_merged_variants)
                     if _merged_variants else None
@@ -1069,6 +1159,22 @@ class TaskService:
                         "suggested_broll_cue_type": clip_info.get("suggested_broll_cue_type"),
                         "caption_source": "cached_words" if clip_info.get("words") else "fallback",
                         "broll": _broll_info,
+                        "editing_plan": clip_info.get("editing_plan"),
+                        "hook_plan": clip_info.get("hook_plan"),
+                        "silence_edit_plan": clip_info.get("silence_edit_plan"),
+                        "output_qc": clip_info.get("output_qc"),
+                        "publishable_status": clip_info.get("publishable_status"),
+                        "publishable_warnings": clip_info.get("publishable_warnings", []),
+                        "publishable_score": clip_info.get("publishable_score"),
+                        "brand_treatment": clip_info.get("brand_treatment"),
+                        "music": clip_info.get("music"),
+                        "sfx": clip_info.get("sfx"),
+                        "speaker_focus": clip_info.get("speaker_focus"),
+                        "editing_richness_score": clip_info.get("editing_richness_score"),
+                        "editing_richness_status": clip_info.get("editing_richness_status"),
+                        "editing_richness_warnings": clip_info.get("editing_richness_warnings", []),
+                        "smart_reframe": clip_info.get("smart_reframe"),
+                        "subtitle_intelligence": clip_info.get("subtitle_intelligence"),
                         "created_at": _vpi_dt.now().isoformat(),
                     }
                     _vpi_meta_path = _vpi_dir / f"clip_{_clip_idx:02d}_metadata.json"
@@ -1163,6 +1269,22 @@ class TaskService:
                             "clip_health": _ci.get("clip_health", {}),
                             "caption_source": "cached_words" if _ci.get("words") else "fallback",
                             "broll": _ci.get("editorial_broll") or [],
+                            "editing_plan": _ci.get("editing_plan"),
+                            "hook_plan": _ci.get("hook_plan"),
+                            "silence_edit_plan": _ci.get("silence_edit_plan"),
+                            "output_qc": _ci.get("output_qc"),
+                            "publishable_status": _ci.get("publishable_status"),
+                            "publishable_warnings": _ci.get("publishable_warnings", []),
+                            "publishable_score": _ci.get("publishable_score"),
+                            "brand_treatment": _ci.get("brand_treatment"),
+                            "music": _ci.get("music"),
+                            "sfx": _ci.get("sfx"),
+                            "speaker_focus": _ci.get("speaker_focus"),
+                            "editing_richness_score": _ci.get("editing_richness_score"),
+                            "editing_richness_status": _ci.get("editing_richness_status"),
+                            "editing_richness_warnings": _ci.get("editing_richness_warnings", []),
+                            "smart_reframe": _ci.get("smart_reframe"),
+                            "subtitle_intelligence": _ci.get("subtitle_intelligence"),
                             "transcript_snippet": (_ci.get("text", "") or "")[:120],
                         }
                         _ts_clip["output_paths"] = [
@@ -1218,6 +1340,12 @@ class TaskService:
                             f"- **VPI score:** `{_ts_clip.get('vpi_score')}`",
                             f"- **VPI patterns:** `{', '.join(_ts_clip.get('matched_patterns') or [])}`",
                             f"- **VPI reason:** {_ts_clip.get('vpi_reason')}",
+                            f"- **Publishable:** `{_ts_clip.get('publishable_status')}` score=`{_ts_clip.get('publishable_score')}`",
+                            f"- **Publishable warnings:** `{', '.join(_ts_clip.get('publishable_warnings') or [])}`",
+                            f"- **Editing richness:** `{_ts_clip.get('editing_richness_status')}` score=`{_ts_clip.get('editing_richness_score')}`",
+                            f"- **Editing plan:** hook=`{(_ts_clip.get('editing_plan') or {}).get('hook_strategy')}` reframe=`{(_ts_clip.get('editing_plan') or {}).get('reframe_strategy')}` broll=`{(_ts_clip.get('editing_plan') or {}).get('broll_strategy')}`",
+                            f"- **Hook plan:** type=`{(_ts_clip.get('hook_plan') or {}).get('hook_type')}` headline=`{(_ts_clip.get('hook_plan') or {}).get('headline_text')}` rendered=`{(_ts_clip.get('hook_plan') or {}).get('rendered')}`",
+                            f"- **Silence edit:** mode=`{(_ts_clip.get('silence_edit_plan') or {}).get('mode')}` cuts=`{((_ts_clip.get('silence_edit_plan') or {}).get('summary') or {}).get('total_cuts_applied')}` removed=`{(_ts_clip.get('silence_edit_plan') or {}).get('total_removed_s')}`",
                             f"- **Caption source:** {_ts_clip['caption_source']}",
                             f"- **Output path:** `{_ts_clip['output_path']}`",
                             f"- **Organized output:** `{_ts_clip['organized_output_path']}`",
@@ -1304,6 +1432,17 @@ class TaskService:
             # ── Single bulk update of task.clip_ids after all clips complete ──
             if clip_ids:
                 await self.task_repo.update_task_clips(self.db, task_id, clip_ids)
+
+            # ── VPI Publishable Gate v3.1: rank clips after render ──
+            try:
+                ranked_clips = rank_clips(render_results)
+                logger.info(
+                    "[publishable-gate] ranked %d clips — best_candidate=%s",
+                    len(ranked_clips),
+                    next((c.get("best_candidate") for c in ranked_clips if c.get("best_candidate")), None),
+                )
+            except Exception as _rank_e:
+                logger.warning("[publishable-gate] ranking failed: %s", _rank_e)
 
             render_elapsed = round(perf_counter() - render_start, 3)
             stage_timings["render_seconds"] = render_elapsed

@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 SILENCE_THRESHOLD: float = 0.8   # seconds — gaps longer than this are removed (was 0.4; raised to protect dramatic pauses)
 MIN_SILENCE_SAVINGS: float = 3.0  # only apply filter if we save at least this many seconds (was 1.5)
 MAX_COMPRESSION_RATIO: float = 0.30  # never remove more than 30% of a clip's duration
+MAX_SILENCE_REMOVAL: float = 2.5  # hard cap on total seconds removed (beta guard)
+HOOK_ZONE_SECONDS: float = 3.0   # first N seconds of clip are never cut (hook/gancho protection)
 SILENCE_MODE: str = os.environ.get("SILENCE_MODE", "cut").lower()  # "cut" | "ramp"
 RAMP_SPEED: float = float(os.environ.get("SILENCE_RAMP_SPEED", "2.0"))  # 2x default
 
@@ -40,12 +42,18 @@ def build_keep_intervals(
     words: List[Dict[str, Any]],
     clip_duration: float,
     silence_threshold: float = SILENCE_THRESHOLD,
-    pad_before: float = 0.05,
-    pad_after: float = 0.08,
+    pad_before: float = 0.20,
+    pad_after: float = 0.25,
 ) -> Tuple[List[Tuple[float, float]], float]:
     """
     Given word-level timestamps build a list of (start, end) intervals to KEEP.
     Gaps > silence_threshold between consecutive keep-intervals are dropped.
+
+    Hook zone protection: the first HOOK_ZONE_SECONDS (3.0s) of the clip are
+    never cut, preserving the spoken hook/gancho at the beginning.
+
+    Beta guard: total removal is capped at MAX_SILENCE_REMOVAL (2.5s) to
+    prevent over-aggressive cutting.
 
     Returns:
         (intervals_to_keep, total_seconds_removed)
@@ -68,6 +76,18 @@ def build_keep_intervals(
 
     raw.sort()
 
+    # ── Hook zone protection ────────────────────────────────────────────
+    # Ensure the first interval always starts at 0.0 so the hook zone is
+    # never cut. If the first word starts within HOOK_ZONE_SECONDS, extend
+    # the first interval to cover the full hook zone.
+    hook_end = min(HOOK_ZONE_SECONDS, clip_duration)
+    if raw[0][0] < hook_end:
+        raw[0] = (0.0, max(raw[0][1], hook_end))
+        logger.info(
+            "[silence] beta guard active: preserving hook zone first %.1fs",
+            HOOK_ZONE_SECONDS,
+        )
+
     # Merge intervals whose gap is below silence_threshold
     merged: List[List[float]] = [[raw[0][0], raw[0][1]]]
     for s, e in raw[1:]:
@@ -85,6 +105,19 @@ def build_keep_intervals(
 
     total_kept    = sum(e - s for s, e in result)
     silence_saved = max(0.0, clip_duration - total_kept)
+
+    # ── Beta guard: cap total removal ───────────────────────────────────
+    if silence_saved > MAX_SILENCE_REMOVAL:
+        logger.info(
+            "[silence] capped removal from %.1fs to %.1fs (beta guard)",
+            silence_saved, MAX_SILENCE_REMOVAL,
+        )
+        # Re-add the excess by extending the last keep interval
+        excess = silence_saved - MAX_SILENCE_REMOVAL
+        if result:
+            result[-1] = (result[-1][0], min(clip_duration, result[-1][1] + excess))
+        silence_saved = MAX_SILENCE_REMOVAL
+
     return result, silence_saved
 
 

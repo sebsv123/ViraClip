@@ -649,6 +649,161 @@ def segment_words_into_lines(
     return lines
 
 
+def _highlight_indices_for_terms(words: List[Dict[str, Any]], terms: List[str]) -> List[int]:
+    normalized_terms = [str(term).lower() for term in terms if str(term).strip()]
+    indices: set[int] = set()
+    if not normalized_terms:
+        return []
+    word_texts = [
+        re.sub(r"[^\w\s'-]", "", (w.get("text") or w.get("word") or "")).strip().lower()
+        for w in words
+    ]
+    for term in normalized_terms:
+        parts = term.split()
+        if not parts:
+            continue
+        for idx in range(0, len(word_texts) - len(parts) + 1):
+            if word_texts[idx : idx + len(parts)] == parts:
+                indices.update(range(idx, idx + len(parts)))
+    return sorted(indices)
+
+
+_STRONG_PHRASE_PRIORITY = [
+    "no es solo",
+    "dependen de ti",
+    "mas adelante",
+    "más adelante",
+    "personas mayores",
+    "seguro de vida",
+    "responsabilidad",
+    "proteger",
+    "proteccion",
+    "protección",
+]
+
+
+def _select_editorial_highlights(
+    words: List[Dict[str, Any]],
+    terms: List[str],
+    editorial_type: str = "",
+    hook_first3_status: str = "",
+    hook_first3_score: int = 0,
+) -> tuple[List[int], List[Dict[str, Any]]]:
+    """Select a restrained set of VPI highlight indices.
+
+    v4.0 retention: when hook_first3_status is READY and score >= 5,
+    ensures emphasis words appear in the first 3 seconds of subtitles
+    for visual reinforcement of the hook.
+
+    The ASS renderer only knows emphasized words, so strong/medium levels are
+    stored in metadata/logs while the visual output stays deliberately sober.
+    """
+    if editorial_type == "weak_intro":
+        logger.info("[subtitle-intelligence] skipped reason=weak_intro")
+        return [], []
+
+    base_lines = segment_words_into_lines(words, max_words_per_line=5, emphasis_indices=[])
+    if not base_lines:
+        return [], []
+
+    word_lookup = [
+        re.sub(r"[^\w\s'-]", "", (w.get("text") or w.get("word") or "")).strip().lower()
+        for w in words
+    ]
+    normalized_terms = []
+    for term in terms:
+        raw = str(term).strip()
+        if not raw:
+            continue
+        normalized_terms.append((raw, raw.lower().replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")))
+
+    candidates: List[Dict[str, Any]] = []
+    for raw, norm in normalized_terms:
+        parts = norm.split()
+        if not parts:
+            continue
+        priority = _STRONG_PHRASE_PRIORITY.index(raw.lower()) if raw.lower() in _STRONG_PHRASE_PRIORITY else 99
+        level = "strong" if priority <= 5 or len(parts) > 1 else "medium"
+        for idx in range(0, len(word_lookup) - len(parts) + 1):
+            window = [
+                token.replace("á", "a").replace("é", "e").replace("í", "i").replace("ó", "o").replace("ú", "u")
+                for token in word_lookup[idx : idx + len(parts)]
+            ]
+            if window == parts:
+                candidates.append({
+                    "term": raw,
+                    "indices": list(range(idx, idx + len(parts))),
+                    "start_idx": idx,
+                    "priority": priority,
+                    "level": level,
+                })
+
+    if not candidates:
+        return [], []
+
+    selected: List[Dict[str, Any]] = []
+    selected_indices: set[int] = set()
+    previous_line_idx = -10
+    # Track timestamps for 4s window density check
+    highlight_timestamps: List[float] = []
+    for line_idx, line in enumerate(base_lines):
+        line_indices = set()
+        cursor = 0
+        for line_word in line.words:
+            target = line_word.text.lower()
+            while cursor < len(word_lookup):
+                if word_lookup[cursor] == target:
+                    line_indices.add(cursor)
+                    cursor += 1
+                    break
+                cursor += 1
+        line_candidates = [
+            item for item in candidates
+            if set(item["indices"]).issubset(line_indices)
+        ]
+        if not line_candidates:
+            continue
+        if line_idx - previous_line_idx < 1:
+            logger.info("[subtitle-intelligence] skipped reason=too_many_highlights line=%s", line_idx)
+            continue
+        line_candidates.sort(key=lambda item: (item["priority"], item["start_idx"]))
+        strong_used = False
+        per_line = 0
+        for item in line_candidates:
+            # v3.2: max 1 strong highlight per line
+            if per_line >= 1:
+                logger.info("[subtitle-intelligence] skipped reason=too_many_highlights line=%s", line_idx)
+                break
+            level = item["level"]
+            if level == "strong" and strong_used:
+                level = "medium"
+            if level == "strong":
+                strong_used = True
+            # v3.2: max 2 highlight terms in any 4s window
+            line_mid_ts = (line.line_start + line.line_end) / 2
+            highlight_timestamps.append(line_mid_ts)
+            # Prune timestamps older than 4s
+            highlight_timestamps = [t for t in highlight_timestamps if line_mid_ts - t <= 4.0]
+            if len(highlight_timestamps) > 2:
+                logger.info(
+                    "[subtitle-intelligence] skipped reason=density_4s_window line=%s count=%d",
+                    line_idx, len(highlight_timestamps),
+                )
+                highlight_timestamps.pop()
+                continue
+            selected.append({"line": line_idx, "term": item["term"], "level": level, "reason": "editorial_priority"})
+            selected_indices.update(item["indices"])
+            logger.info(
+                "[subtitle-intelligence] line=%s highlighted=%s level=%s reason=editorial_priority",
+                line_idx,
+                item["term"],
+                level,
+            )
+            per_line += 1
+        previous_line_idx = line_idx
+    return sorted(selected_indices), selected
+
+
 # ── FFmpeg burn-in ────────────────────────────────────────────────────────────
 
 async def _run_ffmpeg_caption(
@@ -800,9 +955,85 @@ async def burn_captions(
 
     Returns True on success, False on failure (video is still written as-is).
     """
-    # Extract emphasis indices from LangGraph decisions (positional override)
-    emphasis_indices = (caption_decisions or {}).get("emphasis_indices")
+    # Extract emphasis indices from LangGraph/VPI decisions (positional override)
+    caption_decisions = caption_decisions or {}
+    emphasis_indices = caption_decisions.get("emphasis_indices")
+    highlighted_terms = list(caption_decisions.get("highlighted_terms") or [])
+    hook_emphasis_words = list(caption_decisions.get("hook_emphasis_words") or [])
+    hook_subtitle_text = str(caption_decisions.get("hook_subtitle_text") or "")
+    editorial_type = str(caption_decisions.get("editorial_type") or "")
+    hook_first3_status = str(caption_decisions.get("hook_first3_status") or "")
+    hook_first3_score = int(caption_decisions.get("hook_first3_score") or 0)
+    rendered_highlights = False
+    combined_terms = hook_emphasis_words + highlighted_terms
+    # v3.2 metadata
+    captions_highlight_count = 0
+    hook_caption_applied = False
+    caption_density_warning = False
+    # v4.0 retention: first-3-seconds subtitle reinforcement
+    hook_first3_reinforced = False
+    if combined_terms:
+        term_indices, highlight_decisions = _select_editorial_highlights(words, combined_terms, editorial_type)
+        caption_decisions["highlight_decisions"] = highlight_decisions
+        captions_highlight_count = len(highlight_decisions)
+        if term_indices:
+            emphasis_indices = sorted(set(emphasis_indices or []) | set(term_indices))
+            rendered_highlights = True
+        hook_indices = _highlight_indices_for_terms(words, hook_emphasis_words)
+        if hook_indices:
+            hook_caption_applied = True
+            logger.info("[hook-subtitle] applied=true text=%s", hook_subtitle_text or "|".join(hook_emphasis_words[:2]))
+        elif hook_subtitle_text:
+            if rendered_highlights:
+                logger.info("[hook-subtitle] fallback_words=%s", "|".join(hook_emphasis_words[:3]))
+            else:
+                logger.info("[hook-subtitle] metadata_only reason=headline_not_in_transcript text=%s", hook_subtitle_text)
+        logger.info(
+            "[subtitle-intelligence] highlighted=%s rendered=%s reason=%s",
+            "|".join(combined_terms[:12]),
+            str(rendered_highlights).lower(),
+            "emphasis_indices" if rendered_highlights else "terms_not_found",
+        )
+        # v3.2: density warning if > 2 highlights in 4s window
+        if captions_highlight_count > 2:
+            caption_density_warning = True
+            logger.info("[subtitle-intelligence] caption_density_warning=true count=%d", captions_highlight_count)
+    elif str(caption_decisions.get("hook_type") or "") == "weak_intro":
+        logger.info("[hook-subtitle] skipped reason=weak_intro")
+        logger.info("[subtitle-intelligence] highlighted= rendered=false reason=weak_intro")
+    else:
+        logger.info("[subtitle-intelligence] highlighted= rendered=false reason=no_terms")
+    # Store v3.2 metadata in caption_decisions
+    caption_decisions["captions_highlight_count"] = captions_highlight_count
+    caption_decisions["hook_caption_applied"] = hook_caption_applied
+    caption_decisions["caption_density_warning"] = caption_density_warning
+    # v4.0 retention: first-3-seconds subtitle reinforcement
+    # When hook_first3_status is READY and score >= 5, ensure the first
+    # subtitle line has emphasis words for visual reinforcement of the hook.
+    if hook_first3_status == "READY" and hook_first3_score >= 5:
+        hook_first3_reinforced = True
+        logger.info(
+            "[hook-first3] subtitle_reinforcement=true status=%s score=%d",
+            hook_first3_status, hook_first3_score,
+        )
+        # Ensure hook_emphasis_words are included in emphasis_indices
+        if hook_emphasis_words and not hook_indices:
+            hook_indices = _highlight_indices_for_terms(words, hook_emphasis_words)
+            if hook_indices:
+                emphasis_indices = sorted(set(emphasis_indices or []) | set(hook_indices))
+                logger.info(
+                    "[hook-first3] emphasis_indices_reinforced=%s",
+                    hook_indices,
+                )
+        # If hook_subtitle_text is set but not found in transcript, log it
+        if hook_subtitle_text and not hook_indices:
+            logger.info(
+                "[hook-first3] hook_text_not_in_transcript text=%s",
+                hook_subtitle_text,
+            )
+    caption_decisions["hook_first3_reinforced"] = hook_first3_reinforced
     lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line, emphasis_indices=emphasis_indices)
+
     if not lines:
         logger.warning("[caption] No words provided — skipping caption burn-in")
         return False

@@ -1,5 +1,5 @@
 # === ViraClip Backend: NVIDIA CUDA + Python 3.11 ===
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -74,6 +74,13 @@ async def lifespan(app: FastAPI):
         else:
             logger.warning("⚠️ Redis unavailable - rate limiting and caching disabled")
         
+        # GPU probe: log GPU capability status at startup (respects VIRACLIP_GPU_PROBE_ON_START)
+        try:
+            from .utils.gpu_utils import log_gpu_status as _log_gpu
+            _log_gpu()
+        except Exception as _gpu_e:
+            logger.debug("[gpu] Startup probe skipped: %s", _gpu_e)
+
         # LUTService: auto-download film LUTs if not present
         try:
             from .services.lut_service import get_lut_service as _get_lut
@@ -89,6 +96,7 @@ async def lifespan(app: FastAPI):
             logger.debug(f"[LUT] Auto-download skipped: {_lut_e}")
 
         yield
+
     finally:
         await close_db()
         
@@ -187,6 +195,25 @@ try:
     app.include_router(_comp_router)
 except Exception as _ca_e:
     import logging as _log; _log.getLogger(__name__).warning(f"Competitor router skipped: {_ca_e}")
+
+# Register /clips/music/tracks BEFORE the StaticFiles mount so FastAPI routes
+# take priority over StaticFiles (otherwise StaticFiles intercepts all /clips/*).
+from .api.routes.clips import BGM_DIR, TRACK_LABELS
+
+@app.get("/clips/music/tracks", summary="List available background music tracks")
+async def _list_music_tracks():
+    """Return the tracks available in the BGM library."""
+    tracks = []
+    if BGM_DIR.exists():
+        for f in sorted(BGM_DIR.iterdir()):
+            if f.suffix in {".mp3", ".wav", ".ogg", ".m4a"} and f.is_file():
+                stem = f.stem
+                tracks.append({
+                    "id":    stem,
+                    "label": TRACK_LABELS.get(stem, stem.replace("_", " ").title()),
+                    "file":  f.name,
+                })
+    return {"tracks": tracks}
 
 # Mount static files for serving clips
 clips_dir = Path(config.temp_dir) / "clips"

@@ -16,6 +16,83 @@ logger = logging.getLogger(__name__)
 
 from ..utils.async_helpers import run_in_thread
 
+VIRACLIP_PREMIUM_EDITING_DEFAULT = True
+PREMIUM_LAYERS_REQUESTED = [
+    "retention_plan",
+    "premium_transitions",
+    "visual_effects",
+    "music",
+    "sfx_design",
+    "frame_rhythm",
+    "broll_transitions",
+    "caption_visual_support",
+    "retention_quality_gate",
+]
+
+
+def premium_runtime_contract(*, beta_clean: bool) -> Dict[str, Any]:
+    enabled = bool(beta_clean and VIRACLIP_PREMIUM_EDITING_DEFAULT)
+    return {
+        "premium_runtime_enabled": enabled,
+        "premium_layers_requested": list(PREMIUM_LAYERS_REQUESTED) if enabled else [],
+        "retention": enabled,
+        "transitions": enabled,
+        "sfx": enabled,
+        "music": enabled,
+        "vfx": enabled,
+        "frame_rhythm": enabled,
+    }
+
+
+def _log_premium_pipeline_step(step: str, input_path: Path, output_path: Path) -> None:
+    logger.info("[premium-pipeline] step=%s input=%s output=%s", step, input_path, output_path)
+
+
+def verify_final_filename_contract(
+    final_path: Path,
+    *,
+    music: Optional[Dict[str, Any]] = None,
+    sfx: Optional[Dict[str, Any]] = None,
+    transitions: Optional[Dict[str, Any]] = None,
+    visual_effects: Optional[Dict[str, Any]] = None,
+    broll_events: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    name = final_path.name
+    checks = {
+        "music": bool((music or {}).get("music_applied") and "music_" in name),
+        "sfx": bool((sfx or {}).get("sfx_applied") and "sfx_" in name),
+        "trans": bool((transitions or {}).get("transitions_applied") and "trans_" in name),
+        "vfx": bool((visual_effects or {}).get("visual_effects_applied") and "vfx_" in name),
+        "broll": bool(broll_events) == ("broll_" in name),
+    }
+    warnings: List[str] = []
+    if (music or {}).get("music_applied") != ("music_" in name):
+        warnings.append("music_marker_missing_or_false_positive")
+    if (sfx or {}).get("sfx_applied") != ("sfx_" in name):
+        warnings.append("sfx_marker_missing_or_false_positive")
+    if (transitions or {}).get("transitions_applied") != ("trans_" in name):
+        warnings.append("trans_marker_missing_or_false_positive")
+    if (visual_effects or {}).get("visual_effects_applied") != ("vfx_" in name):
+        warnings.append("vfx_marker_missing_or_false_positive")
+    if bool(broll_events) != ("broll_" in name):
+        warnings.append("broll_marker_missing_or_false_positive")
+    logger.info(
+        "[final-contract] music=%s sfx=%s trans=%s vfx=%s broll=%s path=%s",
+        str(checks["music"]).lower(),
+        str(checks["sfx"]).lower(),
+        str(checks["trans"]).lower(),
+        str(checks["vfx"]).lower(),
+        str(checks["broll"]).lower(),
+        final_path,
+    )
+    for warning in warnings:
+        logger.info("[final-contract] warning=%s", warning)
+    return {
+        "final_contract_ok": not warnings,
+        "final_contract": checks,
+        "final_contract_warnings": warnings,
+    }
+
 
 def _get_ffmpeg_exe() -> str:
     """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
@@ -24,6 +101,118 @@ def _get_ffmpeg_exe() -> str:
         return _iio.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+def _escape_drawtext_text(text: str) -> str:
+    return (
+        (text or "")
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace("'", "\\'")
+        .replace("%", "\\%")
+        .replace("\n", "\\n")
+    )
+
+
+def _wrap_hook_overlay_text(text: str, max_words_per_line: int = 5) -> str:
+    words = (text or "").strip().split()
+    if len(words) <= max_words_per_line:
+        return " ".join(words)
+    midpoint = min(max_words_per_line, max(3, (len(words) + 1) // 2))
+    return " ".join(words[:midpoint]) + "\n" + " ".join(words[midpoint:])
+
+
+def _apply_hook_headline_overlay(video_path: Path, output_path: Path, overlay: Dict[str, Any]) -> Dict[str, Any]:
+    text = _wrap_hook_overlay_text(str(overlay.get("text") or ""), 5)
+    if not text:
+        logger.info("[hook-overlay] skipped reason=empty_text")
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["empty_text"]}
+    try:
+        start = max(0.25, min(0.45, float(overlay.get("start_s", 0.35) or 0.35)))
+        duration = max(1.6, min(2.2, float(overlay.get("duration_s", 1.8) or 1.8)))
+    except (TypeError, ValueError):
+        start, duration = 0.35, 1.8
+    end = min(2.7, start + duration)
+    safe_text = _escape_drawtext_text(text)
+    enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+    vf = (
+        f"drawtext=text='{safe_text}':"
+        "x=(w-text_w)/2:y=250:"
+        "fontsize=56:line_spacing=10:"
+        "fontcolor=white@0.96:"
+        "box=1:boxcolor=#10243fcc:boxborderw=28:"
+        f"enable='{enable}',"
+        "drawbox=x=90:y=250:w=8:h=132:color=#f97316@0.82:t=fill:"
+        f"enable='{enable}'"
+    )
+    cmd = [
+        _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", vf,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "copy",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and output_path.exists():
+            logger.info("[hook-overlay] rendered=true text=%s start=%.2f dur=%.2f", overlay.get("text"), start, end - start)
+            return {
+                "rendered": True,
+                "output_path": str(output_path),
+                "text": overlay.get("text"),
+                "start_s": round(start, 2),
+                "duration_s": round(end - start, 2),
+                "warnings": [],
+                "method": "ffmpeg_drawtext",
+            }
+        reason = (result.stderr or "ffmpeg_failed")[-240:]
+        logger.warning("[hook-overlay] failed fallback=input reason=%s", reason)
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["hook_overlay_ffmpeg_failed"], "reason": reason}
+    except Exception as exc:
+        logger.warning("[hook-overlay] failed fallback=input reason=%s", exc)
+        return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
+
+
+def _apply_hook_kickframe(video_path: Path, output_path: Path, event: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        start = max(0.16, float(event.get("start_s", 0.45) or 0.45))
+        duration = max(0.16, min(0.33, float(event.get("duration_s", 0.22) or 0.22)))
+        scale = max(1.03, min(1.05, float(event.get("scale", 1.04) or 1.04)))
+    except (TypeError, ValueError):
+        start, duration, scale = 0.45, 0.22, 1.04
+    end = start + duration
+    scale_expr = f"if(between(t,{start:.3f},{end:.3f}),{scale:.3f},1)"
+    vf = (
+        f"scale=w='ceil(1080*({scale_expr})/2)*2':"
+        f"h='ceil(1920*({scale_expr})/2)*2':eval=frame,"
+        "crop=1080:1920:(in_w-1080)/2:(in_h-1920)/2,"
+        f"eq=brightness='if(between(t,{start:.3f},{end:.3f}),0.018,0)':"
+        f"contrast='if(between(t,{start:.3f},{end:.3f}),1.025,1)'"
+    )
+    cmd = [
+        _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(video_path),
+        "-vf", vf,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "copy",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and output_path.exists():
+            logger.info("[hook-kickframe] applied=true start=%.2f dur=%.2f scale=%.3f", start, duration, scale)
+            return {"rendered": True, "output_path": str(output_path), "event": {**event, "start_s": round(start, 2), "duration_s": round(duration, 2), "scale": round(scale, 3)}, "warnings": []}
+        reason = (result.stderr or "ffmpeg_failed")[-240:]
+        logger.warning("[hook-kickframe] skipped reason=%s", reason)
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["hook_kickframe_ffmpeg_failed"], "reason": reason}
+    except Exception as exc:
+        logger.warning("[hook-kickframe] skipped reason=%s", exc)
+        return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
 
 
 from ..youtube_utils import (
@@ -871,6 +1060,7 @@ class VideoService:
         except Exception as _parse_e:
             logger.error(f"Failed to parse timestamps: {_parse_e}")
             return None
+        _premium_runtime = premium_runtime_contract(beta_clean=False)
 
         # Platform minimum enforcement — respect the LLM's natural speech boundary.
         # Only extend clips that are genuinely too short (< 30s); never pad a
@@ -1067,12 +1257,17 @@ class VideoService:
         words_with_confidence = []
         
         # Definir clip_path antes de usarlo
+        _task_short = task_id.replace("-", "")[:8] if task_id else ""
         clip_filename = (
-            f"clip_{clip_index + 1}_viral_{int(segment.get('virality_score', 0))}_"
+            f"clip_{_task_short}_{clip_index + 1}_viral_{int(segment.get('virality_score', 0))}_"
             f"{segment['start_time'].replace(':', '')}-"
             f"{segment['end_time'].replace(':', '')}.mp4"
         )
         clip_path = output_dir / clip_filename
+        logger.info(
+            "[render-output] task_id=%s clip_filename=%s",
+            task_id, clip_filename,
+        )
 
         def _words_from_cached_transcript(_cached: Dict[str, Any], _source_label: str) -> List[Dict[str, Any]]:
             _seg_start_ms = start_seconds * 1000.0
@@ -1810,10 +2005,308 @@ class VideoService:
                 logger.warning(f"  EditingPipeline failed: {_ep_e}")
         else:
             logger.info(f"[beta-clean] EditingPipeline skipped (beta_clean mode)")
+        _premium_runtime = premium_runtime_contract(beta_clean=bool(_cfg.beta_clean))
+        logger.info(
+            "[premium-runtime] enabled=%s retention=%s transitions=%s sfx=%s music=%s vfx=%s frame_rhythm=%s",
+            str(_premium_runtime["premium_runtime_enabled"]).lower(),
+            str(_premium_runtime["retention"]).lower(),
+            str(_premium_runtime["transitions"]).lower(),
+            str(_premium_runtime["sfx"]).lower(),
+            str(_premium_runtime["music"]).lower(),
+            str(_premium_runtime["vfx"]).lower(),
+            str(_premium_runtime["frame_rhythm"]).lower(),
+        )
 
         # Step 4.6b: LUT now merged into EditingPipeline — standalone pass removed.
         if _lut_vf_ep:
             logger.info(f"  ✓ LUT '{_lut_preset_ep}' baked into EditingPipeline pass")
+
+        # VPI Daily Publishing: deterministic editing plan + safe smart reframe metadata.
+        _editing_plan_data = {}
+        _hook_plan_data = {}
+        _smart_reframe_metadata = {}
+        _silence_edit_plan_data = {}
+        try:
+            from .vpi_broll_intent import detect_clip_theme as _detect_clip_theme
+            from .vpi_editing_plan import assess_visual_density as _assess_visual_density
+            from .vpi_editing_plan import build_editing_plan as _build_editing_plan
+            from .vpi_hook_engine import build_hook_plan as _build_hook_plan
+            from .vpi_silence_editor import apply_silence_edit_plan as _apply_silence_edit_plan
+            from .vpi_silence_editor import build_silence_edit_plan as _build_silence_edit_plan
+            from .vpi_silence_editor import remap_events as _remap_silence_events
+            from .vpi_silence_editor import remap_hook_plan as _remap_silence_hook_plan
+            from .vpi_silence_editor import remap_word_timestamps as _remap_silence_words
+            from .smart_reframe_service import SmartReframeService as _SmartReframeService
+            _vpi_theme = _detect_clip_theme(
+                segment.get("text", ""),
+                editorial_type=segment.get("editorial_type"),
+                matched_patterns=segment.get("matched_patterns", []),
+                suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
+                vpi_score=segment.get("vpi_score"),
+            )
+            _editing_plan_obj = _build_editing_plan(
+                text=segment.get("text", ""),
+                editorial_type=segment.get("editorial_type"),
+                vpi_score=segment.get("vpi_score"),
+                matched_patterns=segment.get("matched_patterns", []),
+                clip_duration=duration,
+                word_timestamps=words_with_confidence or None,
+                theme=_vpi_theme,
+                has_broll=False,
+            )
+            _editing_plan_data = _editing_plan_obj.to_dict()
+            _hook_plan_obj = _build_hook_plan(
+                text=segment.get("text", ""),
+                editorial_type=segment.get("editorial_type"),
+                vpi_score=segment.get("vpi_score"),
+                matched_patterns=segment.get("matched_patterns", []),
+                word_timestamps=words_with_confidence or None,
+                clip_duration=duration,
+                editing_plan=_editing_plan_data,
+                theme=_vpi_theme,
+            )
+            _hook_plan_data = _hook_plan_obj.to_dict()
+            if _hook_plan_data.get("zoom_event"):
+                _existing_zoom_events = list(_editing_plan_data.get("smart_zoom_events") or [])
+                _editing_plan_data["smart_zoom_events"] = [_hook_plan_data["zoom_event"]] + _existing_zoom_events
+            _editing_plan_data["hook_plan"] = _hook_plan_data
+            _planned_has_broll = (_editing_plan_data or {}).get("broll_strategy") != "no_broll"
+            _silence_mode = os.environ.get("VIRACLIP_SILENCE_MODE") or ("safe_trim" if _cfg.beta_clean else "metadata")
+            _silence_plan_obj = _build_silence_edit_plan(
+                word_timestamps=words_with_confidence or None,
+                text=segment.get("text", ""),
+                clip_duration=duration,
+                editorial_type=segment.get("editorial_type"),
+                hook_plan=_hook_plan_data,
+                broll_events=[],
+                subtitle_terms=list((_editing_plan_data or {}).get("highlighted_terms") or []) + list((_hook_plan_data or {}).get("emphasis_words") or []),
+                mode=_silence_mode,
+                enabled=True,
+            )
+            _silence_edit_plan_data = _silence_plan_obj.to_dict()
+            _silence_out = output_path.with_name(f"silence_{output_path.name}")
+            _silence_input = output_path
+            _silence_result = _apply_silence_edit_plan(output_path, _silence_out, _silence_plan_obj, duration)
+            _silence_edit_plan_data["rendered"] = bool(_silence_result.get("rendered"))
+            _silence_edit_plan_data["output_path"] = _silence_result.get("output_path")
+            _silence_edit_plan_data["apply_warnings"] = list(_silence_result.get("warnings") or [])
+            if _silence_result.get("rendered") and Path(_silence_result.get("output_path", "")).exists():
+                output_path = Path(_silence_result["output_path"])
+                _log_premium_pipeline_step("silence", _silence_input, output_path)
+                _offset_map = list(_silence_edit_plan_data.get("offset_map") or [])
+                try:
+                    words_with_confidence = _remap_silence_words(words_with_confidence or [], _offset_map)
+                    _editing_plan_data["smart_zoom_events"] = _remap_silence_events(_editing_plan_data.get("smart_zoom_events") or [], _offset_map)
+                    _editing_plan_data["emphasis_moments"] = _remap_silence_events(_editing_plan_data.get("emphasis_moments") or [], _offset_map)
+                    _hook_plan_data = _remap_silence_hook_plan(_hook_plan_data, _offset_map)
+                    _editing_plan_data["hook_plan"] = _hook_plan_data
+                    duration = round(max(0.0, float(duration or 0.0) - float(_silence_edit_plan_data.get("total_removed_s") or 0.0)), 3)
+                    logger.info(
+                        "[silence-remap] words=%d events=%d",
+                        len(words_with_confidence or []),
+                        len(_editing_plan_data.get("smart_zoom_events") or []),
+                    )
+                    logger.info("[silence-subtitles] remapped=true")
+                    if _hook_plan_data:
+                        logger.info("[silence-hook] action=remapped hook_type=%s", _hook_plan_data.get("hook_type"))
+                except Exception as _remap_e:
+                    _silence_edit_plan_data.setdefault("warnings", []).append("silence_remap_failed")
+                    logger.warning("[silence-remap] failed fallback=metadata reason=%s", _remap_e)
+            else:
+                if _silence_edit_plan_data.get("mode") == "safe_trim" and _silence_edit_plan_data.get("cuts"):
+                    _silence_edit_plan_data.setdefault("warnings", []).append("silence_trim_failed")
+            _density_preflight = _assess_visual_density(
+                editing_plan=_editing_plan_data,
+                broll_events=[],
+                subtitle_highlight_count=len((_editing_plan_data or {}).get("highlighted_terms") or []),
+                watermark_applied=True,
+            )
+            if _density_preflight.get("smart_zoom_events") != _editing_plan_data.get("smart_zoom_events"):
+                _editing_plan_data["smart_zoom_events"] = _density_preflight.get("smart_zoom_events", [])
+                _hook_zoom_event = (_hook_plan_data or {}).get("zoom_event")
+                if (
+                    (_hook_plan_data or {}).get("hook_type") == "emotional_hook"
+                    and _hook_zoom_event
+                    and not any((event or {}).get("hook") for event in (_editing_plan_data.get("smart_zoom_events") or []))
+                ):
+                    _editing_plan_data["smart_zoom_events"] = [_hook_zoom_event] + list(_editing_plan_data.get("smart_zoom_events") or [])
+                    logger.info("[emotional-hook] density_guard_restored_hook_event=true")
+            _editing_plan_data["visual_density_score"] = _density_preflight.get("visual_density_score")
+            _editing_plan_data["visual_density_warnings"] = _density_preflight.get("visual_density_warnings", [])
+            _editing_plan_data["silence_edit_plan"] = _silence_edit_plan_data
+            _smart_reframe_metadata = _SmartReframeService().apply(
+                output_path,
+                output_path.with_name(f"reframe_{output_path.name}"),
+                _editing_plan_data,
+                has_broll=bool(_planned_has_broll),
+            )
+            _editing_plan_data["smart_reframe"] = _smart_reframe_metadata
+            if _hook_plan_data:
+                _hook_plan_data["rendered"] = bool(
+                    _smart_reframe_metadata.get("rendered")
+                    and any((event or {}).get("hook") for event in (_smart_reframe_metadata.get("events") or []))
+                )
+                logger.info(
+                    "[hook-render] treatment=%s rendered=%s method=%s",
+                    _hook_plan_data.get("visual_treatment"),
+                    str(_hook_plan_data["rendered"]).lower(),
+                    _smart_reframe_metadata.get("reason") or _smart_reframe_metadata.get("method") or "smart_reframe",
+                )
+                if not _hook_plan_data["rendered"] and _hook_plan_data.get("enabled"):
+                    _hook_plan_data.setdefault("warnings", []).append("hook_render_failed_or_skipped")
+                _editing_plan_data["hook_plan"] = _hook_plan_data
+            if _smart_reframe_metadata.get("rendered") and Path(_smart_reframe_metadata.get("output_path", "")).exists():
+                _reframe_input = output_path
+                output_path = Path(_smart_reframe_metadata["output_path"])
+                _log_premium_pipeline_step("hook", _reframe_input, output_path)
+            if (
+                _hook_plan_data
+                and _hook_plan_data.get("hook_type") == "emotional_hook"
+                and _hook_plan_data.get("enabled")
+                and not _hook_plan_data.get("rendered")
+                and _hook_plan_data.get("zoom_event")
+            ):
+                _dynamic_reason = _smart_reframe_metadata.get("reason") or _smart_reframe_metadata.get("method") or "unknown"
+                logger.info("[emotional-hook] dynamic_failed reason=%s", _dynamic_reason)
+                _emotional_hook_out = output_path.with_name(f"emotional_hook_{output_path.name}")
+                _emotional_fallback = _SmartReframeService().apply_static_hook_push_in(
+                    output_path,
+                    _emotional_hook_out,
+                    _hook_plan_data.get("zoom_event") or {},
+                )
+                if _emotional_fallback.get("rendered") and Path(_emotional_fallback.get("output_path", "")).exists():
+                    output_path = Path(_emotional_fallback["output_path"])
+                    _hook_plan_data["rendered"] = True
+                    _hook_plan_data["hook_motion_rendered"] = True
+                    _hook_plan_data["hook_motion_method"] = "fallback_static_push_in"
+                    _hook_plan_data["hook_motion_strength"] = "subtle"
+                    _fallback_event = (_emotional_fallback.get("events") or [_hook_plan_data.get("zoom_event") or {}])[0]
+                    _hook_plan_data["hook_motion_start_s"] = float((_fallback_event or {}).get("start_s", 0.0) or 0.0)
+                    _hook_plan_data["hook_motion_duration_s"] = float((_fallback_event or {}).get("duration_s", 0.0) or 0.0)
+                    _hook_plan_data.setdefault("warnings", []).append("emotional_hook_dynamic_fallback")
+                    logger.info("[emotional-hook] fallback_static_push_in applied=true output=%s", output_path)
+                    logger.info("[hook-render] treatment=emotional_push_in rendered=true method=fallback_static_push_in")
+                else:
+                    _hook_plan_data["hook_motion_rendered"] = False
+                    _hook_plan_data["hook_motion_method"] = "none"
+                    _hook_plan_data.setdefault("warnings", []).append("emotional_hook_visual_weak")
+            if _hook_plan_data and _hook_plan_data.get("hook_headline_overlay"):
+                _overlay_out = output_path.with_name(f"hook_overlay_{output_path.name}")
+                _overlay_result = _apply_hook_headline_overlay(
+                    output_path,
+                    _overlay_out,
+                    _hook_plan_data.get("hook_headline_overlay") or {},
+                )
+                _hook_plan_data["overlay_rendered"] = bool(_overlay_result.get("rendered"))
+                _hook_plan_data["overlay_text"] = _overlay_result.get("text") or _hook_plan_data.get("overlay_text")
+                _hook_plan_data["overlay_start_s"] = _overlay_result.get("start_s") or _hook_plan_data.get("overlay_start_s")
+                _hook_plan_data["overlay_duration_s"] = _overlay_result.get("duration_s") or _hook_plan_data.get("overlay_duration_s")
+                _hook_plan_data["overlay_warnings"] = list(_overlay_result.get("warnings") or [])
+                if _overlay_result.get("rendered") and Path(_overlay_result.get("output_path", "")).exists():
+                    output_path = Path(_overlay_result["output_path"])
+                elif _hook_plan_data.get("enabled"):
+                    _hook_plan_data.setdefault("warnings", []).append("hook_overlay_skipped")
+            if _hook_plan_data and _hook_plan_data.get("kickframe_event"):
+                _hook_zoom_rendered = bool(
+                    _smart_reframe_metadata.get("rendered")
+                    and any((event or {}).get("hook") for event in (_smart_reframe_metadata.get("events") or []))
+                )
+                if _hook_zoom_rendered and (_hook_plan_data.get("kickframe_event") or {}).get("integrated_with_zoom"):
+                    _hook_plan_data["kickframe_applied"] = True
+                    logger.info("[hook-kickframe] applied=true start=%.2f dur=%.2f scale=%.3f",
+                                float((_hook_plan_data["kickframe_event"] or {}).get("start_s", 0.0)),
+                                float((_hook_plan_data["kickframe_event"] or {}).get("duration_s", 0.0)),
+                                float((_hook_plan_data["kickframe_event"] or {}).get("scale", 1.0)))
+                else:
+                    _kick_out = output_path.with_name(f"hook_kick_{output_path.name}")
+                    _kick_result = _apply_hook_kickframe(output_path, _kick_out, _hook_plan_data.get("kickframe_event") or {})
+                    _hook_plan_data["kickframe_applied"] = bool(_kick_result.get("rendered"))
+                    if _kick_result.get("event"):
+                        _hook_plan_data["kickframe_event"] = _kick_result.get("event")
+                    if _kick_result.get("rendered") and Path(_kick_result.get("output_path", "")).exists():
+                        output_path = Path(_kick_result["output_path"])
+                    else:
+                        _hook_plan_data.setdefault("warnings", []).append("hook_kickframe_skipped")
+            if _hook_plan_data:
+                _hook_signal_types = []
+                if _hook_plan_data.get("rendered"):
+                    _hook_signal_types.append(str(_hook_plan_data.get("visual_treatment") or "hook_zoom"))
+                    if _hook_plan_data.get("hook_type") == "emotional_hook":
+                        _hook_plan_data["hook_motion_rendered"] = True
+                        if _hook_plan_data.get("hook_motion_method") in {None, "", "none", "planned"}:
+                            _hook_plan_data["hook_motion_method"] = _smart_reframe_metadata.get("method") or "smart_reframe"
+                        if _hook_plan_data.get("hook_motion_strength") in {None, "", "none"}:
+                            _hook_plan_data["hook_motion_strength"] = "subtle"
+                        _hook_plan_data["hook_motion_start_s"] = float(((_hook_plan_data.get("zoom_event") or {}).get("start_s")) or 0.0)
+                        _hook_plan_data["hook_motion_duration_s"] = float(((_hook_plan_data.get("zoom_event") or {}).get("duration_s")) or 0.0)
+                if _hook_plan_data.get("overlay_rendered"):
+                    _hook_signal_types.append("headline_overlay")
+                if _hook_plan_data.get("kickframe_applied"):
+                    _hook_signal_types.append("kickframe")
+                if _hook_plan_data.get("emphasis_words"):
+                    _hook_signal_types.append("subtitle_highlight")
+                _hook_plan_data["rendered"] = bool(
+                    _hook_plan_data.get("rendered")
+                    or _hook_plan_data.get("overlay_rendered")
+                    or _hook_plan_data.get("kickframe_applied")
+                    or _hook_plan_data.get("emphasis_words")
+                )
+                _hook_plan_data["hook_visual_signal_types"] = list(dict.fromkeys(_hook_signal_types))
+                _hook_plan_data["hook_visual_signal_count"] = len(_hook_plan_data["hook_visual_signal_types"])
+                _first4_signals = list(_hook_plan_data.get("hook_first_4s_signals") or [])
+                for _signal in _hook_plan_data["hook_visual_signal_types"]:
+                    if _signal not in _first4_signals:
+                        _first4_signals.append(_signal)
+                if _hook_plan_data.get("enabled") and not _first4_signals:
+                    _first4_signals.append("safe_speaker_focus")
+                _hook_plan_data["hook_first_4s_signals"] = _first4_signals
+                _hook_plan_data["hook_first_4s_score"] = len(_first4_signals)
+                _hook_plan_data["hook_contract_satisfied"] = (
+                    _hook_plan_data.get("hook_type") == "weak_intro"
+                    or _hook_plan_data["hook_visual_signal_count"] > 0
+                )
+                if _hook_plan_data.get("hook_type") == "emotional_hook" and duration > 10.0:
+                    _speaker_focus_strong = bool((_silence_edit_plan_data or {}).get("total_removed_s")) and any(
+                        float((cut or {}).get("start_s", (cut or {}).get("start", 99.0)) or 99.0) < 2.0
+                        for cut in ((_silence_edit_plan_data or {}).get("cuts") or [])
+                    )
+                    _motion_ok = bool(_hook_plan_data.get("hook_motion_rendered"))
+                    if not (_motion_ok or _speaker_focus_strong):
+                        _hook_plan_data["hook_contract_satisfied"] = False
+                        _hook_plan_data["hook_disabled_reason"] = "emotional_hook_visual_weak"
+                        _hook_plan_data.setdefault("warnings", []).append("emotional_hook_visual_weak")
+                    elif _speaker_focus_strong and not _motion_ok:
+                        _hook_plan_data["hook_motion_strength"] = "none"
+                        _hook_plan_data["hook_motion_method"] = "speaker_focus_strong"
+                if (
+                    _hook_plan_data.get("enabled")
+                    and _hook_plan_data.get("hook_type") != "weak_intro"
+                    and int(_hook_plan_data.get("hook_first_4s_score") or 0) < 2
+                ):
+                    _hook_plan_data.setdefault("warnings", []).append("weak_first_4_seconds")
+                if _hook_plan_data.get("enabled") and not _hook_plan_data["hook_contract_satisfied"]:
+                    _hook_plan_data["hook_disabled_reason"] = "hook_visual_missing"
+                    _hook_plan_data.setdefault("warnings", []).append("hook_visual_missing")
+                logger.info(
+                    "[hook-contract] type=%s satisfied=%s signals=%s",
+                    _hook_plan_data.get("hook_type"),
+                    str(bool(_hook_plan_data.get("hook_contract_satisfied"))).lower(),
+                    "|".join(_hook_plan_data.get("hook_visual_signal_types") or []) or "none",
+                )
+                logger.info(
+                    "[hook-first4] satisfied=%s signals=%s",
+                    str(
+                        _hook_plan_data.get("hook_type") == "weak_intro"
+                        or int(_hook_plan_data.get("hook_first_4s_score") or 0) >= 2
+                    ).lower(),
+                    "|".join(_hook_plan_data.get("hook_first_4s_signals") or []) or "none",
+                )
+                _editing_plan_data["hook_plan"] = _hook_plan_data
+        except Exception as _plan_e:
+            logger.warning("[editing-plan] failed metadata_only=true error=%s", _plan_e)
+            _editing_plan_data = {"error": str(_plan_e), "metadata_only": True}
+            _hook_plan_data = {"error": str(_plan_e), "metadata_only": True}
+            _silence_edit_plan_data = {"error": str(_plan_e), "metadata_only": True, "warnings": ["silence_metadata_only"]}
 
         # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
         # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true (unless editorial B-roll is enabled).
@@ -1842,14 +2335,34 @@ class VideoService:
                     broll_fade_s=0.6,
                     task_id=task_id,
                     suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
+                    editorial_type=segment.get("editorial_type"),
+                    vpi_score=segment.get("vpi_score"),
+                    hook_broll_delay_until_s=float((_hook_plan_data or {}).get("broll_delay_until_s") or 0.0),
                 )
                 if Path(_broll_result).exists() and _broll_result != str(output_path):
+                    _broll_input = output_path
                     output_path = Path(_broll_result)
+                    _log_premium_pipeline_step("broll", _broll_input, output_path)
                     logger.info(f"  ✓ Editorial B-roll overlay applied")
                 _editorial_broll_metadata = list(getattr(_broll_svc, "last_editorial_broll", []) or [])
+                _broll_selection_stats = dict(getattr(_broll_svc, "_last_broll_selection_stats", {}) or {})
+                if _editing_plan_data:
+                    _editing_plan_data["has_broll"] = bool(_editorial_broll_metadata)
+                    _editing_plan_data["broll_selection_stats"] = _broll_selection_stats
+                    for _stat_key in (
+                        "broll_no_broll_reason",
+                        "broll_candidates_total",
+                        "broll_candidates_rejected_forbidden",
+                        "broll_candidates_rejected_cooldown",
+                        "broll_candidates_rejected_relevance",
+                        "broll_candidates_usable",
+                    ):
+                        if _stat_key in _broll_selection_stats:
+                            _editing_plan_data[_stat_key] = _broll_selection_stats.get(_stat_key)
             except Exception as _broll_e:
                 logger.warning(f"  Editorial B-roll overlay failed: {_broll_e}")
                 _editorial_broll_metadata = []
+                _broll_selection_stats = {}
         elif not _cfg.beta_clean:
             from ..config import get_config as _get_cfg_broll
             if _get_cfg_broll().broll_enabled:
@@ -1871,6 +2384,7 @@ class VideoService:
                         precomputed_keywords=_broll_kw_override,
                         broll_fade_s=_clip_profile.broll_fade_s if _clip_profile else 0.6,
                         task_id=task_id,
+                        hook_broll_delay_until_s=float((_hook_plan_data or {}).get("broll_delay_until_s") or 0.0),
                     )
                     if Path(_broll_result).exists() and _broll_result != str(output_path):
                         output_path = Path(_broll_result)
@@ -1971,9 +2485,19 @@ class VideoService:
                     words_with_confidence,
                     style=_cap_style,
                     platform=target_platform,
+                    caption_decisions={
+                        "highlighted_terms": (_editing_plan_data or {}).get("highlighted_terms", []),
+                        "hook_emphasis_words": (_hook_plan_data or {}).get("emphasis_words", []),
+                        "hook_headline_text": (_hook_plan_data or {}).get("headline_text"),
+                        "hook_subtitle_text": (_hook_plan_data or {}).get("subtitle_hook_text"),
+                        "hook_type": (_hook_plan_data or {}).get("hook_type"),
+                        "editorial_type": segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type"),
+                    },
                 )
                 if _cap_ok and subtitled_path.exists():
+                    _caption_input = output_path
                     output_path = subtitled_path
+                    _log_premium_pipeline_step("captions", _caption_input, output_path)
                     _caption_ass_debug_path = str(
                         Path(os.environ.get("CAPTION_DEBUG_DIR", "/app/temp/caption_debug"))
                         / f"{subtitled_path.stem}.ass"
@@ -2551,6 +3075,701 @@ class VideoService:
             logger.debug(f"  Clip health skipped: {_ch_e}")
         # ─────────────────────────────────────────────────────────────────
 
+        # VPI Daily Publishing: safe branding, output QC and publishable status.
+        _brand_metadata: dict = {}
+        _output_qc: dict = {}
+        _publishable_metadata: dict = {}
+        _subtitle_intelligence_metadata: dict = {}
+        _music_metadata: dict = {}
+        _sfx_metadata: dict = {}
+        _visual_effects_metadata: dict = {}
+        _transition_metadata: dict = {}
+        _speaker_focus_metadata: dict = {}
+        _editing_richness_metadata: dict = {}
+        try:
+            from .vpi_branding_service import apply_vpi_branding as _apply_vpi_branding
+            from .vpi_branding_service import find_brand_asset as _find_brand_asset
+            from .vpi_editing_plan import assess_visual_density as _assess_visual_density
+            from .vpi_editing_plan import determine_publishable_status as _determine_publishable_status
+            from .vpi_editing_plan import extend_output_qc_visual as _extend_output_qc_visual
+            from .vpi_editing_plan import probe_output_qc as _probe_output_qc
+
+            _repo_root = Path(__file__).resolve().parents[3]
+            _brand_asset = _find_brand_asset(_repo_root)
+            _brand_metadata = {
+                "logo_found": bool(_brand_asset),
+                "logo_path": str(_brand_asset) if _brand_asset else None,
+                "rendered": False,
+                "type": "pending_after_transitions",
+            }
+
+            _editorial_broll_for_status = locals().get("_editorial_broll_metadata", []) or []
+            _broll_selection_stats = locals().get("_broll_selection_stats", {}) or {}
+
+            # ── Post-production visual effects v3.6 — CPU-only, speaker-safe ──
+            try:
+                from .vpi_visual_effects_service import apply_visual_effects as _apply_visual_effects
+                _visual_out = output_path.with_name(f"vfx_{output_path.name}")
+                _visual_effects_metadata = _apply_visual_effects(
+                    output_path,
+                    _visual_out,
+                    hook_plan=_hook_plan_data,
+                    no_broll=not bool(_editorial_broll_for_status),
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    duration_s=float(duration or 0.0),
+                )
+                if _visual_effects_metadata.get("visual_effects_applied") and _visual_out.exists():
+                    _vfx_input = output_path
+                    output_path = _visual_out
+                    _log_premium_pipeline_step("vfx", _vfx_input, output_path)
+                    logger.info("[visual-effects] final_output_uses_vfx=true final_path=%s", output_path)
+            except Exception as _vfx_e:
+                logger.warning("[visual-effects] failed reason=%s", _vfx_e)
+                _visual_effects_metadata = {
+                    "visual_effects_applied": False,
+                    "visual_effects_count": 0,
+                    "visual_effects_events": [],
+                    "visual_effects_warning": str(_vfx_e),
+                }
+
+            # ── Premium Transition Pack v4.1 — visible, intentional, CPU-only ──
+            try:
+                from .vpi_transition_engine import (
+                    apply_transition_plan as _apply_transition_plan,
+                    plan_transition_events as _plan_transition_events,
+                )
+                _transition_context = {
+                    "editorial_type": str(segment.get("editorial_type") or ""),
+                    "reason": str(segment.get("text") or "")[:180],
+                    "start_time": 0.45 if float(duration or 0.0) <= 8.0 else min(3.2, max(0.45, float(duration or 0.0) * 0.18)),
+                    "important_broll": bool(_editorial_broll_for_status),
+                    "narrative_event": "hook_to_explanation" if (_hook_plan_data or {}).get("hook_type") != "weak_intro" else "",
+                    "semantic_continuity": bool(_editorial_broll_for_status),
+                    "target_bbox": (
+                        (_editorial_broll_for_status[0] or {}).get("bbox")
+                        if _editorial_broll_for_status
+                        else None
+                    ),
+                    "concept_shift": (
+                        "risk_to_protection"
+                        if str(segment.get("editorial_type") or "") == "risk_warning"
+                        else ""
+                    ),
+                    "shape_morph_viable": True,
+                    "frame_rhythm_group": "hook_transition",
+                }
+                _transition_plan = _plan_transition_events(_transition_context)
+                _transition_out = output_path.with_name(f"trans_{output_path.name}")
+                _transition_metadata = _apply_transition_plan(
+                    output_path,
+                    _transition_out,
+                    _transition_plan,
+                )
+                _transition_metadata["transition_plan"] = _transition_plan.to_dict()
+                if _transition_metadata.get("transitions_applied") and _transition_out.exists():
+                    _transition_input = output_path
+                    output_path = _transition_out
+                    _log_premium_pipeline_step("transitions", _transition_input, output_path)
+                    logger.info("[transition-final] final_output_uses_transition=true path=%s", output_path)
+                else:
+                    logger.info("[transition-final] final_output_uses_transition=false path=%s", output_path)
+            except Exception as _trans_e:
+                logger.warning("[transition-apply] failed type=unknown fallback=clean_cut reason=%s", _trans_e)
+                _transition_metadata = {
+                    "transitions_applied": False,
+                    "transition_events": [],
+                    "transition_types": [],
+                    "transition_warnings": [str(_trans_e)],
+                    "final_output_uses_transition": False,
+                }
+
+            try:
+                _brand_out = output_path.with_name(f"brand_{output_path.name}")
+                _brand_input = output_path
+                _brand_metadata = _apply_vpi_branding(output_path, _brand_out)
+                _brand_metadata["logo_found"] = bool(_brand_asset)
+                _brand_metadata["logo_path"] = str(_brand_asset) if _brand_asset else None
+                if _brand_metadata.get("rendered") and _brand_out.exists():
+                    output_path = _brand_out
+                    _log_premium_pipeline_step("branding", _brand_input, output_path)
+                else:
+                    _brand_metadata.setdefault("type", "metadata_only")
+                    _brand_metadata["rendered"] = False
+            except Exception as _brand_e:
+                logger.warning("[branding] skipped reason=%s", _brand_e)
+                _brand_metadata = {"type": "metadata_only", "rendered": False, "reason": str(_brand_e)}
+
+            # ── Music/SFX v3.3 — local libraries only, before final mastering ──
+            try:
+                from .vpi_music_service import apply_music_bed as _apply_music_bed
+                _music_out = output_path.with_name(f"music_{output_path.name}")
+                _music_metadata = _apply_music_bed(
+                    output_path,
+                    _music_out,
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                )
+                if _music_metadata.get("music_applied") and _music_out.exists():
+                    _music_input = output_path
+                    output_path = _music_out
+                    _log_premium_pipeline_step("music", _music_input, output_path)
+                    logger.info("[music] final_output_uses_music=true final_path=%s", output_path)
+            except Exception as _music_e:
+                logger.warning("[music] skipped reason=%s", _music_e)
+                _music_metadata = {"music_applied": False, "music_status": "failed", "music_warning": str(_music_e)}
+
+            try:
+                from .vpi_sfx_service import apply_sfx_bed as _apply_sfx_bed
+                _sfx_out = output_path.with_name(f"sfx_{output_path.name}")
+                _sfx_metadata = _apply_sfx_bed(
+                    output_path,
+                    _sfx_out,
+                    hook_plan=_hook_plan_data,
+                    broll_events=_editorial_broll_for_status,
+                    transition_events=(_transition_metadata or {}).get("transition_events") or [],
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                )
+                if _sfx_metadata.get("sfx_applied") and _sfx_out.exists():
+                    _sfx_input = output_path
+                    output_path = _sfx_out
+                    _log_premium_pipeline_step("sfx", _sfx_input, output_path)
+                    logger.info("[sfx] final_output_uses_sfx=true final_path=%s", output_path)
+            except Exception as _sfx_e:
+                logger.warning("[sfx] skipped reason=%s", _sfx_e)
+                _sfx_metadata = {"sfx_applied": False, "sfx_count": 0, "sfx_warning": str(_sfx_e)}
+
+            # ── Audio Mastering v1.8 — loudness normalization for social reels ──
+            # Applied AFTER branding (all audio elements present) and BEFORE
+            # output QC (so QC measures mastered loudness).
+            _audio_mastering_result: Optional[Any] = None
+            try:
+                from .vpi_audio_mastering import (
+                    audio_mastering_enabled as _am_enabled,
+                    master_audio_for_social as _master_audio,
+                    build_audio_qc_metadata as _build_audio_qc,
+                    build_audio_publish_warnings as _build_audio_pub_warnings,
+                )
+                if _am_enabled():
+                    _am_out = output_path.with_name(f"mastered_{output_path.name}")
+                    _audio_mastering_result = _master_audio(
+                        input_path=str(output_path),
+                        output_path=str(_am_out),
+                    )
+                    if _audio_mastering_result.applied and _am_out.exists():
+                        _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
+                        logger.info(
+                            "[audio-master] applied method=%s input_lufs=%s output_lufs=%s status=%s",
+                            _audio_mastering_result.method,
+                            _audio_master_metadata.get("input_lufs"),
+                            _audio_master_metadata.get("output_lufs"),
+                            _audio_master_metadata.get("audio_voice_status"),
+                        )
+                        _log_premium_pipeline_step("audio_mastering", Path(_audio_mastering_result.input_path) if hasattr(_audio_mastering_result, "input_path") else output_path, _am_out)
+                        output_path = _am_out
+                        logger.info(
+                            "[music] final_output_uses_music=%s final_path=%s",
+                            str(bool(_music_metadata.get("music_applied") and "music_" in output_path.name)).lower(),
+                            output_path,
+                        )
+                        logger.info(
+                            "[visual-effects] final_output_uses_vfx=%s final_path=%s",
+                            str(bool(_visual_effects_metadata.get("visual_effects_applied") and "vfx_" in output_path.name)).lower(),
+                            output_path,
+                        )
+                        logger.info(
+                            "[transition-final] final_output_uses_transition=%s path=%s",
+                            str(bool(_transition_metadata.get("transitions_applied") and "trans_" in output_path.name)).lower(),
+                            output_path,
+                        )
+                    elif _audio_mastering_result.method == "skipped":
+                        _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
+                        logger.info("[audio-master] skipped reason=already_loud_enough")
+                    else:
+                        _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
+                        logger.info("[audio-master] not applied method=%s", _audio_mastering_result.method)
+                else:
+                    logger.debug("[audio-master] disabled by config")
+                    _audio_master_metadata = {"audio_mastering_enabled": False, "audio_mastering_applied": False}
+            except Exception as _am_e:
+                logger.warning("[audio-master] integration error: %s", _am_e)
+                _audio_mastering_result = None
+                _audio_master_metadata = {"audio_mastering_applied": False, "audio_warnings": [str(_am_e)]}
+
+            _broll_asset_ids = [
+                str(item.get("asset_id") or item.get("asset_path") or item.get("asset_url") or "")
+                for item in _editorial_broll_for_status
+                if item
+            ]
+            _broll_asset_ids = [item for item in _broll_asset_ids if item]
+            _repeated_exact_broll_same_clip = len(_broll_asset_ids) != len(set(_broll_asset_ids))
+            _weak_intro_forced_broll = (
+                (_editing_plan_data or {}).get("broll_strategy") == "no_broll"
+                and bool(_editorial_broll_for_status)
+            )
+            if _weak_intro_forced_broll:
+                logger.warning("[context-no-broll] hard_stop_failed reason=weak_intro_forced_broll")
+
+            _smart_events = list((_editing_plan_data or {}).get("smart_zoom_events") or [])
+            if _editorial_broll_for_status and len(_smart_events) > 1:
+                _editing_plan_data["smart_zoom_events"] = _smart_events[:1]
+                if isinstance(_editing_plan_data.get("smart_reframe"), dict):
+                    _editing_plan_data["smart_reframe"]["events"] = _smart_events[:1]
+                if isinstance(_smart_reframe_metadata, dict):
+                    _smart_reframe_metadata["events"] = _smart_events[:1]
+
+            _subtitle_terms = list((_editing_plan_data or {}).get("highlighted_terms") or [])
+            _hook_terms = list((_hook_plan_data or {}).get("emphasis_words") or [])
+            _subtitle_intelligence_metadata = {
+                "highlighted_terms": _subtitle_terms,
+                "hook_highlight_terms": _hook_terms,
+                "hook_highlight_applied": bool(_hook_terms),
+                "rendered": bool(_subtitle_terms),
+                "reason": "emphasis_indices" if _subtitle_terms else "no_terms",
+            }
+            if _hook_plan_data:
+                _first3_signals: List[str] = []
+                _first3_score = 0
+                _hook_motion_start = float((_hook_plan_data or {}).get("hook_motion_start_s") or ((_hook_plan_data or {}).get("zoom_event") or {}).get("start_s") or 0.0)
+                _hook_motion_duration = float((_hook_plan_data or {}).get("hook_motion_duration_s") or ((_hook_plan_data or {}).get("zoom_event") or {}).get("duration_s") or 0.0)
+                _vfx_first3 = any(
+                    float((event or {}).get("start_s") or 99.0) < 3.0
+                    for event in (_visual_effects_metadata or {}).get("visual_effects_events", []) or []
+                ) and bool((_visual_effects_metadata or {}).get("visual_effects_applied"))
+                _hook_motion_in_first3 = bool(
+                    (_hook_plan_data or {}).get("hook_motion_rendered")
+                    or (_hook_plan_data or {}).get("rendered")
+                    or (_hook_plan_data or {}).get("kickframe_applied")
+                ) and _hook_motion_start < 3.0 and _hook_motion_duration > 0.0
+                _motion_in_first3 = bool(_hook_motion_in_first3 or _vfx_first3)
+                if _motion_in_first3:
+                    _first3_score += 2
+                    _first3_signals.append("visible_hook_motion")
+                if bool(_hook_terms) or _subtitle_intelligence_metadata.get("hook_highlight_applied"):
+                    _first3_score += 2
+                    _first3_signals.append("hook_subtitle_before_1_5s")
+                try:
+                    _silence_segments = (_silence_edit_plan_data or {}).get("segments") or []
+                    _silence_cuts = (_silence_edit_plan_data or {}).get("cuts") or []
+                    if any(float((item or {}).get("start_s") or (item or {}).get("original_start") or 99.0) < 3.0 for item in list(_silence_segments) + list(_silence_cuts)):
+                        _first3_score += 1
+                        _first3_signals.append("silence_cut_before_3s")
+                except Exception:
+                    pass
+                _headline = str((_hook_plan_data or {}).get("headline_text") or (_hook_plan_data or {}).get("subtitle_hook_text") or "")
+                _segment_text = str(segment.get("text") or "")
+                if _headline and _segment_text and _headline.lower()[:18] in _segment_text.lower()[:180]:
+                    _first3_score += 1
+                    _first3_signals.append("strong_phrase_before_2s")
+                if (_hook_plan_data or {}).get("overlay_rendered") or (_hook_plan_data or {}).get("lower_third_applied"):
+                    _first3_score += 1
+                    _first3_signals.append("visual_emphasis")
+                if any(str((event or {}).get("event") or "").startswith("hook") for event in (_sfx_metadata or {}).get("sfx_events", []) or []):
+                    _first3_score += 1
+                    _first3_signals.append("hook_sfx")
+                elif _music_metadata.get("music_applied"):
+                    _first3_score += 1
+                    _first3_signals.append("music_swell")
+                _first3_strong = bool(
+                    (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+                    and _first3_score >= 5
+                    and _motion_in_first3
+                )
+                _first3_perceptible = _first3_strong
+                _missing = []
+                if not _motion_in_first3:
+                    _missing.append("hook_motion")
+                if not (bool(_hook_terms) or _subtitle_intelligence_metadata.get("hook_highlight_applied")):
+                    _missing.append("hook_subtitle_before_1_5s")
+                if not ((_silence_edit_plan_data or {}).get("rendered")):
+                    _missing.append("rhythm")
+                if not (_sfx_metadata.get("sfx_applied") or _music_metadata.get("music_applied")):
+                    _missing.append("sound_layer")
+                _hook_plan_data["hook_first3_score"] = _first3_score
+                _hook_plan_data["hook_first3_perceptible_score"] = _first3_score
+                _hook_plan_data["hook_first3_perceptible"] = bool(_first3_perceptible)
+                _hook_plan_data["hook_first3_signals"] = _first3_signals
+                _hook_plan_data["hook_first3_missing"] = _missing
+                _hook_plan_data["hook_first3_status"] = "strong" if _first3_strong else "weak"
+                _hook_plan_data["hook_first3_final_verified"] = bool(_motion_in_first3)
+                if not _first3_perceptible:
+                    _hook_plan_data["hook_first3_warning"] = "weak_first_3_seconds"
+                    _hook_plan_data.setdefault("warnings", []).append("weak_first_3_seconds")
+                logger.info(
+                    "[hook-first3] score=%d status=%s rendered_signals=%s final_output_verified=%s",
+                    _first3_score,
+                    _hook_plan_data["hook_first3_status"],
+                    "|".join(_first3_signals) or "none",
+                    str(bool(_motion_in_first3)).lower(),
+                )
+                logger.info("[hook-first3] rendered_signals=%s", "|".join(_first3_signals) or "none")
+                if not _first3_perceptible:
+                    logger.info("[hook-first3] warning=weak_first_3_seconds")
+                logger.info("[hook-first3] missing=%s", "|".join(_missing) or "none")
+                logger.info("[hook-first3] final_output_verified=%s", str(bool(_motion_in_first3)).lower())
+
+            _hook_quality = "missing"
+            _hook_broll_too_early = False
+            if _hook_plan_data:
+                _hook_broll_delay = float((_hook_plan_data or {}).get("broll_delay_until_s") or 0.0)
+                for _broll_event in _editorial_broll_for_status:
+                    try:
+                        if float(_broll_event.get("start_s", 0.0) or 0.0) < _hook_broll_delay:
+                            _hook_broll_too_early = True
+                            break
+                    except (TypeError, ValueError):
+                        continue
+                if (_hook_plan_data or {}).get("hook_type") == "weak_intro":
+                    _hook_quality = "weak"
+                elif not (_hook_plan_data or {}).get("headline_text"):
+                    _hook_quality = "weak"
+                elif _hook_broll_too_early or float((_hook_plan_data or {}).get("density_score") or 0.0) > 6.0:
+                    _hook_quality = "acceptable"
+                elif (
+                    (_hook_plan_data or {}).get("rendered")
+                    or (_hook_plan_data or {}).get("overlay_rendered")
+                    or int((_hook_plan_data or {}).get("hook_visual_signal_count") or 0) > 0
+                    or bool(_hook_terms)
+                ):
+                    _hook_quality = "strong"
+                else:
+                    _hook_quality = "acceptable"
+                if (
+                    _hook_quality == "strong"
+                    and (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+                    and (
+                        int((_hook_plan_data or {}).get("hook_first_4s_score") or 0) < 2
+                        or int((_hook_plan_data or {}).get("hook_first3_perceptible_score") or 0) < 4
+                    )
+                ):
+                    _hook_quality = "acceptable"
+                _hook_plan_data["hook_quality"] = _hook_quality
+
+            _output_qc = _probe_output_qc(output_path)
+            if locals().get("_audio_master_metadata"):
+                _output_qc["audio_qc"] = dict(_audio_master_metadata)
+                _output_qc.update({
+                    "audio_mastering_applied": _audio_master_metadata.get("audio_mastering_applied"),
+                    "input_lufs": _audio_master_metadata.get("input_lufs"),
+                    "output_lufs": _audio_master_metadata.get("output_lufs"),
+                    "input_peak": _audio_master_metadata.get("input_peak"),
+                    "output_peak": _audio_master_metadata.get("output_peak"),
+                    "audio_measurement_method": _audio_master_metadata.get("audio_measurement_method"),
+                    "audio_voice_status": _audio_master_metadata.get("audio_voice_status"),
+                    "audio_warnings": _audio_master_metadata.get("audio_warnings", []),
+                })
+            _output_qc["silence_trim_applied"] = bool((_silence_edit_plan_data or {}).get("rendered"))
+            _output_qc["total_removed_s"] = float((_silence_edit_plan_data or {}).get("total_removed_s") or 0.0)
+            _output_qc["silence_warnings"] = list(
+                (_silence_edit_plan_data or {}).get("warnings")
+                or (_silence_edit_plan_data or {}).get("apply_warnings")
+                or []
+            )
+            _density_final = _assess_visual_density(
+                editing_plan=_editing_plan_data or {},
+                broll_events=_editorial_broll_for_status,
+                subtitle_highlight_count=len(_subtitle_terms),
+                watermark_applied=bool(_brand_metadata.get("rendered")),
+            )
+            if _editing_plan_data:
+                _editing_plan_data["visual_density_score"] = _density_final.get("visual_density_score")
+                _editing_plan_data["visual_density_warnings"] = _density_final.get("visual_density_warnings", [])
+                _editing_plan_data["visual_density_actions"] = _density_final.get("visual_density_actions", [])
+            _hook_signal_count = int((_hook_plan_data or {}).get("hook_visual_signal_count") or 0)
+            _editing_activity_score = 0
+            if _hook_signal_count:
+                _editing_activity_score += 2
+            if _smart_reframe_metadata.get("rendered"):
+                _editing_activity_score += 2
+            if _editorial_broll_for_status:
+                _editing_activity_score += 2
+            if bool(add_subtitles and (words_with_confidence or segment.get("text"))):
+                _editing_activity_score += 1
+            if _brand_metadata.get("rendered"):
+                _editing_activity_score += 1
+            if (_silence_edit_plan_data or {}).get("rendered"):
+                _editing_activity_score += 1
+            if locals().get("_audio_master_metadata", {}).get("applied") or str(Path(output_path).name).startswith("mastered_"):
+                _editing_activity_score += 1
+            _editing_activity_warning = (
+                bool((_hook_plan_data or {}).get("enabled"))
+                and (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+                and _editing_activity_score < 5
+            )
+            if _editing_activity_warning:
+                logger.info("[editing-activity] score=%d warning=low_editing_activity", _editing_activity_score)
+            else:
+                logger.info("[editing-activity] score=%d warning=none", _editing_activity_score)
+            if _editing_plan_data is not None:
+                _editing_plan_data["editing_activity_score"] = _editing_activity_score
+                _editing_plan_data["editing_activity_warning"] = "low_editing_activity" if _editing_activity_warning else None
+            _output_qc = _extend_output_qc_visual(
+                _output_qc,
+                watermark_applied=bool(_brand_metadata.get("rendered")),
+                captions_applied=bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                subtitle_highlight_count=len(_subtitle_terms),
+                broll_count=len(_editorial_broll_for_status),
+                smart_reframe_applied=bool(_smart_reframe_metadata.get("rendered")),
+                visual_density_warnings=_density_final.get("visual_density_warnings", []),
+                branding_warnings=_brand_metadata.get("warnings", []),
+                broll_repetition_warnings=["repeated_exact_broll_same_clip"] if _repeated_exact_broll_same_clip else [],
+                hook_applied=bool((_hook_plan_data or {}).get("enabled")),
+                hook_type=str((_hook_plan_data or {}).get("hook_type") or ""),
+                hook_rendered=bool((_hook_plan_data or {}).get("rendered")),
+            )
+            _publish_warnings = []
+            if not _brand_asset:
+                _publish_warnings.append("no_logo_found_text_watermark_used")
+            if not _smart_reframe_metadata.get("rendered"):
+                _publish_warnings.append("smart_zoom_metadata_only")
+            if (_editing_plan_data or {}).get("cta_strategy") in {"metadata_only", "optional_end"}:
+                _publish_warnings.append("cta_metadata_only")
+            for _hook_warning in ((_hook_plan_data or {}).get("warnings") or []):
+                if _hook_warning in {"weak_hook", "hook_metadata_only", "hook_render_failed", "hook_render_failed_or_skipped", "hook_overlay_skipped", "hook_density_high", "emotional_hook_visual_weak"}:
+                    _publish_warnings.append(_hook_warning)
+            for _silence_warning in ((_silence_edit_plan_data or {}).get("warnings") or []) + ((_silence_edit_plan_data or {}).get("apply_warnings") or []):
+                if _silence_warning in {"silence_trim_failed", "silence_remap_failed", "silence_metadata_only", "excessive_dead_air_detected"}:
+                    _publish_warnings.append(_silence_warning)
+            if _audio_mastering_result is not None:
+                try:
+                    _publish_warnings.extend(_build_audio_pub_warnings(_audio_mastering_result))
+                except Exception:
+                    pass
+            if _hook_quality in {"weak", "missing"}:
+                _publish_warnings.append("weak_hook")
+            if (_hook_plan_data or {}).get("hook_headline_overlay") and not (_hook_plan_data or {}).get("overlay_rendered"):
+                _publish_warnings.append("hook_overlay_skipped")
+            if (
+                bool((_hook_plan_data or {}).get("enabled"))
+                and (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+                and int((_hook_plan_data or {}).get("hook_first_4s_score") or 0) < 2
+            ):
+                _publish_warnings.append("weak_first_4_seconds")
+            if (
+                bool((_hook_plan_data or {}).get("enabled"))
+                and (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+                and not bool((_hook_plan_data or {}).get("hook_first3_perceptible"))
+            ):
+                _publish_warnings.append("weak_first_3_seconds")
+            if float((_hook_plan_data or {}).get("density_score") or 0.0) > 6.0:
+                _publish_warnings.append("hook_density_high")
+            if _hook_broll_too_early:
+                _publish_warnings.append("hook_broll_too_early")
+            if bool((_hook_plan_data or {}).get("enabled")) and int((_hook_plan_data or {}).get("hook_visual_signal_count") or 0) == 0:
+                _publish_warnings.append("hook_visual_missing")
+            if locals().get("_editing_activity_warning"):
+                _publish_warnings.append("low_editing_activity")
+            if (
+                not _editorial_broll_for_status
+                and not _visual_effects_metadata.get("visual_effects_applied")
+                and not _music_metadata.get("music_applied")
+                and not _sfx_metadata.get("sfx_applied")
+            ):
+                _publish_warnings.append("missing_editing_layers")
+
+            _no_broll = not bool(_editorial_broll_for_status)
+            _non_weak_hook = bool((_hook_plan_data or {}).get("enabled")) and (_hook_plan_data or {}).get("hook_type") != "weak_intro"
+            _speaker_focus_events = []
+            if _no_broll and _non_weak_hook:
+                if (_hook_plan_data or {}).get("hook_motion_rendered") or (_hook_plan_data or {}).get("rendered"):
+                    _speaker_focus_events.append({
+                        "type": "hook_motion",
+                        "start_s": (_hook_plan_data or {}).get("hook_motion_start_s"),
+                        "duration_s": (_hook_plan_data or {}).get("hook_motion_duration_s"),
+                    })
+                if (_silence_edit_plan_data or {}).get("rendered"):
+                    _speaker_focus_events.append({
+                        "type": "silence_rhythm",
+                        "removed_s": (_silence_edit_plan_data or {}).get("total_removed_s"),
+                    })
+                if _subtitle_intelligence_metadata.get("hook_highlight_applied"):
+                    _speaker_focus_events.append({"type": "caption_hook_highlight"})
+            _speaker_focus_metadata = {
+                "speaker_focus_enhanced": bool(_speaker_focus_events),
+                "speaker_focus_events": _speaker_focus_events[:2],
+                "speaker_focus_real_effects": bool(
+                    _no_broll
+                    and (_visual_effects_metadata or {}).get("visual_effects_applied")
+                ),
+            }
+            logger.info(
+                "[speaker-focus] enhanced=%s events=%s",
+                str(_speaker_focus_metadata["speaker_focus_enhanced"]).lower(),
+                _speaker_focus_metadata["speaker_focus_events"],
+            )
+            logger.info(
+                "[speaker-focus] applied_real_effects=%s",
+                str(bool(_speaker_focus_metadata.get("speaker_focus_real_effects"))).lower(),
+            )
+
+            _good_broll_phrase_fit = False
+            _broll_without_transition = False
+            _static_broll_without_kenburns = False
+            for _broll_item in _editorial_broll_for_status:
+                try:
+                    _fit_score = float((_broll_item or {}).get("broll_phrase_fit_score") or 0.0)
+                except (TypeError, ValueError):
+                    _fit_score = 0.0
+                _fit_label = str((_broll_item or {}).get("broll_phrase_fit_label") or "").lower()
+                if _fit_score >= 60.0 or _fit_label in {"exact", "good"}:
+                    _good_broll_phrase_fit = True
+                if not bool((_broll_item or {}).get("broll_transition_applied")):
+                    _broll_without_transition = True
+                if bool((_broll_item or {}).get("broll_is_image")) and not bool((_broll_item or {}).get("broll_ken_burns_applied")):
+                    _static_broll_without_kenburns = True
+            _final_name = Path(output_path).name
+            _music_in_final = bool(_music_metadata.get("music_applied") and "music_" in _final_name)
+            _sfx_in_final = bool(_sfx_metadata.get("sfx_applied") and "sfx_" in _final_name)
+            _vfx_in_final = bool(_visual_effects_metadata.get("visual_effects_applied") and "vfx_" in _final_name)
+            _transition_in_final = bool(_transition_metadata.get("transitions_applied") and "trans_" in _final_name)
+            _music_metadata["music_final_verified"] = bool(_music_in_final)
+            _sfx_metadata["sfx_final_verified"] = bool(_sfx_in_final)
+            _visual_effects_metadata["visual_effects_final_verified"] = bool(_vfx_in_final)
+            _transition_metadata["final_output_uses_transition"] = bool(_transition_in_final)
+            _transition_metadata["transition_final_path"] = str(output_path)
+            if _transition_metadata.get("frame_rhythm_applied"):
+                _visual_effects_metadata["frame_rhythm_applied"] = True
+                _visual_effects_metadata["frame_rhythm_events"] = list(_transition_metadata.get("frame_rhythm_events") or [])
+            _final_contract_metadata = verify_final_filename_contract(
+                output_path,
+                music=_music_metadata,
+                sfx=_sfx_metadata,
+                transitions=_transition_metadata,
+                visual_effects=_visual_effects_metadata,
+                broll_events=_editorial_broll_for_status,
+            )
+            logger.info("[premium-pipeline] final_path=%s", output_path)
+            _editing_richness_score = 0
+            if (_hook_plan_data or {}).get("hook_first3_perceptible"):
+                _editing_richness_score += 2
+            if _vfx_in_final:
+                _editing_richness_score += 2
+            if _transition_in_final:
+                _editing_richness_score += 2
+            if _good_broll_phrase_fit:
+                _editing_richness_score += 2
+            if _music_in_final:
+                _editing_richness_score += 1
+            if _sfx_in_final:
+                _editing_richness_score += 1
+            if (_silence_edit_plan_data or {}).get("rendered"):
+                _editing_richness_score += 1
+            if _subtitle_intelligence_metadata.get("hook_highlight_applied"):
+                _editing_richness_score += 1
+            if _brand_metadata.get("rendered"):
+                _editing_richness_score += 1
+            if _speaker_focus_metadata.get("speaker_focus_enhanced"):
+                _editing_richness_score += 1
+            _no_music_sfx_good_broll = (
+                not _music_metadata.get("music_applied")
+                and not _sfx_metadata.get("sfx_applied")
+                and not _good_broll_phrase_fit
+            )
+            if _editing_richness_score <= 3:
+                _editing_richness_status = "too_plain"
+            elif _editing_richness_score <= 5:
+                _editing_richness_status = "acceptable"
+            elif _editing_richness_score <= 8:
+                _editing_richness_status = "good"
+            else:
+                _editing_richness_status = "rich"
+            _richness_warnings = []
+            if _no_music_sfx_good_broll:
+                if _editing_richness_status in {"good", "rich"}:
+                    _editing_richness_status = "acceptable"
+                _richness_warnings.append("visually_too_plain")
+            if _no_broll and not _visual_effects_metadata.get("visual_effects_applied"):
+                _richness_warnings.append("missing_visual_effects_for_no_broll")
+            if _music_metadata.get("music_warning") == "missing_music_library":
+                _richness_warnings.append("missing_music_library")
+            if _sfx_metadata.get("sfx_warning") in {"missing_sfx_library", "missing_sfx_worker_assets"}:
+                _richness_warnings.append(str(_sfx_metadata.get("sfx_warning")))
+            if _music_metadata.get("music_applied") and not _music_in_final:
+                _richness_warnings.append("music_planned_not_in_final")
+            if _visual_effects_metadata.get("visual_effects_applied") and not _vfx_in_final:
+                _richness_warnings.append("vfx_planned_not_in_final")
+            if _transition_metadata.get("transition_events") and not _transition_in_final:
+                _richness_warnings.append("transition_planned_not_in_final")
+            for _transition_warning in _transition_metadata.get("transition_warnings", []) or []:
+                if _transition_warning:
+                    _richness_warnings.append(str(_transition_warning))
+            if _broll_without_transition:
+                _richness_warnings.append("broll_without_transition")
+            if _static_broll_without_kenburns:
+                _richness_warnings.append("static_broll_without_kenburns")
+            if _sfx_metadata.get("sfx_warning") == "missing_sfx_worker_assets":
+                _richness_warnings.append("sfx_missing_worker_assets")
+            _richness_warnings.extend(_final_contract_metadata.get("final_contract_warnings") or [])
+            try:
+                from .vpi_retention_editing_service import build_retention_editing_plan as _build_retention_editing_plan
+                from .vpi_retention_editing_service import retention_plan_metadata as _retention_plan_metadata
+                _retention_plan_obj = _build_retention_editing_plan(
+                    clip_index=clip_index + 1,
+                    clip_duration_s=float(duration or 0.0),
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    text=str(segment.get("text") or ""),
+                    hook_plan=_hook_plan_data,
+                    silence_plan=_silence_edit_plan_data,
+                    broll_plan={"events": _editorial_broll_for_status},
+                    existing_music=_music_metadata,
+                    existing_effects=(_visual_effects_metadata or {}).get("visual_effects_events") or [],
+                )
+                _retention_metadata = _retention_plan_metadata(_retention_plan_obj)
+            except Exception as _retention_e:
+                logger.warning("[retention-plan] warnings=build_failed:%s", _retention_e)
+                _retention_metadata = {"retention_warnings": [str(_retention_e)]}
+            _editing_richness_metadata = {
+                "editing_richness_score": _editing_richness_score,
+                "editing_richness_status": _editing_richness_status,
+                "editing_richness_warnings": _richness_warnings,
+                "editing_richness_good_broll_phrase_fit": _good_broll_phrase_fit,
+                "editing_richness_final_verified": True,
+                **_retention_metadata,
+                **_final_contract_metadata,
+            }
+            logger.info("[editing-richness] final_verified=true score=%d status=%s warnings=%s", _editing_richness_score, _editing_richness_status, "|".join(_richness_warnings) or "none")
+            _publish_warnings.extend(_richness_warnings)
+
+            _publishable_metadata = _determine_publishable_status(
+                task_completed=True,
+                final_file_exists=Path(output_path).exists(),
+                subtitles=bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                output_qc=_output_qc,
+                beta_clean=bool(_cfg.beta_clean),
+                legacy_runtime=False,
+                error_code=None,
+                repeated_exact_broll_same_task=_repeated_exact_broll_same_clip,
+                weak_intro_forced_broll=_weak_intro_forced_broll,
+                warnings=_publish_warnings,
+            )
+            if _editing_plan_data:
+                _editing_plan_data["brand_treatment"] = _brand_metadata
+                _editing_plan_data["hook_plan"] = _hook_plan_data
+                _editing_plan_data["cta"] = {
+                    "strategy": (_editing_plan_data or {}).get("cta_strategy"),
+                    "text_options": ["Lo revisamos juntos?", "Valentin Proteccion Integral"],
+                    "rendered": False,
+                }
+                _editing_plan_data["subtitle_intelligence"] = _subtitle_intelligence_metadata
+                _editing_plan_data["silence_edit_plan"] = _silence_edit_plan_data
+                _editing_plan_data["output_qc"] = _output_qc
+                _editing_plan_data["audio_qc"] = locals().get("_audio_master_metadata", {})
+                _editing_plan_data["visual_effects"] = _visual_effects_metadata
+                _editing_plan_data["transitions"] = _transition_metadata
+                _editing_plan_data["music"] = _music_metadata
+                _editing_plan_data["sfx"] = _sfx_metadata
+                _editing_plan_data["premium_runtime"] = _premium_runtime
+                _editing_plan_data["premium_runtime_enabled"] = _premium_runtime["premium_runtime_enabled"]
+                _editing_plan_data["premium_layers_requested"] = list(_premium_runtime["premium_layers_requested"])
+                _editing_plan_data["speaker_focus"] = _speaker_focus_metadata
+                _editing_plan_data.update(_editing_richness_metadata)
+                _editing_plan_data.update(_publishable_metadata)
+                _editing_plan_data["hook_quality"] = _hook_quality
+            if _hook_plan_data:
+                _hook_plan_data["rendered"] = bool(_hook_plan_data.get("rendered"))
+                _publishable_metadata["hook_quality"] = _hook_quality
+        except Exception as _daily_e:
+            logger.warning("[daily-publishing] metadata failed error=%s", _daily_e)
+            _brand_metadata = {"type": "metadata_only", "rendered": False, "reason": str(_daily_e)}
+
         # Phase 5: Final duration guard — ensure clip isn't too short after processing
         try:
             _final_dur = probe_duration(output_path)
@@ -2616,6 +3835,35 @@ class VideoService:
             "ab_variants": _variants,
             "editorial_broll": locals().get("_editorial_broll_metadata", []),
             "caption_ass_debug_path": locals().get("_caption_ass_debug_path"),
+            "editing_plan": _editing_plan_data,
+            "hook_plan": _hook_plan_data,
+            "silence_edit_plan": _silence_edit_plan_data,
+            "smart_reframe": _smart_reframe_metadata,
+            "brand_treatment": _brand_metadata,
+            "visual_effects": _visual_effects_metadata,
+            "transitions": _transition_metadata,
+            "music": _music_metadata,
+            "sfx": _sfx_metadata,
+            "speaker_focus": _speaker_focus_metadata,
+            "premium_runtime": _premium_runtime,
+            "premium_runtime_enabled": _premium_runtime["premium_runtime_enabled"],
+            "premium_layers_requested": list(_premium_runtime["premium_layers_requested"]),
+            **_editing_richness_metadata,
+            "subtitle_intelligence": _subtitle_intelligence_metadata,
+            "output_qc": _output_qc,
+            "audio_qc": locals().get("_audio_master_metadata", {}),
+            "audio_mastering_applied": (locals().get("_audio_master_metadata", {}) or {}).get("audio_mastering_applied"),
+            "input_lufs": (locals().get("_audio_master_metadata", {}) or {}).get("input_lufs"),
+            "output_lufs": (locals().get("_audio_master_metadata", {}) or {}).get("output_lufs"),
+            "input_peak": (locals().get("_audio_master_metadata", {}) or {}).get("input_peak"),
+            "output_peak": (locals().get("_audio_master_metadata", {}) or {}).get("output_peak"),
+            "audio_measurement_method": (locals().get("_audio_master_metadata", {}) or {}).get("audio_measurement_method"),
+            "audio_voice_status": (locals().get("_audio_master_metadata", {}) or {}).get("audio_voice_status"),
+            "audio_warnings": (locals().get("_audio_master_metadata", {}) or {}).get("audio_warnings", []),
+            "publishable_status": _publishable_metadata.get("publishable_status"),
+            "publishable_warnings": _publishable_metadata.get("publishable_warnings", []),
+            "publishable_score": _publishable_metadata.get("publishable_score"),
+            "hook_quality": _publishable_metadata.get("hook_quality"),
         }
         # Cancel prefetch task if still running
         if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
@@ -3375,7 +4623,84 @@ class VideoService:
             # Re-rank after hook re-score while preserving editorial priority.
             segments_json = _dedupe_editorial_segments(segments_json)
             segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
-            
+
+            # ── Weak Intro Gate v2.6 ─────────────────────────────────────
+            # Do not spend publishable slots on generic greetings when enough
+            # stronger editorial candidates exist.
+            _strong_editorial_types = {
+                "emotional_protection",
+                "family_responsibility",
+                "client_objection",
+                "myth_debunk",
+                "risk_warning",
+                "coverage_explanation",
+                "actionable_advice",
+            }
+
+            def _is_weak_intro_candidate(_segment: Dict[str, Any]) -> bool:
+                _editorial = str(_segment.get("editorial_type") or "").lower()
+                _matched = " ".join(str(item or "") for item in (_segment.get("matched_patterns") or [])).lower()
+                _text_norm = str(_segment.get("text") or "").lower().strip()
+                return (
+                    _editorial == "weak_intro"
+                    or "weak_intro" in _matched
+                    or _text_norm.startswith("hola soy")
+                    or "en este momento les vengo" in _text_norm
+                )
+
+            _weak_intro_excluded_count = 0
+            _weak_intro_selected_reason = ""
+            _weak_intro_candidates = [seg for seg in segments_json if _is_weak_intro_candidate(seg)]
+            _strong_candidates = [
+                seg
+                for seg in segments_json
+                if not _is_weak_intro_candidate(seg)
+                and str(seg.get("editorial_type") or "").lower() in _strong_editorial_types
+            ]
+            if _weak_intro_candidates and len(_strong_candidates) >= num_clips:
+                _weak_intro_excluded_count = len(_weak_intro_candidates)
+                for _seg in _weak_intro_candidates:
+                    _seg["low_publish_priority"] = True
+                    _seg["weak_intro_selected_reason"] = "excluded_better_editorial_candidates"
+                segments_json = [seg for seg in segments_json if not _is_weak_intro_candidate(seg)]
+                _weak_intro_selected_reason = "excluded_better_editorial_candidates"
+                logger.info("[clip-selection-gate] weak_intro excluded reason=better_editorial_candidates count=%d", _weak_intro_excluded_count)
+            elif _weak_intro_candidates:
+                _weak_intro_selected_reason = "not_enough_strong_candidates"
+                for _seg in _weak_intro_candidates:
+                    _score_before_gate = float(_seg.get("final_rank_score", _compute_final_rank_score(_seg)) or 0.0)
+                    _seg["score_before_weak_intro_gate"] = _score_before_gate
+                    _seg["weak_intro_penalty"] = 35.0
+                    _seg["final_rank_score"] = max(0.0, _score_before_gate - 35.0)
+                    _seg["low_publish_priority"] = True
+                    _seg["weak_intro_selected_reason"] = "not_enough_strong_candidates"
+                segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
+                logger.info("[clip-selection-gate] weak_intro allowed reason=not_enough_strong_candidates count=%d", len(_weak_intro_candidates))
+
+            # ── Segment Diversity v1.9 — cross-run diversity layer ──────────
+            # Applies post-ranking penalties for recently-selected segments.
+            _diversity_metadata: Dict[str, Any] = {}
+            try:
+                from .vpi_segment_memory import (
+                    adjust_segments_for_diversity as _adjust_diversity,
+                    remember_selected_segments as _remember_segments,
+                )
+                segments_json, _diversity_metadata = _adjust_diversity(
+                    segments_json,
+                    source_video_path=str(video_path) if video_path else None,
+                    num_clips=num_clips,
+                )
+            except Exception as _div_e:
+                logger.warning("[segment-diversity] integration error: %s", _div_e)
+                _diversity_metadata = {"diversity_enabled": False, "error": str(_div_e)}
+
+            if isinstance(_diversity_metadata, dict):
+                _diversity_metadata["weak_intro_excluded_count"] = _weak_intro_excluded_count
+                _diversity_metadata["weak_intro_selected_reason"] = _weak_intro_selected_reason
+                _diversity_metadata["editorial_mix_selected"] = [
+                    str(seg.get("editorial_type") or "") for seg in segments_json[:num_clips]
+                ]
+
             # Add niche info to segments
             for segment in segments_json:
                 segment["niche_info"] = niche_info
@@ -3425,6 +4750,28 @@ class VideoService:
                 if progress_callback:
                     await progress_callback(90, "Finalizing...", "processing")
 
+            # ── Segment Diversity v1.9: remember selected segments ──────────
+            # Only record if clips were successfully rendered.
+            if clips_info and len([c for c in clips_info if c]) > 0:
+                try:
+                    from .vpi_segment_memory import load_segment_memory as _load_segment_memory
+                    from .vpi_segment_memory import remember_selected_segments as _remember_segments
+                    _remember_ok = _remember_segments(
+                        segments=segments_json[:num_clips],
+                        task_id=task_id or "unknown",
+                        source_video_path=str(video_path) if video_path else None,
+                    )
+                    if _remember_ok:
+                        _memory_after = _load_segment_memory()
+                        _diversity_metadata["memory_entries_after"] = len(_memory_after)
+                    logger.info(
+                        "[segment-memory] remembered count=%d ok=%s",
+                        len(segments_json[:num_clips]),
+                        str(bool(_remember_ok)).lower(),
+                    )
+                except Exception as _rem_e:
+                    logger.warning("[segment-diversity] remember failed: %s", _rem_e)
+
             # Record pipeline success metrics
             get_metrics_collector().finish_pipeline(task_id or "unknown", success=True)
             
@@ -3438,6 +4785,7 @@ class VideoService:
                 "video_path": str(video_path),
                 "clips": clips_info,
                 "clips_info": clips_info,
+                "diversity_metadata": _diversity_metadata,
                 "summary": relevant_parts.summary if relevant_parts else None,
                 "key_topics": relevant_parts.key_topics if relevant_parts else None,
                 "transcript": transcript,

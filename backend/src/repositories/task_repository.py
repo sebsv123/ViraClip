@@ -73,8 +73,13 @@ class TaskRepository:
                     "batch_id": batch_id,
                 },
             )
-        except Exception:
+        except Exception as exc:
             await db.rollback()
+            logger.warning(
+                "Full task insert failed; falling back to legacy task insert. "
+                "Advanced task settings may not persist: %s",
+                exc,
+            )
             result = await db.execute(
                 text("""
                     INSERT INTO tasks (

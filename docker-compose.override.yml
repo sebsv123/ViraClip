@@ -50,63 +50,27 @@ services:
         reservations:
           cpus: '4.0'
           memory: 8G
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     environment:
       - RENDER_CONCURRENCY=6
-      - CUDA_VISIBLE_DEVICES=0
-      - NVIDIA_VISIBLE_DEVICES=all
-      - WHISPER_DEVICE=cuda
+      - WHISPER_DEVICE=cpu
+      - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - WHISPER_COMPUTE_TYPE=float16
       - SAM2_ENABLED=true
-      - T2V_ENABLED=true
-
-  # Worker 2 - CPU fallback (no GPU)
-  worker-2:
-    deploy:
-      resources:
-        limits:
-          cpus: '6.0'
-          memory: 8G
-        reservations:
-          cpus: '3.0'
-          memory: 4G
-    environment:
-      - RENDER_CONCURRENCY=3
-      - CUDA_VISIBLE_DEVICES=""
-      - WHISPER_DEVICE=cpu
-      - SAM2_ENABLED=false
-      - T2V_ENABLED=false
-
-  # Worker 3 - Lightweight CPU tasks
-  worker-3:
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 6G
-        reservations:
-          cpus: '2.0'
-          memory: 3G
-    environment:
-      - RENDER_CONCURRENCY=2
-      - CUDA_VISIBLE_DEVICES=""
-      - WHISPER_DEVICE=cpu
-      - SAM2_ENABLED=false
       - T2V_ENABLED=false
 
   # Frontend - Next.js
   frontend:
+    mem_limit: 4g
+    mem_reservation: 2g
     deploy:
       resources:
         limits:
           cpus: '2.0'
-          memory: 2G
+          memory: 4G
         reservations:
           cpus: '1.0'
-          memory: 1G
+          memory: 2G
 
   # Nginx - Reverse proxy
   nginx:

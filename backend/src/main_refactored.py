@@ -76,6 +76,13 @@ def create_app(
             from .utils.startup import initialize_application
             initialize_application()
             
+            # GPU probe (safe — respects VIRACLIP_GPU_PROBE_ON_START flag)
+            try:
+                from .utils.gpu_utils import log_gpu_status as _log_gpu
+                _log_gpu()
+            except Exception as _gpu_e:
+                logger.debug("[gpu] Startup probe skipped: %s", _gpu_e)
+            
             await init_db()
             logger.info("✅ Database initialized")
 

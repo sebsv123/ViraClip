@@ -98,9 +98,22 @@ class ImprovedLLMService:
         Get virality analysis with validation and fallback.
         Flow: Groq (if key) → Ollama → text-based fallback
         
+        In beta_clean mode (VIRACLIP_BETA_CLEAN=true), both Groq and Ollama
+        are skipped entirely — we go straight to text-based fallback to avoid
+        API calls and latency.
+        
         Returns:
             Dict with "analysis" key containing validated segment analyses
         """
+        # Check if beta_clean mode is active
+        _beta_clean = os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes")
+
+        if _beta_clean:
+            logger.info(
+                "[beta-clean] LLM virality analysis disabled; using text fallback"
+            )
+            return self._text_based_fallback(transcript_segments)
+
         # Primary: Groq (fast, reliable, already used for segment selection)
         if self.groq_api_key:
             try:

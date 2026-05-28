@@ -183,14 +183,14 @@ def normalize_broll(
     target_w: int,
     target_h: int,
     duration: float,
-    fade: float = 0.6,
+    fade: float = 0.15,
     output_path: Optional[Path] = None,
 ) -> Optional[Path]:
     """
     Produce a normalised B-roll clip:
       - Scaled and center-cropped to target_w × target_h
       - Trimmed to *duration* seconds
-      - Fade-in and fade-out of *fade* seconds (default 0.6s for smooth transitions)
+      - Fade-in and fade-out of *fade* seconds (default 0.15s for brand-safe transitions)
       - Audio muted (B-roll is silent by design)
       - Ken Burns effect for static images (subtle zoom + pan)
 
@@ -229,6 +229,8 @@ def normalize_broll(
             f"{effect_filter}"
         )
         logger.info(f"🎨 B-roll effect applied: {effect_type.value}")
+        logger.info("[broll-kenburns] applied=true")
+        logger.info("[broll-transition] applied=true type=short_fade")
     elif is_image:
         # Fallback: Ken Burns clásico sin fade negro
         vf = (
@@ -237,6 +239,8 @@ def normalize_broll(
             f"setsar=1,"
             f"zoompan=z='min(zoom+0.0008,1.08)':d={int(duration*30)}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={target_w}x{target_h}"
         )
+        logger.info("[broll-kenburns] applied=true asset=%s", broll_path)
+        logger.info("[broll-transition] applied=true type=short_fade")
     else:
         # Videos: sin fade negro, imagen limpia
         vf = (
@@ -244,6 +248,7 @@ def normalize_broll(
             f"crop={target_w}:{target_h},"
             f"setsar=1"
         )
+        logger.info("[broll-transition] applied=true type=clean_cut")
 
     # Build codec flags (ensure they come after input/output mapping options)
     _codec_flags = _gpu_codec("medium")
@@ -351,11 +356,22 @@ def compose_overlay(
         return False
 
     end_ts = timestamp + duration
-    # Overlay limpio: el B-roll tapa el video en el rango dado, audio del main continúa.
-    # Sin fade negro — imagen del B-roll tal cual, sin filtros de oscurecimiento.
+    visual_fade = max(0.0, min(0.20, float(fade or 0.0), duration / 3.0))
+    if visual_fade > 0.0:
+        fade_out_start = max(0.0, duration - visual_fade)
+        broll_chain = (
+            "[1:v]setpts=PTS-STARTPTS,"
+            "format=rgba,"
+            f"fade=t=in:st=0:d={visual_fade:.3f}:alpha=1,"
+            f"fade=t=out:st={fade_out_start:.3f}:d={visual_fade:.3f}:alpha=1,"
+            f"setpts=PTS+{timestamp:.3f}/TB[bv];"
+        )
+        logger.info("[broll-transition] fade_in=%.2f fade_out=%.2f applied=true", visual_fade, visual_fade)
+    else:
+        broll_chain = f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
     filter_complex = (
-        f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
-        f"[0:v][bv]overlay=enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':x=0:y=0[out]"
+        broll_chain
+        + f"[0:v][bv]overlay=enable='between(t\\,{timestamp:.3f}\\,{end_ts:.3f})':x=0:y=0[out]"
     )
 
     _codec_flags = _gpu_codec("high")
@@ -456,8 +472,21 @@ async def compose_overlay_multi(
     for idx, (ts, _, dur) in enumerate(valid_pairs):
         end_ts = ts + dur
         out_tag = f"vout{idx}"
+        visual_fade = max(0.0, min(0.20, float(fade or 0.0), dur / 3.0))
+        input_tag = f"bo{idx}"
+        if visual_fade > 0.0:
+            fade_out_start = max(0.0, dur - visual_fade)
+            filter_parts.append(
+                f"[{idx + 1}:v]setpts=PTS-STARTPTS,format=rgba,"
+                f"fade=t=in:st=0:d={visual_fade:.3f}:alpha=1,"
+                f"fade=t=out:st={fade_out_start:.3f}:d={visual_fade:.3f}:alpha=1,"
+                f"setpts=PTS+{ts:.3f}/TB[{input_tag}]"
+            )
+            logger.info("[broll-transition] fade_in=%.2f fade_out=%.2f applied=true", visual_fade, visual_fade)
+        else:
+            filter_parts.append(f"[{idx + 1}:v]setpts=PTS-STARTPTS+{ts:.3f}/TB[{input_tag}]")
         filter_parts.append(
-            f"[{prev}][{idx + 1}:v]"
+            f"[{prev}][{input_tag}]"
             f"overlay=enable='between(t\\,{ts:.3f}\\,{end_ts:.3f})':x=0:y=0"
             f"[{out_tag}]"
         )

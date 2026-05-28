@@ -308,13 +308,20 @@ async def get_broll_suggestions_for_clip(
     # This function can be used for additional keyword extraction if needed
 
     # Simple keyword extraction based on common visual concepts
+    # Insurance/finance-first for Spanish-language beta
     visual_keywords = [
-        "money", "cash", "success", "business", "computer", "phone", "office",
-        "meeting", "team", "workout", "gym", "food", "cooking", "travel",
+        # Insurance / finance (priority for beta)
+        "seguro", "seguros", "póliza", "cobertura", "prima",
+        "indemnización", "siniestro", "reclamo", "aseguradora",
+        "financial", "financiero", "inversión", "ahorro",
+        "banco", "bank", "cuenta", "crédito", "hipoteca",
+        "dinero", "money", "cash", "success", "business",
+        # General
+        "computer", "phone", "office", "meeting", "team",
+        "workout", "gym", "food", "cooking", "travel",
         "city", "nature", "people", "technology", "social media", "coffee",
         "book", "reading", "writing", "car", "driving", "walking", "running"
     ]
-
     text_lower = transcript_text.lower()
     found_keywords = []
 

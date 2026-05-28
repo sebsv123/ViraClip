@@ -19,21 +19,35 @@ logger = logging.getLogger(__name__)
 # Module-level flag to cache Ollama availability (avoid retries on every clip)
 _ollama_available: Optional[bool] = None
 
-# Import viral trend service (Phase 4.3)
-try:
-    from services.viral_trend_service import get_trend_service
-    TREND_SERVICE_AVAILABLE = True
-except ImportError:
-    TREND_SERVICE_AVAILABLE = False
-    logger.warning("Viral trend service not available")
+# Lazy imports — defer to avoid noisy logs at import time when beta_clean is active
+TREND_SERVICE_AVAILABLE: bool = False
+REASONING_PIPELINE_AVAILABLE: bool = False
 
-# Import structured reasoning pipeline (Enhancement Phase 3)
-try:
-    from reasoning.virality_pipeline import get_virality_pipeline
-    REASONING_PIPELINE_AVAILABLE = True
-except ImportError:
-    REASONING_PIPELINE_AVAILABLE = False
-    logger.warning("Structured reasoning pipeline not available")
+def _lazy_init_trend_service() -> bool:
+    """Import viral trend service on first use (lazy)."""
+    global TREND_SERVICE_AVAILABLE
+    if TREND_SERVICE_AVAILABLE:
+        return True
+    try:
+        from services.viral_trend_service import get_trend_service  # noqa: F401
+        TREND_SERVICE_AVAILABLE = True
+    except ImportError:
+        TREND_SERVICE_AVAILABLE = False
+        logger.debug("Viral trend service not available (lazy init)")
+    return TREND_SERVICE_AVAILABLE
+
+def _lazy_init_reasoning_pipeline() -> bool:
+    """Import structured reasoning pipeline on first use (lazy)."""
+    global REASONING_PIPELINE_AVAILABLE
+    if REASONING_PIPELINE_AVAILABLE:
+        return True
+    try:
+        from reasoning.virality_pipeline import get_virality_pipeline  # noqa: F401
+        REASONING_PIPELINE_AVAILABLE = True
+    except ImportError:
+        REASONING_PIPELINE_AVAILABLE = False
+        logger.debug("Structured reasoning pipeline not available (lazy init)")
+    return REASONING_PIPELINE_AVAILABLE
 
 # Phi-3-mini Scroll Stop Test Prompt - The key differentiator
 SCROLL_STOP_TEST_PROMPT = """You are a viral content expert trained on the SCROLL STOP TEST methodology.
@@ -131,11 +145,8 @@ class Phi3ViralityService:
         self.ollama_url = re.sub(r"/v1$", "", raw_url)
         self.model = "phi3:mini"  # 3.8B params, MIT license
         self.timeout = httpx.Timeout(30.0, connect=5.0)
-        try:
-            from .viral_trend_service import ViralTrendService
-            self.trend_service = ViralTrendService()
-        except Exception:
-            self.trend_service = None
+        # Lazy init — trend service is imported on first use via _lazy_init_trend_service()
+        self.trend_service = None
         
         logger.info(f"Phi-3-mini Virality Service initialized: {self.ollama_url}")
     
@@ -163,7 +174,7 @@ class Phi3ViralityService:
         # Check if structured reasoning mode is enabled
         reasoning_mode = os.getenv("REASONING_MODE", "monolithic").lower()
         
-        if reasoning_mode == "structured" and REASONING_PIPELINE_AVAILABLE:
+        if reasoning_mode == "structured" and _lazy_init_reasoning_pipeline():
             return await self._score_with_structured_reasoning(
                 segment_text, duration, audio_features
             )
@@ -348,8 +359,8 @@ class Phi3ViralityService:
         # Get base score
         base_score = await self.score_segment(segment_text, duration, audio_features)
         
-        # Apply trend boost if service available
-        if TREND_SERVICE_AVAILABLE:
+        # Apply trend boost if service available (lazy init)
+        if _lazy_init_trend_service():
             try:
                 trend_service = await get_trend_service()
                 boosted_total = trend_service.apply_trend_boost(

@@ -55,38 +55,67 @@ class EnhancedBrollService:
     Enhanced B-roll service with visual context analysis.
     """
     
-    # Context detection patterns
+    # Context detection patterns (EN + ES for insurance/finance beta)
     CONTEXT_PATTERNS = {
         VisualContextType.TUTORIAL_DEMO: [
             r"click (on|this)", r"open (the|settings)", r"drag (and drop|this)",
             r"type (this|in)", r"select (the|option)", r"press (button|key)",
-            r"enter (data|text)", r"upload (file|image)", r"download (the|file)"
+            r"enter (data|text)", r"upload (file|image)", r"download (the|file)",
+            # Spanish
+            r"haz clic", r"abre (la|el)", r"selecciona", r"presiona",
+            r"ingresa (los|la)", r"sube (el|la)", r"descarga"
         ],
         VisualContextType.PRODUCT_SHOWCASE: [
             r"this product", r"feature (is|allows)", r"comes with",
             r"includes", r"design (is|features)", r"quality (materials|build)",
-            r"look at this", r"check this out", r"here's the"
+            r"look at this", r"check this out", r"here's the",
+            # Spanish — insurance/finance
+            r"este (producto|seguro|plan)", r"esta (póliza|cobertura)",
+            r"incluye", r"cubre", r"protege", r"beneficio",
+            r"te (ofrecemos|damos|garantizamos)",
+            r"nuestro (seguro|plan|producto)"
         ],
         VisualContextType.LOCATION_SCENES: [
             r"we're at", r"this place", r"location", r"scenery",
-            r"landscape", r"beautiful view", r"over here", r"in this (city|area|country)"
+            r"landscape", r"beautiful view", r"over here", r"in this (city|area|country)",
+            # Spanish
+            r"estamos en", r"este (lugar|sitio|país|barrio)",
+            r"aquí (en|está)", r"en esta (zona|ciudad|región)",
+            r"oficina", r"edificio", r"sucursal"
         ],
         VisualContextType.SCREEN_RECORDING: [
             r"screen", r"interface", r"dashboard", r"app", r"website",
-            r"software", r"program", r"platform", r"tool"
+            r"software", r"program", r"platform", r"tool",
+            # Spanish
+            r"pantalla", r"interfaz", r"aplicación", r"app",
+            r"plataforma", r"portal", r"panel", r"dashboard"
         ],
         VisualContextType.EMOTIONAL_MOMENT: [
             r"amazing", r"incredible", r"shocking", r"emotional",
             r"touching", r"heartwarming", r"surprising", r"unbelievable",
-            r"can't believe", r"so (happy|sad|excited|angry)"
+            r"can't believe", r"so (happy|sad|excited|angry)",
+            # Spanish
+            r"increíble", r"impresionante", r"sorprendente",
+            r"tranquilidad", r"confianza", r"seguridad",
+            r"protección", r"paz mental", r"tranquilo",
+            r"no te preocupes", r"estás (cubierto|protegido)"
         ],
         VisualContextType.ACTION_SEQUENCE: [
             r"watch me", r"look at this", r"doing this", r"demonstrating",
-            r"showing you", r"here's how", r"let me (show|demonstrate)"
+            r"showing you", r"here's how", r"let me (show|demonstrate)",
+            # Spanish
+            r"mira (esto|cómo)", r"te muestro", r"vamos a (ver|hacer)",
+            r"así es como", r"déjame (mostrarte|explicarte)"
         ],
         VisualContextType.TEXT_HEAVY: [
             r"statistics", r"numbers", r"data shows", r"according to",
-            r"research", r"study", r"percent", r"graph", r"chart"
+            r"research", r"study", r"percent", r"graph", r"chart",
+            # Spanish — insurance/finance
+            r"estadísticas", r"números", r"datos (muestran|indican)",
+            r"según", r"estudio", r"investigación",
+            r"porcentaje", r"por ciento", r"gráfica", r"tabla",
+            r"promedio", r"cifras", r"resultados",
+            r"prima", r"deducible", r"cobertura", r"límite"
         ]
     }
     

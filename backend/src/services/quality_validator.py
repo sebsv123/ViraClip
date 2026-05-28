@@ -218,6 +218,16 @@ class ClipQualityValidator:
                 text=True
             )
             
+            # Guard: ffprobe may return empty stdout when file is missing or corrupt
+            if not result.stdout.strip():
+                return QualityCheck(
+                    name="resolution",
+                    passed=False,
+                    score=0,
+                    message="ffprobe returned empty output — cannot check resolution",
+                    recommendation="Verify video file integrity"
+                )
+            
             info = json.loads(result.stdout)
             stream = info.get("streams", [{}])[0]
             height = int(stream.get("height", 0))
@@ -279,6 +289,15 @@ class ClipQualityValidator:
                 capture_output=True,
                 text=True
             )
+            
+            # Guard: ffprobe may return empty stdout when file is missing or corrupt
+            if not result.stdout.strip():
+                return QualityCheck(
+                    name="aspect_ratio",
+                    passed=True,
+                    score=70,
+                    message="Could not verify aspect ratio (ffprobe empty)"
+                )
             
             info = json.loads(result.stdout)
             stream = info.get("streams", [{}])[0]
