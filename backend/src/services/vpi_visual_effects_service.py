@@ -301,6 +301,11 @@ def resolve_visual_layer_conflicts(
             allowed = False
             reason = "boom_in_emotional_closure"
 
+        # Rule 3b: minimal_safe blocks strong SFX layers by default.
+        if allowed and comp_mode == "minimal_safe" and layer_type in {"sfx_riser", "sfx_hit", "sfx_whoosh"}:
+            allowed = False
+            reason = "minimal_safe_no_strong_sfx"
+
         # Rule 4: Never icon if long caption
         if allowed and layer_type == "icon":
             caption_text = str(layer.get("text") or layer.get("caption_text") or layer.get("reference_caption") or "")

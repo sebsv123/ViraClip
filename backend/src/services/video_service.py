@@ -3701,7 +3701,19 @@ class VideoService:
 
             try:
                 from .vpi_sfx_service import apply_sfx_bed as _apply_sfx_bed
+                from .vpi_visual_effects_service import first3_visual_contract as _build_first3_visual_contract_pre_sfx
                 _sfx_out = output_path.with_name(f"sfx_{output_path.name}")
+                _first3_visual_contract_pre_sfx: Dict[str, Any] = {}
+                try:
+                    _first3_visual_contract_pre_sfx = _build_first3_visual_contract_pre_sfx(
+                        hook_plan=_hook_plan_data,
+                        caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                        composition_decision=_composition_decision,
+                        visual_effects=(_visual_effects_metadata or {}).get("visual_effects_events") or [],
+                        transition_plan=_transition_metadata if isinstance(_transition_metadata, dict) else {},
+                    )
+                except Exception as _pre_sfx_contract_e:
+                    logger.debug("[first3-visual-contract] pre_sfx skipped reason=%s", _pre_sfx_contract_e)
                 _sfx_metadata = _apply_sfx_bed(
                     output_path,
                     _sfx_out,
@@ -3711,6 +3723,10 @@ class VideoService:
                     editorial_type=str(segment.get("editorial_type") or ""),
                     segment_text=str(segment.get("text") or ""),
                     composition_decision=_composition_decision,
+                    broll_editorial_decision=_broll_editorial_decision,
+                    private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                    first3_visual_contract=_first3_visual_contract_pre_sfx,
+                    silence_plan=_silence_edit_plan_data,
                 )
                 if _sfx_metadata.get("sfx_applied") and _sfx_out.exists():
                     _sfx_input = output_path
@@ -4192,6 +4208,43 @@ class VideoService:
                 _good_broll_phrase_fit = True
             if not _broll_true:
                 _good_broll_phrase_fit = False
+            _sfx_asset_match = bool((_sfx_metadata or {}).get("sfx_asset_applied_match"))
+            _sfx_composition_allowed = bool((_sfx_metadata or {}).get("sfx_composition_allowed", True))
+            _sfx_timing_safe = bool((_sfx_metadata or {}).get("sfx_timing_safe", (_sfx_metadata or {}).get("sfx_applied")))
+            _sfx_true = bool(
+                (_sfx_metadata or {}).get("sfx_applied")
+                and _sfx_asset_match
+                and _sfx_composition_allowed
+                and _sfx_timing_safe
+            )
+            _sfx_opportunity = bool((_sfx_metadata or {}).get("sfx_editorial_opportunity"))
+            _sfx_low_variation = bool((_sfx_metadata or {}).get("sfx_low_variation"))
+            _sfx_retention_pack = bool(
+                (_sfx_metadata or {}).get("sfx_retention_pack")
+                or _sfx_true
+                or bool(((_silence_edit_plan_data or {}).get("summary") or {}).get("tension_silences_preserved"))
+            )
+            _sfx_reason = str((_sfx_metadata or {}).get("sfx_warning") or ((_sfx_metadata or {}).get("sfx_retention_decision") or {}).get("skip_reason") or "")
+            if _sfx_true:
+                _sfx_reason = "asset_timing_composition_safe"
+            elif _sfx_opportunity and not _sfx_reason:
+                _sfx_reason = "opportunity_unfulfilled"
+            _sfx_metadata["sfx_applied"] = bool(_sfx_true)
+            _sfx_metadata["sfx_retention_pack"] = bool(_sfx_retention_pack)
+            _sfx_metadata["sfx_editorial_opportunity"] = bool(_sfx_opportunity and not _sfx_true)
+            _sfx_metadata["sfx_low_variation"] = bool(_sfx_low_variation)
+            logger.info("[editing-richness] sfx=%s reason=%s", str(_sfx_true).lower(), _sfx_reason or "none")
+            logger.info(
+                "[editing-richness] sfx_retention_pack=%s reason=%s",
+                str(_sfx_retention_pack).lower(),
+                "contextual_timing_or_silence" if _sfx_retention_pack else "none",
+            )
+            logger.info(
+                "[editing-richness] sfx_editorial_opportunity=%s reason=%s",
+                str(bool(_sfx_opportunity and not _sfx_true)).lower(),
+                _sfx_reason or "none",
+            )
+            logger.info("[editing-richness] sfx_low_variation=%s", str(_sfx_low_variation).lower())
             _final_name = Path(output_path).name
             _music_in_final = bool(_music_metadata.get("music_applied") and "music_" in _final_name)
             _sfx_in_final = bool(_sfx_metadata.get("sfx_applied") and "sfx_" in _final_name)
@@ -4295,6 +4348,10 @@ class VideoService:
                 _richness_warnings.append("missing_music_library")
             if _sfx_metadata.get("sfx_warning") in {"missing_sfx_library", "missing_sfx_worker_assets"}:
                 _richness_warnings.append(str(_sfx_metadata.get("sfx_warning")))
+            if (_sfx_metadata or {}).get("sfx_editorial_opportunity") and not _sfx_in_final:
+                _richness_warnings.append("sfx_editorial_opportunity_unfulfilled")
+            if (_sfx_metadata or {}).get("sfx_low_variation"):
+                _richness_warnings.append("sfx_low_variation")
             if _music_metadata.get("music_applied") and not _music_in_final:
                 _richness_warnings.append("music_planned_not_in_final")
             if _visual_effects_metadata.get("visual_effects_applied") and not _vfx_in_final:
@@ -4386,6 +4443,10 @@ class VideoService:
                 "broll_limited_assets": _broll_limited_assets,
                 "broll_editorial_decision": _broll_editorial_decision_final,
                 "broll_asset_match": _broll_asset_match_final,
+                "sfx": _sfx_true,
+                "sfx_retention_pack": _sfx_retention_pack,
+                "sfx_editorial_opportunity": bool(_sfx_opportunity and not _sfx_true),
+                "sfx_low_variation": _sfx_low_variation,
                 "editing_richness_final_verified": True,
                 **_retention_metadata,
                 **_final_contract_metadata,

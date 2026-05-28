@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,27 @@ _SFX_DIRS = (
     "/app/assets/sounds/booms",
     "/app/assets/sounds/whooshes",
 )
+_SFX_ROTATION_DIR = Path(os.environ.get("VIRACLIP_SFX_ROTATION_DIR") or "/tmp")
+
+_RETENTION_KEYWORDS = {
+    "risk_warning": ("no siempre avisa", "riesgo", "imprevisto", "advertencia", "urgente"),
+    "myth_flip": ("no va de", "no es", "va de", "mito", "error comun"),
+    "practical_advice": ("antes de", "conviene", "recomendacion", "paso", "organizacion"),
+    "autonomous_business_stakes": ("autonomo", "autónomo", "motor", "ingresos", "negocio", "estabilidad"),
+    "emotional_closure": ("cuando mas falta hace", "cuando más falta hace", "familia", "apoyo", "tranquilidad"),
+}
+
+_SFX_FAMILY_TO_ASSET_KEYS: Dict[str, tuple[str, ...]] = {
+    "tension_riser": ("high_riser",),
+    "high_riser": ("high_riser",),
+    "dark_riser": ("low_riser", "high_riser"),
+    "magic_whoosh": ("magic_whoosh",),
+    "deep_boom": ("deep_boom",),
+    "soft_chime": ("magic_whoosh", "high_riser"),
+}
+
+_AGGRESSIVE_FAMILIES = {"deep_boom", "glitch_hit", "sfx_hit"}
+_BAD_SILENCE_REASONS = ("bts", "false_start", "awkward", "dead_air", "weak_intro", "filler", "stumble", "traba")
 
 
 def _repo_root() -> Path:
@@ -99,6 +122,274 @@ def discover_sfx_assets() -> Dict[str, List[Path]]:
 
 def _asset_label(path: Optional[Path]) -> Optional[str]:
     return str(path) if path else None
+
+
+def _normalize_text(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _contains_any(text: str, keywords: Sequence[str]) -> bool:
+    normalized = _normalize_text(text)
+    return any(_normalize_text(word) in normalized for word in keywords if str(word).strip())
+
+
+def _voice_dense_segment(segment_text: str) -> bool:
+    words = [token for token in _normalize_text(segment_text).split(" ") if token]
+    if len(words) >= 18:
+        return True
+    return len(" ".join(words)) >= 120
+
+
+def _is_safe_silence_reason(reason: str) -> bool:
+    normalized = _normalize_text(reason)
+    return bool(normalized) and not any(flag in normalized for flag in _BAD_SILENCE_REASONS)
+
+
+def _sfx_rotation_path(task_id: Optional[str]) -> Path:
+    suffix = str(task_id or "global").replace("/", "_")
+    return _SFX_ROTATION_DIR / f"viraclip_sfx_rotation_{suffix}.txt"
+
+
+def _read_sfx_rotation_history(task_id: Optional[str]) -> List[str]:
+    path = _sfx_rotation_path(task_id)
+    if not path.exists():
+        return []
+    try:
+        return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:
+        return []
+
+
+def _append_sfx_rotation_history(task_id: Optional[str], asset: str) -> None:
+    if not asset:
+        return
+    _SFX_ROTATION_DIR.mkdir(parents=True, exist_ok=True)
+    path = _sfx_rotation_path(task_id)
+    history = _read_sfx_rotation_history(task_id)
+    history.append(asset)
+    history = history[-20:]
+    try:
+        path.write_text("\n".join(history) + "\n", encoding="utf-8")
+    except Exception:
+        pass
+
+
+def build_sfx_retention_decision(
+    *,
+    hook_intent: str = "",
+    visual_profile: str = "",
+    composition_mode: str = "",
+    broll_editorial_decision: Optional[Dict[str, Any]] = None,
+    segment_text: str = "",
+    private_premium_status: str = "",
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    resolved_intent = str(hook_intent or "neutral_explanation")
+    text = str(segment_text or "")
+    comp_mode = str(composition_mode or "")
+
+    if str(private_premium_status or "") == "DO_NOT_UPLOAD":
+        decision = {
+            "should_apply_sfx": False,
+            "sfx_intent": "no_sfx_needed",
+            "sfx_family": "no_sfx_needed",
+            "timing_offset": 0.0,
+            "duration": 0.0,
+            "volume_db": -28.0,
+            "reason": "private_premium_do_not_upload",
+            "confidence": 0.0,
+            "fallback": "none",
+            "skip_reason": "sensitive_tone",
+        }
+        logger.info("[sfx-retention] should_apply=false intent=no_sfx_needed family=no_sfx_needed confidence=0.00 reason=private_premium_do_not_upload")
+        logger.info("[sfx-retention] skipped reason=sensitive_tone")
+        return decision
+
+    has_risk = _contains_any(text, _RETENTION_KEYWORDS["risk_warning"])
+    has_myth = _contains_any(text, _RETENTION_KEYWORDS["myth_flip"])
+    has_practical = _contains_any(text, _RETENTION_KEYWORDS["practical_advice"])
+    has_business = _contains_any(text, _RETENTION_KEYWORDS["autonomous_business_stakes"])
+    has_emotional = _contains_any(text, _RETENTION_KEYWORDS["emotional_closure"])
+    has_broll_reveal = bool((broll_editorial_decision or {}).get("should_use_broll"))
+    voice_dense = _voice_dense_segment(text)
+
+    sfx_intent = "no_sfx_needed"
+    sfx_family = "no_sfx_needed"
+    reason = "no_retention_gain"
+    confidence = 0.2
+    timing_offset = 0.0
+    duration = 0.0
+    volume_db = -28.0
+    fallback = "none"
+    skip_reason = ""
+    should_apply = False
+
+    if resolved_intent == "risk_warning" and (has_risk or has_broll_reveal or visual_profile == "tension_push"):
+        sfx_intent = "tension_riser"
+        sfx_family = "dark_riser"
+        reason = "warning_emphasis_retention"
+        confidence = 0.78
+        timing_offset = -0.10
+        duration = 1.0
+        volume_db = -24.0
+        should_apply = True
+    elif resolved_intent == "myth_flip" and (has_myth or has_broll_reveal):
+        sfx_intent = "magic_whoosh"
+        sfx_family = "magic_whoosh"
+        reason = "myth_contrast_reveal"
+        confidence = 0.70
+        timing_offset = 0.05
+        duration = 0.5
+        volume_db = -23.0
+        should_apply = True
+    elif resolved_intent == "practical_advice" and has_practical:
+        sfx_intent = "soft_chime"
+        sfx_family = "soft_chime"
+        reason = "clarity_marker"
+        confidence = 0.62
+        timing_offset = 0.10
+        duration = 0.45
+        volume_db = -26.0
+        should_apply = True
+    elif resolved_intent == "autonomous_business_stakes" and has_business:
+        sfx_intent = "deep_boom"
+        sfx_family = "deep_boom"
+        reason = "business_stakes_emphasis"
+        confidence = 0.74
+        timing_offset = 0.08
+        duration = 0.45
+        volume_db = -25.0
+        should_apply = True
+    elif resolved_intent == "emotional_closure" and has_emotional:
+        sfx_intent = "silence_contrast"
+        sfx_family = "silence_contrast"
+        reason = "emotional_pause_support"
+        confidence = 0.66
+        timing_offset = 0.0
+        duration = 0.28
+        volume_db = -29.0
+        should_apply = False
+        fallback = "silence_contrast"
+    elif resolved_intent == "neutral_explanation":
+        sfx_intent = "no_sfx_needed"
+        sfx_family = "no_sfx_needed"
+        reason = "neutral_clarity"
+        confidence = 0.45
+
+    # composition / tone blocks
+    blocked_by_tone = False
+    blocked_reason = ""
+    if comp_mode == "emotional_soft" and sfx_family in _AGGRESSIVE_FAMILIES:
+        blocked_by_tone = True
+        blocked_reason = "sensitive_tone"
+    elif comp_mode == "minimal_safe" and sfx_family not in {"no_sfx_needed", "soft_chime"}:
+        blocked_by_tone = True
+        blocked_reason = "composition_block"
+    elif voice_dense and sfx_family in {"deep_boom", "magic_whoosh", "high_riser"}:
+        blocked_by_tone = True
+        blocked_reason = "voice_conflict"
+
+    if blocked_by_tone:
+        should_apply = False
+        skip_reason = blocked_reason
+        fallback = "caption_emphasis" if blocked_reason == "voice_conflict" else "silence_contrast"
+        logger.info("[sfx-retention] blocked_by_tone=true reason=%s", blocked_reason)
+    else:
+        logger.info("[sfx-retention] blocked_by_tone=false reason=none")
+
+    contract = first3_visual_contract or {}
+    if str(contract.get("status") or "") == "review" and bool(contract.get("first3_visual_fail_count", 0)) >= 2:
+        should_apply = False
+        skip_reason = skip_reason or "composition_block"
+        fallback = "caption_emphasis"
+
+    decision = {
+        "should_apply_sfx": bool(should_apply),
+        "sfx_intent": sfx_intent,
+        "sfx_family": sfx_family,
+        "timing_offset": round(float(timing_offset), 2),
+        "duration": round(float(duration), 2),
+        "volume_db": round(float(volume_db), 1),
+        "reason": reason,
+        "confidence": round(float(confidence), 3),
+        "fallback": fallback,
+        "skip_reason": skip_reason or ("no_retention_gain" if not should_apply and sfx_family != "silence_contrast" else ""),
+        "voice_conflict": bool(voice_dense and blocked_reason == "voice_conflict"),
+    }
+    logger.info(
+        "[sfx-retention] intent_mapping hook_intent=%s sfx_family=%s",
+        resolved_intent,
+        sfx_family,
+    )
+    logger.info(
+        "[sfx-retention] should_apply=%s intent=%s family=%s confidence=%.2f reason=%s",
+        str(bool(should_apply)).lower(),
+        sfx_intent,
+        sfx_family,
+        float(confidence),
+        reason,
+    )
+    if not should_apply and sfx_family != "silence_contrast":
+        logger.info("[sfx-retention] skipped reason=%s", decision.get("skip_reason") or "no_retention_gain")
+    return decision
+
+
+def match_sfx_asset(
+    *,
+    sfx_family: str,
+    hook_intent: str = "",
+    recent_sfx_history: Optional[Sequence[str]] = None,
+    assets: Optional[Dict[str, List[Path]]] = None,
+    task_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    family = str(sfx_family or "no_sfx_needed")
+    if family in {"no_sfx_needed", "silence_contrast"}:
+        return {"matched": False, "asset": None, "low_variation": False, "reason": "no_asset_needed"}
+
+    assets = assets or discover_sfx_assets()
+    candidate_keys = _SFX_FAMILY_TO_ASSET_KEYS.get(family, tuple())
+    candidates: List[Path] = []
+    for key in candidate_keys:
+        candidates.extend(list(assets.get(key) or []))
+    deduped: List[Path] = []
+    seen: set[str] = set()
+    for item in candidates:
+        key = str(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    candidates = deduped
+    if not candidates:
+        logger.info("[sfx-asset] family=%s matched=false asset= low_variation=false", family)
+        logger.info("[sfx-asset] skipped reason=no_local_asset")
+        return {"matched": False, "asset": None, "low_variation": False, "reason": "no_local_asset"}
+
+    history = [str(item) for item in (recent_sfx_history or []) if str(item).strip()]
+    if task_id:
+        history.extend(_read_sfx_rotation_history(task_id))
+    previous = history[-1] if history else ""
+    selected = next((asset for asset in candidates if str(asset) != previous), candidates[0])
+    low_variation = len(candidates) <= 1
+    logger.info("[sfx-asset] rotation selected=%s previous=%s", selected, previous or "none")
+    logger.info(
+        "[sfx-asset] family=%s matched=true asset=%s low_variation=%s",
+        family,
+        selected,
+        str(low_variation).lower(),
+    )
+    _append_sfx_rotation_history(task_id, str(selected))
+    return {
+        "matched": True,
+        "asset": str(selected),
+        "asset_path": selected,
+        "low_variation": low_variation,
+        "reason": "local_asset_match",
+        "family": family,
+    }
 
 
 def _deep_boom_guard_path(task_id: Optional[str]) -> Path:
@@ -225,143 +516,131 @@ def build_sfx_design_plan(
     assets: Optional[Dict[str, List[Path]]] = None,
     used_deep_boom_assets: Optional[Iterable[str]] = None,
     composition_decision: Optional[Dict[str, Any]] = None,
+    broll_editorial_decision: Optional[Dict[str, Any]] = None,
+    private_premium_status: str = "",
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+    silence_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     assets = assets or discover_sfx_assets()
     events: List[Dict[str, Any]] = []
     missing: List[str] = []
-    if segment_text:
-        try:
-            from .vpi_retention_editing_service import evaluate_content_quality
 
-            quality = evaluate_content_quality({"text": segment_text, "start_time": "0", "end_time": str(clip_duration_s or 30.0)})
-            if quality.get("content_quality_reason") == "behind_the_scenes_low_speech":
-                logger.info("[sfx-qc] contextual=false reason=sfx_on_low_value_moment")
-                return {
-                    "sfx_design_applied": False,
-                    "sfx_design_events": [],
-                    "sfx_design_missing_assets": [],
-                    "sfx_assets_available": {
-                        "low_risers": len(assets.get("low_riser") or []),
-                        "high_risers": len(assets.get("high_riser") or []),
-                        "whooshes": len(assets.get("magic_whoosh") or []),
-                        "booms": len(assets.get("deep_boom") or []),
-                    },
-                    "sfx_repetition_guard": {"task_id": task_id, "deep_boom_guarded": False},
-                    "sfx_contextual": False,
-                    "sfx_warning": "sfx_on_low_value_moment",
-                }
-        except Exception as exc:
-            logger.debug("[sfx-qc] content_quality_check_skipped reason=%s", exc)
-    hook_type = str((hook_plan or {}).get("hook_type") or "")
-    strong_hook = hook_type not in {"", "weak_intro"} and int((hook_plan or {}).get("hook_first3_score") or 0) >= 5
+    decision = build_sfx_retention_decision(
+        hook_intent=str((hook_plan or {}).get("hook_intent") or editorial_type or "neutral_explanation"),
+        visual_profile=str((hook_plan or {}).get("visual_profile") or (hook_plan or {}).get("motion_pack_profile") or ""),
+        composition_mode=str((composition_decision or {}).get("composition_mode") or ""),
+        broll_editorial_decision=broll_editorial_decision or {},
+        segment_text=segment_text,
+        private_premium_status=str(private_premium_status or ""),
+        first3_visual_contract=first3_visual_contract or {},
+    )
     motion_sync = sync_sfx_with_motion(
         str((hook_plan or {}).get("hook_intent") or editorial_type or "neutral_explanation"),
         str((hook_plan or {}).get("visual_profile") or (hook_plan or {}).get("motion_pack_profile") or ""),
+        transition_type=str(((transition_events or [{}])[0] or {}).get("transition_type") or ""),
         assets=assets,
         low_value_moment=False,
         composition_mode=str((composition_decision or {}).get("composition_mode") or ""),
     )
 
-    low = (assets.get("low_riser") or [None])[0]
-    high = (assets.get("high_riser") or [None])[0]
-    if strong_hook or editorial_type in {"risk_warning", "myth_debunk", "client_objection"}:
-        if not low:
-            missing.append("low_riser")
-        if not high:
-            missing.append("high_riser")
-        if low or high:
-            events.append({
-                "event": "hook",
-                "type": "dark_riser_combo",
-                "contextual": True,
-                "start_s": 0.25,
-                "duration_s": 0.9,
-                "volume": 0.24,
-                "low_riser_asset": _asset_label(low),
-                "high_riser_asset": _asset_label(high),
-                "dark_riser_combo_applied": True,
-                "reason": "strong_hook_or_tension_shift",
-            })
-            logger.info("[sfx-design] applied event=hook type=dark_riser_combo low=%s high=%s", low, high)
+    comp_mode = str((composition_decision or {}).get("composition_mode") or "")
+    voice_conflict = bool(decision.get("voice_conflict"))
+    retention_pack = False
+    opportunity = bool(decision.get("sfx_family") not in {"no_sfx_needed"} and not decision.get("should_apply_sfx"))
 
-    whoosh = (assets.get("magic_whoosh") or [None])[0]
-    key_broll = [item for item in (broll_events or []) if item]
-    if whoosh and (key_broll or editorial_type in {"myth_debunk", "client_objection", "actionable_advice"}):
-        start = float((key_broll[0] or {}).get("start_s") or (3.2 if clip_duration_s >= 6 else 1.2))
-        events.append({
-            "event": "key_moment",
-            "type": "magic_whoosh",
-            "contextual": True,
-            "start_s": round(max(0.0, start), 2),
-            "duration_s": 0.45,
-            "volume": 0.20,
-            "asset": _asset_label(whoosh),
-            "reason": "caption_or_broll_reveal",
-        })
-        logger.info("[sfx-design] applied event=key_moment type=magic_whoosh asset=%s", whoosh)
-    elif key_broll:
-        missing.append("magic_whoosh")
-
-    for transition in transition_events or []:
-        hint = str((transition or {}).get("sfx_hint") or (transition or {}).get("transition_sfx_type") or "")
-        transition_type = str((transition or {}).get("transition_type") or "")
-        if not hint:
-            continue
-        if whoosh:
-            events.append({
-                "event": f"transition_{transition_type}",
-                "type": "magic_whoosh",
-                "contextual": True,
-                "start_s": round(float((transition or {}).get("start_time") or (transition or {}).get("start_s") or 0.5), 2),
-                "duration_s": 0.35,
-                "volume": 0.16,
-                "asset": _asset_label(whoosh),
-                "reason": f"transition_sfx:{transition_type}",
-            })
-            logger.info("[sfx-design] applied event=transition_%s type=magic_whoosh asset=%s", transition_type, whoosh)
-            logger.info("[transition-sfx] applied=%s transition=%s", whoosh, transition_type)
-        else:
-            missing.append(hint)
-            logger.info("[transition-sfx] missing=%s transition=%s", hint, transition_type)
-
-    # ── Composition Pack v1: block deep_boom in emotional_soft mode ──────────
-    _comp_mode = str((composition_decision or {}).get("composition_mode") or "")
-    _comp_pack_active = bool((composition_decision or {}).get("composition_pack"))
-    _deep_boom_blocked_by_composition = bool(_comp_pack_active and _comp_mode == "emotional_soft")
-    if _deep_boom_blocked_by_composition:
-        logger.info(
-            "[composition-pack] sfx deep_boom blocked reason=emotional_soft composition_mode=%s",
-            _comp_mode,
+    if decision.get("sfx_family") == "silence_contrast":
+        # Silence contrast is a real retention action but not an audio asset.
+        summary = (silence_plan or {}).get("summary") or {}
+        retention_moments = [
+            dict(moment)
+            for moment in summary.get("silence_retention_moments") or []
+            if _is_safe_silence_reason(str((moment or {}).get("reason") or ""))
+        ]
+        preserved = bool(
+            summary.get("tension_silences_preserved")
+            or summary.get("preserved_emphasis_pauses")
+            or retention_moments
         )
-        logger.info("[sfx-qc] composition_allowed=false reason=emotional_soft_no_deep_boom")
-    elif _comp_pack_active and _comp_mode == "minimal_safe" and editorial_type not in {"risk_warning"}:
-        logger.info("[sfx-qc] composition_allowed=false reason=minimal_safe_no_noncontextual_sfx")
-    elif _comp_pack_active:
-        logger.info("[sfx-qc] composition_allowed=true reason=%s", _comp_mode)
+        if preserved:
+            logger.info("[silence-retention] preserved=true reason=emotional_closure")
+            logger.info("[silence-retention] contrast_window=emotional_pause duration=%.2f", float(decision.get("duration") or 0.28))
+            retention_pack = True
+        else:
+            logger.info("[silence-retention] skipped reason=no_safe_gap")
+            opportunity = True
 
-    boom, variant_id, guard_ok = select_deep_boom_variant(
-        assets,
-        task_id=task_id,
-        used_assets=used_deep_boom_assets,
-    )
-    impact_editorial = editorial_type in {"risk_warning", "emotional_protection", "myth_debunk"}
-    if boom and impact_editorial and not _deep_boom_blocked_by_composition:
-        events.append({
-            "event": "impact",
-            "type": "deep_boom",
-            "contextual": True,
-            "start_s": round(min(max(clip_duration_s * 0.45, 2.6), max(2.6, clip_duration_s - 0.8)), 2),
-            "duration_s": 0.55,
-            "volume": 0.18,
-            "asset": _asset_label(boom),
-            "deep_boom_asset": _asset_label(boom),
-            "deep_boom_variant_id": variant_id,
-            "deep_boom_repetition_guard": guard_ok,
-            "reason": "impact_phrase_weight",
-        })
-        logger.info("[sfx-design] applied event=impact type=deep_boom asset=%s", boom)
-    elif impact_editorial and not _deep_boom_blocked_by_composition:
-        missing.append("deep_boom")
+    match: Dict[str, Any] = {"matched": False, "asset": None, "low_variation": False, "reason": "not_requested"}
+    composition_allowed = True
+    composition_reason = "no_sfx_needed"
+    layer_type = ""
+    if decision.get("should_apply_sfx"):
+        match = match_sfx_asset(
+            sfx_family=str(decision.get("sfx_family") or ""),
+            hook_intent=str((hook_plan or {}).get("hook_intent") or editorial_type or ""),
+            recent_sfx_history=[str(item) for item in used_deep_boom_assets or []],
+            assets=assets,
+            task_id=task_id,
+        )
+        if not match.get("matched"):
+            missing.append(str(decision.get("sfx_family") or "unknown"))
+            logger.info("[sfx-retention] skipped reason=no_asset")
+            opportunity = True
+        else:
+            try:
+                from .vpi_visual_effects_service import resolve_visual_layer_conflicts
+
+                family = str(decision.get("sfx_family") or "")
+                layer_type = "sfx_chime"
+                if family in {"dark_riser", "tension_riser", "high_riser"}:
+                    layer_type = "sfx_riser"
+                elif family == "magic_whoosh":
+                    layer_type = "sfx_whoosh"
+                elif family == "deep_boom":
+                    layer_type = "sfx_hit"
+                layers = [{"type": layer_type, "start_s": 0.35, "duration_s": float(decision.get("duration") or 0.45)}]
+                if bool((hook_plan or {}).get("overlay_rendered")):
+                    layers.insert(0, {"type": "hook_overlay", "start_s": 0.0, "duration_s": 1.1})
+                resolved = resolve_visual_layer_conflicts(layers, composition_decision or {})
+                composition_allowed = layer_type in list(resolved.get("layers_final") or [])
+                composition_reason = "allowed" if composition_allowed else "composition_block"
+                logger.info("[sfx-qc] composition_allowed=%s reason=%s", str(composition_allowed).lower(), composition_reason)
+            except Exception as exc:
+                logger.debug("[sfx-qc] composition_check_skipped reason=%s", exc)
+
+            if not composition_allowed:
+                opportunity = True
+                logger.info("[sfx-retention] skipped reason=composition_block")
+                logger.info("[sfx-asset] skipped reason=composition_block")
+            elif voice_conflict:
+                opportunity = True
+                logger.info("[sfx-retention] skipped reason=voice_conflict")
+                logger.info("[sfx-asset] skipped reason=voice_conflict")
+            else:
+                start_s = 0.35
+                if transition_events:
+                    start_s = max(0.0, float((transition_events[0] or {}).get("start_s") or (transition_events[0] or {}).get("start_time") or 0.5) + float(decision.get("timing_offset") or 0.0))
+                elif broll_events:
+                    start_s = max(0.0, float((broll_events[0] or {}).get("start_s") or 1.8) + float(decision.get("timing_offset") or 0.0))
+                else:
+                    start_s = max(0.0, 0.35 + float(decision.get("timing_offset") or 0.0))
+                logger.info("[sfx-timing] offset=%.2f reason=%s", float(decision.get("timing_offset") or 0.0), str(decision.get("reason") or "contextual"))
+                logger.info("[sfx-timing] voice_conflict=%s", str(voice_conflict).lower())
+                ducking = bool(str(decision.get("sfx_family") or "") in {"deep_boom", "dark_riser"} and not voice_conflict)
+                logger.info("[sfx-mix] volume_db=%.1f ducking=%s reason=%s", float(decision.get("volume_db") or -25.0), str(ducking).lower(), str(decision.get("reason") or "contextual"))
+                events.append({
+                    "event": "retention_moment",
+                    "type": str(decision.get("sfx_family") or "magic_whoosh"),
+                    "contextual": True,
+                    "start_s": round(start_s, 2),
+                    "duration_s": float(decision.get("duration") or 0.45),
+                    "volume": round(max(0.08, min(0.35, 10 ** (float(decision.get("volume_db") or -25.0) / 20.0))), 3),
+                    "volume_db": float(decision.get("volume_db") or -25.0),
+                    "ducking": ducking,
+                    "asset": str(match.get("asset") or ""),
+                    "reason": str(decision.get("reason") or "retention"),
+                    "sfx_family": str(decision.get("sfx_family") or ""),
+                })
+                retention_pack = True
 
     if missing:
         logger.info("[sfx-design] skipped reason=missing_asset_type types=%s", "|".join(sorted(set(missing))))
@@ -376,10 +655,17 @@ def build_sfx_design_plan(
             "whooshes": len(assets.get("magic_whoosh") or []),
             "booms": len(assets.get("deep_boom") or []),
         },
-        "sfx_repetition_guard": {"task_id": task_id, "deep_boom_guarded": bool(events)},
+        "sfx_repetition_guard": {"task_id": task_id, "deep_boom_guarded": any((item or {}).get("type") == "deep_boom" for item in events)},
         "sfx_contextual": bool(events),
-        "composition_mode": _comp_mode,
-        "composition_blocked_deep_boom": _deep_boom_blocked_by_composition,
+        "sfx_retention_decision": decision,
+        "sfx_asset_match": match,
+        "sfx_editorial_opportunity": bool(opportunity),
+        "sfx_low_variation": bool(match.get("low_variation")),
+        "sfx_timing_safe": bool(bool(events) and not voice_conflict),
+        "sfx_composition_allowed": bool(composition_allowed),
+        "sfx_composition_reason": composition_reason,
+        "sfx_retention_pack": bool(retention_pack),
+        "composition_mode": comp_mode,
         **motion_sync,
     }
 
@@ -576,13 +862,10 @@ def mix_sfx_into_audio(
     # Ensure SFX directory exists
     sfx_dir.mkdir(parents=True, exist_ok=True)
 
-    # Resolve all SFX files. Prefer discovered local assets; render CPU-local
-    # fallbacks only for planned events that have no matching asset.
+    # Resolve all SFX files from local assets only (no synthetic fallback).
     sfx_inputs: List[tuple[Dict[str, Any], Path, float]] = []
-    rendered_cache: Dict[str, Path] = {}
     for event in sfx_events:
         sfx_type = str(event.get("type", "magic_whoosh"))
-        dur = float(event.get("duration_s", 0.0) or 0.0)
         vol = float(event.get("volume", 0.25) or 0.25)
         local_assets: List[Path] = []
         if event.get("asset") and Path(str(event["asset"])).exists():
@@ -597,18 +880,7 @@ def mix_sfx_into_audio(
             for asset in local_assets:
                 sfx_inputs.append((event, asset, weight))
             continue
-        if sfx_type in rendered_cache:
-            sfx_inputs.append((event, rendered_cache[sfx_type], vol))
-            continue
-        if sfx_type == "dark_riser_combo":
-            path = render_dark_riser_combo(sfx_dir, duration_s=dur or 0.8, volume=vol)
-        elif sfx_type == "deep_boom":
-            path = render_deep_boom(sfx_dir, duration_s=dur or 0.5, volume=vol)
-        else:
-            path = render_magic_whoosh(sfx_dir, duration_s=dur or 0.6, volume=vol)
-        if path:
-            rendered_cache[sfx_type] = path
-            sfx_inputs.append((event, path, vol))
+        logger.info("[sfx-mix] skipped event=%s reason=no_local_asset", sfx_type)
 
     if not sfx_inputs:
         logger.warning("[sfx-mix] no sfx could be rendered")
@@ -689,6 +961,10 @@ def apply_sfx_bed(
     segment_text: str = "",
     task_id: Optional[str] = None,
     composition_decision: Optional[Dict[str, Any]] = None,
+    broll_editorial_decision: Optional[Dict[str, Any]] = None,
+    private_premium_status: str = "",
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+    silence_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Apply intentional local SFX if matching local assets exist.
 
@@ -704,6 +980,10 @@ def apply_sfx_bed(
         segment_text=segment_text,
         task_id=task_id,
         composition_decision=composition_decision,
+        broll_editorial_decision=broll_editorial_decision,
+        private_premium_status=private_premium_status,
+        first3_visual_contract=first3_visual_contract,
+        silence_plan=silence_plan,
     )
     events = list(design.get("sfx_design_events") or [])
     if not events:
@@ -711,15 +991,17 @@ def apply_sfx_bed(
             design.get("sfx_warning")
             or ("sfx_missing_worker_assets" if design.get("sfx_design_missing_assets") else "no_sfx_moment")
         )
+        if bool(design.get("sfx_retention_pack")):
+            warning = ""
         logger.info("[sfx-design] final_output_uses_sfx=false")
         return {
             "sfx_applied": False,
             "sfx_count": 0,
-            "sfx_warning": warning,
+            "sfx_warning": warning or None,
+            "sfx_asset_applied_match": False,
             **design,
         }
-    # The current mixer renders CPU-local approximations for event timing while
-    # preserving discovered asset metadata for auditability.
+    # The mixer now accepts only real local assets. No synthetic fallback.
     with tempfile.TemporaryDirectory(prefix="viraclip_sfx_") as tmp_dir:
         result = mix_sfx_into_audio(
             input_path,
@@ -728,12 +1010,16 @@ def apply_sfx_bed(
             Path(tmp_dir),
         )
     applied = bool(result.get("rendered"))
-    logger.info("[sfx-design] final_output_uses_sfx=%s", str(applied).lower())
+    event_assets = [str((event or {}).get("asset") or "") for event in events if str((event or {}).get("asset") or "").strip()]
+    # Mixer only ingests local files from event assets, so rendered=true implies match.
+    asset_applied_match = bool(applied and event_assets)
+    logger.info("[sfx-design] final_output_uses_sfx=%s", str(bool(applied and asset_applied_match)).lower())
     return {
-        "sfx_applied": applied,
-        "sfx_count": len(events) if applied else 0,
+        "sfx_applied": bool(applied and asset_applied_match),
+        "sfx_count": len(events) if (applied and asset_applied_match) else 0,
         "sfx_events": events,
-        "sfx_warning": None if applied else result.get("reason", "sfx_mix_failed"),
+        "sfx_warning": None if (applied and asset_applied_match) else result.get("reason", "sfx_mix_failed"),
+        "sfx_asset_applied_match": asset_applied_match,
         **design,
         **result,
     }

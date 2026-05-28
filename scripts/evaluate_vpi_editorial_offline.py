@@ -44,6 +44,10 @@ from src.services.vpi_broll_intent import (  # noqa: E402
     build_broll_editorial_decision,
     match_broll_asset,
 )
+from src.services.vpi_sfx_service import (  # noqa: E402
+    build_sfx_retention_decision,
+    match_sfx_asset,
+)
 
 logger = logging.getLogger("offline_editorial_eval")
 
@@ -689,6 +693,45 @@ def case_w_broll_editorial_pack() -> Dict[str, Any]:
     )
 
 
+def case_x_sfx_retention_pack() -> Dict[str, Any]:
+    text = "La salud no siempre avisa. Tener acceso rápido a especialistas cambia mucho."
+    decision = build_sfx_retention_decision(
+        hook_intent="risk_warning",
+        visual_profile="tension_push",
+        composition_mode="warning_tension",
+        broll_editorial_decision={"should_use_broll": True},
+        segment_text=text,
+        private_premium_status="PRIVATE_PREMIUM_READY",
+        first3_visual_contract={"status": "pass"},
+    )
+    match = match_sfx_asset(
+        sfx_family=str(decision.get("sfx_family") or ""),
+        hook_intent="risk_warning",
+        recent_sfx_history=[],
+        task_id="offline_eval_sfx",
+    )
+    match_safe = dict(match)
+    if isinstance(match_safe.get("asset_path"), Path):
+        match_safe["asset_path"] = str(match_safe.get("asset_path"))
+    passed = bool(
+        decision.get("sfx_family") in {"dark_riser", "tension_riser"}
+        and decision.get("should_apply_sfx") is True
+        and decision.get("sfx_family") != "deep_boom"
+        and (
+            (match.get("matched") is True)
+            or (decision.get("fallback") in {"silence_contrast", "caption_emphasis", "music_only"})
+        )
+    )
+    return _case_result(
+        "X_sfx_retention_pack",
+        passed,
+        "risk warning maps to non-aggressive contextual SFX with local-asset-or-clean-fallback behavior",
+        {"decision": decision, "match": match_safe},
+        {"family_in": ["dark_riser", "tension_riser"], "not": "deep_boom", "local_or_clean_fallback": True},
+        "sfx_pack",
+    )
+
+
 LONG_TRANSCRIPT = """
 [00:03 - 00:04] Claro.
 [00:06 - 00:07] Papá.
@@ -756,7 +799,8 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     caption_overlay = rate({"caption_overlay"})
     broll_pack = rate({"broll_pack"})
     delivery = all(item["passed"] for item in results if item["category"] == "delivery")
-    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + (1.0 if delivery else 0.0)) / 8.0, 3)
+    sfx_pack = rate({"sfx_pack"})
+    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + sfx_pack + (1.0 if delivery else 0.0)) / 9.0, 3)
     status = "READY_FOR_RENDER" if overall >= 0.85 else ("NEEDS_MINOR_FIXES" if overall >= 0.70 else "NOT_READY")
     logger.info("[offline-eval] score=%.3f status=%s", overall, status)
     return {
@@ -770,6 +814,7 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "motion_pack_pass_rate": motion,
         "caption_overlay_pass_rate": caption_overlay,
         "broll_pack_pass_rate": broll_pack,
+        "sfx_pack_pass_rate": sfx_pack,
         "delivery_simulation_pass": delivery,
         "overall_editorial_readiness_score": overall,
         "status": status,
@@ -852,6 +897,7 @@ def main(argv: List[str] | None = None) -> int:
         case_u_motion_pack_generic_basic,
         case_v_caption_overlay_pack,
         case_w_broll_editorial_pack,
+        case_x_sfx_retention_pack,
     ]
     results = [case() for case in cases]
     scorecard = build_scorecard(results)
