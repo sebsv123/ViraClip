@@ -3541,6 +3541,7 @@ class VideoService:
         _music_metadata: dict = {}
         _sfx_metadata: dict = {}
         _visual_effects_metadata: dict = {}
+        _cinematic_finish_metadata: dict = {}
         _transition_metadata: dict = {}
         _speaker_focus_metadata: dict = {}
         _editing_richness_metadata: dict = {}
@@ -3793,6 +3794,82 @@ class VideoService:
                 logger.warning("[audio-master] integration error: %s", _am_e)
                 _audio_mastering_result = None
                 _audio_master_metadata = {"audio_mastering_applied": False, "audio_warnings": [str(_am_e)]}
+
+            # ── Cinematic Finish Pack v1 — subtle final visual polish ──────────
+            try:
+                from .vpi_visual_effects_service import (
+                    apply_cinematic_finish as _apply_cinematic_finish,
+                    build_cinematic_finish_decision as _build_cinematic_finish_decision,
+                )
+
+                _finish_first3_contract = locals().get("_first3_visual_contract_pre_sfx") or {}
+                _finish_status_hint = str((_publishable_metadata or {}).get("private_premium_status") or "")
+                if not _finish_status_hint:
+                    _finish_complete_idea = float(segment.get("complete_idea_score") or 1.0)
+                    _finish_fluency = float(
+                        segment.get("fluency_score_after")
+                        or ((_fluency_edit_plan or {}).get("fluency_score_after") if _fluency_edit_plan else 1.0)
+                        or 1.0
+                    )
+                    _finish_content_quality = str(segment.get("content_quality_label") or "")
+                    _finish_hook_score = int((_hook_plan_data or {}).get("hook_first3_score") or 0)
+                    _finish_hook_fit_ok = bool((_hook_plan_data or {}).get("hook_fit_acceptable"))
+                    if _finish_content_quality == "reject" or _finish_complete_idea < 0.75 or _finish_fluency < 0.70:
+                        _finish_status_hint = "DO_NOT_UPLOAD"
+                    elif _finish_hook_score < 5 and not _finish_hook_fit_ok:
+                        _finish_status_hint = "PRIVATE_PREMIUM_REVIEW"
+                    else:
+                        _finish_status_hint = "PRIVATE_PREMIUM_READY"
+                _finish_decision = _build_cinematic_finish_decision(
+                    hook_intent=str((_hook_plan_data or {}).get("hook_intent") or ""),
+                    composition_mode=str((_composition_decision or {}).get("composition_mode") or ""),
+                    private_premium_status=_finish_status_hint,
+                    first3_visual_contract=_finish_first3_contract,
+                    caption_overlay_pack=_caption_overlay_pack_metadata,
+                    motion_pack_applied=bool((_visual_effects_metadata or {}).get("motion_pack_applied")),
+                    broll_applied=bool(_editorial_broll_for_status),
+                    sfx_retention_pack=bool((_sfx_metadata or {}).get("sfx_retention_pack")),
+                    segment_text=str(segment.get("text") or ""),
+                )
+                _finish_out = output_path.with_name(f"finish_{output_path.name}")
+                _cinematic_finish_metadata = _apply_cinematic_finish(
+                    output_path,
+                    _finish_out,
+                    decision=_finish_decision,
+                    caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    first3_visual_contract_data=_finish_first3_contract,
+                    composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
+                )
+                if _cinematic_finish_metadata.get("visual_finish") and _finish_out.exists():
+                    _finish_input = output_path
+                    output_path = _finish_out
+                    _log_premium_pipeline_step("cinematic_finish", _finish_input, output_path)
+                logger.info(
+                    "[editing-richness] cinematic_finish_pack=%s reason=%s",
+                    str(bool(_cinematic_finish_metadata.get("cinematic_finish_pack"))).lower(),
+                    (
+                        "filter_plan_applied"
+                        if _cinematic_finish_metadata.get("cinematic_finish_pack")
+                        else (_cinematic_finish_metadata.get("finish_warning") or "not_applied")
+                    ),
+                )
+                logger.info(
+                    "[editing-richness] visual_finish=%s reason=%s",
+                    str(bool(_cinematic_finish_metadata.get("visual_finish"))).lower(),
+                    "ffmpeg_filter_applied" if _cinematic_finish_metadata.get("visual_finish") else (_cinematic_finish_metadata.get("finish_warning") or "not_applied"),
+                )
+                logger.info("[editing-richness] finish_profile=%s", str(_cinematic_finish_metadata.get("finish_profile") or "none"))
+                logger.info("[editing-richness] finish_safety=%s", str(_cinematic_finish_metadata.get("finish_safety") or "blocked"))
+            except Exception as _finish_e:
+                logger.warning("[cinematic-finish] skipped reason=%s", _finish_e)
+                _cinematic_finish_metadata = {
+                    "cinematic_finish_pack": False,
+                    "visual_finish": False,
+                    "finish_profile": "no_finish_needed",
+                    "finish_safety": "blocked",
+                    "finish_warning": str(_finish_e),
+                    "finish_applied": False,
+                }
 
             _broll_asset_ids = [
                 str(item.get("asset_id") or item.get("asset_path") or item.get("asset_url") or "")
@@ -4245,6 +4322,41 @@ class VideoService:
                 _sfx_reason or "none",
             )
             logger.info("[editing-richness] sfx_low_variation=%s", str(_sfx_low_variation).lower())
+            _finish_decision_meta = dict((_cinematic_finish_metadata or {}).get("finish_decision") or {})
+            _finish_filter_plan_meta = dict((_cinematic_finish_metadata or {}).get("finish_filter_plan") or {})
+            _finish_should_apply = bool(_finish_decision_meta.get("should_apply_finish"))
+            _finish_filter_applied = bool((_cinematic_finish_metadata or {}).get("finish_applied"))
+            _finish_safety_status = str((_cinematic_finish_metadata or {}).get("finish_safety") or "blocked")
+            _finish_has_plan = bool(_finish_filter_plan_meta.get("filter_chain"))
+            _visual_finish = bool(
+                (_cinematic_finish_metadata or {}).get("visual_finish")
+                and _finish_filter_applied
+                and _finish_has_plan
+                and _finish_safety_status in {"pass", "adjusted"}
+            )
+            _cinematic_finish_pack = bool(
+                _finish_should_apply
+                and _visual_finish
+                and _finish_safety_status in {"pass", "adjusted"}
+            )
+            _finish_limited_assets = bool(_finish_should_apply and not _visual_finish)
+            _finish_reason = str((_cinematic_finish_metadata or {}).get("finish_warning") or "")
+            if _visual_finish:
+                _finish_reason = "filter_plan_applied"
+            elif _finish_should_apply and not _finish_reason:
+                _finish_reason = "opportunity_unfulfilled"
+            logger.info(
+                "[editing-richness] cinematic_finish_pack=%s reason=%s",
+                str(_cinematic_finish_pack).lower(),
+                _finish_reason or "none",
+            )
+            logger.info(
+                "[editing-richness] visual_finish=%s reason=%s",
+                str(_visual_finish).lower(),
+                "ffmpeg_filter_applied" if _visual_finish else (_finish_reason or "none"),
+            )
+            logger.info("[editing-richness] finish_profile=%s", str((_cinematic_finish_metadata or {}).get("finish_profile") or "none"))
+            logger.info("[editing-richness] finish_safety=%s", _finish_safety_status)
             _final_name = Path(output_path).name
             _music_in_final = bool(_music_metadata.get("music_applied") and "music_" in _final_name)
             _sfx_in_final = bool(_sfx_metadata.get("sfx_applied") and "sfx_" in _final_name)
@@ -4317,6 +4429,8 @@ class VideoService:
                 _editing_richness_score += 1
             if _composition_pack_active:
                 _editing_richness_score += 1
+            if _visual_finish:
+                _editing_richness_score += 1
             logger.info(
                 "[editing-richness] composition_pack=%s reason=%s",
                 str(_composition_pack_active).lower(),
@@ -4352,6 +4466,10 @@ class VideoService:
                 _richness_warnings.append("sfx_editorial_opportunity_unfulfilled")
             if (_sfx_metadata or {}).get("sfx_low_variation"):
                 _richness_warnings.append("sfx_low_variation")
+            if _finish_limited_assets:
+                _richness_warnings.append("finish_limited_assets_or_safety")
+            if _finish_safety_status == "blocked":
+                _richness_warnings.append("finish_safety_blocked")
             if _music_metadata.get("music_applied") and not _music_in_final:
                 _richness_warnings.append("music_planned_not_in_final")
             if _visual_effects_metadata.get("visual_effects_applied") and not _vfx_in_final:
@@ -4447,6 +4565,13 @@ class VideoService:
                 "sfx_retention_pack": _sfx_retention_pack,
                 "sfx_editorial_opportunity": bool(_sfx_opportunity and not _sfx_true),
                 "sfx_low_variation": _sfx_low_variation,
+                "cinematic_finish_pack": _cinematic_finish_pack,
+                "visual_finish": _visual_finish,
+                "finish_profile": str((_cinematic_finish_metadata or {}).get("finish_profile") or "none"),
+                "finish_safety": _finish_safety_status,
+                "finish_limited_assets": _finish_limited_assets,
+                "private_premium_finish_adjustment": "pending",
+                "private_premium_status_after_finish": "pending",
                 "editing_richness_final_verified": True,
                 **_retention_metadata,
                 **_final_contract_metadata,
@@ -4513,6 +4638,22 @@ class VideoService:
                 warnings=_publish_warnings,
                 first3_visual_contract=_first3_visual_contract_result,
             )
+            _finish_adjustment = "none"
+            _status_after_finish = str(_publishable_metadata.get("private_premium_status") or "")
+            if _finish_safety_status == "blocked" and _status_after_finish == "PRIVATE_PREMIUM_READY":
+                _publishable_metadata["private_premium_status"] = "PRIVATE_PREMIUM_LIMITED_ASSETS"
+                _publishable_metadata["private_premium_reason"] = "finish_limited_assets_or_safety"
+                _finish_adjustment = "limited_assets"
+                _status_after_finish = "PRIVATE_PREMIUM_LIMITED_ASSETS"
+            if _visual_finish and _finish_safety_status == "blocked":
+                _publishable_metadata["private_premium_status"] = "PRIVATE_PREMIUM_REVIEW"
+                _publishable_metadata["private_premium_reason"] = "finish_safety_degradation"
+                _finish_adjustment = "review_due_to_finish_safety"
+                _status_after_finish = "PRIVATE_PREMIUM_REVIEW"
+            logger.info("[private-premium] finish_adjustment=%s", _finish_adjustment)
+            logger.info("[private-premium] status_after_finish=%s", _status_after_finish)
+            _publishable_metadata["private_premium_finish_adjustment"] = _finish_adjustment
+            _publishable_metadata["private_premium_status_after_finish"] = _status_after_finish
             _composition_downgrade = bool(
                 (_first3_visual_contract_result or {}).get("downgrade_required")
                 and str(_publishable_metadata.get("private_premium_status") or "") == "PRIVATE_PREMIUM_REVIEW"
@@ -4536,6 +4677,9 @@ class VideoService:
                 "layer_overload": _composition_layer_overload,
                 "first3_visual_contract": _first3_visual_contract_result,
                 "composition_runtime_applied": _composition_runtime_applied,
+                "cinematic_finish": _cinematic_finish_metadata,
+                "private_premium_finish_adjustment": _finish_adjustment,
+                "private_premium_status_after_finish": _status_after_finish,
             })
             logger.info(
                 "[editing-richness] composition_pack=%s reason=%s",
@@ -4566,6 +4710,7 @@ class VideoService:
                 _editing_plan_data["speaker_focus"] = _speaker_focus_metadata
                 _editing_plan_data["composition_decision"] = _composition_decision
                 _editing_plan_data["first3_visual_contract"] = _first3_visual_contract_result
+                _editing_plan_data["cinematic_finish"] = _cinematic_finish_metadata
                 _editing_plan_data.update(_editing_richness_metadata)
                 _editing_plan_data.update(_publishable_metadata)
                 _editing_plan_data["hook_quality"] = _hook_quality
@@ -4650,6 +4795,7 @@ class VideoService:
             "transitions": _transition_metadata,
             "music": _music_metadata,
             "sfx": _sfx_metadata,
+            "cinematic_finish": _cinematic_finish_metadata,
             "speaker_focus": _speaker_focus_metadata,
             "composition_decision": _composition_decision,
             "premium_runtime": _premium_runtime,

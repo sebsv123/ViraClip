@@ -34,6 +34,7 @@ PY_COMPILE_FILES = [
     "scripts/debug_motion_pack.py",
     "scripts/debug_caption_overlay_pack.py",
     "scripts/debug_sfx_retention_pack.py",
+    "scripts/debug_cinematic_finish_pack.py",
     "scripts/debug_broll_editorial_pack.py",
     "scripts/debug_composition_pack.py",
     "scripts/debug_composition_runtime_integration.py",
@@ -117,6 +118,7 @@ def main(argv: List[str] | None = None) -> int:
         ("motion_pack", [python, "scripts/debug_motion_pack.py"]),
         ("caption_overlay_pack", [python, "scripts/debug_caption_overlay_pack.py"]),
         ("sfx_retention_pack", [python, "scripts/debug_sfx_retention_pack.py"]),
+        ("cinematic_finish_pack", [python, "scripts/debug_cinematic_finish_pack.py"]),
         ("broll_editorial_pack", [python, "scripts/debug_broll_editorial_pack.py"]),
         ("editorial_runtime_integration", [python, "scripts/debug_editorial_runtime_integration.py"]),
         ("retention_editing_system", [python, "scripts/debug_retention_editing_system.py"]),
@@ -149,6 +151,9 @@ def main(argv: List[str] | None = None) -> int:
         "sfx_retention_pack": bool(
             passed and any(step["name"] == "sfx_retention_pack" and step["returncode"] == 0 for step in results)
         ),
+        "cinematic_finish_pack": bool(
+            passed and any(step["name"] == "cinematic_finish_pack" and step["returncode"] == 0 for step in results)
+        ),
         "pycompile_skipped": bool(args.skip_pycompile),
         "steps": results,
         "reports": {
@@ -166,6 +171,7 @@ def main(argv: List[str] | None = None) -> int:
         print(f"COMPOSITION_RUNTIME_CONNECTED={'true' if passed else 'false'}")
         print(f"BROLL_EDITORIAL_PACK={'true' if payload.get('broll_editorial_pack') else 'false'}")
         print(f"SFX_RETENTION_PACK={'true' if payload.get('sfx_retention_pack') else 'false'}")
+        print(f"CINEMATIC_FINISH_PACK={'true' if payload.get('cinematic_finish_pack') else 'false'}")
         print(f"VPI_EDITORIAL_PREFLIGHT={'PASS' if passed else 'FAIL'}")
         print(f"READY_FOR_RENDER={'true' if passed else 'false'}")
         print(f"REPORT_MD={payload['reports']['md']}")

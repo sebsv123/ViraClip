@@ -459,6 +459,419 @@ def first3_visual_contract(
     }
 
 
+# ── VPI Cinematic Finish Pack v1 ───────────────────────────────────────────────
+
+_FINISH_PROFILE_BY_INTENT: Dict[str, str] = {
+    "myth_flip": "clean_premium",
+    "risk_warning": "warning_subtle_tension",
+    "practical_advice": "health_clarity",
+    "autonomous_business_stakes": "business_contrast",
+    "emotional_closure": "emotional_soft_grade",
+    "neutral_explanation": "clean_premium",
+}
+
+_FINISH_PROFILE_VALUES: Dict[str, Dict[str, Any]] = {
+    "clean_premium": {"contrast": 1.04, "brightness": 0.008, "saturation": 1.02, "sharpness": 0.20, "warmth": 0.01, "vignette": False},
+    "warm_family": {"contrast": 1.03, "brightness": 0.012, "saturation": 1.03, "sharpness": 0.18, "warmth": 0.04, "vignette": False},
+    "health_clarity": {"contrast": 1.04, "brightness": 0.010, "saturation": 1.01, "sharpness": 0.24, "warmth": 0.00, "vignette": False},
+    "business_contrast": {"contrast": 1.07, "brightness": 0.004, "saturation": 1.02, "sharpness": 0.28, "warmth": 0.00, "vignette": True},
+    "warning_subtle_tension": {"contrast": 1.05, "brightness": -0.004, "saturation": 0.98, "sharpness": 0.22, "warmth": -0.01, "vignette": True},
+    "emotional_soft_grade": {"contrast": 1.02, "brightness": 0.010, "saturation": 1.01, "sharpness": 0.16, "warmth": 0.03, "vignette": False},
+    "no_finish_needed": {"contrast": 1.00, "brightness": 0.000, "saturation": 1.00, "sharpness": 0.00, "warmth": 0.00, "vignette": False},
+}
+
+
+def build_cinematic_finish_decision(
+    *,
+    hook_intent: str = "",
+    composition_mode: str = "",
+    private_premium_status: str = "",
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
+    caption_overlay_pack: Optional[Dict[str, Any]] = None,
+    motion_pack_applied: bool = False,
+    broll_applied: bool = False,
+    sfx_retention_pack: bool = False,
+    segment_text: str = "",
+) -> Dict[str, Any]:
+    intent = str(hook_intent or "neutral_explanation")
+    mode = str(composition_mode or "minimal_safe")
+    status = str(private_premium_status or "")
+    cap_pack = caption_overlay_pack or {}
+    first3 = first3_visual_contract or {}
+    first3_checks = first3.get("first3_visual_contract") if isinstance(first3.get("first3_visual_contract"), dict) else {}
+    first3_status = str(first3.get("status") or "")
+
+    if status == "DO_NOT_UPLOAD":
+        logger.info("[cinematic-finish] should_apply=false profile=no_finish_needed confidence=0.00 reason=do_not_upload")
+        logger.info("[cinematic-finish] skipped reason=do_not_upload")
+        return {
+            "should_apply_finish": False,
+            "finish_profile": "no_finish_needed",
+            "contrast": "neutral",
+            "sharpness": "none",
+            "vignette": False,
+            "warmth": "neutral",
+            "reason": "do_not_upload",
+            "confidence": 0.0,
+            "fallback": "none",
+            "contrast_value": 1.0,
+            "brightness_value": 0.0,
+            "saturation_value": 1.0,
+            "sharpness_value": 0.0,
+            "warmth_value": 0.0,
+        }
+
+    profile = _FINISH_PROFILE_BY_INTENT.get(intent, "clean_premium")
+    if mode == "minimal_safe" and intent == "neutral_explanation" and not (motion_pack_applied or broll_applied or sfx_retention_pack):
+        profile = "no_finish_needed"
+    elif mode == "explanation_clean" and profile == "clean_premium":
+        profile = "health_clarity"
+    elif mode == "emotional_soft" and profile != "emotional_soft_grade":
+        profile = "warm_family"
+
+    values = dict(_FINISH_PROFILE_VALUES.get(profile) or _FINISH_PROFILE_VALUES["clean_premium"])
+    should_apply = profile != "no_finish_needed"
+    reason = "contextual_finish_gain" if should_apply else "no_visual_gain"
+    fallback = "basic_safe_grade" if should_apply else "none"
+    confidence = 0.72 if should_apply else 0.28
+
+    long_caption = bool(cap_pack.get("density_guard_actions")) and any(
+        str(item.get("action")) in {"skip_overlay", "skip_icon"}
+        for item in (cap_pack.get("density_guard_actions") or [])
+        if isinstance(item, dict)
+    )
+    if long_caption and values["vignette"]:
+        values["vignette"] = False
+        reason = "caption_safety_reduce_vignette"
+
+    if first3_status in {"review", "fail"} and values["contrast"] > 1.06:
+        values["contrast"] = 1.04
+        reason = "first3_safety_reduce_contrast"
+
+    logger.info("[cinematic-finish] intent_mapping hook_intent=%s profile=%s", intent, profile)
+    logger.info(
+        "[cinematic-finish] should_apply=%s profile=%s confidence=%.2f reason=%s",
+        str(should_apply).lower(),
+        profile,
+        confidence,
+        reason,
+    )
+    return {
+        "should_apply_finish": should_apply,
+        "finish_profile": profile,
+        "contrast": "subtle" if values["contrast"] <= 1.04 else "moderate",
+        "sharpness": "none" if values["sharpness"] <= 0.0 else ("subtle" if values["sharpness"] <= 0.24 else "light"),
+        "vignette": bool(values["vignette"]),
+        "warmth": "neutral" if abs(values["warmth"]) < 0.015 else ("warm" if values["warmth"] > 0 else "cool"),
+        "reason": reason,
+        "confidence": confidence,
+        "fallback": fallback,
+        "contrast_value": float(values["contrast"]),
+        "brightness_value": float(values["brightness"]),
+        "saturation_value": float(values["saturation"]),
+        "sharpness_value": float(values["sharpness"]),
+        "warmth_value": float(values["warmth"]),
+        "hook_intent": intent,
+        "composition_mode": mode,
+    }
+
+
+def build_cinematic_finish_filter_plan(
+    decision: Dict[str, Any],
+    existing_filters: str = "",
+    caption_safety: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    should_apply = bool(decision.get("should_apply_finish"))
+    profile = str(decision.get("finish_profile") or "no_finish_needed")
+    if not should_apply or profile == "no_finish_needed":
+        logger.info("[cinematic-finish] filter_plan=none")
+        logger.info("[cinematic-finish] applied=false reason=no_visual_gain")
+        return {
+            "apply": False,
+            "filters": [],
+            "filter_chain": "",
+            "reason": "no_visual_gain",
+            "fallback": str(decision.get("fallback") or "none"),
+            "finish_profile": profile,
+            "contrast_value": float(decision.get("contrast_value") or 1.0),
+            "brightness_value": float(decision.get("brightness_value") or 0.0),
+            "saturation_value": float(decision.get("saturation_value") or 1.0),
+            "sharpness_value": float(decision.get("sharpness_value") or 0.0),
+            "warmth_value": float(decision.get("warmth_value") or 0.0),
+            "vignette": bool(decision.get("vignette")),
+            "vignette_strength": 0.0,
+        }
+
+    contrast = max(1.0, min(1.08, float(decision.get("contrast_value") or 1.0)))
+    brightness = max(-0.01, min(0.02, float(decision.get("brightness_value") or 0.0)))
+    saturation = max(0.96, min(1.06, float(decision.get("saturation_value") or 1.0)))
+    sharpness = max(0.0, min(0.35, float(decision.get("sharpness_value") or 0.0)))
+    warmth = max(-0.03, min(0.05, float(decision.get("warmth_value") or 0.0)))
+    vignette = bool(decision.get("vignette"))
+    vignette_strength = 0.06 if vignette else 0.0
+
+    cap_safety = caption_safety or {}
+    if bool(cap_safety.get("long_caption")):
+        vignette = False
+        vignette_strength = 0.0
+        contrast = min(contrast, 1.04)
+        brightness = max(brightness, 0.0)
+        logger.info("[cinematic-finish] fallback=basic_safe_grade reason=caption_safety")
+
+    filters: List[str] = []
+    if existing_filters:
+        filters.append(existing_filters)
+    filters.append(f"eq=contrast={contrast:.3f}:brightness={brightness:.3f}:saturation={saturation:.3f}")
+    if abs(warmth) >= 0.01:
+        # Gentle brand texture; keep shifts low to avoid skin-tone drift.
+        filters.append(f"colorbalance=rs={warmth:.3f}:gs={warmth * 0.5:.3f}:bs={-warmth * 0.5:.3f}")
+    if sharpness > 0.0:
+        filters.append(f"unsharp=5:5:{sharpness:.2f}:5:5:0.00")
+    if vignette:
+        filters.append("vignette=PI/8")
+
+    filter_chain = ",".join(item for item in filters if item)
+    logger.info("[cinematic-finish] filter_plan=%s", filter_chain or "none")
+    return {
+        "apply": bool(filter_chain),
+        "filters": filters,
+        "filter_chain": filter_chain,
+        "reason": "finish_filters_planned" if filter_chain else "empty_filter_chain",
+        "fallback": str(decision.get("fallback") or "none"),
+        "finish_profile": profile,
+        "contrast_value": contrast,
+        "brightness_value": brightness,
+        "saturation_value": saturation,
+        "sharpness_value": sharpness,
+        "warmth_value": warmth,
+        "vignette": vignette,
+        "vignette_strength": vignette_strength,
+    }
+
+
+def assess_finish_safety(
+    finish_plan: Dict[str, Any],
+    caption_overlay_pack: Optional[Dict[str, Any]] = None,
+    first3_visual_contract_data: Optional[Dict[str, Any]] = None,
+    composition_decision: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    cap_pack = caption_overlay_pack or {}
+    first3 = first3_visual_contract_data or {}
+    first3_checks = first3.get("first3_visual_contract") if isinstance(first3.get("first3_visual_contract"), dict) else {}
+    comp = composition_decision or {}
+
+    caption_readable = bool(first3_checks.get("caption_readable", True))
+    face_priority_safe = not (
+        str(comp.get("screen_priority") or "") == "face"
+        and bool(finish_plan.get("vignette"))
+        and float(finish_plan.get("vignette_strength") or 0.0) > 0.05
+    )
+    no_overdarkening = bool(
+        float(finish_plan.get("contrast_value") or 1.0) <= 1.08
+        and float(finish_plan.get("brightness_value") or 0.0) >= -0.01
+    )
+    no_oversharpen = bool(float(finish_plan.get("sharpness_value") or 0.0) <= 0.35)
+    lower_third = (cap_pack.get("lower_third") or {})
+    no_brand_conflict = not (
+        bool(lower_third.get("applied"))
+        and bool(finish_plan.get("vignette"))
+        and float(finish_plan.get("contrast_value") or 1.0) > 1.06
+    )
+
+    adjusted_plan = dict(finish_plan)
+    adjusted = False
+    blocked = False
+    reason = "pass"
+
+    if not caption_readable:
+        blocked = True
+        reason = "caption_risk"
+    elif not face_priority_safe:
+        adjusted_plan["vignette"] = False
+        adjusted_plan["vignette_strength"] = 0.0
+        adjusted = True
+        reason = "face_risk"
+    if not no_overdarkening and not blocked:
+        adjusted_plan["contrast_value"] = min(float(adjusted_plan.get("contrast_value") or 1.0), 1.04)
+        adjusted_plan["brightness_value"] = max(float(adjusted_plan.get("brightness_value") or 0.0), 0.0)
+        adjusted = True
+        reason = "no_overdarkening"
+    if not no_oversharpen and not blocked:
+        adjusted_plan["sharpness_value"] = 0.24
+        adjusted = True
+        reason = "no_oversharpen"
+    if not no_brand_conflict and not blocked:
+        adjusted_plan["vignette"] = False
+        adjusted_plan["vignette_strength"] = 0.0
+        adjusted = True
+        reason = "brand_conflict"
+
+    logger.info("[finish-safety] caption_readable=%s", str(caption_readable).lower())
+    logger.info("[finish-safety] face_priority_safe=%s", str(face_priority_safe).lower())
+    if blocked:
+        logger.info("[finish-safety] blocked=true reason=%s", reason)
+    elif adjusted:
+        logger.info("[finish-safety] adjusted=true reason=%s", reason)
+
+    status = "blocked" if blocked else ("adjusted" if adjusted else "pass")
+    return {
+        "caption_readable_after_finish": caption_readable,
+        "face_priority_safe": face_priority_safe,
+        "no_overdarkening": no_overdarkening,
+        "no_oversharpen": no_oversharpen,
+        "no_brand_conflict": no_brand_conflict,
+        "adjusted": adjusted,
+        "blocked": blocked,
+        "reason": reason,
+        "status": status,
+        "finish_plan": adjusted_plan,
+    }
+
+
+def apply_cinematic_finish(
+    input_path: Path,
+    output_path: Path,
+    *,
+    decision: Optional[Dict[str, Any]] = None,
+    caption_overlay_pack: Optional[Dict[str, Any]] = None,
+    first3_visual_contract_data: Optional[Dict[str, Any]] = None,
+    composition_decision: Optional[Dict[str, Any]] = None,
+    existing_filters: str = "",
+) -> Dict[str, Any]:
+    finish_decision = dict(decision or {})
+    if not finish_decision:
+        logger.info("[cinematic-finish] skipped reason=no_decision")
+        return {
+            "cinematic_finish_pack": False,
+            "visual_finish": False,
+            "finish_profile": "no_finish_needed",
+            "finish_safety": "blocked",
+            "finish_warning": "no_decision",
+            "finish_applied": False,
+        }
+
+    long_caption = bool(caption_overlay_pack and any(
+        str(item.get("action")) in {"skip_overlay", "skip_icon"}
+        for item in (caption_overlay_pack or {}).get("density_guard_actions", [])
+        if isinstance(item, dict)
+    ))
+    plan = build_cinematic_finish_filter_plan(
+        finish_decision,
+        existing_filters=existing_filters,
+        caption_safety={"long_caption": long_caption},
+    )
+    safety = assess_finish_safety(
+        plan,
+        caption_overlay_pack=caption_overlay_pack,
+        first3_visual_contract_data=first3_visual_contract_data,
+        composition_decision=composition_decision,
+    )
+
+    if safety.get("blocked"):
+        logger.info("[cinematic-finish] skipped reason=%s", safety.get("reason") or "safety_blocked")
+        logger.info("[brand-finish] skipped reason=would_clutter")
+        return {
+            "cinematic_finish_pack": False,
+            "visual_finish": False,
+            "finish_profile": str(finish_decision.get("finish_profile") or "no_finish_needed"),
+            "finish_safety": "blocked",
+            "finish_warning": str(safety.get("reason") or "safety_blocked"),
+            "finish_applied": False,
+            "finish_decision": finish_decision,
+            "finish_filter_plan": plan,
+            "finish_safety_report": safety,
+        }
+
+    if safety.get("adjusted"):
+        adjusted_decision = dict(finish_decision)
+        adjusted_plan = dict(safety.get("finish_plan") or {})
+        adjusted_decision["contrast_value"] = adjusted_plan.get("contrast_value", adjusted_decision.get("contrast_value"))
+        adjusted_decision["brightness_value"] = adjusted_plan.get("brightness_value", adjusted_decision.get("brightness_value"))
+        adjusted_decision["saturation_value"] = adjusted_plan.get("saturation_value", adjusted_decision.get("saturation_value"))
+        adjusted_decision["sharpness_value"] = adjusted_plan.get("sharpness_value", adjusted_decision.get("sharpness_value"))
+        adjusted_decision["warmth_value"] = adjusted_plan.get("warmth_value", adjusted_decision.get("warmth_value"))
+        adjusted_decision["vignette"] = adjusted_plan.get("vignette", adjusted_decision.get("vignette"))
+        plan = build_cinematic_finish_filter_plan(
+            adjusted_decision,
+            existing_filters=existing_filters,
+            caption_safety={"long_caption": long_caption},
+        )
+        finish_decision = adjusted_decision
+
+    if not plan.get("apply") or not plan.get("filter_chain"):
+        logger.info("[cinematic-finish] applied=false reason=%s", plan.get("reason") or "empty_filter_chain")
+        return {
+            "cinematic_finish_pack": False,
+            "visual_finish": False,
+            "finish_profile": str(finish_decision.get("finish_profile") or "no_finish_needed"),
+            "finish_safety": str(safety.get("status") or "pass"),
+            "finish_warning": str(plan.get("reason") or "empty_filter_chain"),
+            "finish_applied": False,
+            "finish_decision": finish_decision,
+            "finish_filter_plan": plan,
+            "finish_safety_report": safety,
+        }
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_path),
+        "-vf",
+        str(plan.get("filter_chain")),
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        logger.info("[cinematic-finish] applied=true reason=finish_filters_applied")
+        logger.info("[brand-finish] applied=true reason=subtle_brand_texture")
+        return {
+            "cinematic_finish_pack": True,
+            "visual_finish": True,
+            "finish_profile": str(finish_decision.get("finish_profile") or "clean_premium"),
+            "finish_safety": str(safety.get("status") or "pass"),
+            "finish_warning": "",
+            "finish_applied": True,
+            "finish_decision": finish_decision,
+            "finish_filter_plan": plan,
+            "finish_safety_report": safety,
+            "finish_fallback_used": "none",
+        }
+
+    reason = (result.stderr or "ffmpeg_failed").strip()[-500:] or "ffmpeg_failed"
+    logger.info("[cinematic-finish] applied=false reason=%s", reason)
+    fallback = str(finish_decision.get("fallback") or "none")
+    if fallback == "basic_safe_grade":
+        logger.info("[cinematic-finish] fallback=basic_safe_grade reason=ffmpeg_unsupported")
+    else:
+        logger.info("[cinematic-finish] fallback=none reason=ffmpeg_unsupported")
+    return {
+        "cinematic_finish_pack": False,
+        "visual_finish": False,
+        "finish_profile": str(finish_decision.get("finish_profile") or "clean_premium"),
+        "finish_safety": str(safety.get("status") or "pass"),
+        "finish_warning": reason,
+        "finish_applied": False,
+        "finish_decision": finish_decision,
+        "finish_filter_plan": plan,
+        "finish_safety_report": safety,
+        "finish_fallback_used": fallback,
+    }
+
+
 def build_kickframe_rhythm(intent: str, moment_type: str) -> Dict[str, Any]:
     resolved_intent = str(intent or "neutral_explanation")
     moment = str(moment_type or "")

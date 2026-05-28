@@ -321,7 +321,20 @@ def assess_private_premium_status(
         str(item) in {"sfx_editorial_opportunity_unfulfilled", "sfx_low_variation"}
         for item in (editing_richness_warnings or [])
     )
-    limited_assets = (not has_broll and not has_premium_visual and not contextual_transition) or broll_missing_opportunity or sfx_missing_opportunity
+    finish_missing_opportunity = any(
+        str(item) in {"finish_limited_assets_or_safety"}
+        for item in (editing_richness_warnings or [])
+    )
+    finish_safety_blocked = any(
+        str(item) in {"finish_safety_blocked"}
+        for item in (editing_richness_warnings or [])
+    )
+    limited_assets = (
+        (not has_broll and not has_premium_visual and not contextual_transition)
+        or broll_missing_opportunity
+        or sfx_missing_opportunity
+        or finish_missing_opportunity
+    )
 
     if has_broll or has_premium_visual or contextual_transition:
         richness = "rich" if contextual_sfx or visual_effects_meta.get("visual_effects_applied") else "moderate"
@@ -359,6 +372,10 @@ def assess_private_premium_status(
         status = "PRIVATE_PREMIUM_REVIEW"
         editorial_quality = "review_first3_visual_contract"
         reason = f"first3_visual_contract_failed:{_first3_fail_count}_failures"
+    elif finish_safety_blocked:
+        status = "PRIVATE_PREMIUM_REVIEW"
+        editorial_quality = "review_finish_safety"
+        reason = "finish_safety_blocked"
     elif not perceptible_editorial_action:
         status = "PRIVATE_PREMIUM_REVIEW"
         editorial_quality = "review_editorial_action"
@@ -393,6 +410,8 @@ def assess_private_premium_status(
         logger.info("[private-premium] limited_assets=true reason=broll_asset_missing")
     elif sfx_missing_opportunity:
         logger.info("[private-premium] limited_assets=true reason=sfx_asset_missing_or_low_variation")
+    elif finish_missing_opportunity:
+        logger.info("[private-premium] limited_assets=true reason=finish_limited_assets_or_safety")
     return {
         "private_premium_status": status,
         "private_premium_editorial_quality": editorial_quality,

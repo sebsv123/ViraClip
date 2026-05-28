@@ -35,6 +35,9 @@ from src.services.vpi_retention_editing_service import (  # noqa: E402
     filter_content_quality_candidates,
 )
 from src.services.vpi_visual_effects_service import (  # noqa: E402
+    assess_finish_safety,
+    build_cinematic_finish_decision,
+    build_cinematic_finish_filter_plan,
     build_kickframe_rhythm,
     get_hook_motion_profile,
     plan_visual_effects,
@@ -732,6 +735,79 @@ def case_x_sfx_retention_pack() -> Dict[str, Any]:
     )
 
 
+def case_y_cinematic_finish_pack() -> Dict[str, Any]:
+    risk_text = "La salud no siempre avisa."
+    risk_decision = build_cinematic_finish_decision(
+        hook_intent="risk_warning",
+        composition_mode="warning_tension",
+        private_premium_status="PRIVATE_PREMIUM_READY",
+        first3_visual_contract={"first3_visual_contract": {"caption_readable": True}, "status": "pass"},
+        caption_overlay_pack={"caption_overlay_pack": True},
+        motion_pack_applied=True,
+        broll_applied=False,
+        sfx_retention_pack=True,
+        segment_text=risk_text,
+    )
+    risk_plan = build_cinematic_finish_filter_plan(risk_decision)
+    risk_safety = assess_finish_safety(
+        risk_plan,
+        caption_overlay_pack={"caption_overlay_pack": True},
+        first3_visual_contract_data={"first3_visual_contract": {"caption_readable": True}, "status": "pass"},
+        composition_decision={"screen_priority": "face"},
+    )
+    noop_decision = build_cinematic_finish_decision(
+        hook_intent="neutral_explanation",
+        composition_mode="minimal_safe",
+        private_premium_status="PRIVATE_PREMIUM_READY",
+        first3_visual_contract={"status": "pass"},
+        caption_overlay_pack={},
+        motion_pack_applied=False,
+        broll_applied=False,
+        sfx_retention_pack=False,
+        segment_text="Explicación neutra y breve.",
+    )
+    noop_plan = build_cinematic_finish_filter_plan(noop_decision)
+    blocked_decision = build_cinematic_finish_decision(
+        hook_intent="myth_flip",
+        composition_mode="hook_driven",
+        private_premium_status="DO_NOT_UPLOAD",
+        first3_visual_contract={"status": "review"},
+        caption_overlay_pack={"caption_overlay_pack": True},
+        motion_pack_applied=True,
+        broll_applied=False,
+        sfx_retention_pack=False,
+        segment_text="Este seguro no va de miedo.",
+    )
+    passed = bool(
+        risk_decision.get("should_apply_finish")
+        and risk_decision.get("finish_profile") == "warning_subtle_tension"
+        and float(risk_decision.get("contrast_value") or 1.0) <= 1.08
+        and risk_safety.get("status") in {"pass", "adjusted"}
+        and not bool(noop_plan.get("apply"))
+        and not bool(blocked_decision.get("should_apply_finish"))
+    )
+    return _case_result(
+        "Y_cinematic_finish_pack",
+        passed,
+        "finish pack maps contextual profiles and keeps noop/blocked cases honest",
+        {
+            "risk_decision": risk_decision,
+            "risk_plan": risk_plan,
+            "risk_safety": risk_safety,
+            "noop_decision": noop_decision,
+            "noop_plan": noop_plan,
+            "blocked_decision": blocked_decision,
+        },
+        {
+            "risk_profile": "warning_subtle_tension",
+            "risk_safety": ["pass", "adjusted"],
+            "noop_apply": False,
+            "do_not_upload_should_apply": False,
+        },
+        "finish_pack",
+    )
+
+
 LONG_TRANSCRIPT = """
 [00:03 - 00:04] Claro.
 [00:06 - 00:07] Papá.
@@ -800,7 +876,8 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     broll_pack = rate({"broll_pack"})
     delivery = all(item["passed"] for item in results if item["category"] == "delivery")
     sfx_pack = rate({"sfx_pack"})
-    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + sfx_pack + (1.0 if delivery else 0.0)) / 9.0, 3)
+    finish_pack = rate({"finish_pack"})
+    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + sfx_pack + finish_pack + (1.0 if delivery else 0.0)) / 10.0, 3)
     status = "READY_FOR_RENDER" if overall >= 0.85 else ("NEEDS_MINOR_FIXES" if overall >= 0.70 else "NOT_READY")
     logger.info("[offline-eval] score=%.3f status=%s", overall, status)
     return {
@@ -815,6 +892,7 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "caption_overlay_pass_rate": caption_overlay,
         "broll_pack_pass_rate": broll_pack,
         "sfx_pack_pass_rate": sfx_pack,
+        "finish_pack_pass_rate": finish_pack,
         "delivery_simulation_pass": delivery,
         "overall_editorial_readiness_score": overall,
         "status": status,
@@ -898,6 +976,7 @@ def main(argv: List[str] | None = None) -> int:
         case_v_caption_overlay_pack,
         case_w_broll_editorial_pack,
         case_x_sfx_retention_pack,
+        case_y_cinematic_finish_pack,
     ]
     results = [case() for case in cases]
     scorecard = build_scorecard(results)
