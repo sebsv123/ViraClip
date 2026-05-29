@@ -38,6 +38,7 @@ PY_COMPILE_FILES = [
     "scripts/debug_shot_rhythm_pack.py",
     "scripts/debug_broll_editorial_pack.py",
     "scripts/debug_asset_library_pack.py",
+    "scripts/debug_asset_intake_pack.py",
     "scripts/debug_final_qc_pack.py",
     "scripts/debug_composition_pack.py",
     "scripts/debug_composition_runtime_integration.py",
@@ -125,6 +126,7 @@ def main(argv: List[str] | None = None) -> int:
         ("shot_rhythm_pack", [python, "scripts/debug_shot_rhythm_pack.py"]),
         ("broll_editorial_pack", [python, "scripts/debug_broll_editorial_pack.py"]),
         ("asset_library_pack", [python, "scripts/debug_asset_library_pack.py"]),
+        ("asset_intake_pack", [python, "scripts/debug_asset_intake_pack.py"]),
         ("final_qc_pack", [python, "scripts/debug_final_qc_pack.py"]),
         ("editorial_runtime_integration", [python, "scripts/debug_editorial_runtime_integration.py"]),
         ("retention_editing_system", [python, "scripts/debug_retention_editing_system.py"]),
@@ -174,6 +176,9 @@ def main(argv: List[str] | None = None) -> int:
             passed and any(step["name"] == "shot_rhythm_pack" and step["returncode"] == 0 for step in results)
         ),
         "asset_library_status": asset_library_status,
+        "asset_intake_pack": bool(
+            passed and any(step["name"] == "asset_intake_pack" and step["returncode"] == 0 for step in results)
+        ),
         "final_qc_pack": bool(
             passed and any(step["name"] == "final_qc_pack" and step["returncode"] == 0 for step in results)
         ),
@@ -197,6 +202,7 @@ def main(argv: List[str] | None = None) -> int:
         print(f"CINEMATIC_FINISH_PACK={'true' if payload.get('cinematic_finish_pack') else 'false'}")
         print(f"SHOT_RHYTHM_PACK={'true' if payload.get('shot_rhythm_pack') else 'false'}")
         print(f"ASSET_LIBRARY_STATUS={payload.get('asset_library_status')}")
+        print(f"ASSET_INTAKE_PACK={'true' if payload.get('asset_intake_pack') else 'false'}")
         print(f"FINAL_QC_PACK={'true' if payload.get('final_qc_pack') else 'false'}")
         print(f"VPI_EDITORIAL_PREFLIGHT={'PASS' if passed else 'FAIL'}")
         print(f"READY_FOR_RENDER={'true' if passed else 'false'}")

@@ -167,6 +167,49 @@ PYTHONPYCACHEPREFIX=/tmp/viraclip_pycache_check python -m py_compile \
 
 ---
 
+## Register assets with `vpi_asset_intake.py`
+
+```bash
+# Add B-roll entry to active manifest
+python scripts/vpi_asset_intake.py add \
+  --type broll \
+  --path assets/broll/family_relief/family_relief_pexels_001.mp4 \
+  --id family_relief_001 \
+  --source pexels \
+  --source-url "" \
+  --license-name "Pexels License" \
+  --commercial-use-ok true \
+  --attribution-required false \
+  --tags family_relief emotional_support warm_family \
+  --topics decesos vida familia \
+  --sensitive-tone safe \
+  --duration-hint 2.0
+
+# Add SFX entry
+python scripts/vpi_asset_intake.py add \
+  --type sfx \
+  --path assets/sounds/sfx/soft_chime/soft_chime_mixkit_001.mp3 \
+  --id soft_chime_001 \
+  --source mixkit \
+  --source-url "" \
+  --license-name "Mixkit Free License" \
+  --commercial-use-ok true \
+  --attribution-required false \
+  --tags soft_chime
+
+# Validate intake manifest
+python scripts/vpi_asset_intake.py validate
+
+# List assets (optional filters)
+python scripts/vpi_asset_intake.py list
+python scripts/vpi_asset_intake.py list --type broll --status verified
+
+# Suggest missing categories for READY
+python scripts/vpi_asset_intake.py suggest
+```
+
+---
+
 ## Fuentes aprobadas
 
 | Fuente | Tipos | Licencia | Commercial Use |
