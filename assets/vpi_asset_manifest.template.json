@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "sources": {
+    "pexels": {
+      "license": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check individual asset page and avoid recognizable logos/trademarks."
+    },
+    "pixabay": {
+      "license": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Avoid trademarks/logos/standalone resale."
+    },
+    "mixkit": {
+      "license": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check item type: Free License vs Restricted License."
+    },
+    "coverr": {
+      "license": "Coverr License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Free for commercial use with license notice."
+    },
+    "lucide": {
+      "license": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "tabler": {
+      "license": "MIT",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "heroicons": {
+      "license": "MIT",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "freesound_cc0": {
+      "license": "CC0 1.0",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Public domain dedication."
+    },
+    "freesound_ccby": {
+      "license": "CC BY 4.0",
+      "commercial_use_ok": true,
+      "attribution_required": true,
+      "notes": "Attribution required. Credit in video description."
+    },
+    "google_fonts": {
+      "license": "OFL",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "SIL Open Font License. Keep OFL file."
+    }
+  },
+  "assets": []
+}
