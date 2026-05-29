@@ -35,7 +35,9 @@ PY_COMPILE_FILES = [
     "scripts/debug_caption_overlay_pack.py",
     "scripts/debug_sfx_retention_pack.py",
     "scripts/debug_cinematic_finish_pack.py",
+    "scripts/debug_shot_rhythm_pack.py",
     "scripts/debug_broll_editorial_pack.py",
+    "scripts/debug_final_qc_pack.py",
     "scripts/debug_composition_pack.py",
     "scripts/debug_composition_runtime_integration.py",
     "scripts/vpi_editorial_preflight.py",
@@ -119,7 +121,9 @@ def main(argv: List[str] | None = None) -> int:
         ("caption_overlay_pack", [python, "scripts/debug_caption_overlay_pack.py"]),
         ("sfx_retention_pack", [python, "scripts/debug_sfx_retention_pack.py"]),
         ("cinematic_finish_pack", [python, "scripts/debug_cinematic_finish_pack.py"]),
+        ("shot_rhythm_pack", [python, "scripts/debug_shot_rhythm_pack.py"]),
         ("broll_editorial_pack", [python, "scripts/debug_broll_editorial_pack.py"]),
+        ("final_qc_pack", [python, "scripts/debug_final_qc_pack.py"]),
         ("editorial_runtime_integration", [python, "scripts/debug_editorial_runtime_integration.py"]),
         ("retention_editing_system", [python, "scripts/debug_retention_editing_system.py"]),
         ("premium_runtime_contract", [python, "scripts/debug_premium_runtime_contract.py"]),
@@ -154,6 +158,12 @@ def main(argv: List[str] | None = None) -> int:
         "cinematic_finish_pack": bool(
             passed and any(step["name"] == "cinematic_finish_pack" and step["returncode"] == 0 for step in results)
         ),
+        "shot_rhythm_pack": bool(
+            passed and any(step["name"] == "shot_rhythm_pack" and step["returncode"] == 0 for step in results)
+        ),
+        "final_qc_pack": bool(
+            passed and any(step["name"] == "final_qc_pack" and step["returncode"] == 0 for step in results)
+        ),
         "pycompile_skipped": bool(args.skip_pycompile),
         "steps": results,
         "reports": {
@@ -172,6 +182,8 @@ def main(argv: List[str] | None = None) -> int:
         print(f"BROLL_EDITORIAL_PACK={'true' if payload.get('broll_editorial_pack') else 'false'}")
         print(f"SFX_RETENTION_PACK={'true' if payload.get('sfx_retention_pack') else 'false'}")
         print(f"CINEMATIC_FINISH_PACK={'true' if payload.get('cinematic_finish_pack') else 'false'}")
+        print(f"SHOT_RHYTHM_PACK={'true' if payload.get('shot_rhythm_pack') else 'false'}")
+        print(f"FINAL_QC_PACK={'true' if payload.get('final_qc_pack') else 'false'}")
         print(f"VPI_EDITORIAL_PREFLIGHT={'PASS' if passed else 'FAIL'}")
         print(f"READY_FOR_RENDER={'true' if passed else 'false'}")
         print(f"REPORT_MD={payload['reports']['md']}")

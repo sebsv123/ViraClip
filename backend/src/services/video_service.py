@@ -2270,6 +2270,7 @@ class VideoService:
         _hook_plan_data = {}
         _smart_reframe_metadata = {}
         _silence_edit_plan_data = {}
+        _shot_rhythm_metadata = {}
         try:
             from .vpi_broll_intent import detect_clip_theme as _detect_clip_theme
             from .vpi_editing_plan import assess_visual_density as _assess_visual_density
@@ -2281,6 +2282,7 @@ class VideoService:
             from .vpi_silence_editor import remap_events as _remap_silence_events
             from .vpi_silence_editor import remap_hook_plan as _remap_silence_hook_plan
             from .vpi_silence_editor import remap_word_timestamps as _remap_silence_words
+            from .vpi_visual_effects_service import build_shot_rhythm_decision as _build_shot_rhythm_decision
             from .smart_reframe_service import SmartReframeService as _SmartReframeService
             _vpi_theme = _detect_clip_theme(
                 segment.get("text", ""),
@@ -2420,7 +2422,96 @@ class VideoService:
                     )
             except Exception as _fluency_cut_e:
                 logger.debug("[fluency-edit] media_cut_bridge_skipped reason=%s", _fluency_cut_e)
+            try:
+                _rhythm_status_hint = str((_publishable_metadata or {}).get("private_premium_status") or "")
+                if not _rhythm_status_hint:
+                    _rhythm_complete_idea = float(segment.get("complete_idea_score") or 1.0)
+                    _rhythm_fluency = float(segment.get("fluency_score_after") or ((_fluency_edit_plan or {}).get("fluency_score_after") if _fluency_edit_plan else 1.0) or 1.0)
+                    _rhythm_content_quality = str(segment.get("content_quality_label") or "")
+                    _rhythm_hook_score = int((_hook_plan_data or {}).get("hook_first3_score") or 0)
+                    _rhythm_hook_fit_ok = bool((_hook_plan_data or {}).get("hook_fit_acceptable"))
+                    if _rhythm_content_quality == "reject" or _rhythm_complete_idea < 0.75 or _rhythm_fluency < 0.70:
+                        _rhythm_status_hint = "DO_NOT_UPLOAD"
+                    elif _rhythm_hook_score < 5 and not _rhythm_hook_fit_ok:
+                        _rhythm_status_hint = "PRIVATE_PREMIUM_REVIEW"
+                    else:
+                        _rhythm_status_hint = "PRIVATE_PREMIUM_READY"
+                _shot_rhythm_metadata = _build_shot_rhythm_decision(
+                    segment_text=str(segment.get("text") or ""),
+                    hook_intent=str((_hook_plan_data or {}).get("hook_intent") or segment.get("editorial_type") or ""),
+                    composition_mode=str((_composition_decision or {}).get("composition_mode") or "minimal_safe"),
+                    fluency_plan=_fluency_edit_plan or {},
+                    silence_plan=_silence_plan_obj.to_dict(),
+                    motion_pack_profile=str((_hook_plan_data or {}).get("motion_pack_profile") or (_hook_plan_data or {}).get("visual_profile") or ""),
+                    sfx_retention_decision={},
+                    broll_editorial_decision={},
+                    private_premium_status=_rhythm_status_hint,
+                    first3_visual_contract={},
+                )
+                _shot_microcuts = list((_shot_rhythm_metadata or {}).get("microcuts") or [])
+                if _shot_microcuts:
+                    _existing_cuts = list(_silence_plan_obj.cuts or [])
+                    _existing_ranges = [
+                        (
+                            float(item.get("start_s") or 0.0),
+                            float(item.get("end_s") or float(item.get("start_s") or 0.0)),
+                        )
+                        for item in _existing_cuts
+                    ]
+                    _added_microcuts = 0
+                    for _cut in _shot_microcuts[:3]:
+                        _c_start = float(_cut.get("start_s") or 0.0)
+                        _c_end = float(_cut.get("end_s") or _c_start)
+                        if _c_end <= _c_start:
+                            continue
+                        if any(_c_start < _e and _c_end > _s for _s, _e in _existing_ranges):
+                            continue
+                        _existing_cuts.append({
+                            "start_s": round(_c_start, 3),
+                            "end_s": round(_c_end, 3),
+                            "removed_s": round(max(0.0, _c_end - _c_start), 3),
+                            "target_duration_s": 0.0,
+                            "pause_start_s": round(_c_start, 3),
+                            "pause_end_s": round(_c_end, 3),
+                            "pause_type": "shot_rhythm_microcut",
+                            "action": "cut",
+                            "reason": str(_cut.get("reason") or "shot_rhythm_microcut"),
+                        })
+                        _existing_ranges.append((_c_start, _c_end))
+                        _added_microcuts += 1
+                    if _added_microcuts:
+                        _silence_plan_obj.cuts = sorted(
+                            _existing_cuts,
+                            key=lambda item: float(item.get("start_s", 0.0) or 0.0),
+                        )
+                        _silence_plan_obj.offset_map = _build_silence_offset_map(_silence_plan_obj.cuts)
+                        _silence_plan_obj.total_removed_s = round(
+                            sum(float(cut.get("removed_s", 0.0) or 0.0) for cut in _silence_plan_obj.cuts),
+                            3,
+                        )
+                        _silence_plan_obj.summary["shot_rhythm_microcuts_added"] = _added_microcuts
+                        _shot_rhythm_metadata["microcuts_applied_count"] = _added_microcuts
+                        _shot_rhythm_metadata["applied"] = True
+                    else:
+                        _shot_rhythm_metadata["applied"] = bool((_shot_rhythm_metadata or {}).get("preserved_pauses"))
+                else:
+                    _shot_rhythm_metadata["applied"] = bool((_shot_rhythm_metadata or {}).get("preserved_pauses"))
+                logger.info("[shot-rhythm] runtime_connected=true")
+            except Exception as _shot_rhythm_e:
+                logger.debug("[shot-rhythm] skipped reason=%s", _shot_rhythm_e)
+                _shot_rhythm_metadata = {
+                    "should_apply_rhythm": False,
+                    "rhythm_profile": "no_rhythm_needed",
+                    "microcuts": [],
+                    "preserved_pauses": [],
+                    "pattern_interruptions": [],
+                    "pacing_score_before": 0.0,
+                    "pacing_score_after_estimate": 0.0,
+                    "applied": False,
+                    "reason": f"shot_rhythm_failed:{_shot_rhythm_e}",
+                }
             _silence_edit_plan_data = _silence_plan_obj.to_dict()
+            _silence_edit_plan_data["shot_rhythm"] = _shot_rhythm_metadata
             _silence_out = output_path.with_name(f"silence_{output_path.name}")
             _silence_input = output_path
             _silence_result = _apply_silence_edit_plan(output_path, _silence_out, _silence_plan_obj, duration)
@@ -2485,6 +2576,7 @@ class VideoService:
             _editing_plan_data["visual_density_score"] = _density_preflight.get("visual_density_score")
             _editing_plan_data["visual_density_warnings"] = _density_preflight.get("visual_density_warnings", [])
             _editing_plan_data["silence_edit_plan"] = _silence_edit_plan_data
+            _editing_plan_data["shot_rhythm"] = _shot_rhythm_metadata
             _smart_reframe_metadata = _SmartReframeService().apply(
                 output_path,
                 output_path.with_name(f"reframe_{output_path.name}"),
@@ -4322,6 +4414,49 @@ class VideoService:
                 _sfx_reason or "none",
             )
             logger.info("[editing-richness] sfx_low_variation=%s", str(_sfx_low_variation).lower())
+            _shot_rhythm_plan = dict(
+                (_silence_edit_plan_data or {}).get("shot_rhythm")
+                or (_editing_plan_data or {}).get("shot_rhythm")
+                or (_shot_rhythm_metadata or {})
+                or {}
+            )
+            _shot_rhythm_microcuts = list(_shot_rhythm_plan.get("microcuts") or [])
+            _shot_rhythm_preserved = list(_shot_rhythm_plan.get("preserved_pauses") or [])
+            _shot_rhythm_interruptions = [
+                item for item in (_shot_rhythm_plan.get("pattern_interruptions") or [])
+                if bool((item or {}).get("applied"))
+            ]
+            _shot_rhythm_applied = bool(
+                _shot_rhythm_plan.get("applied")
+                or int(_shot_rhythm_plan.get("microcuts_applied_count") or 0) > 0
+                or _shot_rhythm_microcuts
+                or _shot_rhythm_preserved
+                or _shot_rhythm_interruptions
+            )
+            _pacing_before = float(_shot_rhythm_plan.get("pacing_score_before") or 0.0)
+            _pacing_after = float(_shot_rhythm_plan.get("pacing_score_after_estimate") or _pacing_before)
+            _shot_rhythm_pack = bool(
+                _shot_rhythm_applied
+                and (
+                    bool(_shot_rhythm_microcuts)
+                    or bool(_shot_rhythm_preserved)
+                    or bool(_shot_rhythm_interruptions)
+                    or (_pacing_after > _pacing_before + 0.01)
+                )
+            )
+            _shot_rhythm_reason = str(_shot_rhythm_plan.get("reason") or "")
+            if _shot_rhythm_pack:
+                _shot_rhythm_reason = "microcut_pause_pattern_applied"
+            elif not _shot_rhythm_reason:
+                _shot_rhythm_reason = "metadata_only"
+            logger.info("[shot-rhythm] pacing_score_before=%.2f", _pacing_before)
+            logger.info("[shot-rhythm] pacing_score_after=%.2f", _pacing_after)
+            logger.info("[shot-rhythm] applied=%s reason=%s", str(_shot_rhythm_applied).lower(), _shot_rhythm_reason)
+            logger.info(
+                "[editing-richness] shot_rhythm_pack=%s reason=%s",
+                str(_shot_rhythm_pack).lower(),
+                _shot_rhythm_reason,
+            )
             _finish_decision_meta = dict((_cinematic_finish_metadata or {}).get("finish_decision") or {})
             _finish_filter_plan_meta = dict((_cinematic_finish_metadata or {}).get("finish_filter_plan") or {})
             _finish_should_apply = bool(_finish_decision_meta.get("should_apply_finish"))
@@ -4431,6 +4566,8 @@ class VideoService:
                 _editing_richness_score += 1
             if _visual_finish:
                 _editing_richness_score += 1
+            if _shot_rhythm_pack:
+                _editing_richness_score += 1
             logger.info(
                 "[editing-richness] composition_pack=%s reason=%s",
                 str(_composition_pack_active).lower(),
@@ -4470,6 +4607,8 @@ class VideoService:
                 _richness_warnings.append("finish_limited_assets_or_safety")
             if _finish_safety_status == "blocked":
                 _richness_warnings.append("finish_safety_blocked")
+            if not _shot_rhythm_pack and _pacing_before <= 0.55:
+                _richness_warnings.append("shot_rhythm_opportunity_unfulfilled")
             if _music_metadata.get("music_applied") and not _music_in_final:
                 _richness_warnings.append("music_planned_not_in_final")
             if _visual_effects_metadata.get("visual_effects_applied") and not _vfx_in_final:
@@ -4508,6 +4647,7 @@ class VideoService:
                 or (_silence_edit_plan_data or {}).get("rendered")
                 or _good_broll_phrase_fit
                 or _visual_effects_metadata.get("visual_effects_applied")
+                or _shot_rhythm_pack
             )
             _honest_gate_reason_f5 = ""
             if _complete_idea_score_f5 < 0.75:
@@ -4570,8 +4710,14 @@ class VideoService:
                 "finish_profile": str((_cinematic_finish_metadata or {}).get("finish_profile") or "none"),
                 "finish_safety": _finish_safety_status,
                 "finish_limited_assets": _finish_limited_assets,
+                "shot_rhythm": _shot_rhythm_plan,
+                "shot_rhythm_pack": _shot_rhythm_pack,
+                "pacing_score_before": _pacing_before,
+                "pacing_score_after": _pacing_after,
                 "private_premium_finish_adjustment": "pending",
                 "private_premium_status_after_finish": "pending",
+                "private_premium_rhythm_adjustment": "pending",
+                "private_premium_status_after_rhythm": "pending",
                 "editing_richness_final_verified": True,
                 **_retention_metadata,
                 **_final_contract_metadata,
@@ -4654,6 +4800,24 @@ class VideoService:
             logger.info("[private-premium] status_after_finish=%s", _status_after_finish)
             _publishable_metadata["private_premium_finish_adjustment"] = _finish_adjustment
             _publishable_metadata["private_premium_status_after_finish"] = _status_after_finish
+            _rhythm_adjustment = "none"
+            _status_after_rhythm = str(_publishable_metadata.get("private_premium_status") or _status_after_finish)
+            _fluency_score_rhythm = float(
+                segment.get("fluency_score_after")
+                or ((_fluency_edit_plan or {}).get("fluency_score_after") if _fluency_edit_plan else 1.0)
+                or 1.0
+            )
+            _hook_fit_ok_rhythm = bool((_hook_plan_data or {}).get("hook_fit_acceptable"))
+            if _status_after_rhythm != "DO_NOT_UPLOAD":
+                if _pacing_after < 0.58 and (not _hook_fit_ok_rhythm or _fluency_score_rhythm < 0.75):
+                    _publishable_metadata["private_premium_status"] = "PRIVATE_PREMIUM_REVIEW"
+                    _publishable_metadata["private_premium_reason"] = "low_pacing_rhythm_review"
+                    _rhythm_adjustment = "review_low_pacing"
+                    _status_after_rhythm = "PRIVATE_PREMIUM_REVIEW"
+            logger.info("[private-premium] rhythm_adjustment=%s", _rhythm_adjustment)
+            logger.info("[private-premium] status_after_rhythm=%s", _status_after_rhythm)
+            _publishable_metadata["private_premium_rhythm_adjustment"] = _rhythm_adjustment
+            _publishable_metadata["private_premium_status_after_rhythm"] = _status_after_rhythm
             _composition_downgrade = bool(
                 (_first3_visual_contract_result or {}).get("downgrade_required")
                 and str(_publishable_metadata.get("private_premium_status") or "") == "PRIVATE_PREMIUM_REVIEW"
@@ -4670,6 +4834,66 @@ class VideoService:
                     or "none"
                 ),
             )
+            _final_qc_report = {}
+            try:
+                from .vpi_publishable_gate import build_final_qc_report as _build_final_qc_report
+                _audio_qc_meta = dict(locals().get("_audio_master_metadata", {}) or {})
+                _subtitle_qc_meta = {
+                    "captions_rendered": bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                    "hook_first3_score": int((_hook_plan_data or {}).get("hook_first3_score") or 0),
+                }
+                _final_qc_report = _build_final_qc_report(
+                    private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                    editing_richness=_editing_richness_metadata,
+                    composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
+                    first3_visual_contract=_first3_visual_contract_result if isinstance(_first3_visual_contract_result, dict) else {},
+                    caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    motion_pack=_visual_effects_metadata if isinstance(_visual_effects_metadata, dict) else {},
+                    broll_metadata={
+                        "broll_asset_applied_match": _broll_asset_applied_match,
+                        "matched": bool(_broll_asset_match_final.get("matched")),
+                        "timing_valid": _broll_timing_valid,
+                        "composition_allowed": _broll_composition_allowed_final,
+                    },
+                    sfx_metadata=_sfx_metadata if isinstance(_sfx_metadata, dict) else {},
+                    cinematic_finish=_cinematic_finish_metadata if isinstance(_cinematic_finish_metadata, dict) else {},
+                    shot_rhythm=_shot_rhythm_plan if isinstance(_shot_rhythm_plan, dict) else {},
+                    audio_metadata=_audio_qc_meta,
+                    subtitle_metadata=_subtitle_qc_meta,
+                    segment_text=str(segment.get("text") or ""),
+                )
+            except Exception as _final_qc_e:
+                logger.warning("[final-qc] build_failed reason=%s", _final_qc_e)
+                _final_qc_report = {
+                    "final_qc_status": "REVIEW",
+                    "upload_recommendation": "REVIEW_MANUALLY",
+                    "checks": {},
+                    "warnings": [f"final_qc_failed:{_final_qc_e}"],
+                    "reasons": ["final_qc_build_failed"],
+                    "premium_truth_score": 0.0,
+                    "readability_score": 0.0,
+                    "audio_score": 0.0,
+                    "composition_score": 0.0,
+                    "retention_score": 0.0,
+                }
+
+            _final_qc_status = str(_final_qc_report.get("final_qc_status") or "REVIEW")
+            _final_upload_recommendation = str(_final_qc_report.get("upload_recommendation") or "REVIEW_MANUALLY")
+            _status_after_final_qc = str(_publishable_metadata.get("private_premium_status") or "")
+            _final_qc_adjustment = "none"
+            if _final_qc_status == "FAIL":
+                _status_after_final_qc = "DO_NOT_UPLOAD"
+                _final_qc_adjustment = "downgrade_do_not_upload"
+            elif _final_qc_status == "REVIEW" and _status_after_final_qc != "DO_NOT_UPLOAD":
+                _status_after_final_qc = "PRIVATE_PREMIUM_REVIEW"
+                _final_qc_adjustment = "downgrade_review"
+            _publishable_metadata["private_premium_status"] = _status_after_final_qc
+            _publishable_metadata["final_private_premium_status"] = _status_after_final_qc
+            _publishable_metadata["final_qc_status"] = _final_qc_status
+            _publishable_metadata["final_upload_recommendation"] = _final_upload_recommendation
+            _publishable_metadata["final_qc"] = _final_qc_report
+            logger.info("[private-premium] final_qc_adjustment=%s", _final_qc_adjustment)
+            logger.info("[private-premium] final_status=%s", _status_after_final_qc)
             _editing_richness_metadata.update({
                 "composition_decision": _composition_decision,
                 "composition_pack": _composition_pack_active,
@@ -4680,6 +4904,16 @@ class VideoService:
                 "cinematic_finish": _cinematic_finish_metadata,
                 "private_premium_finish_adjustment": _finish_adjustment,
                 "private_premium_status_after_finish": _status_after_finish,
+                "shot_rhythm": _shot_rhythm_plan,
+                "shot_rhythm_pack": _shot_rhythm_pack,
+                "pacing_score_before": _pacing_before,
+                "pacing_score_after": _pacing_after,
+                "private_premium_rhythm_adjustment": _rhythm_adjustment,
+                "private_premium_status_after_rhythm": _status_after_rhythm,
+                "final_qc": _final_qc_report,
+                "final_qc_status": _final_qc_status,
+                "final_upload_recommendation": _final_upload_recommendation,
+                "final_private_premium_status": _status_after_final_qc,
             })
             logger.info(
                 "[editing-richness] composition_pack=%s reason=%s",
@@ -4817,6 +5051,10 @@ class VideoService:
             "publishable_warnings": _publishable_metadata.get("publishable_warnings", []),
             "publishable_score": _publishable_metadata.get("publishable_score"),
             "hook_quality": _publishable_metadata.get("hook_quality"),
+            "final_qc": _publishable_metadata.get("final_qc", {}),
+            "final_qc_status": _publishable_metadata.get("final_qc_status"),
+            "final_upload_recommendation": _publishable_metadata.get("final_upload_recommendation"),
+            "final_private_premium_status": _publishable_metadata.get("final_private_premium_status"),
         }
         # Cancel prefetch task if still running
         if _broll_prefetch_task is not None and not _broll_prefetch_task.done():

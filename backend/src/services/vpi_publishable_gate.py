@@ -304,9 +304,22 @@ def assess_private_premium_status(
         or float(silence_plan.get("total_removed_s") or 0.0) > 0.15
         or (silence_plan.get("summary") or {}).get("tension_silences_preserved")
     )
+    shot_rhythm = dict(silence_plan.get("shot_rhythm") or {})
+    shot_rhythm_pack = bool(
+        shot_rhythm.get("applied")
+        and (
+            (shot_rhythm.get("microcuts") or [])
+            or (shot_rhythm.get("preserved_pauses") or [])
+            or (shot_rhythm.get("pattern_interruptions") or [])
+            or float(shot_rhythm.get("pacing_score_after_estimate") or 0.0)
+            > float(shot_rhythm.get("pacing_score_before") or 0.0) + 0.01
+        )
+    )
+    pacing_after = float(shot_rhythm.get("pacing_score_after_estimate") or 0.0)
     has_broll = bool(broll_items)
     perceptible_editorial_action = bool(
         meaningful_silence
+        or shot_rhythm_pack
         or has_premium_visual
         or contextual_transition
         or contextual_sfx
@@ -376,6 +389,10 @@ def assess_private_premium_status(
         status = "PRIVATE_PREMIUM_REVIEW"
         editorial_quality = "review_finish_safety"
         reason = "finish_safety_blocked"
+    elif pacing_after and pacing_after < 0.58 and (not hook_fit_acceptable or fluency_score_after < 0.75):
+        status = "PRIVATE_PREMIUM_REVIEW"
+        editorial_quality = "review_rhythm_pacing"
+        reason = "low_pacing_after_rhythm"
     elif not perceptible_editorial_action:
         status = "PRIVATE_PREMIUM_REVIEW"
         editorial_quality = "review_editorial_action"
@@ -419,6 +436,226 @@ def assess_private_premium_status(
         "private_premium_limited_assets": limited_assets,
         "private_premium_reason": reason,
         "private_premium_perceptible_editorial_action": perceptible_editorial_action,
+    }
+
+
+def build_final_qc_report(
+    *,
+    private_premium_status: str,
+    editing_richness: Dict[str, Any],
+    composition_decision: Dict[str, Any],
+    first3_visual_contract: Dict[str, Any],
+    caption_overlay_pack: Dict[str, Any],
+    motion_pack: Dict[str, Any],
+    broll_metadata: Dict[str, Any],
+    sfx_metadata: Dict[str, Any],
+    cinematic_finish: Dict[str, Any],
+    shot_rhythm: Dict[str, Any],
+    audio_metadata: Dict[str, Any],
+    subtitle_metadata: Dict[str, Any],
+    segment_text: str,
+) -> Dict[str, Any]:
+    status_in = str(private_premium_status or "")
+    richness = editing_richness or {}
+    first3 = first3_visual_contract or {}
+    cap = caption_overlay_pack or {}
+    comp = composition_decision or {}
+    broll = broll_metadata or {}
+    sfx = sfx_metadata or {}
+    finish = cinematic_finish or {}
+    rhythm = shot_rhythm or {}
+    audio = audio_metadata or {}
+    subs = subtitle_metadata or {}
+
+    checks: Dict[str, Any] = {}
+    reasons: List[str] = []
+    warnings: List[str] = []
+
+    lower_text = str(segment_text or "").lower()
+    incomplete_tail = any(lower_text.strip().endswith(token) for token in (" cuando", " porque", " pero", " y", " para", " si", " entonces"))
+    bts_flag = bool("bts" in lower_text or "dale de nuevo" in lower_text or "lo repito" in lower_text)
+    weak_hook = bool(int((subs.get("hook_first3_score") or 0)) < 5)
+    visible_repetition = bool(
+        "repetition" in "|".join(str(x) for x in (rhythm.get("removed_pauses") or []))
+        or "visible_repetition" in "|".join(str(x) for x in (richness.get("editing_richness_warnings") or []))
+    )
+    editorial_integrity = bool(not bts_flag and not incomplete_tail and not visible_repetition and status_in != "DO_NOT_UPLOAD")
+    checks["editorial_integrity"] = editorial_integrity
+    if not editorial_integrity:
+        reasons.append("editorial_integrity_failed")
+    elif weak_hook:
+        warnings.append("weak_hook_review")
+
+    first3_checks = dict(first3.get("first3_visual_contract") or {})
+    first3_quality = bool(
+        first3_checks.get("hook_visible_before_1_5s", False)
+        and first3_checks.get("caption_readable", False)
+        and first3_checks.get("no_layer_overload", False)
+        and (
+            first3_checks.get("motion_contextual", False)
+            or bool(rhythm.get("applied"))
+        )
+    )
+    checks["first3_quality"] = first3_quality
+    if not first3_quality:
+        warnings.append("first3_quality_review")
+
+    overlays = cap.get("caption_overlay_actions") or []
+    caption_quality = bool(
+        bool(subs.get("captions_rendered", True))
+        and not bool(cap.get("layer_overload"))
+        and not (
+            bool((cap.get("lower_third") or {}).get("applied"))
+            and bool((cap.get("hook_overlay") or {}).get("applied"))
+            and float((cap.get("lower_third") or {}).get("start_s") or 0.0) < 1.2
+        )
+    )
+    if len(overlays) > 3:
+        caption_quality = False
+    checks["caption_quality"] = caption_quality
+    if not caption_quality:
+        warnings.append("caption_quality_warning")
+
+    voice_conflict = bool(sfx.get("voice_conflict"))
+    sfx_over_voice = bool(sfx.get("sfx_applied") and voice_conflict)
+    audio_quality = bool(
+        not sfx_over_voice
+        and not bool(audio.get("voice_buried"))
+        and not bool(audio.get("music_too_loud"))
+    )
+    checks["audio_quality"] = audio_quality
+    if not audio_quality:
+        warnings.append("audio_quality_warning")
+
+    composition_quality = bool(
+        not bool(comp.get("layer_overload") or richness.get("layer_overload"))
+        and str(comp.get("composition_quality") or richness.get("composition_quality") or "ok") in {"ok", "good", "strong"}
+        and not bool((first3.get("first3_visual_contract") or {}).get("no_layer_overload") is False)
+    )
+    checks["composition_quality"] = composition_quality
+    if not composition_quality:
+        warnings.append("composition_quality_warning")
+
+    fake_flags: List[str] = []
+    if bool(richness.get("broll")) and not bool(broll.get("broll_asset_applied_match") or broll.get("asset_applied_match")):
+        fake_flags.append("broll_true_without_asset")
+    if bool(richness.get("sfx")) and not bool(sfx.get("sfx_asset_applied_match")):
+        fake_flags.append("sfx_true_without_asset")
+    if bool(richness.get("visual_finish")) and not bool(finish.get("visual_finish") and finish.get("finish_applied")):
+        fake_flags.append("finish_true_without_filters")
+    if bool(richness.get("shot_rhythm_pack")) and not bool(
+        rhythm.get("applied")
+        and (
+            rhythm.get("microcuts")
+            or rhythm.get("preserved_pauses")
+            or rhythm.get("pattern_interruptions")
+            or float(rhythm.get("pacing_score_after_estimate") or 0.0) > float(rhythm.get("pacing_score_before") or 0.0) + 0.01
+        )
+    ):
+        fake_flags.append("rhythm_true_without_action")
+    if bool(richness.get("cinematic_finish_pack")) and not bool(finish.get("visual_finish")):
+        fake_flags.append("finish_pack_without_visual_finish")
+    if bool(richness.get("caption_overlay_pack")) and not bool(overlays):
+        fake_flags.append("caption_pack_without_actions")
+    if bool(richness.get("composition_pack")) and not bool(
+        richness.get("composition_runtime_applied")
+        or comp.get("runtime_connected")
+        or comp.get("composition_pack")
+        or bool(first3.get("status") == "pass")
+    ):
+        fake_flags.append("composition_pack_without_runtime_proof")
+    motion_events = list(motion_pack.get("visual_effects_events") or motion_pack.get("motion_scaling_events") or [])
+    motion_contextual = bool(
+        motion_pack.get("motion_pack_applied")
+        or motion_pack.get("visual_effects_applied")
+        and any(
+            bool((event or {}).get("motion_pack_contextual") or (event or {}).get("contextual") or (event or {}).get("premium_visual_effect"))
+            for event in motion_events
+        )
+    )
+    if bool(richness.get("motion_pack")) and not motion_contextual:
+        fake_flags.append("motion_pack_without_contextual_action")
+    if bool(richness.get("broll")) and bool(richness.get("broll_editorial_opportunity")) and not bool(broll.get("broll_asset_applied_match") or broll.get("asset_applied_match")):
+        fake_flags.append("broll_opportunity_counted_as_applied")
+    if bool(richness.get("sfx")) and bool(richness.get("sfx_editorial_opportunity")) and not bool(sfx.get("sfx_asset_applied_match")):
+        fake_flags.append("sfx_opportunity_counted_as_applied")
+    premium_truth = len(fake_flags) == 0
+    checks["premium_truth"] = premium_truth
+    for fake in fake_flags:
+        logger.info("[final-qc] fake_premium_flag=%s reason=flag_without_real_action", fake)
+        warnings.append(f"fake_premium:{fake}")
+
+    render_safety = bool(
+        bool(richness)
+        and status_in != ""
+        and not (bool(richness.get("broll")) and not bool(broll))
+        and not (bool(richness.get("sfx")) and not bool(sfx))
+        and not (bool(richness.get("visual_finish")) and not bool(finish))
+        and not (bool(richness.get("shot_rhythm_pack")) and not bool(rhythm))
+    )
+    checks["render_safety"] = render_safety
+    if not render_safety:
+        reasons.append("render_safety_failed")
+
+    readability_score = round(1.0 if caption_quality else 0.62, 3)
+    audio_score = round(1.0 if audio_quality else 0.58, 3)
+    composition_score = round(1.0 if composition_quality else 0.55, 3)
+    retention_score = round(
+        max(
+            0.0,
+            min(
+                1.0,
+                float(rhythm.get("pacing_score_after_estimate") or rhythm.get("pacing_score_after") or 0.68),
+            ),
+        ),
+        3,
+    )
+    premium_truth_score = 1.0 - (0.14 * len(fake_flags))
+    premium_truth_score = round(max(0.0, min(1.0, premium_truth_score)), 3)
+    logger.info("[final-qc] premium_truth_score=%.2f", premium_truth_score)
+
+    severe_fake_premium = len(fake_flags) >= 3
+    severe = (
+        status_in == "DO_NOT_UPLOAD"
+        or not editorial_integrity
+        or not render_safety
+        or severe_fake_premium
+        or premium_truth_score < 0.55
+    )
+    if severe:
+        qc_status = "FAIL"
+    elif fake_flags or premium_truth_score < 0.75 or not first3_quality or not caption_quality or not audio_quality or not composition_quality:
+        qc_status = "REVIEW"
+    else:
+        qc_status = "PASS"
+
+    if status_in == "DO_NOT_UPLOAD" or qc_status == "FAIL":
+        upload_reco = "DO_NOT_UPLOAD"
+    elif status_in == "PRIVATE_PREMIUM_READY" and qc_status == "PASS" and not warnings:
+        upload_reco = "UPLOAD"
+    else:
+        upload_reco = "REVIEW_MANUALLY"
+
+    logger.info("[final-qc] status=%s", qc_status)
+    logger.info("[final-qc] upload_recommendation=%s", upload_reco)
+    logger.info("[final-qc] severe=%s reason=%s", str(severe).lower(), "|".join(reasons) or "none")
+    for reason in reasons:
+        logger.info("[final-qc] reason=%s", reason)
+    for warning in warnings:
+        logger.info("[final-qc] warning=%s", warning)
+
+    return {
+        "final_qc_status": qc_status,
+        "upload_recommendation": upload_reco,
+        "reasons": reasons,
+        "warnings": warnings,
+        "checks": checks,
+        "premium_truth_score": premium_truth_score,
+        "readability_score": readability_score,
+        "audio_score": audio_score,
+        "composition_score": composition_score,
+        "retention_score": retention_score,
+        "severe": severe,
     }
 
 

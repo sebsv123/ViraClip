@@ -27,7 +27,7 @@ from src.services.vpi_hook_engine import (  # noqa: E402
     find_better_hook_start,
     is_weak_hook_unresolved,
 )
-from src.services.vpi_publishable_gate import evaluate_clip_publishability  # noqa: E402
+from src.services.vpi_publishable_gate import build_final_qc_report, evaluate_clip_publishability  # noqa: E402
 from src.services.vpi_retention_editing_service import (  # noqa: E402
     build_clean_take_candidates,
     build_delivery_contract,
@@ -39,6 +39,7 @@ from src.services.vpi_visual_effects_service import (  # noqa: E402
     build_cinematic_finish_decision,
     build_cinematic_finish_filter_plan,
     build_kickframe_rhythm,
+    build_shot_rhythm_decision,
     get_hook_motion_profile,
     plan_visual_effects,
 )
@@ -808,6 +809,124 @@ def case_y_cinematic_finish_pack() -> Dict[str, Any]:
     )
 
 
+def case_z_shot_rhythm_pack() -> Dict[str, Any]:
+    text = "La salud no siempre avisa. Y cuando avisa, conviene tener margen."
+    silence_plan = {
+        "summary": {
+            "fluency_cuts_added": 0,
+        },
+        "segments": [
+            {
+                "start_s": 1.20,
+                "end_s": 1.52,
+                "duration_s": 0.32,
+                "action": "preserve_for_tension",
+                "pause_type": "tension_silence",
+                "reason": "warning_reveal",
+                "confidence": 0.9,
+            },
+            {
+                "start_s": 2.80,
+                "end_s": 3.40,
+                "duration_s": 0.60,
+                "action": "cut",
+                "pause_type": "dead_air",
+                "reason": "dead_air_wait",
+                "confidence": 0.9,
+            },
+        ],
+        "cuts": [],
+    }
+    fluency_plan = {
+        "disfluency_count": 1,
+        "false_start_count": 0,
+        "fluency_score_after": 0.76,
+    }
+    decision = build_shot_rhythm_decision(
+        segment_text=text,
+        hook_intent="risk_warning",
+        composition_mode="warning_tension",
+        fluency_plan=fluency_plan,
+        silence_plan=silence_plan,
+        motion_pack_profile="tension_push",
+        sfx_retention_decision={"should_apply_sfx": True, "voice_conflict": False},
+        broll_editorial_decision={"should_use_broll": False},
+        private_premium_status="PRIVATE_PREMIUM_READY",
+        first3_visual_contract={"status": "pass", "first3_visual_contract": {"no_layer_overload": True}},
+    )
+    passed = bool(
+        decision.get("should_apply_rhythm")
+        and decision.get("rhythm_profile") == "warning_breath"
+        and len(decision.get("microcuts") or []) <= 3
+        and any(item.get("reason") == "warning" for item in (decision.get("preserved_pauses") or []))
+        and float(decision.get("pacing_score_after_estimate") or 0.0) >= float(decision.get("pacing_score_before") or 0.0)
+    )
+    return _case_result(
+        "Z_shot_rhythm_pack",
+        passed,
+        "shot rhythm preserves useful warning pause and applies only safe microcuts",
+        {"decision": decision},
+        {"profile": "warning_breath", "microcuts_lte": 3, "pause_preserved_warning": True, "pacing_improves": True},
+        "shot_rhythm_pack",
+    )
+
+
+def case_aa_final_qc_pack() -> Dict[str, Any]:
+    base = {
+        "private_premium_status": "PRIVATE_PREMIUM_READY",
+        "editing_richness": {
+            "broll": False,
+            "sfx": False,
+            "visual_finish": True,
+            "cinematic_finish_pack": True,
+            "shot_rhythm_pack": True,
+            "caption_overlay_pack": True,
+            "composition_quality": "good",
+            "layer_overload": False,
+        },
+        "composition_decision": {"composition_quality": "good", "layer_overload": False},
+        "first3_visual_contract": {
+            "first3_visual_contract": {
+                "hook_visible_before_1_5s": True,
+                "caption_readable": True,
+                "no_layer_overload": True,
+                "motion_contextual": True,
+            }
+        },
+        "caption_overlay_pack": {"caption_overlay_actions": ["keyword_emphasis"]},
+        "motion_pack": {"visual_effects_applied": True},
+        "broll_metadata": {"broll_asset_applied_match": False},
+        "sfx_metadata": {"sfx_asset_applied_match": True, "voice_conflict": False},
+        "cinematic_finish": {"visual_finish": True, "finish_applied": True},
+        "shot_rhythm": {"applied": True, "microcuts": [{"start_s": 1.2}], "pacing_score_before": 0.61, "pacing_score_after_estimate": 0.72},
+        "audio_metadata": {"voice_buried": False, "music_too_loud": False},
+        "subtitle_metadata": {"captions_rendered": True, "hook_first3_score": 6},
+        "segment_text": "Antes de mirar precios, mira tu vida real. La clave es decidir con claridad.",
+    }
+    strong = build_final_qc_report(**base)
+    fake = build_final_qc_report(
+        **{
+            **base,
+            "editing_richness": {**base["editing_richness"], "broll": True},
+            "broll_metadata": {"broll_asset_applied_match": False},
+        }
+    )
+    passed = (
+        strong.get("final_qc_status") in {"PASS", "REVIEW"}
+        and strong.get("upload_recommendation") in {"UPLOAD", "REVIEW_MANUALLY"}
+        and fake.get("premium_truth_score", 1.0) < strong.get("premium_truth_score", 1.0)
+        and fake.get("final_qc_status") in {"REVIEW", "FAIL"}
+    )
+    return _case_result(
+        "AA_final_qc_pack",
+        passed,
+        "final qc penalizes fake premium flags and keeps honest clips publishable/reviewable",
+        {"strong": strong, "fake": fake},
+        {"strong_not_fail": True, "fake_penalized": True},
+        "final_qc_pack",
+    )
+
+
 LONG_TRANSCRIPT = """
 [00:03 - 00:04] Claro.
 [00:06 - 00:07] Papá.
@@ -877,7 +996,9 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     delivery = all(item["passed"] for item in results if item["category"] == "delivery")
     sfx_pack = rate({"sfx_pack"})
     finish_pack = rate({"finish_pack"})
-    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + sfx_pack + finish_pack + (1.0 if delivery else 0.0)) / 10.0, 3)
+    shot_rhythm_pack = rate({"shot_rhythm_pack"})
+    final_qc_pack = rate({"final_qc_pack"})
+    overall = round((complete + fluency + hook + gate + motion + caption_overlay + broll_pack + sfx_pack + finish_pack + shot_rhythm_pack + final_qc_pack + (1.0 if delivery else 0.0)) / 12.0, 3)
     status = "READY_FOR_RENDER" if overall >= 0.85 else ("NEEDS_MINOR_FIXES" if overall >= 0.70 else "NOT_READY")
     logger.info("[offline-eval] score=%.3f status=%s", overall, status)
     return {
@@ -893,6 +1014,8 @@ def build_scorecard(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "broll_pack_pass_rate": broll_pack,
         "sfx_pack_pass_rate": sfx_pack,
         "finish_pack_pass_rate": finish_pack,
+        "shot_rhythm_pack_pass_rate": shot_rhythm_pack,
+        "final_qc_pack_pass_rate": final_qc_pack,
         "delivery_simulation_pass": delivery,
         "overall_editorial_readiness_score": overall,
         "status": status,
@@ -977,6 +1100,8 @@ def main(argv: List[str] | None = None) -> int:
         case_w_broll_editorial_pack,
         case_x_sfx_retention_pack,
         case_y_cinematic_finish_pack,
+        case_z_shot_rhythm_pack,
+        case_aa_final_qc_pack,
     ]
     results = [case() for case in cases]
     scorecard = build_scorecard(results)
