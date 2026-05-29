@@ -1315,7 +1315,7 @@ def match_broll_asset(
     _manifest_found = bool(_asset_index.get("manifest_found"))
     assets = _list_local_broll_assets()
     verified_by_path: Dict[str, Dict[str, Any]] = {
-        str(item.get("path") or ""): item for item in _verified_broll if isinstance(item, dict)
+        str(Path(str(item.get("path") or "")).resolve()): item for item in _verified_broll if isinstance(item, dict) and str(item.get("path") or "").strip()
     }
     terms = _BROLL_FILENAME_TERMS.get(intent, tuple())
     best_match: Optional[Path] = None
@@ -1341,7 +1341,7 @@ def match_broll_asset(
         logger.info("[broll-asset] skipped reason=no_local_asset")
         return {"matched": False, "asset": None, "reason": "no_local_asset", "score": 0}
 
-    _best_key = str(best_match)
+    _best_key = str(best_match.resolve())
     _verified_entry = verified_by_path.get(_best_key)
     _verified = bool(_verified_entry)
     _source = str((_verified_entry or {}).get("source_name") or ("unverified_local" if not _manifest_found else ""))

@@ -206,7 +206,11 @@ def main() -> int:
 
     caption_plan = plan_caption_overlay_pack("Texto limpio sin iconos locales verificados.", hook_intent="neutral_explanation")
     font_registry = dict(caption_plan.get("font_registry") or {})
-    check("fonts_missing_fallback_safe", bool(font_registry.get("caption_font_fallback")), str(font_registry))
+    check(
+        "fonts_registry_safe",
+        bool(font_registry.get("caption_font_fallback")) or bool(font_registry.get("selected_caption_font")),
+        str(font_registry),
+    )
 
     runtime_index = build_asset_index()
     runtime_qc = build_asset_library_qc_report(runtime_index)

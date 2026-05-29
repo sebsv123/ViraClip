@@ -52,6 +52,16 @@ _ASSET_EXTS: Dict[str, Tuple[str, ...]] = {
     "fonts": (".ttf", ".otf", ".woff", ".woff2"),
 }
 
+_ASSET_TYPE_ALIASES: Dict[str, str] = {
+    "icon": "icons",
+    "icons": "icons",
+    "font": "fonts",
+    "fonts": "fonts",
+    "broll": "broll",
+    "sfx": "sfx",
+    "bgm": "bgm",
+}
+
 EDITORIAL_BROLL_INTENTS: Tuple[str, ...] = (
     "family_relief",
     "emotional_support",
@@ -104,6 +114,10 @@ EDITORIAL_FONT_ROLES: Tuple[str, ...] = (
 def _abs_path(candidate: str) -> Path:
     path = Path(candidate)
     return path if path.is_absolute() else (_REPO_ROOT / path)
+
+
+def _normalize_asset_type(asset_type: str) -> str:
+    return _ASSET_TYPE_ALIASES.get(str(asset_type or "").strip().lower(), "")
 
 
 def _allowed_root_paths(asset_type: str) -> List[Path]:
@@ -185,7 +199,7 @@ def load_asset_manifest() -> Dict[str, Any]:
 
 
 def validate_asset_entry(asset: Dict[str, Any]) -> Dict[str, Any]:
-    asset_type = str(asset.get("type") or "").strip().lower()
+    asset_type = _normalize_asset_type(str(asset.get("type") or ""))
     rel_path = str(asset.get("path") or "").strip()
     path = _abs_path(rel_path) if rel_path else Path("")
     exists = bool(rel_path and path.exists() and path.is_file())

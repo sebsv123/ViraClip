@@ -1,0 +1,1407 @@
+{
+  "version": "1.0",
+  "sources": {
+    "pexels": {
+      "license": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check individual asset page and avoid recognizable logos/trademarks."
+    },
+    "pixabay": {
+      "license": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Avoid trademarks/logos/standalone resale."
+    },
+    "mixkit": {
+      "license": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check item type: Free License vs Restricted License."
+    },
+    "coverr": {
+      "license": "Coverr License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Free for commercial use with license notice."
+    },
+    "lucide": {
+      "license": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "tabler": {
+      "license": "MIT",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "heroicons": {
+      "license": "MIT",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "freesound_cc0": {
+      "license": "CC0 1.0",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Public domain dedication."
+    },
+    "freesound_ccby": {
+      "license": "CC BY 4.0",
+      "commercial_use_ok": true,
+      "attribution_required": true,
+      "notes": "Attribution required. Credit in video description."
+    },
+    "google_fonts": {
+      "license": "OFL",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "SIL Open Font License. Keep OFL file."
+    },
+    "google_fonts_ofl": {
+      "license": "SIL Open Font License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Auto-added by vpi_asset_intake.py"
+    }
+  },
+  "assets": [
+    {
+      "id": "family_relief_pexels_001",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_002",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_002.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_003",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_003.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_004",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_004.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_005",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_005.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_006",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_006.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "family_relief_pexels_007",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_pexels_007.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "family_relief",
+        "emotional_support",
+        "warm_family"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_001",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_002",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_002.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_003",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_003.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_004",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_004.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_005",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_005.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "health_access_pexels_006",
+      "type": "broll",
+      "path": "assets/broll/health_access/health_access_pexels_006.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "health_access",
+        "medical_care",
+        "health_clarity"
+      ],
+      "topics": [
+        "salud",
+        "seguro_salud"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_001",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_002",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_002.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_003",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_003.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_004",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_004.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_005",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_005.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "autonomous_work_stability_pexels_006",
+      "type": "broll",
+      "path": "assets/broll/autonomous_work_stability/autonomous_work_stability_pexels_006.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "autonomous_work_stability",
+        "office_work",
+        "business_punch"
+      ],
+      "topics": [
+        "autonomos",
+        "vida",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "practical_explanation_pexels_001",
+      "type": "broll",
+      "path": "assets/broll/practical_explanation/practical_explanation_pexels_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "practical_explanation",
+        "paperwork_support",
+        "clean_explanation"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "decesos",
+        "autonomos"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "practical_explanation_pexels_002",
+      "type": "broll",
+      "path": "assets/broll/practical_explanation/practical_explanation_pexels_002.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "practical_explanation",
+        "paperwork_support",
+        "clean_explanation"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "decesos",
+        "autonomos"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "practical_explanation_pexels_003",
+      "type": "broll",
+      "path": "assets/broll/practical_explanation/practical_explanation_pexels_003.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "practical_explanation",
+        "paperwork_support",
+        "clean_explanation"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "decesos",
+        "autonomos"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "practical_explanation_pexels_004",
+      "type": "broll",
+      "path": "assets/broll/practical_explanation/practical_explanation_pexels_004.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "practical_explanation",
+        "paperwork_support",
+        "clean_explanation"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "decesos",
+        "autonomos"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "practical_explanation_pexels_005",
+      "type": "broll",
+      "path": "assets/broll/practical_explanation/practical_explanation_pexels_005.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "practical_explanation",
+        "paperwork_support",
+        "clean_explanation"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "decesos",
+        "autonomos"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_001",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_002",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_002.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_003",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_003.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_004",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_004.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_005",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_005.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "risk_warning_context_pexels_006",
+      "type": "broll",
+      "path": "assets/broll/risk_warning_context/risk_warning_context_pexels_006.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "risk_warning_context",
+        "warning_subtle_tension",
+        "calm_risk"
+      ],
+      "topics": [
+        "salud",
+        "vida",
+        "autonomos"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 2.0
+    },
+    {
+      "id": "briefcase_business",
+      "type": "icon",
+      "path": "assets/icons/briefcase/briefcase-business.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "briefcase",
+        "business"
+      ]
+    },
+    {
+      "id": "calendar_search",
+      "type": "icon",
+      "path": "assets/icons/calendar/calendar-search.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "calendar",
+        "search"
+      ]
+    },
+    {
+      "id": "checklist_check",
+      "type": "icon",
+      "path": "assets/icons/checklist/check-check.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "checklist",
+        "check"
+      ]
+    },
+    {
+      "id": "document_file_search",
+      "type": "icon",
+      "path": "assets/icons/document/file-search-corner.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "document",
+        "file",
+        "search"
+      ]
+    },
+    {
+      "id": "euro_badge",
+      "type": "icon",
+      "path": "assets/icons/euro/badge-euro.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "euro",
+        "badge",
+        "finance"
+      ]
+    },
+    {
+      "id": "family_contact",
+      "type": "icon",
+      "path": "assets/icons/family/contact.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "family",
+        "contact"
+      ]
+    },
+    {
+      "id": "health_heart_pulse",
+      "type": "icon",
+      "path": "assets/icons/health/heart-pulse.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "health",
+        "heart",
+        "pulse"
+      ]
+    },
+    {
+      "id": "heart_pulse",
+      "type": "icon",
+      "path": "assets/icons/heart/heart-pulse.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "heart",
+        "pulse"
+      ]
+    },
+    {
+      "id": "home_house",
+      "type": "icon",
+      "path": "assets/icons/home/house.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "home",
+        "house"
+      ]
+    },
+    {
+      "id": "hospital",
+      "type": "icon",
+      "path": "assets/icons/hospital/hospital.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "hospital"
+      ]
+    },
+    {
+      "id": "phone_smartphone",
+      "type": "icon",
+      "path": "assets/icons/phone/smartphone.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "phone",
+        "smartphone"
+      ]
+    },
+    {
+      "id": "shield_plus",
+      "type": "icon",
+      "path": "assets/icons/shield/shield-plus.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "shield",
+        "plus",
+        "protection"
+      ]
+    },
+    {
+      "id": "support_hand_fist",
+      "type": "icon",
+      "path": "assets/icons/support/hand-fist.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "support",
+        "hand",
+        "fist"
+      ]
+    },
+    {
+      "id": "user_check",
+      "type": "icon",
+      "path": "assets/icons/user/user-check.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "user",
+        "check"
+      ]
+    },
+    {
+      "id": "warning_octagon_alert",
+      "type": "icon",
+      "path": "assets/icons/warning/octagon-alert.svg",
+      "source": "lucide",
+      "source_url": "",
+      "license_name": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "icon",
+        "warning",
+        "octagon",
+        "alert"
+      ]
+    },
+    {
+      "id": "manrope_regular",
+      "type": "font",
+      "path": "assets/fonts/manrope/Manrope-Regular.ttf",
+      "source": "google_fonts_ofl",
+      "source_url": "",
+      "license_name": "SIL Open Font License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "font",
+        "manrope",
+        "caption_primary"
+      ]
+    },
+    {
+      "id": "manrope_medium",
+      "type": "font",
+      "path": "assets/fonts/manrope/Manrope-Medium.ttf",
+      "source": "google_fonts_ofl",
+      "source_url": "",
+      "license_name": "SIL Open Font License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "font",
+        "manrope",
+        "caption_primary"
+      ]
+    },
+    {
+      "id": "manrope_semibold",
+      "type": "font",
+      "path": "assets/fonts/manrope/Manrope-SemiBold.ttf",
+      "source": "google_fonts_ofl",
+      "source_url": "",
+      "license_name": "SIL Open Font License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "font",
+        "manrope",
+        "caption_emphasis"
+      ]
+    },
+    {
+      "id": "manrope_bold",
+      "type": "font",
+      "path": "assets/fonts/manrope/Manrope-Bold.ttf",
+      "source": "google_fonts_ofl",
+      "source_url": "",
+      "license_name": "SIL Open Font License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "font",
+        "manrope",
+        "caption_emphasis"
+      ]
+    },
+    {
+      "id": "magic_whoosh_pixabay_001",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/magic_whoosh/magic_whoosh_pixabay_001.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "magic_whoosh",
+        "transition",
+        "reveal"
+      ],
+      "topics": [
+        "myth_flip",
+        "hook_driven"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.6
+    },
+    {
+      "id": "magic_whoosh_pixabay_002",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/magic_whoosh/magic_whoosh_pixabay_002.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "magic_whoosh",
+        "transition",
+        "reveal"
+      ],
+      "topics": [
+        "myth_flip",
+        "hook_driven"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.6
+    },
+    {
+      "id": "magic_whoosh_pixabay_003",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/magic_whoosh/magic_whoosh_pixabay_003.wav",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "magic_whoosh",
+        "transition",
+        "reveal"
+      ],
+      "topics": [
+        "myth_flip",
+        "hook_driven"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.6
+    },
+    {
+      "id": "magic_whoosh_pixabay_004",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/magic_whoosh/magic_whoosh_pixabay_004.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "magic_whoosh",
+        "transition",
+        "reveal"
+      ],
+      "topics": [
+        "myth_flip",
+        "hook_driven"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.6
+    },
+    {
+      "id": "deep_boom_mixkit_001",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/deep_boom/deep_boom_mixkit_001.mp3",
+      "source": "mixkit",
+      "source_url": "",
+      "license_name": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "deep_boom",
+        "business_punch",
+        "impact_soft"
+      ],
+      "topics": [
+        "autonomous_business_stakes",
+        "business_punch"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 0.7
+    },
+    {
+      "id": "deep_boom_mixkit_002",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/deep_boom/deep_boom_mixkit_002.mp3",
+      "source": "mixkit",
+      "source_url": "",
+      "license_name": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "deep_boom",
+        "business_punch",
+        "impact_soft"
+      ],
+      "topics": [
+        "autonomous_business_stakes",
+        "business_punch"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 0.7
+    },
+    {
+      "id": "deep_boom_mixkit_003",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/deep_boom/deep_boom_mixkit_003.mp3",
+      "source": "mixkit",
+      "source_url": "",
+      "license_name": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "deep_boom",
+        "business_punch",
+        "impact_soft"
+      ],
+      "topics": [
+        "autonomous_business_stakes",
+        "business_punch"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 0.7
+    },
+    {
+      "id": "deep_boom_mixkit_004",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/deep_boom/deep_boom_mixkit_004.wav",
+      "source": "mixkit",
+      "source_url": "",
+      "license_name": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "deep_boom",
+        "business_punch",
+        "impact_soft"
+      ],
+      "topics": [
+        "autonomous_business_stakes",
+        "business_punch"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 0.7
+    },
+    {
+      "id": "dark_riser_pixabay_001",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/dark_riser/dark_riser_pixabay_001.wav",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "dark_riser",
+        "tension",
+        "warning_subtle_tension"
+      ],
+      "topics": [
+        "risk_warning",
+        "warning_tension"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 1.0
+    },
+    {
+      "id": "dark_riser_pixabay_002",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/dark_riser/dark_riser_pixabay_002.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "dark_riser",
+        "tension",
+        "warning_subtle_tension"
+      ],
+      "topics": [
+        "risk_warning",
+        "warning_tension"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 1.0
+    },
+    {
+      "id": "dark_riser_pixabay_003",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/dark_riser/dark_riser_pixabay_003.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "dark_riser",
+        "tension",
+        "warning_subtle_tension"
+      ],
+      "topics": [
+        "risk_warning",
+        "warning_tension"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 1.0
+    },
+    {
+      "id": "soft_chime_pixabay_001",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/soft_chime/soft_chime_pixabay_001.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "soft_chime",
+        "positive",
+        "gentle"
+      ],
+      "topics": [
+        "practical_advice",
+        "emotional_closure",
+        "clean_explanation"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.5
+    },
+    {
+      "id": "soft_chime_pixabay_002",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/soft_chime/soft_chime_pixabay_002.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "soft_chime",
+        "positive",
+        "gentle"
+      ],
+      "topics": [
+        "practical_advice",
+        "emotional_closure",
+        "clean_explanation"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.5
+    },
+    {
+      "id": "soft_chime_pixabay_003",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/soft_chime/soft_chime_pixabay_003.wav",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "soft_chime",
+        "positive",
+        "gentle"
+      ],
+      "topics": [
+        "practical_advice",
+        "emotional_closure",
+        "clean_explanation"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.5
+    },
+    {
+      "id": "soft_chime_pixabay_004",
+      "type": "sfx",
+      "path": "assets/sounds/sfx/soft_chime/soft_chime_pixabay_004.wav",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "soft_chime",
+        "positive",
+        "gentle"
+      ],
+      "topics": [
+        "practical_advice",
+        "emotional_closure",
+        "clean_explanation"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 0.5
+    },
+    {
+      "id": "warm_trust_pixabay_001",
+      "type": "bgm",
+      "path": "assets/sounds/bgm/warm_trust/warm_trust_pixabay_001.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "warm_trust",
+        "emotional_family",
+        "soft_background"
+      ],
+      "topics": [
+        "decesos",
+        "vida",
+        "familia"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 30.0
+    },
+    {
+      "id": "clean_corporate_pixabay_001",
+      "type": "bgm",
+      "path": "assets/sounds/bgm/clean_corporate/clean_corporate_pixabay_001.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "clean_corporate",
+        "explainer",
+        "soft_background"
+      ],
+      "topics": [
+        "salud",
+        "autonomos",
+        "finanzas"
+      ],
+      "sensitive_tone": "safe",
+      "duration_hint": 30.0
+    },
+    {
+      "id": "subtle_tension_pixabay_001",
+      "type": "bgm",
+      "path": "assets/sounds/bgm/subtle_tension/subtle_tension_pixabay_001.mp3",
+      "source": "pixabay",
+      "source_url": "",
+      "license_name": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": [
+        "subtle_tension",
+        "risk_warning",
+        "soft_background"
+      ],
+      "topics": [
+        "risk_warning",
+        "salud",
+        "vida"
+      ],
+      "sensitive_tone": "caution",
+      "duration_hint": 30.0
+    }
+  ]
+}
