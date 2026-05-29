@@ -37,6 +37,7 @@ PY_COMPILE_FILES = [
     "scripts/debug_cinematic_finish_pack.py",
     "scripts/debug_shot_rhythm_pack.py",
     "scripts/debug_broll_editorial_pack.py",
+    "scripts/debug_asset_library_pack.py",
     "scripts/debug_final_qc_pack.py",
     "scripts/debug_composition_pack.py",
     "scripts/debug_composition_runtime_integration.py",
@@ -123,6 +124,7 @@ def main(argv: List[str] | None = None) -> int:
         ("cinematic_finish_pack", [python, "scripts/debug_cinematic_finish_pack.py"]),
         ("shot_rhythm_pack", [python, "scripts/debug_shot_rhythm_pack.py"]),
         ("broll_editorial_pack", [python, "scripts/debug_broll_editorial_pack.py"]),
+        ("asset_library_pack", [python, "scripts/debug_asset_library_pack.py"]),
         ("final_qc_pack", [python, "scripts/debug_final_qc_pack.py"]),
         ("editorial_runtime_integration", [python, "scripts/debug_editorial_runtime_integration.py"]),
         ("retention_editing_system", [python, "scripts/debug_retention_editing_system.py"]),
@@ -141,6 +143,16 @@ def main(argv: List[str] | None = None) -> int:
             break
 
     passed = all(step["returncode"] == 0 for step in results) and len(results) == len(steps)
+    asset_library_status = "UNKNOWN"
+    for step in results:
+        if step["name"] == "asset_library_pack":
+            for line in (step.get("output_tail") or "").splitlines():
+                if line.startswith("ASSET_LIBRARY_STATUS="):
+                    asset_library_status = line.split("=", 1)[1].strip() or "UNKNOWN"
+                    break
+            break
+    if asset_library_status == "INVALID":
+        passed = False
     payload = {
         "generated_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "status": "PASS" if passed else "FAIL",
@@ -161,6 +173,7 @@ def main(argv: List[str] | None = None) -> int:
         "shot_rhythm_pack": bool(
             passed and any(step["name"] == "shot_rhythm_pack" and step["returncode"] == 0 for step in results)
         ),
+        "asset_library_status": asset_library_status,
         "final_qc_pack": bool(
             passed and any(step["name"] == "final_qc_pack" and step["returncode"] == 0 for step in results)
         ),
@@ -183,6 +196,7 @@ def main(argv: List[str] | None = None) -> int:
         print(f"SFX_RETENTION_PACK={'true' if payload.get('sfx_retention_pack') else 'false'}")
         print(f"CINEMATIC_FINISH_PACK={'true' if payload.get('cinematic_finish_pack') else 'false'}")
         print(f"SHOT_RHYTHM_PACK={'true' if payload.get('shot_rhythm_pack') else 'false'}")
+        print(f"ASSET_LIBRARY_STATUS={payload.get('asset_library_status')}")
         print(f"FINAL_QC_PACK={'true' if payload.get('final_qc_pack') else 'false'}")
         print(f"VPI_EDITORIAL_PREFLIGHT={'PASS' if passed else 'FAIL'}")
         print(f"READY_FOR_RENDER={'true' if passed else 'false'}")

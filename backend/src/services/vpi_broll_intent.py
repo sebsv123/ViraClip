@@ -1304,7 +1304,19 @@ def match_broll_asset(
     if intent == "no_broll_needed":
         return {"matched": False, "asset": None, "reason": "no_editorial_gain"}
 
+    try:
+        from .vpi_asset_library_service import build_asset_index
+        _asset_index = build_asset_index()
+    except Exception as exc:
+        logger.debug("[broll-asset] asset_library_unavailable reason=%s", exc)
+        _asset_index = {}
+
+    _verified_broll = list((_asset_index.get("verified") or {}).get("broll") or [])
+    _manifest_found = bool(_asset_index.get("manifest_found"))
     assets = _list_local_broll_assets()
+    verified_by_path: Dict[str, Dict[str, Any]] = {
+        str(item.get("path") or ""): item for item in _verified_broll if isinstance(item, dict)
+    }
     terms = _BROLL_FILENAME_TERMS.get(intent, tuple())
     best_match: Optional[Path] = None
     best_score = -1
@@ -1329,11 +1341,44 @@ def match_broll_asset(
         logger.info("[broll-asset] skipped reason=no_local_asset")
         return {"matched": False, "asset": None, "reason": "no_local_asset", "score": 0}
 
+    _best_key = str(best_match)
+    _verified_entry = verified_by_path.get(_best_key)
+    _verified = bool(_verified_entry)
+    _source = str((_verified_entry or {}).get("source_name") or ("unverified_local" if not _manifest_found else ""))
+    _license = str((_verified_entry or {}).get("license_name") or "")
+    _commercial_use_ok = bool((_verified_entry or {}).get("commercial_use_ok"))
+    _attribution_required = bool((_verified_entry or {}).get("attribution_required"))
+    _tags = list((_verified_entry or {}).get("tags") or [])
+    _topics = list((_verified_entry or {}).get("topics") or [])
+
+    if _manifest_found and not _verified:
+        logger.info("[broll-asset] verified=false source=unverified_local license=")
+        logger.info("[broll-asset] skipped reason=unverified_local")
+        return {"matched": False, "asset": None, "reason": "unverified_local", "score": 0}
+    if _verified and not _commercial_use_ok:
+        logger.info("[broll-asset] verified=false source=%s license=%s", _source, _license)
+        logger.info("[broll-asset] skipped reason=commercial_use_not_ok")
+        return {"matched": False, "asset": None, "reason": "commercial_use_not_ok", "score": 0}
+    if _verified and not _license:
+        logger.info("[broll-asset] verified=false source=%s license=", _source)
+        logger.info("[broll-asset] skipped reason=license_missing")
+        return {"matched": False, "asset": None, "reason": "license_missing", "score": 0}
+
     logger.info("[broll-asset] intent=%s matched=true asset=%s", intent, str(best_match))
+    logger.info("[broll-asset] verified=%s source=%s license=%s", str(_verified).lower(), _source or "unverified_local", _license or "none")
     return {
         "matched": True,
         "asset": str(best_match),
         "asset_path": best_match,
         "score": best_score,
         "reason": "local_asset_match",
+        "verified": _verified,
+        "broll_asset_verified": _verified,
+        "broll_asset_source": _source or "unverified_local",
+        "broll_asset_license": _license,
+        "broll_asset_tags": _tags,
+        "broll_asset_topics": _topics,
+        "broll_asset_commercial_use_ok": bool(_commercial_use_ok if _verified else False),
+        "broll_asset_attribution_required": _attribution_required,
+        "verification_status": "verified_manifest" if _verified else "unverified_local",
     }

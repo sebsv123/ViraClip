@@ -1,0 +1,52 @@
+{
+  "version": "1.0",
+  "sources": {
+    "pexels": {
+      "license": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check individual asset page and avoid recognizable logos/trademarks."
+    },
+    "pixabay": {
+      "license": "Pixabay Content License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Avoid trademarks/logos/standalone resale."
+    },
+    "mixkit": {
+      "license": "Mixkit Free License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Check item type: Free License vs Restricted License."
+    },
+    "lucide": {
+      "license": "ISC",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    },
+    "tabler": {
+      "license": "MIT",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "notes": "Keep license file."
+    }
+  },
+  "assets": [
+    {
+      "id": "family_relief_001",
+      "type": "broll",
+      "path": "assets/broll/family_relief/family_relief_001.mp4",
+      "source": "pexels",
+      "source_url": "",
+      "license_name": "Pexels License",
+      "commercial_use_ok": true,
+      "attribution_required": false,
+      "tags": ["family_relief", "emotional_support", "warm_family"],
+      "topics": ["decesos", "vida", "familia"],
+      "sensitive_tone": "safe",
+      "avoid_for": ["risk_warning_aggressive"],
+      "duration_hint": 2.0
+    }
+  ]
+}

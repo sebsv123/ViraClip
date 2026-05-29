@@ -349,6 +349,15 @@ def match_sfx_asset(
     if family in {"no_sfx_needed", "silence_contrast"}:
         return {"matched": False, "asset": None, "low_variation": False, "reason": "no_asset_needed"}
 
+    try:
+        from .vpi_asset_library_service import build_asset_index
+        _asset_index = build_asset_index()
+    except Exception as exc:
+        logger.debug("[sfx-asset] asset_library_unavailable reason=%s", exc)
+        _asset_index = {}
+    _manifest_found = bool(_asset_index.get("manifest_found"))
+    _verified_sfx = list((_asset_index.get("verified") or {}).get("sfx") or [])
+
     assets = assets or discover_sfx_assets()
     candidate_keys = _SFX_FAMILY_TO_ASSET_KEYS.get(family, tuple())
     candidates: List[Path] = []
@@ -368,12 +377,78 @@ def match_sfx_asset(
         logger.info("[sfx-asset] skipped reason=no_local_asset")
         return {"matched": False, "asset": None, "low_variation": False, "reason": "no_local_asset"}
 
+    verified_by_path: Dict[str, Dict[str, Any]] = {
+        str(item.get("path") or ""): item for item in _verified_sfx if isinstance(item, dict)
+    }
+    if _manifest_found:
+        verified_candidates = [asset for asset in candidates if str(asset) in verified_by_path]
+        if not verified_candidates:
+            logger.info("[sfx-asset] family=%s matched=false asset= low_variation=false", family)
+            logger.info("[sfx-asset] skipped reason=no_verified_asset")
+            return {
+                "matched": False,
+                "asset": None,
+                "low_variation": False,
+                "reason": "no_verified_asset",
+                "verified": False,
+                "sfx_asset_verified": False,
+                "sfx_asset_source": "unverified_local",
+                "sfx_asset_license": "",
+                "sfx_attribution_needed": False,
+            }
+        candidates = verified_candidates
+
     history = [str(item) for item in (recent_sfx_history or []) if str(item).strip()]
     if task_id:
         history.extend(_read_sfx_rotation_history(task_id))
     previous = history[-1] if history else ""
     selected = next((asset for asset in candidates if str(asset) != previous), candidates[0])
     low_variation = len(candidates) <= 1
+    _entry = verified_by_path.get(str(selected), {})
+    _verified = bool(_entry)
+    _source = str((_entry or {}).get("source_name") or ("unverified_local" if not _manifest_found else ""))
+    _license = str((_entry or {}).get("license_name") or "")
+    _commercial_use_ok = bool((_entry or {}).get("commercial_use_ok"))
+    _attribution_required = bool((_entry or {}).get("attribution_required"))
+    if _verified and not _commercial_use_ok:
+        logger.info("[sfx-asset] skipped reason=commercial_use_not_ok")
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "commercial_use_not_ok",
+            "verified": False,
+            "sfx_asset_verified": False,
+            "sfx_asset_source": _source,
+            "sfx_asset_license": _license,
+            "sfx_attribution_needed": _attribution_required,
+        }
+    if _verified and not _license:
+        logger.info("[sfx-asset] skipped reason=license_missing")
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "license_missing",
+            "verified": False,
+            "sfx_asset_verified": False,
+            "sfx_asset_source": _source,
+            "sfx_asset_license": "",
+            "sfx_attribution_needed": _attribution_required,
+        }
+    if _manifest_found and not _verified:
+        logger.info("[sfx-asset] skipped reason=no_verified_asset")
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "no_verified_asset",
+            "verified": False,
+            "sfx_asset_verified": False,
+            "sfx_asset_source": "unverified_local",
+            "sfx_asset_license": "",
+            "sfx_attribution_needed": False,
+        }
     logger.info("[sfx-asset] rotation selected=%s previous=%s", selected, previous or "none")
     logger.info(
         "[sfx-asset] family=%s matched=true asset=%s low_variation=%s",
@@ -381,6 +456,7 @@ def match_sfx_asset(
         selected,
         str(low_variation).lower(),
     )
+    logger.info("[sfx-asset] verified=%s source=%s license=%s", str(_verified).lower(), _source or "unverified_local", _license or "none")
     _append_sfx_rotation_history(task_id, str(selected))
     return {
         "matched": True,
@@ -389,6 +465,12 @@ def match_sfx_asset(
         "low_variation": low_variation,
         "reason": "local_asset_match",
         "family": family,
+        "verified": _verified,
+        "sfx_asset_verified": _verified,
+        "sfx_asset_source": _source or "unverified_local",
+        "sfx_asset_license": _license,
+        "sfx_attribution_needed": _attribution_required,
+        "sfx_asset_commercial_use_ok": bool(_commercial_use_ok if _verified else False),
     }
 
 

@@ -378,6 +378,21 @@ def _select_caption_keywords(text: str, editorial_type: str = "") -> List[str]:
 
 
 def _discover_caption_icon_assets() -> List[Path]:
+    try:
+        from .vpi_asset_library_service import build_asset_index
+        asset_index = build_asset_index()
+        verified_icons = list((asset_index.get("verified") or {}).get("icons") or [])
+        if verified_icons:
+            resolved: List[Path] = []
+            for entry in verified_icons:
+                path = Path(str((entry or {}).get("path") or ""))
+                if path.exists() and path.is_file():
+                    resolved.append(path)
+            if resolved:
+                return resolved
+    except Exception as exc:
+        logger.debug("[caption-icon] asset_library_unavailable reason=%s", exc)
+
     root = Path(__file__).resolve().parents[3]
     exts = {".png", ".jpg", ".jpeg", ".webp", ".svg"}
     assets: List[Path] = []
@@ -398,6 +413,28 @@ def _match_caption_icon(concept: str, assets: List[Path]) -> Optional[Path]:
         if any(term and term in name for term in needles):
             return asset
     return None
+
+
+def _discover_font_registry() -> Dict[str, Any]:
+    try:
+        from .vpi_asset_library_service import build_asset_index
+        asset_index = build_asset_index()
+    except Exception as exc:
+        logger.debug("[font-library] asset_library_unavailable reason=%s", exc)
+        asset_index = {}
+    verified_fonts = list((asset_index.get("verified") or {}).get("fonts") or [])
+    selected_font = _CAPTION_FONT
+    fallback = True
+    if verified_fonts:
+        selected_font = Path(str((verified_fonts[0] or {}).get("path") or selected_font)).stem or _CAPTION_FONT
+        fallback = False
+    logger.info("[font-library] discovered count=%d", len(verified_fonts))
+    logger.info("[font-library] selected role=caption_primary font=%s fallback=%s", selected_font, str(fallback).lower())
+    return {
+        "fonts_discovered": len(verified_fonts),
+        "selected_caption_font": selected_font,
+        "caption_font_fallback": fallback,
+    }
 
 
 def _hook_overlay_text(text: str, hook_intent: str) -> str:
@@ -478,6 +515,16 @@ def plan_caption_overlay_pack(
 
     concept = _topic_from_text(text, editorial_type) or ("autonomo" if "autonom" in _strip_accents(text) else "")
     icon_assets = local_icon_assets if local_icon_assets is not None else _discover_caption_icon_assets()
+    _icon_entry_by_path: Dict[str, Dict[str, Any]] = {}
+    _manifest_found = False
+    try:
+        from .vpi_asset_library_service import build_asset_index
+        _asset_index = build_asset_index()
+        _manifest_found = bool(_asset_index.get("manifest_found"))
+        for _entry in list((_asset_index.get("verified") or {}).get("icons") or []):
+            _icon_entry_by_path[str((_entry or {}).get("path") or "")] = dict(_entry or {})
+    except Exception as exc:
+        logger.debug("[caption-icon] asset_library_unavailable reason=%s", exc)
     icon: Dict[str, Any] = {"applied": False, "concept": concept, "reason": "not_useful"}
     if long_subtitle or hook_overlay.get("applied"):
         icon["reason"] = "too_many_elements"
@@ -489,9 +536,35 @@ def plan_caption_overlay_pack(
     elif concept:
         asset = _match_caption_icon(concept, icon_assets)
         if asset:
-            icon = {"applied": True, "concept": concept, "asset": str(asset), "start_s": 0.2, "duration_s": 1.2}
-            actions.append("semantic_icon")
-            logger.info("[caption-icon] concept=%s asset=%s applied=true", concept, asset)
+            _meta = _icon_entry_by_path.get(str(asset), {})
+            _verified = bool(_meta)
+            _license = str((_meta or {}).get("license_name") or "")
+            _source = str((_meta or {}).get("source_name") or "")
+            if _manifest_found and not _verified:
+                icon["reason"] = "no_verified_icon"
+                logger.info("[caption-icon] skipped reason=no_verified_icon")
+            elif _verified and not _license:
+                icon["reason"] = "license_missing"
+                logger.info("[caption-icon] skipped reason=license_missing")
+            else:
+                icon = {
+                    "applied": True,
+                    "concept": concept,
+                    "asset": str(asset),
+                    "start_s": 0.2,
+                    "duration_s": 1.2,
+                    "caption_icon_verified": _verified,
+                    "caption_icon_license": _license,
+                    "caption_icon_source": _source or ("unverified_local" if not _verified else ""),
+                }
+                actions.append("semantic_icon")
+                logger.info("[caption-icon] concept=%s asset=%s applied=true", concept, asset)
+                logger.info(
+                    "[caption-icon] verified=%s source=%s license=%s",
+                    str(_verified).lower(),
+                    icon.get("caption_icon_source") or "unverified_local",
+                    icon.get("caption_icon_license") or "none",
+                )
         else:
             icon["reason"] = "no_local_asset"
             logger.info("[caption-icon] skipped reason=no_local_asset")
@@ -527,6 +600,7 @@ def plan_caption_overlay_pack(
 
     if keyword_terms:
         actions.insert(0, "keyword_emphasis")
+    _font_registry = _discover_font_registry()
 
     # ── VPI Premium Composition Pack v1: resolve visual layer conflicts ──
     composition_allowed_layers: List[str] = []
@@ -614,6 +688,7 @@ def plan_caption_overlay_pack(
         "composition_decision_applied": composition_decision_applied,
         "layer_overload": layer_overload,
         "caption_overlay_pack_reason": "caption_overlay_actions" if pack_applied else "normal_subtitles_only",
+        "font_registry": _font_registry,
     }
 
 
