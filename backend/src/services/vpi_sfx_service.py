@@ -12,6 +12,7 @@ Repetition guard built into the plan layer (vpi_retention_editing_service).
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import subprocess
@@ -21,6 +22,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
+
+
+def _is_vpi_productive_minimum() -> bool:
+    """Check if VPI productive minimum mode is active (env or config)."""
+    val = os.environ.get("VPI_PRODUCTIVE_MINIMUM", "")
+    if val:
+        return val.lower() in ("1", "true", "yes")
+    # Fallback: check if beta_clean is active (productive minimum defaults True in beta_clean)
+    beta = os.environ.get("VIRACLIP_BETA_CLEAN", "")
+    if beta.lower() in ("1", "true", "yes"):
+        return True
+    return False
 
 # ── SFX generation ─────────────────────────────────────────────────────────────
 
@@ -58,10 +71,81 @@ _SFX_FAMILY_TO_ASSET_KEYS: Dict[str, tuple[str, ...]] = {
     "magic_whoosh": ("magic_whoosh",),
     "deep_boom": ("deep_boom",),
     "soft_chime": ("magic_whoosh", "high_riser"),
+    "soft_whoosh": ("magic_whoosh",),
+    "soft_impact": ("deep_boom",),
+    "deep_boom_light": ("deep_boom",),
+    "dark_riser_short": ("low_riser",),
+    "subtle_tick_off": ("magic_whoosh", "high_riser"),
+    "check_pop": ("magic_whoosh", "high_riser"),
+    "myth_break": ("magic_whoosh",),
+    "question_tap": ("magic_whoosh", "high_riser"),
+    "soft_hit": ("deep_boom",),
 }
 
 _AGGRESSIVE_FAMILIES = {"deep_boom", "glitch_hit", "sfx_hit"}
 _BAD_SILENCE_REASONS = ("bts", "false_start", "awkward", "dead_air", "weak_intro", "filler", "stumble", "traba")
+_REVELATION_CUES = ("esto mucha gente no lo sabe", "la realidad es", "lo importante")
+_RISK_CUES = ("miedo", "riesgo", "problema", "cuidado", "error", "imprevisto", "no es vender miedo")
+_MYTH_CUES = ("mito", "no es asi", "falso", "mucha gente piensa")
+_OBJECTION_CUES = ("es muy caro", "yo ya tengo", "no me hace falta")
+_ADVICE_CUES = ("consejo", "haz esto", "lo mejor es", "revisa")
+_EMOTIONAL_CUES = ("familia", "proteger", "tranquilidad", "calma", "tuyos")
+_BLOCKED_SFX_TERMS = (
+    "typewriter",
+    "typing",
+    "keyboard",
+    "click",
+    "clicks",
+    "tick",
+    "ticker",
+    "mechanical_click",
+    "keypress",
+)
+_ALLOWED_SFX_FAMILIES = {
+    "magic_whoosh",
+    "whoosh",
+    "impact",
+    "soft_impact",
+    "deep_boom",
+    "boom",
+    "dark_riser",
+    "tension_riser",
+    "high_riser",
+    "soft_chime",
+    "soft_whoosh",
+    "deep_boom_light",
+    "dark_riser_short",
+    "subtle_tick_off",
+    "check_pop",
+    "myth_break",
+    "question_tap",
+    "soft_hit",
+}
+
+_SFX_FAMILY_ALIASES = {
+    "soft_whoosh": "magic_whoosh",
+    "soft_impact": "deep_boom",
+    "deep_boom_light": "deep_boom",
+    "dark_riser_short": "dark_riser",
+    "subtle_tick_off": "soft_chime",
+    "check_pop": "soft_chime",
+    "myth_break": "magic_whoosh",
+    "question_tap": "soft_chime",
+    "soft_hit": "deep_boom",
+}
+
+_SFX_FAMILY_FALLBACKS = {
+    "soft_whoosh": ("magic_whoosh", "soft_chime"),
+    "soft_impact": ("deep_boom", "deep_boom_light"),
+    "deep_boom_light": ("deep_boom", "soft_impact"),
+    "dark_riser_short": ("dark_riser", "tension_riser"),
+    "soft_chime": ("soft_chime", "check_pop"),
+    "check_pop": ("soft_chime", "soft_whoosh"),
+    "myth_break": ("magic_whoosh", "soft_chime"),
+    "question_tap": ("soft_chime", "soft_whoosh"),
+    "warning_tap": ("soft_chime", "dark_riser_short"),
+    "soft_hit": ("deep_boom", "soft_impact"),
+}
 
 
 def _repo_root() -> Path:
@@ -77,7 +161,9 @@ def _candidate_sfx_dirs() -> Iterable[Path]:
 
 def classify_sfx_asset(path: Path) -> Optional[str]:
     name = path.stem.lower()
-    if any(term in name for term in ("magic", "sparkle", "shimmer", "whoosh", "tick", "click", "glitch")):
+    if _is_blocked_sfx_text(name):
+        return None
+    if any(term in name for term in ("magic", "sparkle", "shimmer", "whoosh", "glitch")):
         return "magic_whoosh"
     if any(term in name for term in ("boom", "deep", "hit", "impact", "sub")):
         return "deep_boom"
@@ -129,6 +215,29 @@ def _normalize_text(text: str) -> str:
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
     return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _is_blocked_sfx_text(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(term in normalized for term in _BLOCKED_SFX_TERMS)
+
+
+def _is_allowed_sfx_family(family: str) -> bool:
+    normalized = _normalize_text(family).replace(" ", "_")
+    mapped = _SFX_FAMILY_ALIASES.get(normalized, normalized)
+    return normalized in _ALLOWED_SFX_FAMILIES or mapped in _ALLOWED_SFX_FAMILIES
+
+
+def _sfx_family_fallback_order(family: str) -> List[str]:
+    normalized = _normalize_text(family).replace(" ", "_")
+    mapped = _SFX_FAMILY_ALIASES.get(normalized, normalized)
+    fallback_order = [mapped]
+    fallback_order.extend(list(_SFX_FAMILY_FALLBACKS.get(mapped, ())))
+    fallback_order.extend(list(_SFX_FAMILY_FALLBACKS.get(normalized, ())))
+    fallback_order.append("soft_chime")
+    fallback_order.append("magic_whoosh")
+    fallback_order.append("deep_boom")
+    return list(dict.fromkeys(item for item in fallback_order if item))
 
 
 def _contains_any(text: str, keywords: Sequence[str]) -> bool:
@@ -190,6 +299,7 @@ def build_sfx_retention_decision(
     resolved_intent = str(hook_intent or "neutral_explanation")
     text = str(segment_text or "")
     comp_mode = str(composition_mode or "")
+    normalized_text = _normalize_text(text)
 
     if str(private_premium_status or "") == "DO_NOT_UPLOAD":
         decision = {
@@ -208,11 +318,13 @@ def build_sfx_retention_decision(
         logger.info("[sfx-retention] skipped reason=sensitive_tone")
         return decision
 
-    has_risk = _contains_any(text, _RETENTION_KEYWORDS["risk_warning"])
-    has_myth = _contains_any(text, _RETENTION_KEYWORDS["myth_flip"])
-    has_practical = _contains_any(text, _RETENTION_KEYWORDS["practical_advice"])
+    has_revelation = _contains_any(normalized_text, _REVELATION_CUES)
+    has_risk = _contains_any(text, _RETENTION_KEYWORDS["risk_warning"]) or _contains_any(normalized_text, _RISK_CUES)
+    has_myth = _contains_any(text, _RETENTION_KEYWORDS["myth_flip"]) or _contains_any(normalized_text, _MYTH_CUES)
+    has_objection = _contains_any(normalized_text, _OBJECTION_CUES)
+    has_practical = _contains_any(text, _RETENTION_KEYWORDS["practical_advice"]) or _contains_any(normalized_text, _ADVICE_CUES)
     has_business = _contains_any(text, _RETENTION_KEYWORDS["autonomous_business_stakes"])
-    has_emotional = _contains_any(text, _RETENTION_KEYWORDS["emotional_closure"])
+    has_emotional = _contains_any(text, _RETENTION_KEYWORDS["emotional_closure"]) or _contains_any(normalized_text, _EMOTIONAL_CUES)
     has_broll_reveal = bool((broll_editorial_decision or {}).get("should_use_broll"))
     voice_dense = _voice_dense_segment(text)
 
@@ -227,7 +339,22 @@ def build_sfx_retention_decision(
     skip_reason = ""
     should_apply = False
 
-    if resolved_intent == "risk_warning" and (has_risk or has_broll_reveal or visual_profile == "tension_push"):
+    # Canonical editorial SFX intent model
+    editorial_intent = "none"
+    if resolved_intent in {"myth_flip", "revelation"} or has_revelation:
+        editorial_intent = "revelation"
+    elif resolved_intent == "risk_warning" or has_risk:
+        editorial_intent = "risk_warning"
+    elif has_myth:
+        editorial_intent = "myth_debunk"
+    elif has_objection:
+        editorial_intent = "objection"
+    elif resolved_intent in {"practical_advice", "actionable_advice"} or has_practical:
+        editorial_intent = "actionable_advice"
+    elif resolved_intent in {"emotional_closure", "emotional_protection"} or has_emotional:
+        editorial_intent = "emotional_protection"
+
+    if editorial_intent == "risk_warning" and (has_risk or has_broll_reveal or visual_profile == "tension_push"):
         sfx_intent = "tension_riser"
         sfx_family = "dark_riser"
         reason = "warning_emphasis_retention"
@@ -236,16 +363,25 @@ def build_sfx_retention_decision(
         duration = 1.0
         volume_db = -24.0
         should_apply = True
-    elif resolved_intent == "myth_flip" and (has_myth or has_broll_reveal):
+    elif editorial_intent in {"myth_debunk", "revelation"} and (has_myth or has_revelation or has_broll_reveal):
         sfx_intent = "magic_whoosh"
         sfx_family = "magic_whoosh"
-        reason = "myth_contrast_reveal"
+        reason = "reveal_or_myth_contrast"
         confidence = 0.70
         timing_offset = 0.05
         duration = 0.5
         volume_db = -23.0
         should_apply = True
-    elif resolved_intent == "practical_advice" and has_practical:
+    elif editorial_intent == "objection":
+        sfx_intent = "light_tension_riser"
+        sfx_family = "high_riser"
+        reason = "objection_tension_marker"
+        confidence = 0.64
+        timing_offset = -0.05
+        duration = 0.45
+        volume_db = -26.0
+        should_apply = True
+    elif editorial_intent == "actionable_advice":
         sfx_intent = "soft_chime"
         sfx_family = "soft_chime"
         reason = "clarity_marker"
@@ -263,21 +399,24 @@ def build_sfx_retention_decision(
         duration = 0.45
         volume_db = -25.0
         should_apply = True
-    elif resolved_intent == "emotional_closure" and has_emotional:
-        sfx_intent = "silence_contrast"
-        sfx_family = "silence_contrast"
-        reason = "emotional_pause_support"
-        confidence = 0.66
-        timing_offset = 0.0
-        duration = 0.28
-        volume_db = -29.0
-        should_apply = False
-        fallback = "silence_contrast"
-    elif resolved_intent == "neutral_explanation":
+    elif editorial_intent == "emotional_protection":
+        sfx_intent = "soft_chime"
+        sfx_family = "soft_chime"
+        reason = "emotional_warmth_marker"
+        confidence = 0.58
+        timing_offset = 0.08
+        duration = 0.40
+        volume_db = -27.0
+        should_apply = True
+    elif resolved_intent == "neutral_explanation" or editorial_intent == "none":
         sfx_intent = "no_sfx_needed"
         sfx_family = "no_sfx_needed"
-        reason = "neutral_clarity"
+        reason = "neutral_explanation_no_sfx"
         confidence = 0.45
+
+    # Productive minimum must not force SFX for layer count.
+    if _is_vpi_productive_minimum() and not should_apply:
+        skip_reason = "no_sfx_editorial_intent" if editorial_intent == "none" else (skip_reason or reason or "no_retention_gain")
 
     # composition / tone blocks
     blocked_by_tone = False
@@ -294,7 +433,7 @@ def build_sfx_retention_decision(
 
     if blocked_by_tone:
         should_apply = False
-        skip_reason = blocked_reason
+        skip_reason = "tone_too_sensitive" if blocked_reason == "sensitive_tone" else blocked_reason
         fallback = "caption_emphasis" if blocked_reason == "voice_conflict" else "silence_contrast"
         logger.info("[sfx-retention] blocked_by_tone=true reason=%s", blocked_reason)
     else:
@@ -306,8 +445,13 @@ def build_sfx_retention_decision(
         skip_reason = skip_reason or "composition_block"
         fallback = "caption_emphasis"
 
+    if voice_dense and should_apply and editorial_intent in {"actionable_advice", "none"}:
+        should_apply = False
+        skip_reason = "no_retention_gain"
+
     decision = {
         "should_apply_sfx": bool(should_apply),
+        "editorial_intent": editorial_intent,
         "sfx_intent": sfx_intent,
         "sfx_family": sfx_family,
         "timing_offset": round(float(timing_offset), 2),
@@ -343,11 +487,61 @@ def match_sfx_asset(
     hook_intent: str = "",
     recent_sfx_history: Optional[Sequence[str]] = None,
     assets: Optional[Dict[str, List[Path]]] = None,
+    audio_inventory: Optional[Dict[str, Any]] = None,
     task_id: Optional[str] = None,
+    audio_editorial_profile: str = "",
+    sfx_allowed_families: Optional[Sequence[str]] = None,
+    sfx_blocked_families: Optional[Sequence[str]] = None,
+    music_mood: str = "",
+    audio_variation_index: int = 0,
 ) -> Dict[str, Any]:
     family = str(sfx_family or "no_sfx_needed")
     if family in {"no_sfx_needed", "silence_contrast"}:
         return {"matched": False, "asset": None, "low_variation": False, "reason": "no_asset_needed"}
+    allowed_set = {str(item).strip().lower().replace(" ", "_") for item in (sfx_allowed_families or []) if str(item).strip()}
+    blocked_set = {str(item).strip().lower().replace(" ", "_") for item in (sfx_blocked_families or []) if str(item).strip()}
+    normalized_family = _normalize_text(family).replace(" ", "_")
+    mapped_family = _SFX_FAMILY_ALIASES.get(normalized_family, normalized_family)
+    if blocked_set and (normalized_family in blocked_set or mapped_family in blocked_set):
+        logger.info("SFX_FAMILY_BLOCKED_BY_PROFILE family=%s profile=%s reason=profile_blocked", family, audio_editorial_profile or "unknown")
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "family_blocked_by_profile",
+            "family": family,
+            "sfx_family_selected": family,
+            "sfx_selection_reason": "family_blocked_by_profile",
+            "sfx_reuse_reason": "profile_blocked",
+            "sfx_asset_taxonomy_used": "inventory" if audio_editorial_profile else "filename",
+        }
+    if allowed_set and normalized_family not in allowed_set and mapped_family not in allowed_set:
+        logger.info("SFX_FAMILY_BLOCKED_BY_PROFILE family=%s profile=%s reason=family_not_allowed", family, audio_editorial_profile or "unknown")
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "family_not_allowed",
+            "family": family,
+            "sfx_family_selected": family,
+            "sfx_selection_reason": "family_not_allowed",
+            "sfx_reuse_reason": "profile_family_not_allowed",
+            "sfx_asset_taxonomy_used": "inventory" if audio_editorial_profile else "filename",
+        }
+    if not _is_allowed_sfx_family(family):
+        logger.info("[sfx-asset] family=%s matched=false asset= low_variation=false", family)
+        logger.info("[sfx-asset] skipped reason=family_not_allowed family=%s", family)
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "family_not_allowed",
+            "family": family,
+            "sfx_family_selected": family,
+            "sfx_selection_reason": "family_not_allowed",
+            "sfx_reuse_reason": "family_not_allowed",
+            "sfx_asset_taxonomy_used": "inventory" if audio_editorial_profile else "filename",
+        }
 
     try:
         from .vpi_asset_library_service import build_asset_index
@@ -357,6 +551,7 @@ def match_sfx_asset(
         _asset_index = {}
     _manifest_found = bool(_asset_index.get("manifest_found"))
     _verified_sfx = list((_asset_index.get("verified") or {}).get("sfx") or [])
+    inventory_sfx_assets = list((audio_inventory or {}).get("sfx_assets") or [])
 
     assets = assets or discover_sfx_assets()
     candidate_keys = _SFX_FAMILY_TO_ASSET_KEYS.get(family, tuple())
@@ -372,31 +567,56 @@ def match_sfx_asset(
         seen.add(key)
         deduped.append(item)
     candidates = deduped
+    candidates = [asset for asset in candidates if not _is_blocked_sfx_text(asset.stem)]
+    if not candidates and inventory_sfx_assets:
+        fallback_order = _sfx_family_fallback_order(family)
+        inventory_candidates: List[Path] = []
+        for item in inventory_sfx_assets:
+            asset_path = str(item.get("asset_path") or item.get("path") or "")
+            if not asset_path:
+                continue
+            item_family = str(item.get("family") or _infer_sfx_family_from_path(Path(asset_path)))
+            if item_family in fallback_order and not _is_blocked_sfx_text(Path(asset_path).stem):
+                inventory_candidates.append(Path(asset_path))
+        if inventory_candidates:
+            candidates = inventory_candidates
+            logger.warning(
+                "SFX_FAMILY_ASSET_MISSING family=%s reason=inventory_fallback selected=%s",
+                family,
+                "|".join(fallback_order),
+            )
     if not candidates:
         logger.info("[sfx-asset] family=%s matched=false asset= low_variation=false", family)
         logger.info("[sfx-asset] skipped reason=no_local_asset")
-        return {"matched": False, "asset": None, "low_variation": False, "reason": "no_local_asset"}
+        return {
+            "matched": False,
+            "asset": None,
+            "low_variation": False,
+            "reason": "no_local_asset",
+            "family": family,
+            "sfx_family_selected": family,
+            "sfx_selection_reason": "no_local_asset",
+            "sfx_reuse_reason": "no_local_asset",
+            "sfx_asset_taxonomy_used": "inventory" if inventory_sfx_assets else "filename",
+        }
 
     verified_by_path: Dict[str, Dict[str, Any]] = {
         str(item.get("path") or ""): item for item in _verified_sfx if isinstance(item, dict)
     }
+    # FIX 4: When manifest not found, allow unverified local assets.
+    # Only require verified candidates when manifest exists AND has verified entries.
     if _manifest_found:
         verified_candidates = [asset for asset in candidates if str(asset) in verified_by_path]
-        if not verified_candidates:
-            logger.info("[sfx-asset] family=%s matched=false asset= low_variation=false", family)
-            logger.info("[sfx-asset] skipped reason=no_verified_asset")
-            return {
-                "matched": False,
-                "asset": None,
-                "low_variation": False,
-                "reason": "no_verified_asset",
-                "verified": False,
-                "sfx_asset_verified": False,
-                "sfx_asset_source": "unverified_local",
-                "sfx_asset_license": "",
-                "sfx_attribution_needed": False,
-            }
-        candidates = verified_candidates
+        if verified_candidates:
+            candidates = verified_candidates
+        else:
+            # Manifest exists but no verified SFX — still allow unverified local assets
+            # so local SFX can be used without a manifest.
+            logger.info("[sfx-asset] manifest_found=true but no verified sfx; falling back to unverified local assets")
+            logger.info("[sfx-asset] family=%s matched=fallback candidates=%d", family, len(candidates))
+    else:
+        # No manifest — all discovered local assets are usable.
+        logger.info("[sfx-asset] manifest_found=false; using unverified local assets for family=%s", family)
 
     history = [str(item) for item in (recent_sfx_history or []) if str(item).strip()]
     if task_id:
@@ -422,6 +642,7 @@ def match_sfx_asset(
             "sfx_asset_source": _source,
             "sfx_asset_license": _license,
             "sfx_attribution_needed": _attribution_required,
+            "sfx_asset_taxonomy_used": "inventory" if inventory_sfx_assets else "filename",
         }
     if _verified and not _license:
         logger.info("[sfx-asset] skipped reason=license_missing")
@@ -435,20 +656,11 @@ def match_sfx_asset(
             "sfx_asset_source": _source,
             "sfx_asset_license": "",
             "sfx_attribution_needed": _attribution_required,
+            "sfx_asset_taxonomy_used": "inventory" if inventory_sfx_assets else "filename",
         }
-    if _manifest_found and not _verified:
-        logger.info("[sfx-asset] skipped reason=no_verified_asset")
-        return {
-            "matched": False,
-            "asset": None,
-            "low_variation": False,
-            "reason": "no_verified_asset",
-            "verified": False,
-            "sfx_asset_verified": False,
-            "sfx_asset_source": "unverified_local",
-            "sfx_asset_license": "",
-            "sfx_attribution_needed": False,
-        }
+    # NOTE: The stale `if _manifest_found and not _verified:` block was removed here.
+    # With FIX 4, unverified local assets are now allowed when manifest not found,
+    # and the earlier logic already handles the verified/unverified distinction.
     logger.info("[sfx-asset] rotation selected=%s previous=%s", selected, previous or "none")
     logger.info(
         "[sfx-asset] family=%s matched=true asset=%s low_variation=%s",
@@ -471,6 +683,11 @@ def match_sfx_asset(
         "sfx_asset_license": _license,
         "sfx_attribution_needed": _attribution_required,
         "sfx_asset_commercial_use_ok": bool(_commercial_use_ok if _verified else False),
+        "sfx_family_selected": family,
+        "sfx_selection_reason": "local_asset_match",
+        "sfx_reuse_reason": "recently_used_reuse" if str(previous or "") == str(selected or "") else "",
+        "sfx_variation_id": Path(str(selected)).stem if str(selected) else "",
+        "sfx_asset_taxonomy_used": "inventory" if inventory_sfx_assets else ("inventory" if _manifest_found else "filename"),
     }
 
 
@@ -593,6 +810,13 @@ def build_sfx_design_plan(
     transition_events: Optional[List[Dict[str, Any]]] = None,
     editorial_type: str = "",
     segment_text: str = "",
+    audio_editorial_profile: str = "",
+    sfx_allowed_families: Optional[List[str]] = None,
+    sfx_blocked_families: Optional[List[str]] = None,
+    max_sfx_events: int = 3,
+    recent_sfx_family_history: Optional[Sequence[str]] = None,
+    audio_variation_index: int = 0,
+    audio_inventory: Optional[Dict[str, Any]] = None,
     clip_duration_s: float = 0.0,
     task_id: Optional[str] = None,
     assets: Optional[Dict[str, List[Path]]] = None,
@@ -602,6 +826,7 @@ def build_sfx_design_plan(
     private_premium_status: str = "",
     first3_visual_contract: Optional[Dict[str, Any]] = None,
     silence_plan: Optional[Dict[str, Any]] = None,
+    clip_order: int = 0,
 ) -> Dict[str, Any]:
     assets = assets or discover_sfx_assets()
     events: List[Dict[str, Any]] = []
@@ -616,6 +841,14 @@ def build_sfx_design_plan(
         private_premium_status=str(private_premium_status or ""),
         first3_visual_contract=first3_visual_contract or {},
     )
+    logger.info(
+        "SFX_EDITORIAL_PROFILE_SELECTED profile=%s family=%s allowed=%s blocked=%s max_events=%d",
+        audio_editorial_profile or "unknown",
+        str(decision.get("sfx_family") or "none"),
+        "|".join(sfx_allowed_families or []) or "none",
+        "|".join(sfx_blocked_families or []) or "none",
+        int(max_sfx_events or 0),
+    )
     motion_sync = sync_sfx_with_motion(
         str((hook_plan or {}).get("hook_intent") or editorial_type or "neutral_explanation"),
         str((hook_plan or {}).get("visual_profile") or (hook_plan or {}).get("motion_pack_profile") or ""),
@@ -629,6 +862,44 @@ def build_sfx_design_plan(
     voice_conflict = bool(decision.get("voice_conflict"))
     retention_pack = False
     opportunity = bool(decision.get("sfx_family") not in {"no_sfx_needed"} and not decision.get("should_apply_sfx"))
+
+    normalized_allowed = [str(item).strip().lower().replace(" ", "_") for item in (sfx_allowed_families or []) if str(item).strip()]
+    normalized_blocked = {str(item).strip().lower().replace(" ", "_") for item in (sfx_blocked_families or []) if str(item).strip()}
+    recent_family_history = [str(item).strip().lower().replace(" ", "_") for item in (recent_sfx_family_history or []) if str(item).strip()]
+    requested_family = str(decision.get("sfx_family") or "").strip()
+    requested_family_norm = _normalize_text(requested_family).replace(" ", "_")
+    requested_family_mapped = _SFX_FAMILY_ALIASES.get(requested_family_norm, requested_family_norm)
+    family_streak = len(recent_family_history) >= 2 and recent_family_history[-1] == recent_family_history[-2] == requested_family_norm
+    family_blocked = bool(
+        (normalized_allowed and requested_family_norm not in normalized_allowed and requested_family_mapped not in normalized_allowed)
+        or requested_family_norm in normalized_blocked
+        or requested_family_mapped in normalized_blocked
+    )
+    if (family_blocked or family_streak) and normalized_allowed:
+        candidates = [
+            item
+            for item in normalized_allowed
+            if item not in normalized_blocked and item not in {"no_sfx_needed", "silence_contrast"}
+        ]
+        if family_streak:
+            alternatives = [item for item in candidates if item != requested_family_norm]
+            if alternatives:
+                candidates = alternatives
+        if candidates:
+            rotated_family = candidates[int(audio_variation_index or 0) % len(candidates)]
+            if rotated_family and rotated_family != requested_family_norm:
+                logger.info(
+                    "SFX_FAMILY_SELECTED family=%s profile=%s reason=editorial_profile_rotation",
+                    rotated_family,
+                    audio_editorial_profile or "unknown",
+                )
+                decision = dict(decision)
+                decision["sfx_family"] = rotated_family
+                decision["sfx_intent"] = f"{decision.get('sfx_intent') or ''}|profile_rotation".strip("|")
+                decision["reason"] = "editorial_profile_rotation"
+                requested_family = rotated_family
+                requested_family_norm = rotated_family
+                requested_family_mapped = _SFX_FAMILY_ALIASES.get(requested_family_norm, requested_family_norm)
 
     if decision.get("sfx_family") == "silence_contrast":
         # Silence contrast is a real retention action but not an audio asset.
@@ -655,13 +926,22 @@ def build_sfx_design_plan(
     composition_allowed = True
     composition_reason = "no_sfx_needed"
     layer_type = ""
+    hook_type = str((hook_plan or {}).get("hook_type") or "")
+    hook_visible = bool(hook_type and hook_type != "weak_intro")
+    hook_overlay_active = bool((hook_plan or {}).get("overlay_rendered") or (hook_plan or {}).get("kickframe_applied"))
     if decision.get("should_apply_sfx"):
         match = match_sfx_asset(
             sfx_family=str(decision.get("sfx_family") or ""),
             hook_intent=str((hook_plan or {}).get("hook_intent") or editorial_type or ""),
             recent_sfx_history=[str(item) for item in used_deep_boom_assets or []],
             assets=assets,
+            audio_inventory=audio_inventory,
             task_id=task_id,
+            audio_editorial_profile=audio_editorial_profile,
+            sfx_allowed_families=sfx_allowed_families,
+            sfx_blocked_families=sfx_blocked_families,
+            music_mood=str((hook_plan or {}).get("music_mood") or ""),
+            audio_variation_index=audio_variation_index,
         )
         if not match.get("matched"):
             missing.append(str(decision.get("sfx_family") or "unknown"))
@@ -689,47 +969,213 @@ def build_sfx_design_plan(
             except Exception as exc:
                 logger.debug("[sfx-qc] composition_check_skipped reason=%s", exc)
 
-            if not composition_allowed:
-                opportunity = True
-                logger.info("[sfx-retention] skipped reason=composition_block")
-                logger.info("[sfx-asset] skipped reason=composition_block")
-            elif voice_conflict:
-                opportunity = True
-                logger.info("[sfx-retention] skipped reason=voice_conflict")
-                logger.info("[sfx-asset] skipped reason=voice_conflict")
+            family = str(decision.get("sfx_family") or "")
+            timing_offset = float(decision.get("timing_offset") or 0.0)
+            main_start = 0.35
+            if transition_events:
+                main_start = max(0.0, float((transition_events[0] or {}).get("start_s") or (transition_events[0] or {}).get("start_time") or 0.5) + timing_offset)
+            elif broll_events:
+                main_start = max(0.0, float((broll_events[0] or {}).get("start_s") or 1.8) + timing_offset)
             else:
-                start_s = 0.35
-                if transition_events:
-                    start_s = max(0.0, float((transition_events[0] or {}).get("start_s") or (transition_events[0] or {}).get("start_time") or 0.5) + float(decision.get("timing_offset") or 0.0))
-                elif broll_events:
-                    start_s = max(0.0, float((broll_events[0] or {}).get("start_s") or 1.8) + float(decision.get("timing_offset") or 0.0))
-                else:
-                    start_s = max(0.0, 0.35 + float(decision.get("timing_offset") or 0.0))
-                logger.info("[sfx-timing] offset=%.2f reason=%s", float(decision.get("timing_offset") or 0.0), str(decision.get("reason") or "contextual"))
-                logger.info("[sfx-timing] voice_conflict=%s", str(voice_conflict).lower())
-                ducking = bool(str(decision.get("sfx_family") or "") in {"deep_boom", "dark_riser"} and not voice_conflict)
-                logger.info("[sfx-mix] volume_db=%.1f ducking=%s reason=%s", float(decision.get("volume_db") or -25.0), str(ducking).lower(), str(decision.get("reason") or "contextual"))
+                main_start = max(0.0, 0.35 + timing_offset)
+
+            def _append_editorial_event(
+                *,
+                family_name: str,
+                moment: str,
+                timestamp_s: float,
+                duration_s: float,
+                asset_path: Optional[str],
+                volume_db: float,
+                ducking: bool,
+                reason: str,
+                start_floor: float = 0.0,
+            ) -> None:
+                if len(events) >= 3:
+                    return
+                if not _is_allowed_sfx_family(family_name):
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s reason=family_not_allowed family=%s",
+                        task_id or "",
+                        clip_order,
+                        family_name,
+                    )
+                    return
+                if not asset_path:
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s family=%s reason=missing_asset",
+                        task_id or "",
+                        clip_order,
+                        family_name,
+                    )
+                    return
+                actual_start = max(start_floor, timestamp_s)
                 events.append({
                     "event": "retention_moment",
-                    "type": str(decision.get("sfx_family") or "magic_whoosh"),
+                    "type": family_name,
                     "contextual": True,
-                    "start_s": round(start_s, 2),
-                    "duration_s": float(decision.get("duration") or 0.45),
-                    "volume": round(max(0.08, min(0.35, 10 ** (float(decision.get("volume_db") or -25.0) / 20.0))), 3),
-                    "volume_db": float(decision.get("volume_db") or -25.0),
-                    "ducking": ducking,
-                    "asset": str(match.get("asset") or ""),
-                    "reason": str(decision.get("reason") or "retention"),
-                    "sfx_family": str(decision.get("sfx_family") or ""),
+                    "start_s": round(actual_start, 2),
+                    "duration_s": round(float(duration_s), 2),
+                    "volume": round(max(0.08, min(0.35, 10 ** (float(volume_db) / 20.0))), 3),
+                    "volume_db": float(volume_db),
+                    "ducking": bool(ducking),
+                    "asset": str(asset_path or ""),
+                    "reason": reason,
+                    "sfx_family": family_name,
+                    "moment": moment,
                 })
-                retention_pack = True
+                logger.info(
+                    "EDITORIAL_SFX_APPLIED task_id=%s clip_order=%s family=%s moment=%s timestamp=%.2f",
+                    task_id or "",
+                    clip_order,
+                    family_name,
+                    moment,
+                    actual_start,
+                )
+
+            hook_family = "magic_whoosh"
+            hook_asset = ""
+            hook_reason = "hook_entry"
+            if hook_visible and not voice_conflict and hook_type not in {"", "weak_intro", "explanation_hook"}:
+                hook_asset_match = match_sfx_asset(
+                    sfx_family="magic_whoosh",
+                    hook_intent=str((hook_plan or {}).get("hook_intent") or editorial_type or ""),
+                    recent_sfx_history=[str(item) for item in used_deep_boom_assets or []],
+                    assets=assets,
+                    audio_inventory=audio_inventory,
+                    task_id=task_id,
+                )
+                hook_asset = str(hook_asset_match.get("asset") or "")
+                hook_start = 0.25 if not hook_overlay_active else 0.30
+                _append_editorial_event(
+                    family_name=hook_family,
+                    moment="hook_entry",
+                    timestamp_s=hook_start,
+                    duration_s=0.35,
+                    asset_path=hook_asset,
+                    volume_db=-28.0,
+                    ducking=False,
+                    reason="hook_entry",
+                    start_floor=0.20,
+                )
+
+            if composition_allowed and not voice_conflict:
+                if family in {"dark_riser", "tension_riser", "high_riser", "deep_boom"}:
+                    impact_asset = str(match.get("asset") or "")
+                    _append_editorial_event(
+                        family_name=family,
+                        moment="warning_or_revelation",
+                        timestamp_s=main_start,
+                        duration_s=float(decision.get("duration") or 0.45),
+                        asset_path=impact_asset,
+                        volume_db=float(decision.get("volume_db") or -25.0),
+                        ducking=bool(family in {"deep_boom", "dark_riser"}),
+                        reason=str(decision.get("reason") or "retention"),
+                        start_floor=0.30,
+                    )
+                elif family == "magic_whoosh" and not any(ev.get("moment") == "hook_entry" for ev in events):
+                    impact_asset = str(match.get("asset") or "")
+                    _append_editorial_event(
+                        family_name=family,
+                        moment="warning_or_revelation",
+                        timestamp_s=main_start,
+                        duration_s=float(decision.get("duration") or 0.45),
+                        asset_path=impact_asset,
+                        volume_db=float(decision.get("volume_db") or -25.0),
+                        ducking=False,
+                        reason=str(decision.get("reason") or "retention"),
+                        start_floor=0.30,
+                    )
+
+            if clip_duration_s >= 12.0 and len(events) < 3 and transition_events:
+                riser_asset = ""
+                riser_match = match_sfx_asset(
+                    sfx_family="dark_riser",
+                    hook_intent=str((hook_plan or {}).get("hook_intent") or editorial_type or ""),
+                    recent_sfx_history=[str(item) for item in used_deep_boom_assets or []],
+                    assets=assets,
+                    audio_inventory=audio_inventory,
+                    task_id=task_id,
+                )
+                riser_asset = str(riser_match.get("asset") or "")
+                if riser_asset:
+                    riser_start = max(0.30, float((transition_events[0] or {}).get("start_s") or 0.5) + 0.05)
+                    _append_editorial_event(
+                        family_name="dark_riser",
+                        moment="strong_turn",
+                        timestamp_s=riser_start,
+                        duration_s=0.45,
+                        asset_path=riser_asset,
+                        volume_db=-26.0,
+                        ducking=True,
+                        reason="strong_turn",
+                        start_floor=0.30,
+                    )
+
+            if not events:
+                if retention_pack:
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s reason=silence_preserved",
+                        task_id or "",
+                        clip_order,
+                    )
+                elif not composition_allowed:
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s reason=composition_block",
+                        task_id or "",
+                        clip_order,
+                    )
+                elif voice_conflict:
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s reason=voice_conflict",
+                        task_id or "",
+                        clip_order,
+                    )
+                else:
+                    logger.info(
+                        "EDITORIAL_SFX_SKIPPED_REASON task_id=%s clip_order=%s reason=no_editorial_moment",
+                        task_id or "",
+                        clip_order,
+                    )
+            retention_pack = bool(events) or retention_pack
 
     if missing:
         logger.info("[sfx-design] skipped reason=missing_asset_type types=%s", "|".join(sorted(set(missing))))
+    # ── SFX Budget: cap at max_sfx_events_per_clip=3 ──────────────────────────
+    max_sfx_events = int(max_sfx_events or 3)
+    requested_count = len(events)
+    if requested_count > max_sfx_events:
+        # Keep strongest editorial moments (first events by priority)
+        events = events[:max_sfx_events]
+    logger.info(
+        "EDITORIAL_SFX_BUDGET_APPLIED task_id=%s clip_order=%s count=%d",
+        task_id or "",
+        clip_order,
+        len(events),
+    )
+
     logger.info("[sfx-qc] contextual=%s reason=%s", str(bool(events)).lower(), "hook_or_editorial_moment" if events else "no_contextual_sfx_event")
+    selected_variation_ids = list(
+        dict.fromkeys(
+            str((event or {}).get("asset") or (event or {}).get("sfx_family") or "")
+            for event in events
+            if str((event or {}).get("asset") or (event or {}).get("sfx_family") or "")
+        )
+    )
+    if events:
+        logger.info(
+            "SFX_FAMILY_SELECTED family=%s profile=%s reason=%s",
+            str(decision.get("sfx_family") or ""),
+            audio_editorial_profile or "unknown",
+            str(decision.get("reason") or "editorial_retention"),
+        )
+        logger.info(
+            "SFX_VARIATION_SELECTED ids=%s",
+            "|".join(selected_variation_ids) or "none",
+        )
     return {
         "sfx_design_applied": bool(events),
-        "sfx_design_events": events[:4],
+        "sfx_design_events": events,
         "sfx_design_missing_assets": sorted(set(missing)),
         "sfx_assets_available": {
             "low_risers": len(assets.get("low_riser") or []),
@@ -748,6 +1194,14 @@ def build_sfx_design_plan(
         "sfx_composition_reason": composition_reason,
         "sfx_retention_pack": bool(retention_pack),
         "composition_mode": comp_mode,
+        "sfx_editorial_profile": audio_editorial_profile or "unknown",
+        "sfx_allowed_families": list(sfx_allowed_families or []),
+        "sfx_blocked_families": list(sfx_blocked_families or []),
+        "sfx_family_selected": str(decision.get("sfx_family") or ""),
+        "sfx_variation_ids": selected_variation_ids,
+        "sfx_selection_reason": str(decision.get("reason") or ""),
+        "sfx_reuse_reason": str(match.get("sfx_reuse_reason") or match.get("reason") or ""),
+        "sfx_asset_taxonomy_used": str(match.get("sfx_asset_taxonomy_used") or ("inventory" if audio_inventory else "filename")),
         **motion_sync,
     }
 
@@ -1032,6 +1486,66 @@ def mix_sfx_into_audio(
         return {"rendered": False, "reason": str(exc), "warnings": ["sfx_mix_exception"]}
 
 
+def _verify_sfx_audio_mix(input_video: Path, output_video: Path) -> bool:
+    """Verify that an output file contains a real mixed audio stream."""
+    try:
+        if not output_video.exists() or output_video.stat().st_size <= 0:
+            return False
+        if not input_video.exists():
+            return False
+
+        probe_cmd = [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type,duration",
+            "-of",
+            "json",
+            str(output_video),
+        ]
+        probe = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=20)
+        if probe.returncode != 0:
+            return False
+        data = json.loads(probe.stdout or "{}")
+        streams = list(data.get("streams") or [])
+        if not streams:
+            return False
+        duration = 0.0
+        try:
+            duration = float(streams[0].get("duration") or 0.0)
+        except Exception:
+            duration = 0.0
+        if duration <= 0.5:
+            return False
+
+        vol_cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(output_video),
+            "-af",
+            "volumedetect",
+            "-f",
+            "null",
+            "-",
+        ]
+        vol = subprocess.run(vol_cmd, capture_output=True, text=True, timeout=30)
+        if vol.returncode != 0:
+            return False
+        stderr = vol.stderr or ""
+        if "mean_volume" not in stderr and "max_volume" not in stderr:
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("[sfx-verify] failed reason=%s", exc)
+        return False
+
+
 def apply_sfx_bed(
     input_path: Path,
     output_path: Path,
@@ -1047,6 +1561,15 @@ def apply_sfx_bed(
     private_premium_status: str = "",
     first3_visual_contract: Optional[Dict[str, Any]] = None,
     silence_plan: Optional[Dict[str, Any]] = None,
+    clip_order: int = 0,
+    segment_words: Optional[List[Dict[str, Any]]] = None,
+    audio_editorial_profile: str = "",
+    sfx_allowed_families: Optional[List[str]] = None,
+    sfx_blocked_families: Optional[List[str]] = None,
+    max_sfx_events: int = 3,
+    recent_sfx_family_history: Optional[Sequence[str]] = None,
+    audio_variation_index: int = 0,
+    audio_inventory: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Apply intentional local SFX if matching local assets exist.
 
@@ -1066,8 +1589,114 @@ def apply_sfx_bed(
         private_premium_status=private_premium_status,
         first3_visual_contract=first3_visual_contract,
         silence_plan=silence_plan,
+        clip_order=clip_order,
+        audio_editorial_profile=audio_editorial_profile,
+        sfx_allowed_families=sfx_allowed_families,
+        sfx_blocked_families=sfx_blocked_families,
+        max_sfx_events=max_sfx_events,
+        recent_sfx_family_history=recent_sfx_family_history,
+        audio_variation_index=audio_variation_index,
+        audio_inventory=audio_inventory,
     )
     events = list(design.get("sfx_design_events") or [])
+    word_events = [word for word in (segment_words or []) if isinstance(word, dict)]
+    sfx_word_collision_avoided = False
+    sfx_events_shifted = 0
+    sfx_events_dropped_for_voice = 0
+    if events and word_events:
+        safe_events: List[Dict[str, Any]] = []
+
+        def _word_start(word: Dict[str, Any]) -> float:
+            for key in ("start_s", "start", "timestamp_s", "timestamp", "begin", "time_s"):
+                try:
+                    val = float(word.get(key))
+                    if val >= 0:
+                        return val
+                except Exception:
+                    continue
+            return 0.0
+
+        def _word_end(word: Dict[str, Any], start: float) -> float:
+            for key in ("end_s", "end", "stop", "finish"):
+                try:
+                    val = float(word.get(key))
+                    if val > start:
+                        return val
+                except Exception:
+                    continue
+            try:
+                duration = float(word.get("duration_s") or word.get("duration") or 0.22)
+            except Exception:
+                duration = 0.22
+            return start + max(0.12, duration)
+
+        def _word_is_important(word: Dict[str, Any]) -> bool:
+            text = str(word.get("text") or word.get("word") or "").strip()
+            confidence = 0.0
+            for key in ("confidence", "score", "probability"):
+                try:
+                    confidence = max(confidence, float(word.get(key) or 0.0))
+                except Exception:
+                    continue
+            return bool(text) and (confidence >= 0.7 or len(text) >= 4)
+
+        for event in events:
+            try:
+                event_start = float(event.get("start_s") or event.get("start") or 0.0)
+            except Exception:
+                event_start = 0.0
+            try:
+                event_duration = float(event.get("duration_s") or event.get("duration") or 0.35)
+            except Exception:
+                event_duration = 0.35
+            adjusted_event = dict(event)
+            collided = False
+            for word in word_events:
+                if not _word_is_important(word):
+                    continue
+                word_start = _word_start(word)
+                word_end = _word_end(word, word_start)
+                window_start = event_start - 0.10
+                window_end = event_start + event_duration + 0.10
+                if word_start <= window_end and word_end >= window_start:
+                    collided = True
+                    break
+            if collided:
+                shifted = False
+                for offset in (0.15, -0.15):
+                    candidate_start = max(0.0, event_start + offset)
+                    candidate_end = candidate_start + event_duration
+                    if any(
+                        (_word_start(word) <= candidate_end + 0.05 and _word_end(word, _word_start(word)) >= candidate_start - 0.05)
+                        for word in word_events
+                        if _word_is_important(word)
+                    ):
+                        continue
+                    adjusted_event["start_s"] = round(candidate_start, 2)
+                    adjusted_event["timestamp_s"] = round(candidate_start, 2)
+                    safe_events.append(adjusted_event)
+                    sfx_word_collision_avoided = True
+                    sfx_events_shifted += 1
+                    logger.info(
+                        "SFX_WORD_COLLISION_AVOIDED event=%s old_start=%.2f new_start=%.2f",
+                        str(event.get("type") or "sfx"),
+                        event_start,
+                        candidate_start,
+                    )
+                    shifted = True
+                    break
+                if not shifted:
+                    sfx_word_collision_avoided = True
+                    sfx_events_dropped_for_voice += 1
+                    logger.warning(
+                        "SFX_DROPPED_FOR_VOICE_CLARITY event=%s start=%.2f",
+                        str(event.get("type") or "sfx"),
+                        event_start,
+                    )
+                    continue
+            else:
+                safe_events.append(adjusted_event)
+        events = safe_events
     if not events:
         warning = str(
             design.get("sfx_warning")
@@ -1075,12 +1704,19 @@ def apply_sfx_bed(
         )
         if bool(design.get("sfx_retention_pack")):
             warning = ""
-        logger.info("[sfx-design] final_output_uses_sfx=false")
+        logger.info("SFX_DISABLED_REASON task_id=%s clip_order=%s reason=%s", task_id or "", clip_order, warning or "no_sfx_moment")
         return {
             "sfx_applied": False,
             "sfx_count": 0,
+            "sfx_event_count": 0,
+            "sfx_verified": False,
+            "sfx_families": [],
             "sfx_warning": warning or None,
             "sfx_asset_applied_match": False,
+            "sfx_voice_clarity_ok": True,
+            "sfx_word_collision_avoided": False,
+            "sfx_events_shifted": 0,
+            "sfx_events_dropped_for_voice": 0,
             **design,
         }
     # The mixer now accepts only real local assets. No synthetic fallback.
@@ -1092,16 +1728,28 @@ def apply_sfx_bed(
             Path(tmp_dir),
         )
     applied = bool(result.get("rendered"))
+    verified = bool(applied and _verify_sfx_audio_mix(input_path, output_path))
     event_assets = [str((event or {}).get("asset") or "") for event in events if str((event or {}).get("asset") or "").strip()]
     # Mixer only ingests local files from event assets, so rendered=true implies match.
-    asset_applied_match = bool(applied and event_assets)
-    logger.info("[sfx-design] final_output_uses_sfx=%s", str(bool(applied and asset_applied_match)).lower())
+    asset_applied_match = bool(verified and event_assets)
+    if verified:
+        logger.info("SFX_AUDIO_MIX_VERIFIED task_id=%s clip_order=%s", task_id or "", clip_order)
+    else:
+        logger.info("SFX_DISABLED_REASON task_id=%s clip_order=%s reason=%s", task_id or "", clip_order, result.get("reason", "sfx_mix_failed"))
+    logger.info("[sfx-design] final_output_uses_sfx=%s", str(bool(verified and asset_applied_match)).lower())
     return {
-        "sfx_applied": bool(applied and asset_applied_match),
-        "sfx_count": len(events) if (applied and asset_applied_match) else 0,
+        "sfx_applied": bool(verified and asset_applied_match),
+        "sfx_count": len(events) if (verified and asset_applied_match) else 0,
+        "sfx_event_count": len(events) if (verified and asset_applied_match) else 0,
         "sfx_events": events,
-        "sfx_warning": None if (applied and asset_applied_match) else result.get("reason", "sfx_mix_failed"),
+        "sfx_warning": None if (verified and asset_applied_match) else result.get("reason", "sfx_mix_failed"),
         "sfx_asset_applied_match": asset_applied_match,
+        "sfx_verified": bool(verified and asset_applied_match),
+        "sfx_families": sorted({str((event or {}).get("sfx_family") or (event or {}).get("type") or "") for event in events if str((event or {}).get("sfx_family") or (event or {}).get("type") or "")}),
+        "sfx_voice_clarity_ok": bool(verified and asset_applied_match),
+        "sfx_word_collision_avoided": bool(sfx_word_collision_avoided),
+        "sfx_events_shifted": int(sfx_events_shifted),
+        "sfx_events_dropped_for_voice": int(sfx_events_dropped_for_voice),
         **design,
         **result,
     }

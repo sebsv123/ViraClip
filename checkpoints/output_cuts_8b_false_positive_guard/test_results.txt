@@ -1,0 +1,10 @@
+PASS g1_rhetorical_no_preserved
+PASS g1_guard_metadata
+PASS g2_no_es_preserved
+PASS g3_short_question_preserved
+PASS g4_explicit_no_no_cut
+PASS g5_me_equivoque_cut
+PASS g6_dead_air_still_cut
+PASS g7_retake_still_cut
+
+RESULT: 8 passed, 0 failed

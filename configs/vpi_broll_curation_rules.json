@@ -1,0 +1,92 @@
+{
+  "curation_rules": {
+    "accept_preferred": {
+      "duration_range_s": [4.0, 20.0],
+      "orientation": ["portrait", "square"],
+      "min_resolution": [720, 720],
+      "description": "Videos within ideal duration, portrait/square orientation, good resolution"
+    },
+    "accept_with_caution": {
+      "duration_range_s": [3.0, 4.0],
+      "orientation": ["landscape"],
+      "min_resolution": [640, 640],
+      "description": "Short videos or landscape orientation - review carefully for crop-friendliness"
+    },
+    "reject": {
+      "duration_under_s": 3.0,
+      "duration_over_s": 45.0,
+      "resolution_under": [640, 640],
+      "description": "Too short, too long, or too low resolution"
+    },
+    "avoid_terms_in_title_or_query": [
+      "meditation",
+      "yoga",
+      "tea",
+      "coffee",
+      "funeral",
+      "hospital",
+      "stock market",
+      "luxury",
+      "trading",
+      "handshake only",
+      "ambulance",
+      "violence",
+      "horror",
+      "nursing home",
+      "cemetery",
+      "alcohol",
+      "smoking",
+      "gambling",
+      "weapon",
+      "war",
+      "poverty",
+      "homeless",
+      "massage",
+      "spa",
+      "beach vacation",
+      "party",
+      "celebration",
+      "wedding",
+      "birthday"
+    ],
+    "preferred_categories": {
+      "family_protection": {
+        "target": 12,
+        "current": 2,
+        "gap": 10,
+        "priority": "high"
+      },
+      "advisor_consultation": {
+        "target": 12,
+        "current": 0,
+        "gap": 12,
+        "priority": "high"
+      },
+      "financial_planning": {
+        "target": 12,
+        "current": 2,
+        "gap": 10,
+        "priority": "high"
+      },
+      "documents_support": {
+        "target": 8,
+        "current": 2,
+        "gap": 6,
+        "priority": "medium"
+      },
+      "risk_responsibility": {
+        "target": 8,
+        "current": 2,
+        "gap": 6,
+        "priority": "medium"
+      },
+      "local_trust": {
+        "target": 6,
+        "current": 0,
+        "gap": 6,
+        "priority": "medium"
+      }
+    },
+    "notes": "Avoid documents_support dominating the library. Ensure balanced category distribution. Prefer videos with people/context over abstract stock footage."
+  }
+}

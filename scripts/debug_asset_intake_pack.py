@@ -38,7 +38,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="vpi_intake_debug_") as td:
         tmp = Path(td)
         manifest = tmp / "vpi_asset_manifest.json"
-        debug_tag = "__debug_intake_pack__"
+        debug_tag = f"__debug_intake_pack__{tmp.name[-8:]}"
         broll_dir = ROOT / "assets" / "broll" / debug_tag / "family_relief"
         broll_dir.mkdir(parents=True, exist_ok=True)
         broll_file = broll_dir / "family_relief_pexels_001.mp4"

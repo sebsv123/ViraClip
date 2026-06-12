@@ -30,11 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
-    try:
-        import imageio_ffmpeg as _iio
-        return _iio.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
+    """Return ffmpeg binary path, preferring system ffmpeg with NVENC."""
+    from src.utils.gpu_utils import get_ffmpeg_exe
+    return get_ffmpeg_exe()
 
 
 # ── tuneable constants (override via env vars) ────────────────────────────────
@@ -347,6 +345,24 @@ def _build_filter_complex(
     """
     filters: List[str] = []
 
+    # Daily / production-safe mode keeps the visual pipeline neutral so the
+    # active render path cannot wash the whole frame red via grade/LUT/overlay
+    # steps (progress bar, lower-third box, flash, full-frame drawbox, etc.).
+    # VPI_DAILY_MODE_ALLOW_UNSAFE is an explicit escape hatch — when set, the
+    # unsafe visual chain is allowed to run even while daily/prod-safe is on.
+    _daily_mode_active = os.environ.get("VPI_DAILY_MODE", "").lower() in {"1", "true", "yes", "on"}
+    _production_safe_active = os.environ.get("VPI_PRODUCTION_SAFE_EDIT", "").lower() in {"1", "true", "yes", "on"}
+    _daily_mode_allow_unsafe = os.environ.get("VPI_DAILY_MODE_ALLOW_UNSAFE", "").lower() in {"1", "true", "yes", "on"}
+    daily_safe = bool((_daily_mode_active or _production_safe_active) and not _daily_mode_allow_unsafe)
+    _neutral_grade_mode = daily_safe
+    if daily_safe:
+        logger.info(
+            "VPI_EP_DAILY_SAFE_VISUAL_FILTERS_BYPASSED daily_safe=true function=_build_filter_complex "
+            "bypassed=colorbalance,lut,progress_drawbox,lower_third_box,flash,fullscreen_drawbox "
+            "daily=%s production_safe=%s allow_unsafe=%s",
+            str(_daily_mode_active).lower(), str(_production_safe_active).lower(), str(_daily_mode_allow_unsafe).lower(),
+        )
+
     # ── 0. Determine clip theme for adaptive grade + audio EQ ──────────────────
     theme = _classify_theme(segment_text) if segment_text else "neutral"
 
@@ -361,7 +377,20 @@ def _build_filter_complex(
                  " (cat-override)" if grain_override > 0 else "")
 
     # ── 1. Colour grading: eq + unsharp ──────────────────────────────────────
-    eq_f     = f"eq=saturation={_sat}:contrast={_con}:brightness={BRIGHTNESS}"
+    if _neutral_grade_mode:
+        eq_f = "eq=saturation=1.0:contrast=1.0:brightness=0.0"
+        _cb_params = "rs=0:gs=0:bs=0:rm=0:gm=0:bm=0:rh=0:gh=0:bh=0"
+        logger.info(
+            "VPI_EP_COLOR_GRADE_DISABLED_DAILY daily=%s production_safe=%s",
+            str(_daily_mode_active).lower(),
+            str(_production_safe_active).lower(),
+        )
+        logger.info("VPI_EP_DAILY_NEUTRAL_GRADE_APPLIED daily=%s production_safe=%s", str(_daily_mode_active).lower(), str(_production_safe_active).lower())
+        logger.info("VPI_EP_COLOR_FILTER_REMOVED_FROM_FILTER_COMPLEX reason=neutral_grade_mode")
+        logger.info("VPI_EP_FULLSCREEN_TINT_DISABLED_DAILY reason=neutral_grade_mode")
+    else:
+        eq_f = f"eq=saturation={_sat}:contrast={_con}:brightness={BRIGHTNESS}"
+        _cb_params = None
     sharp_f  = f"unsharp=5:5:{SHARPNESS}:5:5:0"
     filters.append(f"[0:v]{eq_f},{sharp_f}[vgrade]")
 
@@ -369,7 +398,7 @@ def _build_filter_complex(
     # A second eq layer briefly boosts saturation at emphasis timestamps via the
     # `enable` timeline option. When inactive it is identity (pass-through).
     prev_grade = "[vgrade]"
-    if EP_SAT_PULSE_ON and emphasis_items:
+    if EP_SAT_PULSE_ON and emphasis_items and not _neutral_grade_mode:
         ratio        = EP_SAT_PULSE_STRENGTH / max(SATURATION, 0.01)
         enable_parts = [
             f"between(t,{ts-0.10:.3f},{ts+0.50:.3f})" for ts, _ in emphasis_items
@@ -384,13 +413,17 @@ def _build_filter_complex(
     # warm: red midtones/highlights up, blue down (golden-hour feel)
     # cool: blue shadows/midtones up, red down (clean tech/digital feel)
     # neutral: default teal/orange grade
-    if EP_THEME_GRADE_ON and theme == "warm":
-        cb_params = "rs=0.00:gs=0.03:bs=-0.02:rm=0.04:gm=0:bm=-0.02:rh=0.10:gh=0:bh=-0.08"
-    elif EP_THEME_GRADE_ON and theme == "cool":
-        cb_params = "rs=-0.06:gs=0.02:bs=0.10:rm=-0.02:gm=0:bm=0.03:rh=0.04:gh=0:bh=-0.02"
+    if _neutral_grade_mode:
+        logger.info("VPI_EP_COLORBALANCE_DISABLED_DAILY daily_safe=true function=_build_filter_complex reason=neutral_grade_mode")
+        filters.append(f"{prev_grade}copy[vcine]")
     else:
-        cb_params = "rs=-0.03:gs=0.03:bs=0.06:rm=0:gm=0:bm=0:rh=0.06:gh=0:bh=-0.06"
-    filters.append(f"{prev_grade}colorbalance={cb_params}[vcine]")
+        if EP_THEME_GRADE_ON and theme == "warm":
+            cb_params = "rs=0.00:gs=0.03:bs=-0.02:rm=0.04:gm=0:bm=-0.02:rh=0.10:gh=0:bh=-0.08"
+        elif EP_THEME_GRADE_ON and theme == "cool":
+            cb_params = "rs=-0.06:gs=0.02:bs=0.10:rm=-0.02:gm=0:bm=0.03:rh=0.04:gh=0:bh=-0.02"
+        else:
+            cb_params = "rs=-0.03:gs=0.03:bs=0.06:rm=0:gm=0:bm=0:rh=0.06:gh=0:bh=-0.06"
+        filters.append(f"{prev_grade}colorbalance={cb_params}[vcine]")
 
     # ── 3. Enhancement de sujeto (sin vignette oscurecedor) ──────────────────
     # VIGNETTE_ENABLED=false por defecto — el vignette oscurece la imagen sin aportar.
@@ -471,7 +504,13 @@ def _build_filter_complex(
     # ── 5. (Pattern interrupts now baked into step 4 — no second zoompan) ─────
 
     # ── 6. Progress bar (solid | gradient | dots) ─────────────────────────────
-    if dur > 0:
+    if daily_safe:
+        logger.info(
+            "VPI_EP_PROGRESS_DRAWBOX_DISABLED_DAILY daily_safe=true function=_build_filter_complex "
+            "reason=neutral_visual_mode color=%s style=%s",
+            PROGRESS_CLR, EP_PROGRESS_STYLE,
+        )
+    elif dur > 0:
         pb_w = f"iw*t/{dur:.3f}"
         if EP_PROGRESS_STYLE == "gradient":
             # Two-layer drawbox: dim full bar + bright right half = left-to-right gradient
@@ -503,7 +542,10 @@ def _build_filter_complex(
         prev_v = "[vpbar]"
 
     # ── 7. Lower thirds ───────────────────────────────────────────────────────
-    if LOWER_THIRD_ON and segment_text:
+    if daily_safe:
+        if LOWER_THIRD_ON and segment_text:
+            logger.info("VPI_EP_LOWER_THIRD_BOX_DISABLED_DAILY daily_safe=true function=_build_filter_complex reason=neutral_visual_mode")
+    elif LOWER_THIRD_ON and segment_text:
         safe_text = _sanitize_drawtext(segment_text)
         font_arg  = f":fontfile={FONT_PATH}" if Path(FONT_PATH).exists() else ""
         # alpha: fade-in 0→0.4s, hold 0.4→3.0s, fade-out 3.0→3.5s
@@ -548,7 +590,10 @@ def _build_filter_complex(
             prev_v = label_out
 
     # ── 8. Flash/whiteout at cut transitions ─────────────────────────────────
-    if flash_timestamps:
+    if daily_safe:
+        if flash_timestamps:
+            logger.info("VPI_EP_FLASH_DISABLED_DAILY daily_safe=true function=_build_filter_complex reason=neutral_visual_mode")
+    elif flash_timestamps:
         enable_parts = [
             f"between(t,{ts:.3f},{ts + 0.07:.3f})" for ts in flash_timestamps
         ]
@@ -560,7 +605,10 @@ def _build_filter_complex(
 
     # ── 8.5. Cinematic letterbox bars (opt-in via EP_LETTERBOX_ON=true) ───────────
     # Two drawbox calls chained with comma within one filter segment.
-    if EP_LETTERBOX_ON:
+    if daily_safe:
+        if EP_LETTERBOX_ON:
+            logger.info("VPI_EP_FULLSCREEN_DRAWBOX_DISABLED_DAILY daily_safe=true function=_build_filter_complex reason=neutral_visual_mode block=letterbox_bars")
+    elif EP_LETTERBOX_ON:
         bars_h = max(1, int(h * EP_LETTERBOX_H))
         filters.append(
             f"{prev_v}drawbox=x=0:y=0:w=iw:h={bars_h}:color=black@1:t=fill,"
@@ -651,6 +699,9 @@ def _build_filter_complex(
         prev_v = "[vfade]"
 
     # ── 10.5. Cinematic LUT (merged in — eliminates a separate FFmpeg pass) ─────
+    if _neutral_grade_mode and lut_vf:
+        logger.info("VPI_EP_LUT_DISABLED_DAILY daily_safe=true function=_build_filter_complex reason=neutral_grade_mode preset=%s", lut_vf)
+        lut_vf = ""
     if lut_vf:
         filters.append(f"{prev_v}{lut_vf}[vlut]")
         prev_v = "[vlut]"

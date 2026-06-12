@@ -1,7 +1,11 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional in lightweight script envs
+    def load_dotenv(*args, **kwargs):  # type: ignore
+        return False
 from sqlalchemy import text
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.ext.asyncio import (

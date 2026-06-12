@@ -15,10 +15,25 @@ services:
     container_name: viraclip-frontend
     ports:
       - "3000:3000"
+    command:
+      - sh
+      - -lc
+      - |
+        set -e
+        # Patch Better Auth scrypt for fast login on Bun
+        sh /app/scripts/patch-better-auth-scrypt.sh
+        if [ "${VIRACLIP_LOCAL_AUTH_BOOTSTRAP:-true}" = "true" ]; then
+          bun /app/scripts/ensure-local-admin.mjs
+        else
+          echo "LOCAL_AUTH_BOOTSTRAP=SKIPPED"
+        fi
+        exec bun run dev:docker
     volumes:
       - ./frontend/src:/app/src
       - ./frontend/public:/app/public
       - ./frontend/prisma:/app/prisma
+      - ./frontend/scripts:/app/scripts
+      - ./outputs:/app/outputs
     environment:
       - NODE_ENV=${NODE_ENV:-development}
       - NEXT_TELEMETRY_DISABLED=1
@@ -40,6 +55,11 @@ services:
       - STRIPE_CHECKOUT_URL=${STRIPE_CHECKOUT_URL}
       - STRIPE_CUSTOMER_PORTAL_URL=${STRIPE_CUSTOMER_PORTAL_URL}
       - RESEND_API_KEY=${RESEND_API_KEY}
+      - VIRACLIP_LOCAL_AUTH_BOOTSTRAP=${VIRACLIP_LOCAL_AUTH_BOOTSTRAP:-true}
+      - VIRACLIP_PATCH_BETTER_AUTH_SCRYPT=${VIRACLIP_PATCH_BETTER_AUTH_SCRYPT:-true}
+      - VIRACLIP_FRONTEND_IGNORE_TS_ERRORS=${VIRACLIP_FRONTEND_IGNORE_TS_ERRORS:-true}
+      - VIRACLIP_LOCAL_ADMIN_EMAIL=${VIRACLIP_LOCAL_ADMIN_EMAIL:-admin@viraclip.com}
+      - VIRACLIP_LOCAL_ADMIN_PASSWORD=${VIRACLIP_LOCAL_ADMIN_PASSWORD:-admin123}
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,13 +91,14 @@ services:
       - ./scripts:/app/scripts
       - ./configs:/app/configs:ro
       - shared_temp:/app/temp
+      - ./outputs:/app/outputs
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
-      - ./assets/broll:/app/assets/broll
-      - ./backend/music:/app/assets/sounds
-      - ./assets/sounds:/app/assets/sounds/sfx:ro
+      - ./assets:/app/assets:ro
+      - ./remotion:/app/remotion:ro
+      - ./backend/music:/app/music_legacy:ro
       - ./backend/comfy_workflows:/app/comfy_workflows
       - llm_datasets:/app/datasets
     environment:
@@ -103,12 +124,12 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-large-v3}
-      - WHISPER_DEVICE=cpu
+      - WHISPER_DEVICE=cuda
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-false}
-      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-false}
-      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-false}
+      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-true}
+      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-true}
+      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-true}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
@@ -241,11 +262,19 @@ services:
       - DSPY_OPTIMIZED_PROMPT_PATH=${DSPY_OPTIMIZED_PROMPT_PATH:-/app/datasets/dspy_optimized_prompt.txt}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
       - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
-      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-false}
+      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-true}
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
       - VIRACLIP_BETA_CLEAN=${VIRACLIP_BETA_CLEAN:-true}
+      - VIRACLIP_MODE=${VIRACLIP_MODE:-premium_productive}
+      - VPI_DAILY_MODE=${VPI_DAILY_MODE:-false}
+      - VPI_PRODUCTION_SAFE_EDIT=${VPI_PRODUCTION_SAFE_EDIT:-false}
+      - VIRACLIP_ENABLE_PREMIUM_EDITING=${VIRACLIP_ENABLE_PREMIUM_EDITING:-false}
+      - VPI_DAILY_MODE_ALLOW_UNSAFE=${VPI_DAILY_MODE_ALLOW_UNSAFE:-false}
+      - VPI_SHOW_DEBUG_OVERLAYS=${VPI_SHOW_DEBUG_OVERLAYS:-false}
+      - VIRACLIP_DEADLINE_SAFE_MODE=${VIRACLIP_DEADLINE_SAFE_MODE:-false}
+      - VIRACLIP_EDITORIAL_QC_BLOCKING=${VIRACLIP_EDITORIAL_QC_BLOCKING:-false}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -281,14 +310,15 @@ services:
       - ./scripts:/app/scripts:ro
       - ./configs:/app/configs:ro
       - shared_temp:/app/temp
+      - ./outputs:/app/outputs
       - ./exports/clips:/app/exports/clips
       - whisper_models:/app/models
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
-      - ./assets/broll:/app/assets/broll
-      - ./backend/music:/app/assets/sounds
-      - ./assets/sounds:/app/assets/sounds/sfx:ro
+      - ./assets:/app/assets:ro
+      - ./remotion:/app/remotion:ro
+      - ./backend/music:/app/music_legacy:ro
       - ./backend/comfy_workflows:/app/comfy_workflows
     environment:
       - PYTHONPATH=/app
@@ -313,12 +343,12 @@ services:
       - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-qwen3-vl:8b}
       - VISION_ANALYSIS_ENABLED=${VISION_ANALYSIS_ENABLED:-false}
       - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
-      - WHISPER_DEVICE=cpu
+      - WHISPER_DEVICE=cuda
       - WHISPER_COMPUTE_TYPE=${WHISPER_COMPUTE_TYPE:-float16}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
-      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-false}
-      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-false}
-      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-false}
+      - VIRACLIP_ENABLE_TORCH_CUDA=${VIRACLIP_ENABLE_TORCH_CUDA:-true}
+      - VIRACLIP_ENABLE_NVENC=${VIRACLIP_ENABLE_NVENC:-true}
+      - VIRACLIP_GPU_PROBE_ON_START=${VIRACLIP_GPU_PROBE_ON_START:-true}
       - SFX_LIBRARY_PATH=/app/assets/sounds
       - QUEUED_TASK_TIMEOUT_SECONDS=${QUEUED_TASK_TIMEOUT_SECONDS:-600}
       - DEFAULT_PROCESSING_MODE=${DEFAULT_PROCESSING_MODE:-fast}
@@ -516,11 +546,20 @@ services:
       - HOOK_SLOWMO_SPEED=${HOOK_SLOWMO_SPEED:-0.5}
       - BROLL_ENABLED=${BROLL_ENABLED:-true}
       - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
-      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-false}
+      - VIRACLIP_ENABLE_EDITORIAL_BROLL=${VIRACLIP_ENABLE_EDITORIAL_BROLL:-true}
       - PEXELS_API_KEY=${PEXELS_API_KEY}
       - COVERR_API_KEY=${COVERR_API_KEY}
       - PIXABAY_API_KEY=${PIXABAY_API_KEY}
       - VIRACLIP_BETA_CLEAN=${VIRACLIP_BETA_CLEAN:-true}
+      - VIRACLIP_MODE=${VIRACLIP_MODE:-premium_productive}
+      - VIRACLIP_DEADLINE_SAFE_MODE=${VIRACLIP_DEADLINE_SAFE_MODE:-false}
+      - VIRACLIP_EDITORIAL_QC_BLOCKING=${VIRACLIP_EDITORIAL_QC_BLOCKING:-false}
+      # ── H7.7/H7.8 — VPI Daily Mode ──────────────────────────────────────
+      - VPI_DAILY_MODE=${VPI_DAILY_MODE:-true}
+      - VPI_PRODUCTION_SAFE_EDIT=${VPI_PRODUCTION_SAFE_EDIT:-true}
+      - VIRACLIP_ENABLE_PREMIUM_EDITING=${VIRACLIP_ENABLE_PREMIUM_EDITING:-true}
+      - VPI_DAILY_MODE_ALLOW_UNSAFE=${VPI_DAILY_MODE_ALLOW_UNSAFE:-false}
+      - VPI_SHOW_DEBUG_OVERLAYS=${VPI_SHOW_DEBUG_OVERLAYS:-false}
     restart: always
     depends_on:
       postgres:
@@ -544,7 +583,8 @@ services:
       - ./backend/fonts:/app/fonts
       - ./backend/transitions:/app/transitions
       - ${DOWNLOADS_PATH:-./downloads}:/app/temp/uploads/downloads
-      - ./backend/music:/app/assets/sounds
+      - ./backend/music:/app/music_legacy:ro
+      - ./remotion:/app/remotion:ro
       - ./backend/comfy_workflows:/app/comfy_workflows
       - gpu_models_t2v:/app/models/t2v
       - gpu_models_tts:/app/models/tts

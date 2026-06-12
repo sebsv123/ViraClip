@@ -287,6 +287,7 @@ def determine_publishable_status(
     repeated_exact_broll_same_task: bool = False,
     weak_intro_forced_broll: bool = False,
     warnings: Optional[List[str]] = None,
+    first3_visual_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     publish_warnings = list(warnings or [])
     publish_score = 100.0
@@ -310,6 +311,13 @@ def determine_publishable_status(
         hard_failures.append("repeated_exact_broll_same_task")
     if weak_intro_forced_broll:
         hard_failures.append("weak_intro_forced_broll")
+
+    # ── CAMBIO 5: first3_visual_contract affects status ──────────────────────
+    _first3_contract = first3_visual_contract or {}
+    _first3_fail_count = int(_first3_contract.get("first3_visual_fail_count") or 0)
+    if _first3_fail_count >= 2:
+        hard_failures.append("first3_visual_contract_failed")
+        publish_warnings.append(f"first3_visual_contract_failed:{_first3_fail_count}_failures")
 
     if hard_failures:
         status = "not_ready"

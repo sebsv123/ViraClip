@@ -319,11 +319,54 @@ class TaskRepository:
             text("""
                 UPDATE tasks
                 SET error_code = :error_code,
-                    status = 'failed'
+                    error_message = :error_message,
+                    progress_message = :progress_message,
+                    status = 'error',
+                    updated_at = NOW()
                 WHERE id = :task_id
             """),
-            {"task_id": task_id, "error_code": error_code[:80]}
+            {
+                "task_id": task_id,
+                "error_code": error_code[:80],
+                "error_message": (error_message or "")[:500],
+                "progress_message": f"no_clips_generated:{(error_message or 'unknown')[:120]}",
+            }
         )
+        await db.commit()
+
+    @staticmethod
+    async def update_task_failure_details(
+        db: AsyncSession,
+        task_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        progress_message: str,
+        progress: Optional[int] = 100,
+    ) -> None:
+        """Persist explicit failure details for frontend/API consumption."""
+        await db.execute(
+            text(
+                """
+                UPDATE tasks
+                SET status = 'error',
+                    error_code = :error_code,
+                    error_message = :error_message,
+                    progress_message = :progress_message,
+                    progress = :progress,
+                    updated_at = NOW()
+                WHERE id = :task_id
+                """
+            ),
+            {
+                "task_id": task_id,
+                "error_code": (error_code or "task_error")[:80],
+                "error_message": (error_message or "unknown_error")[:500],
+                "progress_message": (progress_message or "error")[:240],
+                "progress": progress,
+            },
+        )
+        await db.commit()
     
     @staticmethod
     async def update_task_status(

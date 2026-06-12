@@ -337,6 +337,76 @@ def _safe_float(val: Any) -> Optional[float]:
         return None
 
 
+def _analysis_from_report(report: AudioLoudnessReport) -> Dict[str, Any]:
+    """Convert a loudness report into a compact analysis dict."""
+    integrated_lufs = report.output_i if report.output_i is not None else report.input_i
+    true_peak = report.output_tp if report.output_tp is not None else report.input_tp
+    if true_peak is None:
+        true_peak = report.max_volume
+    mean_volume_db = report.mean_volume
+    max_volume_db = report.max_volume
+    audio_analysis_available = bool(
+        report.measurement_method != "unavailable"
+        or integrated_lufs is not None
+        or mean_volume_db is not None
+        or max_volume_db is not None
+    )
+    silence_likely = bool(mean_volume_db is not None and mean_volume_db < -45.0)
+    too_quiet = bool(
+        (mean_volume_db is not None and mean_volume_db < -28.0)
+        or (integrated_lufs is not None and integrated_lufs < -18.5)
+    )
+    clipping_risk = bool(true_peak is not None and true_peak > -0.5)
+    too_loud = bool(
+        (true_peak is not None and true_peak > -1.0)
+        or (mean_volume_db is not None and mean_volume_db > -10.0)
+    )
+    voice_band_energy_hint = "balanced"
+    if silence_likely:
+        voice_band_energy_hint = "silent"
+    elif too_quiet:
+        voice_band_energy_hint = "weak"
+    elif clipping_risk or too_loud:
+        voice_band_energy_hint = "hot"
+    elif mean_volume_db is not None and -24.0 <= mean_volume_db <= -14.0:
+        voice_band_energy_hint = "healthy"
+
+    return {
+        "audio_analysis_available": audio_analysis_available,
+        "mean_volume_db": mean_volume_db,
+        "max_volume_db": max_volume_db,
+        "integrated_lufs": integrated_lufs,
+        "true_peak": true_peak,
+        "silence_likely": silence_likely,
+        "clipping_risk": clipping_risk,
+        "too_quiet": too_quiet,
+        "too_loud": too_loud,
+        "voice_band_energy_hint": voice_band_energy_hint,
+        "analysis_method": report.measurement_method,
+        "analysis_warnings": list(report.warnings or []),
+    }
+
+
+def analyze_audio_loudness(path: str) -> Dict[str, Any]:
+    """Analyze audio loudness for a file and return a compact dict."""
+    report = measure_loudness(path)
+    analysis = _analysis_from_report(report)
+    logger.info(
+        "AUDIO_LOUDNESS_ANALYZED path=%s available=%s mean_db=%s max_db=%s lufs=%s true_peak=%s silence=%s clipping=%s too_quiet=%s too_loud=%s",
+        Path(path).name if path else "",
+        str(bool(analysis.get("audio_analysis_available"))).lower(),
+        analysis.get("mean_volume_db"),
+        analysis.get("max_volume_db"),
+        analysis.get("integrated_lufs"),
+        analysis.get("true_peak"),
+        str(bool(analysis.get("silence_likely"))).lower(),
+        str(bool(analysis.get("clipping_risk"))).lower(),
+        str(bool(analysis.get("too_quiet"))).lower(),
+        str(bool(analysis.get("too_loud"))).lower(),
+    )
+    return analysis
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # FASE 3 — Audio Mastering
 # ══════════════════════════════════════════════════════════════════════════════
@@ -410,13 +480,17 @@ def master_audio_for_social(
         result.loudness_report = report
         result.method = "disabled"
         result.warnings.append("audio_mastering_disabled")
+        result.pre_master_audio_analysis = _analysis_from_report(report)  # type: ignore[attr-defined]
+        result.post_master_audio_analysis = _analysis_from_report(report)  # type: ignore[attr-defined]
         return result
 
     # ── Step 1: Measure input loudness ────────────────────────────────────
     logger.info("[audio-master] measuring input loudness: %s", input_path_obj.name)
     input_report = measure_loudness(input_path)
+    pre_master_analysis = _analysis_from_report(input_report)
     result.loudness_report = input_report
     result.input_loudness_report = input_report
+    result.pre_master_audio_analysis = pre_master_analysis  # type: ignore[attr-defined]
 
     # ── Step 2: Check if mastering is needed ──────────────────────────────
     if not should_apply_audio_mastering(input_report):
@@ -432,6 +506,7 @@ def master_audio_for_social(
             result.applied = False
             result.output_loudness_report = measure_loudness(output_path)
             result.loudness_report = result.output_loudness_report
+            result.post_master_audio_analysis = _analysis_from_report(result.output_loudness_report)  # type: ignore[attr-defined]
             return result
         except Exception as e:
             result.error = str(e)
@@ -478,6 +553,8 @@ def master_audio_for_social(
         output_report = measure_loudness(output_path)
         result.loudness_report = output_report
         result.output_loudness_report = output_report
+        post_master_analysis = _analysis_from_report(output_report)
+        result.post_master_audio_analysis = post_master_analysis  # type: ignore[attr-defined]
 
         # Use output_i from loudnorm (which is the measured LUFS of the output file)
         # or fall back to input_i (same file measurement)
@@ -492,12 +569,34 @@ def master_audio_for_social(
             output_peak,
             output_report.measurement_method,
         )
+        rejected_reasons: List[str] = []
+        if post_master_analysis.get("silence_likely"):
+            rejected_reasons.append("silence_likely")
+        if post_master_analysis.get("clipping_risk"):
+            rejected_reasons.append("clipping_risk")
+        if post_master_analysis.get("too_quiet"):
+            rejected_reasons.append("too_quiet")
+        if rejected_reasons:
+            logger.warning(
+                "AUDIO_MASTERING_REJECTED_REASON path=%s reason=%s",
+                Path(output_path).name,
+                "|".join(rejected_reasons),
+            )
+            _fallback_copy(input_path, output_path, result)
+            result.method = "fallback_pre_master_analysis_rejected"
+            result.applied = False
+            result.warnings.append("mastering_rejected_analysis")
+            result.output_loudness_report = measure_loudness(output_path)
+            result.post_master_audio_analysis = _analysis_from_report(result.output_loudness_report)  # type: ignore[attr-defined]
+        else:
+            logger.info("AUDIO_MASTERING_IMPROVED_AUDIO input=%s output=%s", input_path_obj.name, Path(output_path).name)
 
     except subprocess.TimeoutExpired:
         logger.warning("[audio-master] failed fallback=input reason=timeout")
         result.error = "ffmpeg_timeout"
         result.warnings.append("audio_mastering_failed")
         _fallback_copy(input_path, output_path, result)
+        result.post_master_audio_analysis = analyze_audio_loudness(output_path)  # type: ignore[attr-defined]
 
     except subprocess.CalledProcessError as e:
         stderr = (e.stderr or "")[-240:]
@@ -505,12 +604,14 @@ def master_audio_for_social(
         result.error = f"ffmpeg_error: {stderr}"
         result.warnings.append("audio_mastering_failed")
         _fallback_copy(input_path, output_path, result)
+        result.post_master_audio_analysis = analyze_audio_loudness(output_path)  # type: ignore[attr-defined]
 
     except Exception as e:
         logger.warning("[audio-master] failed fallback=input reason=%s", e)
         result.error = str(e)
         result.warnings.append("audio_mastering_failed")
         _fallback_copy(input_path, output_path, result)
+        result.post_master_audio_analysis = analyze_audio_loudness(output_path)  # type: ignore[attr-defined]
 
     return result
 
@@ -613,12 +714,44 @@ def build_audio_qc_metadata(result: AudioMasteringResult) -> Dict[str, Any]:
         + list(input_report.warnings or [])
         + list(output_report.warnings or [])
     ))
+    pre_master_analysis = getattr(result, "pre_master_audio_analysis", None)
+    if not isinstance(pre_master_analysis, dict):
+        pre_master_analysis = analyze_audio_loudness(result.input_path) if result.input_path else _analysis_from_report(input_report)
+    post_master_analysis = getattr(result, "post_master_audio_analysis", None)
+    if not isinstance(post_master_analysis, dict):
+        post_master_analysis = analyze_audio_loudness(result.output_path) if result.output_path else _analysis_from_report(output_report)
+    mastered_better = bool(
+        post_master_analysis.get("audio_analysis_available")
+        and not post_master_analysis.get("silence_likely")
+        and not post_master_analysis.get("clipping_risk")
+        and not post_master_analysis.get("too_quiet")
+    )
+    rejected_reason = ""
+    if result.error:
+        rejected_reason = str(result.error)
+    elif not mastered_better and not bool(result.applied):
+        rejected_reason = str(post_master_analysis.get("voice_band_energy_hint") or "analysis_rejected")
+    elif bool(post_master_analysis.get("silence_likely")):
+        rejected_reason = "silence_likely"
+    elif bool(post_master_analysis.get("clipping_risk")):
+        rejected_reason = "clipping_risk"
+    elif bool(post_master_analysis.get("too_quiet")):
+        rejected_reason = "too_quiet"
 
     return {
         # FASE 4 fields
         "audio_mastering_applied": result.applied,
         "audio_mastering_enabled": result.enabled,
         "audio_mastering_method": result.method,
+        "audio_mastering_fallback_to_premaster": bool(
+            result.method.startswith("fallback")
+            or "fallback" in " ".join(audio_warnings).lower()
+        ),
+        "audio_mastering_skip_reason": (
+            result.error
+            or ("already_loud_enough" if result.method == "skipped" else "")
+            or ("disabled" if not result.enabled else "")
+        ),
         "input_lufs": input_lufs,
         "output_lufs": output_lufs,
         "input_peak": input_peak,
@@ -639,6 +772,10 @@ def build_audio_qc_metadata(result: AudioMasteringResult) -> Dict[str, Any]:
         "normalization_type": output_report.normalization_type,
         "target_offset": output_report.target_offset,
         "audio_warnings": audio_warnings,
+        "pre_master_audio_analysis": pre_master_analysis,
+        "post_master_audio_analysis": post_master_analysis,
+        "mastering_improved_audio": bool(mastered_better),
+        "mastering_rejected_reason": rejected_reason,
     }
 
 
@@ -668,3 +805,219 @@ def build_audio_publish_warnings(result: AudioMasteringResult) -> List[str]:
         warnings.append("audio_measure_failed")
 
     return warnings
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# FASE 5 — Final Audio Audibility QC
+# ══════════════════════════════════════════════════════════════════════════════
+
+def final_audio_audibility_qc(
+    audio_path: str,
+    pre_master_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run final audio audibility QC on a mastered audio/video file.
+
+    Uses ffprobe to:
+      1. Check that an audio stream exists.
+      2. Run volumedetect to get mean_volume and max_volume.
+      3. If mean_volume > -30 dB (near-silent), log AUDIO_MASTERING_FALLBACK
+         reason=near_silence and fall back to pre-master output (if available).
+      4. Log FINAL_AUDIO_QC with path, has_audio_stream, mean_volume,
+         max_volume, audible.
+      5. If no audible audio remains, return technical_qc fail.
+
+    Returns a dict with:
+      - path: str
+      - has_audio_stream: bool
+      - mean_volume: Optional[float]
+      - max_volume: Optional[float]
+      - audible: bool
+      - fallback_applied: bool
+      - fallback_reason: Optional[str]
+      - technical_qc_passed: bool
+      - technical_qc_reasons: List[str]
+    """
+    result: Dict[str, Any] = {
+        "path": audio_path,
+        "has_audio_stream": False,
+        "mean_volume": None,
+        "max_volume": None,
+        "audible": False,
+        "fallback_applied": False,
+        "fallback_reason": None,
+        "technical_qc_passed": True,
+        "technical_qc_reasons": [],
+    }
+
+    path = Path(audio_path)
+    if not path.exists():
+        result["technical_qc_passed"] = False
+        result["technical_qc_reasons"].append("audio_file_not_found")
+        logger.warning("FINAL_AUDIO_QC path=%s has_audio_stream=false audible=false reason=file_not_found", audio_path)
+        return result
+
+    # ── Step 1: Check audio stream exists ──────────────────────────────────
+    try:
+        probe_cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(path),
+        ]
+        probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=15)
+        has_audio = probe_result.returncode == 0 and "audio" in (probe_result.stdout or "").strip().lower()
+        result["has_audio_stream"] = has_audio
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("[audio-audibility] ffprobe stream check failed: %s", e)
+        result["has_audio_stream"] = False
+
+    if not result["has_audio_stream"]:
+        result["audible"] = False
+        result["technical_qc_passed"] = False
+        result["technical_qc_reasons"].append("no_audio_stream")
+        logger.warning(
+            "FINAL_AUDIO_QC path=%s has_audio_stream=false audible=false reason=no_audio_stream",
+            audio_path,
+        )
+        return result
+
+    # ── Step 2: Run volumedetect ───────────────────────────────────────────
+    try:
+        vd_cmd = [
+            "ffprobe", "-v", "error",
+            "-f", "lavfi",
+            "-i", f"amovie={path},volumedetect",
+            "-show_entries", "tags=lavfi.volumedetect.mean_volume,lavfi.volumedetect.max_volume",
+            "-of", "csv=p=0",
+        ]
+        vd_result = subprocess.run(vd_cmd, capture_output=True, text=True, timeout=30)
+        vd_stdout = vd_result.stdout or ""
+        vd_stderr = vd_result.stderr or ""
+
+        # Fallback: parse volumedetect output from stderr if stdout is empty
+        if not vd_stdout.strip():
+            vd_cmd2 = [
+                "ffprobe", "-v", "error",
+                "-f", "lavfi",
+                "-i", f"amovie={path},volumedetect",
+                "-show_entries", "frame_tags",
+                "-of", "default=noprint_wrappers=1",
+            ]
+            vd_result2 = subprocess.run(vd_cmd2, capture_output=True, text=True, timeout=30)
+            vd_stdout = vd_result2.stdout or ""
+            vd_stderr = vd_result2.stderr or ""
+
+        # Parse mean_volume and max_volume from output
+        mean_volume: Optional[float] = None
+        max_volume: Optional[float] = None
+        for line in (vd_stdout + "\n" + vd_stderr).split("\n"):
+            line = line.strip().lower()
+            if "mean_volume" in line:
+                parts = line.split("=")
+                if len(parts) >= 2:
+                    try:
+                        mean_volume = float(parts[-1].replace("db", "").strip())
+                    except ValueError:
+                        pass
+            elif "max_volume" in line:
+                parts = line.split("=")
+                if len(parts) >= 2:
+                    try:
+                        max_volume = float(parts[-1].replace("db", "").strip())
+                    except ValueError:
+                        pass
+
+        result["mean_volume"] = mean_volume
+        result["max_volume"] = max_volume
+
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        logger.warning("[audio-audibility] volumedetect failed: %s", e)
+        result["mean_volume"] = None
+        result["max_volume"] = None
+
+    # ── Step 3: Determine audibility ───────────────────────────────────────
+    # If mean_volume is available and > -30 dB, audio is near-silent
+    near_silent = (
+        result["mean_volume"] is not None
+        and result["mean_volume"] > -30.0
+    )
+
+    if near_silent:
+        logger.warning(
+            "AUDIO_MASTERING_FALLBACK reason=near_silence mean_volume=%.1f path=%s",
+            result["mean_volume"],
+            audio_path,
+        )
+        result["fallback_applied"] = True
+        result["fallback_reason"] = "near_silence"
+
+        # Fall back to pre-master output if available
+        if pre_master_path and Path(pre_master_path).exists():
+            logger.info(
+                "[audio-audibility] falling back to pre-master output: %s",
+                pre_master_path,
+            )
+            # Re-run volumedetect on pre-master
+            try:
+                vd_cmd3 = [
+                    "ffprobe", "-v", "error",
+                    "-f", "lavfi",
+                    "-i", f"amovie={pre_master_path},volumedetect",
+                    "-show_entries", "frame_tags",
+                    "-of", "default=noprint_wrappers=1",
+                ]
+                vd_result3 = subprocess.run(vd_cmd3, capture_output=True, text=True, timeout=30)
+                pm_stdout = vd_result3.stdout or ""
+                pm_stderr = vd_result3.stderr or ""
+                pm_mean: Optional[float] = None
+                pm_max: Optional[float] = None
+                for line in (pm_stdout + "\n" + pm_stderr).split("\n"):
+                    line = line.strip().lower()
+                    if "mean_volume" in line:
+                        parts = line.split("=")
+                        if len(parts) >= 2:
+                            try:
+                                pm_mean = float(parts[-1].replace("db", "").strip())
+                            except ValueError:
+                                pass
+                    elif "max_volume" in line:
+                        parts = line.split("=")
+                        if len(parts) >= 2:
+                            try:
+                                pm_max = float(parts[-1].replace("db", "").strip())
+                            except ValueError:
+                                pass
+                result["mean_volume"] = pm_mean
+                result["max_volume"] = pm_max
+                result["path"] = pre_master_path
+                # Re-check audibility on pre-master
+                if pm_mean is not None and pm_mean > -30.0:
+                    result["audible"] = False
+                    result["technical_qc_passed"] = False
+                    result["technical_qc_reasons"].append("near_silent_audio")
+                else:
+                    result["audible"] = True
+            except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+                logger.warning("[audio-audibility] pre-master volumedetect failed: %s", e)
+                result["audible"] = False
+                result["technical_qc_passed"] = False
+                result["technical_qc_reasons"].append("near_silent_audio")
+        else:
+            result["audible"] = False
+            result["technical_qc_passed"] = False
+            result["technical_qc_reasons"].append("near_silent_audio")
+    else:
+        result["audible"] = True
+
+    # ── Step 4: Log FINAL_AUDIO_QC ─────────────────────────────────────────
+    logger.info(
+        "FINAL_AUDIO_QC path=%s has_audio_stream=%s mean_volume=%s max_volume=%s audible=%s",
+        result["path"],
+        str(result["has_audio_stream"]).lower(),
+        str(result["mean_volume"]) if result["mean_volume"] is not None else "none",
+        str(result["max_volume"]) if result["max_volume"] is not None else "none",
+        str(result["audible"]).lower(),
+    )
+
+    return result

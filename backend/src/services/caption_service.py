@@ -40,7 +40,117 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .vpi_visual_effects_service import choose_vpi_caption_polish_profile, get_vpi_visual_design_tokens
+
 logger = logging.getLogger(__name__)
+
+
+def _normalize_caption_words_to_clip_timebase(
+    words: List[Dict[str, Any]],
+    clip_duration: float,
+) -> tuple[List[Dict[str, Any]], bool, str, str]:
+    normalized: List[Dict[str, Any]] = []
+    starts: List[float] = []
+    ends: List[float] = []
+    for raw in words or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start = float(raw.get("start", 0.0) or 0.0)
+            end = float(raw.get("end", start) or start)
+        except Exception:
+            continue
+        normalized.append(dict(raw))
+        starts.append(start)
+        ends.append(end)
+    if not normalized:
+        return [], False, "empty", ""
+    min_start = min(starts) if starts else 0.0
+    max_end = max(ends) if ends else 0.0
+    clip_duration = float(clip_duration or 0.0)
+    if clip_duration > 0.0 and max_end > clip_duration + 1.0 and min_start >= 1.0:
+        offset = min_start
+        corrected: List[Dict[str, Any]] = []
+        for raw in normalized:
+            shifted = dict(raw)
+            try:
+                shifted["start"] = max(0.0, float(shifted.get("start", 0.0) or 0.0) - offset)
+                shifted["end"] = max(0.0, float(shifted.get("end", shifted["start"]) or shifted["start"]) - offset)
+            except Exception:
+                continue
+            corrected.append(shifted)
+        return corrected, True, "absolute_to_clip_offset", f"offset={offset:.3f}"
+    return normalized, False, "clip_relative", ""
+
+
+def _normalize_caption_word_items(
+    words: List[Any],
+    clip_duration: float = 0.0,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    previous_end = 0.0
+    clip_duration = max(0.0, float(clip_duration or 0.0))
+
+    for index, raw in enumerate(words or []):
+        item: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            item = dict(raw)
+        elif hasattr(raw, "start") or hasattr(raw, "end") or hasattr(raw, "text") or hasattr(raw, "word"):
+            item = {
+                "start": getattr(raw, "start", None),
+                "end": getattr(raw, "end", None),
+                "text": getattr(raw, "text", None),
+                "word": getattr(raw, "word", None),
+                "score": getattr(raw, "score", getattr(raw, "probability", None)),
+            }
+        elif isinstance(raw, (list, tuple)):
+            item = {
+                "text": raw[0] if len(raw) > 0 else "",
+                "start": raw[1] if len(raw) > 1 else None,
+                "end": raw[2] if len(raw) > 2 else None,
+                "score": raw[3] if len(raw) > 3 else None,
+            }
+        elif isinstance(raw, str):
+            item = {"text": raw, "start": None, "end": None}
+        else:
+            continue
+
+        text = str(item.get("text") or item.get("word") or "").strip()
+        if not text:
+            continue
+
+        raw_start = item.get("start", None)
+        raw_end = item.get("end", None)
+        try:
+            start = float(raw_start) if raw_start is not None else previous_end
+        except Exception:
+            start = previous_end
+        try:
+            end = float(raw_end) if raw_end is not None else start + 0.45
+        except Exception:
+            end = start + 0.45
+
+        if end <= start:
+            end = start + 0.45
+
+        start = max(0.0, start)
+        end = max(start + 0.01, end)
+
+        previous_end = max(previous_end, end)
+        normalized.append(
+            {
+                "text": text,
+                "word": text,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": float(item.get("score", item.get("probability", 0.5)) or 0.5),
+                "probability": float(item.get("probability", item.get("score", 0.5)) or 0.5),
+                "is_emphasis": bool(item.get("is_emphasis", False)),
+                "_normalized_index": index,
+            }
+        )
+
+    return normalized
 
 
 # ── Data models ───────────────────────────────────────────────────────────────
@@ -87,12 +197,126 @@ _VPI_ORANGE = _ass_colour(255, 122, 24)
 _TRANSP  = "&H00000000"
 _SEMI_BG = "&HAA000000"   # semi-transparent black background
 
+_VPI_CAPTION_KEYWORDS = {
+    "seguro",
+    "seguros",
+    "salud",
+    "vida",
+    "decesos",
+    "familia",
+    "proteccion",
+    "proteger",
+    "riesgo",
+    "accidente",
+    "hospital",
+    "medico",
+    "ahorro",
+    "tranquilidad",
+    "cobertura",
+    "poliza",
+    "autonomo",
+    "extranjero",
+    "residencia",
+}
+
 _CAPTION_KEYWORDS: Dict[str, List[str]] = {
     "decesos": ["alivio", "familia", "momento dificil", "momento difícil", "acompañamiento", "menos carga", "cuidado", "responsabilidad"],
     "salud": ["salud", "no siempre avisa", "especialistas", "pruebas", "tranquilidad", "organizacion", "organización", "respaldo"],
     "autonomos": ["autonomo", "autónomo", "autonomos", "autónomos", "motor", "estabilidad", "ingresos", "continuidad", "estrategia", "bolsillo", "imprevisto"],
     "vida": ["proteccion", "protección", "familia", "futuro", "tranquilidad", "responsabilidad", "ingresos", "ausencia"],
 }
+
+_CAPTION_PROTECTED_PHRASES = [
+    "seguro de vida",
+    "seguro de salud",
+    "cuadro medico",
+    "cuadro médico",
+    "sin copago",
+    "extranjeria",
+    "extranjería",
+    "permiso de residencia",
+    "asistencia en viaje",
+    "seguro de decesos",
+]
+
+
+def _caption_polish_token(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _strip_accents(text))
+
+
+def _caption_phrase_tokens(phrases: Optional[List[str]] = None) -> List[tuple[str, ...]]:
+    tokens: List[tuple[str, ...]] = []
+    for phrase in phrases or _CAPTION_PROTECTED_PHRASES:
+        parts = tuple(_caption_polish_token(part) for part in str(phrase).split() if _caption_polish_token(part))
+        if len(parts) >= 2:
+            tokens.append(parts)
+    return tokens
+
+
+def _caption_word_tokens(words: List[WordTimestamp]) -> List[str]:
+    return [_caption_polish_token(w.text) for w in words]
+
+
+def _caption_tail_forms_protected_phrase(
+    current_tokens: List[str],
+    next_token: str,
+    protected_phrases: List[tuple[str, ...]],
+) -> bool:
+    if not current_tokens or not next_token:
+        return False
+    for phrase in protected_phrases:
+        if len(phrase) < 2:
+            continue
+        if len(current_tokens) < len(phrase) - 1:
+            continue
+        if tuple(current_tokens[-(len(phrase) - 1):] + [next_token]) == phrase:
+            return True
+    return False
+
+
+def _caption_split_index(
+    words: List[WordTimestamp],
+    max_words_per_line: int,
+    max_chars_per_line: int = 0,
+    protected_phrases: Optional[List[tuple[str, ...]]] = None,
+) -> int:
+    if len(words) <= 3:
+        return max(1, len(words) // 2 or 1)
+    protected_phrases = protected_phrases or _caption_phrase_tokens()
+    tokens = _caption_word_tokens(words)
+    char_counts = [len(str(w.text or "").strip()) for w in words]
+    candidates = list(range(1, len(words)))
+    best_idx = max(1, min(len(words) - 1, (len(words) + 1) // 2))
+    best_score: float = -1e9
+    for idx in candidates:
+        left = tokens[:idx]
+        right = tokens[idx:]
+        if not left or not right:
+            continue
+        left_chars = sum(char_counts[:idx]) + max(0, idx - 1)
+        right_chars = sum(char_counts[idx:]) + max(0, len(words) - idx - 1)
+        score = -abs(len(left) - len(right)) * 2.0
+        if len(left) == 1:
+            score -= 4.0
+        if len(right) == 1:
+            score -= 4.0
+        if len(left) > max_words_per_line:
+            score -= (len(left) - max_words_per_line) * 3.0
+        if len(right) > max_words_per_line:
+            score -= (len(right) - max_words_per_line) * 3.0
+        if max_chars_per_line > 0:
+            if left_chars > max_chars_per_line:
+                score -= (left_chars - max_chars_per_line) * 0.9
+            if right_chars > max_chars_per_line:
+                score -= (right_chars - max_chars_per_line) * 0.9
+        if _caption_tail_forms_protected_phrase(left, right[0], protected_phrases):
+            score -= 8.0
+        if len(left) >= 2 and len(right) >= 2:
+            score += 1.5
+        if score > best_score:
+            best_idx = idx
+            best_score = score
+    return best_idx
 
 _ICON_CONCEPTS: Dict[str, List[str]] = {
     "familia": ["family", "familia", "heart", "shield"],
@@ -132,12 +356,113 @@ def _is_beta_clean() -> bool:
     return os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}
 
 
+def _premium_captions_enabled() -> bool:
+    try:
+        from .vpi_production_safe_edit import production_safe_edit_enabled
+        return _is_beta_clean() or production_safe_edit_enabled()
+    except Exception:
+        return _is_beta_clean()
+
+
 def _margin_v(platform: str) -> int:
     return _PLATFORM_MARGIN_V.get(platform.lower(), _PLATFORM_MARGIN_V["default"])
 
 
 def _beta_clean_margin_v(platform: str) -> int:
     return int(os.environ.get("CAPTION_BETA_CLEAN_MARGIN_V", _margin_v(platform)))
+
+
+def _strip_caption_accents(text: str) -> str:
+    return str(text or "").translate(str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunAEIOUUN")).lower()
+
+
+def _caption_word_token(text: str) -> str:
+    token = _strip_caption_accents(text)
+    return re.sub(r"[^a-z0-9]+", "", token)
+
+
+def _select_vpi_caption_keywords(words: List[WordTimestamp], max_terms: int = 2) -> List[str]:
+    selected: List[str] = []
+    for w in words:
+        token = _caption_word_token(w.text)
+        if token in _VPI_CAPTION_KEYWORDS and token not in selected:
+            selected.append(token)
+        if len(selected) >= max_terms:
+            break
+    return selected
+
+
+def _safe_zone_adjustment(
+    *,
+    platform: str,
+    base_margin_v: int,
+    overlay_plan: Optional[Dict[str, Any]] = None,
+    safe_zone_context: Optional[Dict[str, Any]] = None,
+    play_res_y: int = 1920,
+) -> tuple[int, int, Optional[str]]:
+    adjusted_margin_v = base_margin_v
+    adjusted_pos_y = int(round(play_res_y * 0.84))
+    reasons: List[str] = []
+    overlay_plan = overlay_plan or {}
+    safe_zone_context = safe_zone_context or {}
+
+    if overlay_plan.get("hook_overlay", {}).get("applied"):
+        adjusted_margin_v += 28
+        adjusted_pos_y = max(0, adjusted_pos_y - 26)
+        reasons.append("hook_overlay")
+    if overlay_plan.get("lower_third", {}).get("applied"):
+        adjusted_margin_v += 18
+        adjusted_pos_y = max(0, adjusted_pos_y - 18)
+        reasons.append("lower_third")
+
+    bbox_sources: List[Dict[str, Any]] = []
+    for key in ("face_bbox", "speaker_bbox", "bbox"):
+        bbox = safe_zone_context.get(key)
+        if isinstance(bbox, dict):
+            bbox_sources.append(bbox)
+
+    if bbox_sources:
+        low_face = False
+        for bbox in bbox_sources:
+            try:
+                bottom = float(bbox.get("y", 0.0)) + float(bbox.get("height", bbox.get("h", 0.0)))
+                if bottom >= 0.62:
+                    low_face = True
+                    break
+            except Exception:
+                continue
+        if low_face:
+            adjusted_margin_v += 22
+            adjusted_pos_y = max(0, adjusted_pos_y - 18)
+            reasons.append("face_bbox")
+
+    if adjusted_margin_v < base_margin_v:
+        adjusted_margin_v = base_margin_v
+    if adjusted_margin_v == base_margin_v and adjusted_pos_y == int(round(play_res_y * 0.84)):
+        return base_margin_v, adjusted_pos_y, None
+    return adjusted_margin_v, adjusted_pos_y, ",".join(reasons) or "safe_default"
+
+
+def _adaptive_font_size(base_size: int, words: List[WordTimestamp]) -> tuple[int, Optional[str]]:
+    word_count = len(words)
+    char_count = sum(len(str(w.text or "").strip()) for w in words)
+    factor = 1.0
+    reason = None
+    if word_count >= 8 or char_count >= 48:
+        factor = 0.82
+        reason = "long_block"
+    elif word_count >= 6 or char_count >= 36:
+        factor = 0.90
+        reason = "long_block"
+    elif word_count >= 5 or char_count >= 28:
+        factor = 0.95
+        reason = "long_block"
+    if reason is None:
+        return base_size, None
+    new_size = max(62, int(round(base_size * factor)))
+    if new_size >= base_size:
+        return base_size, None
+    return new_size, reason
 
 
 # ── Font configuration ─────────────────────────────────────────────────────
@@ -154,9 +479,9 @@ _VISUAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "name": "vpi_clean",
         "caption_style": "tiktok",
         "font": _CAPTION_FONT,
-        "font_size": int(os.environ.get("CAPTION_VPI_FONT_SIZE", "80")),
+        "font_size": int(os.environ.get("CAPTION_VPI_FONT_SIZE", "72")),
         "primary_colour": _WHITE,
-        "highlight_colour": _VPI_ORANGE,
+        "highlight_colour": _WHITE,
         "outline_colour": _BLACK,
         "back_colour": _SEMI_BG,
         "bold": -1,
@@ -168,16 +493,16 @@ _VISUAL_PRESETS: Dict[str, Dict[str, Any]] = {
         "spacing": 1,
         "angle": 0,
         "border_style": 1,
-        "outline": 4,
-        "shadow": 2,
+        "outline": 3,
+        "shadow": 1,
         "alignment": 2,
         "margin_l": 10,
         "margin_r": 10,
         "margin_v": _PLATFORM_MARGIN_V["tiktok"],
         "anchor": "an5",
         "position_x_ratio": 0.5,
-        "position_y_ratio": 0.78,
-        "max_words_per_block": 4,
+        "position_y_ratio": 0.84,
+        "max_words_per_block": 3,
         "min_duration_s": 0.65,
         "max_duration_s": 1.8,
         "gap_threshold_s": 0.45,
@@ -214,6 +539,19 @@ def _beta_clean_visual_preset() -> Dict[str, Any]:
     preset = _get_visual_preset(_active_visual_preset_name())
     if preset is None:
         preset = _VISUAL_PRESETS[_DEFAULT_BETA_CLEAN_PRESET]
+    tokens = get_vpi_visual_design_tokens()
+    colors = tokens.get("colors") or {}
+    typography = tokens.get("typography") or {}
+    spacing = tokens.get("spacing") or {}
+    preset = dict(preset)
+    preset["font_size"] = int(round(float(preset.get("font_size") or 72) * float(typography.get("caption_font_scale") or 1.0)))
+    preset["primary_colour"] = _ass_colour(245, 245, 242)
+    preset["highlight_colour"] = _ass_colour(245, 245, 242)
+    preset["outline_colour"] = _ass_colour(255, 255, 255, 220)
+    preset["back_colour"] = _ass_colour(26, 26, 26, 230)
+    preset["margin_v"] = max(int(preset.get("margin_v") or 0), int(spacing.get("caption_bottom_margin") or 280))
+    preset["position_x_ratio"] = 0.5
+    preset["position_y_ratio"] = 0.84
     logger.info("[vpi-preset] using preset=%s", preset["name"])
     return preset
 
@@ -291,15 +629,31 @@ def _is_emphasis_word(word: WordTimestamp, threshold: float = 0.82) -> bool:
     return word.score >= threshold
 
 
-def _build_karaoke_text(words: List[WordTimestamp], emphasis_threshold: float = 0.82) -> str:
+def _build_karaoke_text(
+    words: List[WordTimestamp],
+    emphasis_threshold: float = 0.82,
+    caption_polish_profile: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build \\k-tagged karaoke text from word list with emphasis support."""
     parts = []
+    keyword_terms = set(_select_vpi_caption_keywords(words))
+    sensitive_soft = bool(isinstance(caption_polish_profile, dict) and str(caption_polish_profile.get("caption_polish_profile") or "") == "sensitive_soft")
+    if isinstance(caption_polish_profile, dict) and not bool(caption_polish_profile.get("keyword_highlight_allowed", True)):
+        keyword_terms = set()
     for w in words:
-        if _is_emphasis_word(w, emphasis_threshold):
+        token = _caption_word_token(w.text)
+        if sensitive_soft:
+            parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
+        elif _is_emphasis_word(w, emphasis_threshold):
             # High impact word: bright yellow + slightly larger
             parts.append(
                 f"{{\\k{w.duration_cs}\\c{_YELLOW}\\fscx110\\fscy110}}{w.text}"
                 f"{{\\c{_WHITE}\\fscx100\\fscy100}}"
+            )
+        elif token in keyword_terms:
+            parts.append(
+                f"{{\\k{w.duration_cs}\\c{_WHITE}\\b1\\fscx106\\fscy106}}{w.text}"
+                f"{{\\c{_WHITE}\\b0\\fscx100\\fscy100}}"
             )
         else:
             parts.append(f"{{\\k{w.duration_cs}}}{w.text}")
@@ -312,7 +666,7 @@ def _build_beta_clean_text(words: List[WordTimestamp], active_idx: int = -1) -> 
     for i, w in enumerate(words):
         text = w.text
         if i == active_idx:
-            parts.append(f"{{\\c{_YELLOW}}}{text}{{\\c{_WHITE}}}")
+            parts.append(f"{{\\c{_WHITE}\\b1}}{text}{{\\c{_WHITE}\\b0}}")
         else:
             parts.append(text)
     return "{\\an2}" + " ".join(parts)
@@ -321,20 +675,54 @@ def _build_beta_clean_text(words: List[WordTimestamp], active_idx: int = -1) -> 
 def _build_beta_clean_karaoke_text(
     words: List[WordTimestamp],
     pos_tag: str,
-    highlight_colour: str = _VPI_ORANGE,
+    highlight_colour: str = _WHITE,
+    font_size: Optional[int] = None,
+    caption_polish_profile: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Single visual ASS event per block, with active word handled by karaoke timing."""
-    parts = []
-    for w in words:
+    polish = caption_polish_profile if isinstance(caption_polish_profile, dict) else {}
+    keyword_terms = set(_select_vpi_caption_keywords(words))
+    sensitive_soft = bool(str(polish.get("caption_polish_profile") or "") == "sensitive_soft")
+    if not bool(polish.get("keyword_highlight_allowed", True)):
+        keyword_terms = set()
+    max_words_per_line = max(3, int(polish.get("max_words_per_caption") or 5))
+    protected_phrases = _caption_phrase_tokens()
+
+    def _render_word(w: WordTimestamp) -> str:
+        token = _caption_word_token(w.text)
         duration_cs = max(1, int(round(max(0.08, w.end - w.start) * 100)))
+        if sensitive_soft:
+            return f"{{\\kf{duration_cs}}}{w.text}"
         if w.emphasis:
-            parts.append(
+            return (
                 f"{{\\kf{duration_cs}\\c{highlight_colour}\\b1\\fscx108\\fscy108}}"
                 f"{w.text}{{\\c{_WHITE}\\b0\\fscx100\\fscy100}}"
             )
-        else:
-            parts.append(f"{{\\kf{duration_cs}\\c{highlight_colour}}}{w.text}{{\\c{_WHITE}}}")
-    return pos_tag + " ".join(parts)
+        if token in keyword_terms:
+            return (
+                f"{{\\kf{duration_cs}\\c{_SOFT_WHITE}\\b1\\fscx106\\fscy106}}{w.text}"
+                f"{{\\c{_WHITE}\\b0\\fscx100\\fscy100}}"
+            )
+        return f"{{\\kf{duration_cs}\\c{highlight_colour}\\b1}}{w.text}{{\\c{_WHITE}\\b0}}"
+
+    prefix = pos_tag
+    if font_size:
+        prefix = f"{pos_tag}{{\\fs{font_size}}}"
+    else:
+        prefix = f"{pos_tag}{{\\fs72}}"
+
+    if len(words) <= 3:
+        return prefix + "{\\fad(90,120)}" + " ".join(_render_word(w) for w in words)
+
+    split_at = _caption_split_index(
+        words,
+        max_words_per_line=max_words_per_line,
+        max_chars_per_line=int(polish.get("max_chars_per_caption") or 0),
+        protected_phrases=protected_phrases,
+    )
+    first_line = " ".join(_render_word(w) for w in words[:split_at])
+    second_line = " ".join(_render_word(w) for w in words[split_at:])
+    return prefix + "{\\fad(90,120)}" + first_line + "\\N" + second_line
 
 
 _ASS_OVERRIDE_RE = re.compile(r"\{[^}]*\}")
@@ -477,11 +865,15 @@ def plan_caption_overlay_pack(
     local_icon_assets: Optional[List[Path]] = None,
     enable_lower_third: bool = True,
     composition_decision: Optional[Dict[str, Any]] = None,
+    global_visual_layer_budget: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     text = str(text or "")
     words = list(words or [])
     hook_intent = str(hook_intent or "")
+    visual_tokens = get_vpi_visual_design_tokens()
+    visual_design_version = str(visual_tokens.get("visual_design_version") or "a1")
     keyword_terms = _select_caption_keywords(text, editorial_type)
+    daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
     if keyword_terms:
         logger.info("[caption-overlay] keyword_emphasis applied=true words=%s", "|".join(keyword_terms[:4]))
     else:
@@ -495,7 +887,15 @@ def plan_caption_overlay_pack(
     density_actions: List[Dict[str, str]] = []
 
     overlay_text = _hook_overlay_text(text, hook_intent)
-    if subtitle_already_strong:
+    if daily_mode:
+        hook_overlay = {
+            "applied": False,
+            "reason": "daily_mode",
+            "rendered": False,
+            "disabled_by": "daily_mode",
+        }
+        logger.info("VPI_HOOK_LOWER_THIRD_DISABLED_DAILY layer=hook_overlay reason=daily_mode")
+    elif subtitle_already_strong:
         hook_overlay = {"applied": False, "reason": "subtitle_already_strong"}
         logger.info("[caption-overlay] hook_overlay skipped reason=subtitle_already_strong")
     elif sensitive_tone:
@@ -578,7 +978,15 @@ def plan_caption_overlay_pack(
         "autonomos": "Protección para autónomos",
         "vida": "Valentín Protección Integral",
     }.get(topic, "")
-    if not enable_lower_third:
+    if daily_mode:
+        lower_third = {
+            "applied": False,
+            "reason": "daily_mode",
+            "rendered": False,
+            "disabled_by": "daily_mode",
+        }
+        logger.info("VPI_HOOK_LOWER_THIRD_DISABLED_DAILY layer=lower_third reason=daily_mode")
+    elif not enable_lower_third or subtitle_already_strong or hook_overlay.get("applied"):
         lower_third = {"applied": False, "reason": "branding_conflict"}
         logger.info("[caption-overlay] lower_third skipped reason=branding_conflict")
     elif long_subtitle:
@@ -666,6 +1074,58 @@ def plan_caption_overlay_pack(
         except Exception as _comp_resolve_e:
             logger.debug("[composition-pack] conflict_resolver skipped reason=%s", _comp_resolve_e)
 
+    global_budget = global_visual_layer_budget if isinstance(global_visual_layer_budget, dict) else {}
+    if global_budget:
+        budget_allowed = set(str(item) for item in (global_budget.get("allowed_layers") or global_budget.get("visual_layers_allowed") or []))
+        budget_decisions = global_budget.get("layer_decisions") if isinstance(global_budget.get("layer_decisions"), dict) else {}
+        for _layer_name, _layer_value in (("hook_overlay", hook_overlay), ("caption_icon", icon), ("lower_third", lower_third)):
+            _budget_decision = dict((budget_decisions or {}).get(_layer_name) or {})
+            if not _budget_decision and _layer_name == "caption_icon":
+                _budget_decision = dict((budget_decisions or {}).get("icon") or {})
+            _action = str(_budget_decision.get("action") or "").strip()
+            _reason = str(_budget_decision.get("reason") or "visual_layer_budget")
+            _allowed = _layer_name in budget_allowed or ("icon" if _layer_name == "caption_icon" else _layer_name) in budget_allowed or _action == "allow"
+            if not _allowed or _action == "drop":
+                if _layer_value.get("applied"):
+                    logger.info("OVERLAY_DROPPED_COLLISION_GUARD layer=%s reason=%s", _layer_name, _reason)
+                logger.info("OVERLAY_RENDER_BLOCKED_BY_BUDGET layer=%s reason=%s", _layer_name, _reason)
+                if _layer_name == "hook_overlay":
+                    hook_overlay = {"applied": False, "planned": True, "rendered": False, "dropped_by_budget": True, "budget_drop_reason": _reason, "reason": _reason}
+                elif _layer_name == "caption_icon":
+                    icon = {"applied": False, "planned": True, "rendered": False, "dropped_by_budget": True, "budget_drop_reason": _reason, "concept": icon.get("concept", ""), "reason": _reason}
+                elif _layer_name == "lower_third":
+                    lower_third = {"applied": False, "planned": True, "rendered": False, "dropped_by_budget": True, "budget_drop_reason": _reason, "reason": _reason}
+            elif _action == "delay":
+                _new_start = float(_budget_decision.get("new_start_s") or _layer_value.get("start_s") or 0.0)
+                if _layer_name == "hook_overlay" and hook_overlay.get("applied"):
+                    hook_overlay["start_s"] = round(_new_start, 2)
+                    hook_overlay["end_s"] = round(_new_start + float(hook_overlay.get("duration_s") or 0.0), 2)
+                elif _layer_name == "lower_third" and lower_third.get("applied"):
+                    lower_third["start_s"] = round(_new_start, 2)
+                elif _layer_name == "caption_icon" and icon.get("applied"):
+                    icon["start_s"] = round(_new_start, 2)
+                logger.info(
+                    "OVERLAY_DELAYED_COLLISION_GUARD layer=%s old_start=%.2f new_start=%.2f",
+                    _layer_name,
+                    float(_layer_value.get("start_s") or 0.0),
+                    _new_start,
+                )
+            elif _action == "reduce":
+                logger.info(
+                    "OVERLAY_SAFE_ZONE_ASSIGNED layer=%s zone=%s",
+                    _layer_name,
+                    str(_budget_decision.get("safe_zone") or _layer_value.get("safe_zone") or "default"),
+                )
+        for _planned_name, _planned_value in (("hook_overlay", hook_overlay), ("caption_icon", icon), ("lower_third", lower_third)):
+            if _planned_name == "caption_icon":
+                _planned_value.setdefault("planned", bool(_planned_value.get("applied")))
+                _planned_value.setdefault("rendered", bool(_planned_value.get("applied")))
+            else:
+                _planned_value.setdefault("planned", bool(_planned_value.get("applied")))
+                _planned_value.setdefault("rendered", bool(_planned_value.get("applied")))
+            _planned_value.setdefault("dropped_by_budget", False)
+            _planned_value.setdefault("budget_drop_reason", "")
+
     pack_applied = bool(actions)
     logger.info("[caption-overlay] pack_applied=%s actions=%s", str(pack_applied).lower(), "|".join(actions) or "none")
     logger.info(
@@ -689,10 +1149,18 @@ def plan_caption_overlay_pack(
         "layer_overload": layer_overload,
         "caption_overlay_pack_reason": "caption_overlay_actions" if pack_applied else "normal_subtitles_only",
         "font_registry": _font_registry,
+        "visual_design_version": visual_design_version,
+        "visual_design_tokens_applied": True,
+        "visual_design_tokens_applied_to_captions": True,
     }
 
 
-def _build_highlight_text(words: List[WordTimestamp], active_idx: int, emphasis_threshold: float = 0.82) -> str:
+def _build_highlight_text(
+    words: List[WordTimestamp],
+    active_idx: int,
+    emphasis_threshold: float = 0.82,
+    caption_polish_profile: Optional[Dict[str, Any]] = None,
+) -> str:
     """
     Build per-word dialogue line where the active word gets a highlight override.
     Used for karaoke-highlight style — each dialogue event represents one word
@@ -702,14 +1170,27 @@ def _build_highlight_text(words: List[WordTimestamp], active_idx: int, emphasis_
     Active words with emphasis use RED color to differentiate from standard active.
     """
     parts = []
+    keyword_terms = set(_select_vpi_caption_keywords(words))
+    sensitive_soft = bool(isinstance(caption_polish_profile, dict) and str(caption_polish_profile.get("caption_polish_profile") or "") == "sensitive_soft")
+    if isinstance(caption_polish_profile, dict) and not bool(caption_polish_profile.get("keyword_highlight_allowed", True)):
+        keyword_terms = set()
     for i, w in enumerate(words):
+        token = _caption_word_token(w.text)
         if i == active_idx:
-            if _is_emphasis_word(w, emphasis_threshold):
+            if sensitive_soft:
+                parts.append(f"{{\\c{_WHITE}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+            elif _is_emphasis_word(w, emphasis_threshold):
                 # Active + emphasis = RED color for high confidence words
                 parts.append(f"{{\\c{_RED}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+            elif token in keyword_terms:
+                parts.append(f"{{\\c{_WHITE}\\b1\\fscx106\\fscy106}}{w.text}{{\\r}}")
             else:
                 # Normal active = YELLOW
                 parts.append(f"{{\\c{_YELLOW}\\bord0\\shad0\\p0}}{w.text}{{\\r}}")
+        elif sensitive_soft:
+            parts.append(f"{{\\alpha&H80&}}{w.text}{{\\alpha&H00&}}")
+        elif token in keyword_terms:
+            parts.append(f"{{\\c{_SOFT_WHITE}\\b1\\fscx104\\fscy104}}{w.text}{{\\c{_WHITE}\\b0}}")
         elif _is_emphasis_word(w, emphasis_threshold):
             # Emphasis words: less transparent (H40) so they stand out more
             parts.append(f"{{\\alpha&H40&}}{w.text}{{\\alpha&H00&}}")
@@ -728,6 +1209,8 @@ def build_ass_script(
     platform: str = "tiktok",
     emphasis_threshold: float = 0.82,
     overlay_plan: Optional[Dict[str, Any]] = None,
+    safe_zone_context: Optional[Dict[str, Any]] = None,
+    caption_polish_profile: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build a complete ASS script from caption lines.
@@ -739,17 +1222,38 @@ def build_ass_script(
     platform: used to set platform-specific caption safe zones (MarginV).
               Supported: 'tiktok', 'reels', 'shorts', 'universal'.
     """
-    beta_clean = _is_beta_clean()
+    beta_clean = _premium_captions_enabled()
     preset: Optional[Dict[str, Any]] = None
+    safe_zone_context = safe_zone_context or {}
+    polish = caption_polish_profile if isinstance(caption_polish_profile, dict) else {}
+    keyword_highlight_logged = False
     if beta_clean:
         preset = _beta_clean_visual_preset()
         style = str(preset["caption_style"])
-        margin_v = int(os.environ.get("CAPTION_BETA_CLEAN_MARGIN_V", preset["margin_v"]))
+        base_margin_v = int(os.environ.get("CAPTION_BETA_CLEAN_MARGIN_V", preset["margin_v"]))
+        margin_v, safe_pos_y, safe_reason = _safe_zone_adjustment(
+            platform=platform,
+            base_margin_v=base_margin_v,
+            overlay_plan=overlay_plan,
+            safe_zone_context=safe_zone_context,
+            play_res_y=play_res_y,
+        )
         style_def = _style_def_from_preset(preset, margin_v)
+        logger.info("VPI_PREMIUM_CAPTIONS_STYLE_APPLIED backend=caption_service style=vpi_clean palette=white_premium")
+        if safe_reason:
+            logger.info("VPI_CAPTION_SAFE_ZONE_ADJUSTED backend=caption_service reason=%s", safe_reason)
     else:
         style_def = _STYLE_DEFS.get(style, _STYLE_DEFS["tiktok"])
-        margin_v = _margin_v(platform)
+        margin_v, _, safe_reason = _safe_zone_adjustment(
+            platform=platform,
+            base_margin_v=_margin_v(platform),
+            overlay_plan=overlay_plan,
+            safe_zone_context=safe_zone_context,
+            play_res_y=play_res_y,
+        )
         style_def = style_def.replace("MARGINV", str(margin_v))
+        if safe_reason:
+            logger.info("VPI_CAPTION_SAFE_ZONE_ADJUSTED backend=caption_service reason=%s", safe_reason)
     is_highlight = (style == "highlight") and not beta_clean
     if beta_clean:
         assert preset is not None
@@ -759,8 +1263,9 @@ def build_ass_script(
         ))
         pos_y = int(os.environ.get(
             "CAPTION_VPI_POS_Y",
-            round(play_res_y * float(preset["position_y_ratio"])),
+            safe_pos_y,
         ))
+        pos_y = min(pos_y, safe_pos_y)
         anchor = str(preset["anchor"])
         pos_tag = f"{{\\{anchor}\\pos({pos_x},{pos_y})}}"
         logger.info(
@@ -792,6 +1297,11 @@ def build_ass_script(
             anchor,
         )
         logger.info("[caption-layout] fixed_pos_tag applied to all dialogues")
+        logger.info(
+            "VPI_ASS_CAPTION_PLACEMENT_STABILIZED backend=caption_service pos_y=%d margin_v=%d",
+            pos_y,
+            margin_v,
+        )
 
     header = f"""\
 [Script Info]
@@ -807,8 +1317,8 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, \
 BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: {style_def}
-Style: HookOverlay,{_CAPTION_FONT},58,{_WHITE},{_VPI_ORANGE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,1,3,2,8,40,40,120,1
-Style: LowerThird,{_CAPTION_FONT},42,{_WHITE},{_VPI_ORANGE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,3,1,0,1,42,42,360,1
+Style: HookOverlay,{_CAPTION_FONT},58,{_WHITE},{_WHITE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,1,3,2,8,40,40,120,1
+Style: LowerThird,{_CAPTION_FONT},42,{_WHITE},{_WHITE},{_BLACK},{_SEMI_BG},-1,0,0,0,100,100,0,0,3,1,0,1,42,42,360,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -824,6 +1334,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
     for line in lines:
         words = line.words
+        line_keyword_terms = _select_vpi_caption_keywords(words)
+        if not bool(polish.get("keyword_highlight_allowed", True)):
+            line_keyword_terms = []
+        elif line_keyword_terms and int(polish.get("max_lines") or 2) <= 1:
+            line_keyword_terms = line_keyword_terms[:1]
+        if line_keyword_terms and not keyword_highlight_logged:
+            logger.info(
+                "VPI_CAPTION_KEYWORD_HIGHLIGHT_APPLIED backend=caption_service terms=%s",
+                "|".join(line_keyword_terms[:2]),
+            )
+            keyword_highlight_logged = True
         if uppercase:
             words = [
                 WordTimestamp(
@@ -838,8 +1359,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
         if beta_clean:
             assert preset is not None
-            min_duration_s = float(preset["min_duration_s"])
-            max_duration_s = float(preset["max_duration_s"])
+            min_duration_s = float(polish.get("min_caption_duration") or preset["min_duration_s"])
+            max_duration_s = float(polish.get("max_caption_duration") or preset["max_duration_s"])
             event_start = max(line.line_start, previous_end)
             if event_start > line.line_start:
                 overlap_fixed += 1
@@ -853,10 +1374,21 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 event_end = event_start + min_duration_s
                 min_duration_applied += 1
 
+            base_size = int(preset["font_size"])
+            adjusted_size, size_reason = _adaptive_font_size(base_size, words)
+            if size_reason:
+                logger.info(
+                    "VPI_CAPTION_ADAPTIVE_SIZE_APPLIED backend=caption_service old_size=%d new_size=%d reason=%s",
+                    base_size,
+                    adjusted_size,
+                    size_reason,
+                )
             text = _build_beta_clean_karaoke_text(
                 words,
                 pos_tag,
                 str(preset["highlight_colour"]),
+                adjusted_size,
+                caption_polish_profile=polish,
             )
             normalized_text = _normalize_caption_text(text)
             if normalized_text == previous_text:
@@ -900,14 +1432,33 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         elif is_highlight:
             # One event per word — each word gets the highlight box while active
             for i, w in enumerate(words):
-                text = _build_highlight_text(words, i, emphasis_threshold)
+                base_size = 68
+                adjusted_size, size_reason = _adaptive_font_size(base_size, words)
+                if size_reason:
+                    logger.info(
+                        "VPI_CAPTION_ADAPTIVE_SIZE_APPLIED backend=caption_service old_size=%d new_size=%d reason=%s",
+                        base_size,
+                        adjusted_size,
+                        size_reason,
+                    )
+                text = _build_highlight_text(words, i, emphasis_threshold, caption_polish_profile=polish)
+                text = f"{{\\fad(90,120)}}{{\\fs{adjusted_size}}}{text}"
                 events.append(
                     f"Dialogue: 0,{_ass_time(w.start)},{_ass_time(w.end)},"
                     f"Default,,0,0,0,,{text}"
                 )
         else:
             # Full line with \\k timing
-            text = _build_karaoke_text(words, emphasis_threshold)
+            base_size = 72
+            adjusted_size, size_reason = _adaptive_font_size(base_size, words)
+            if size_reason:
+                logger.info(
+                    "VPI_CAPTION_ADAPTIVE_SIZE_APPLIED backend=caption_service old_size=%d new_size=%d reason=%s",
+                    base_size,
+                    adjusted_size,
+                    size_reason,
+                )
+            text = f"{{\\fad(90,120)}}{{\\fs{adjusted_size}}}" + _build_karaoke_text(words, emphasis_threshold, caption_polish_profile=polish)
             events.append(
                 f"Dialogue: 0,{_ass_time(line.line_start)},{_ass_time(line.line_end)},"
                 f"Default,,0,0,0,,{text}"
@@ -954,6 +1505,8 @@ def segment_words_into_lines(
     gap_threshold: float = 0.8,
     emphasis_threshold: float = 0.88,
     emphasis_indices: Optional[List[int]] = None,
+    caption_polish_profile: Optional[Dict[str, Any]] = None,
+    protected_phrases: Optional[List[str]] = None,
 ) -> List[CaptionLine]:
     """
     Group word-level timestamps into caption lines suitable for display.
@@ -971,6 +1524,8 @@ def segment_words_into_lines(
         gap_threshold: Gap between words (seconds) that triggers a line break.
         emphasis_threshold: Score threshold for auto-marking emphasis (default 0.88).
         emphasis_indices: Optional list of word indices from LangGraph to mark as emphasis.
+        caption_polish_profile: Optional VPI polish profile with line/timing limits.
+        protected_phrases: Optional phrase list that should not be split across lines.
     """
     if not words:
         return []
@@ -998,6 +1553,16 @@ def segment_words_into_lines(
             if 0 <= idx < len(wts):
                 wts[idx].emphasis = True
 
+    polish = caption_polish_profile if isinstance(caption_polish_profile, dict) else {}
+    if polish:
+        max_words_per_line = min(max_words_per_line, int(polish.get("max_words_per_caption") or max_words_per_line))
+        max_line_duration = min(max_line_duration, float(polish.get("max_caption_duration") or max_line_duration))
+        gap_threshold = min(gap_threshold, max(0.25, float(polish.get("gap_threshold_s") or gap_threshold)))
+    min_caption_duration = float(polish.get("min_caption_duration") or 0.0)
+    max_caption_duration = float(polish.get("max_caption_duration") or max_line_duration)
+    max_chars_per_caption = int(polish.get("max_chars_per_caption") or 0)
+    protected_phrase_tokens = _caption_phrase_tokens(protected_phrases)
+
     lines: List[CaptionLine] = []
     current: List[WordTimestamp] = []
 
@@ -1014,6 +1579,8 @@ def segment_words_into_lines(
             gap = wt.start - current[-1].end
             dur = wt.end - current[0].start
             last_text = current[-1].text.rstrip()
+            current_chars = sum(len(str(item.text or "").strip()) for item in current) + max(0, len(current) - 1)
+            next_chars = current_chars + (1 if current else 0) + len(str(wt.text or "").strip())
             # Break on sentence endings, gaps, max words, or max duration
             ends_sentence = any(last_text.endswith(p) for p in _SENTENCE_ENDINGS)
             if (
@@ -1021,13 +1588,21 @@ def segment_words_into_lines(
                 or gap > gap_threshold
                 or len(current) >= max_words_per_line
                 or dur > max_line_duration
+                or (max_chars_per_caption > 0 and next_chars > max_chars_per_caption)
             ):
-                force_break = True
+                next_token = _caption_polish_token(wt.text)
+                current_tokens = _caption_word_tokens(current)
+                if _caption_tail_forms_protected_phrase(current_tokens, next_token, protected_phrase_tokens):
+                    force_break = False
+                else:
+                    force_break = True
 
         if force_break and current:
             line_end = current[-1].end if beta_clean else current[-1].end + 0.15
+            if min_caption_duration > 0:
+                line_end = max(line_end, current[0].start + min_caption_duration)
             if beta_clean:
-                line_end = min(line_end, current[0].start + max_line_duration)
+                line_end = min(line_end, current[0].start + max_caption_duration)
             lines.append(CaptionLine(
                 words=current,
                 line_start=current[0].start,
@@ -1039,13 +1614,41 @@ def segment_words_into_lines(
 
     if current:
         line_end = current[-1].end + (0.08 if beta_clean else 0.15)
+        if min_caption_duration > 0:
+            line_end = max(line_end, current[0].start + min_caption_duration)
         if beta_clean:
-            line_end = min(line_end, current[0].start + max_line_duration)
+            line_end = min(line_end, current[0].start + max_caption_duration)
         lines.append(CaptionLine(
             words=current,
             line_start=current[0].start,
             line_end=line_end,
         ))
+
+    # Merge single-word orphan lines when a safe combination exists.
+    if len(lines) > 1:
+        merged_lines: List[CaptionLine] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if (
+                len(line.words) == 1
+                and merged_lines
+                and len(merged_lines[-1].words) < max_words_per_line
+            ):
+                prev = merged_lines[-1]
+                combined_words = prev.words + line.words
+                combined_duration = float(line.line_end - prev.line_start)
+                if combined_duration <= max_caption_duration * 1.15:
+                    merged_lines[-1] = CaptionLine(
+                        words=combined_words,
+                        line_start=prev.line_start,
+                        line_end=max(prev.line_end, line.line_end),
+                    )
+                    i += 1
+                    continue
+            merged_lines.append(line)
+            i += 1
+        lines = merged_lines
 
     return lines
 
@@ -1358,6 +1961,18 @@ async def burn_captions(
     """
     # Extract emphasis indices from LangGraph/VPI decisions (positional override)
     caption_decisions = caption_decisions or {}
+    daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    clip_duration_hint = float(caption_decisions.get("clip_duration") or 0.0)
+    words = _normalize_caption_word_items(words, clip_duration_hint)
+    logger.info("VPI_CAPTION_WORD_ITEMS_NORMALIZED count=%d clip_duration=%.2f", len(words), clip_duration_hint)
+    visual_tokens = get_vpi_visual_design_tokens()
+    caption_decisions["visual_design_version"] = str(visual_tokens.get("visual_design_version") or "a1")
+    caption_decisions["visual_design_tokens_applied"] = True
+    caption_decisions["visual_design_tokens_applied_to_captions"] = True
+    logger.info(
+        "VPI_VISUAL_TOKENS_APPLIED backend=caption_service visual_design_version=%s",
+        caption_decisions["visual_design_version"],
+    )
     emphasis_indices = caption_decisions.get("emphasis_indices")
     highlighted_terms = list(caption_decisions.get("highlighted_terms") or [])
     hook_emphasis_words = list(caption_decisions.get("hook_emphasis_words") or [])
@@ -1376,10 +1991,20 @@ async def burn_captions(
         words=words,
         subtitle_already_strong=bool(caption_decisions.get("hook_caption_applied")),
         composition_decision=composition_decision,
+        enable_lower_third=not daily_mode,
+        global_visual_layer_budget=caption_decisions.get("global_visual_layer_budget") if isinstance(caption_decisions, dict) else None,
     )
     caption_decisions["caption_overlay_pack"] = overlay_plan
+    caption_decisions["visual_design_version"] = str(overlay_plan.get("visual_design_version") or caption_decisions.get("visual_design_version") or "a1")
+    caption_decisions["visual_design_tokens_applied"] = bool(overlay_plan.get("visual_design_tokens_applied", True))
+    caption_decisions["visual_design_tokens_applied_to_captions"] = True
     caption_overlay_terms = list(overlay_plan.get("keyword_emphasis_terms") or [])
     combined_terms = hook_emphasis_words + highlighted_terms + caption_overlay_terms
+    safe_zone_context = {
+        "face_bbox": caption_decisions.get("face_bbox"),
+        "speaker_bbox": caption_decisions.get("speaker_bbox"),
+        "bbox": caption_decisions.get("bbox"),
+    }
     # v3.2 metadata
     captions_highlight_count = 0
     hook_caption_applied = False
@@ -1421,6 +2046,30 @@ async def burn_captions(
     caption_decisions["captions_highlight_count"] = captions_highlight_count
     caption_decisions["hook_caption_applied"] = hook_caption_applied
     caption_decisions["caption_density_warning"] = caption_density_warning
+    words, caption_timebase_corrected, caption_timebase_source, caption_sync_warning = _normalize_caption_words_to_clip_timebase(
+        words,
+        clip_duration_hint,
+    )
+    if caption_timebase_corrected:
+        logger.info(
+            "VPI_CAPTION_TIMEBASE_CORRECTED source=%s warning=%s",
+            caption_timebase_source,
+            caption_sync_warning or "none",
+        )
+    else:
+        logger.info(
+            "VPI_ASS_TIMING_APPROX_SIMPLE_MODE source=%s warning=%s",
+            caption_timebase_source,
+            caption_sync_warning or "none",
+        )
+    logger.info(
+        "VPI_CAPTION_TIMEBASE_LOCALIZED_FALLBACK source=%s warning=%s",
+        caption_timebase_source,
+        caption_sync_warning or "none",
+    )
+    caption_decisions["caption_timebase_corrected"] = bool(caption_timebase_corrected)
+    caption_decisions["caption_timebase_source"] = caption_timebase_source
+    caption_decisions["caption_sync_warning"] = caption_sync_warning
     # v4.0 retention: first-3-seconds subtitle reinforcement
     # When hook_first3_status is READY and score >= 5, ensure the first
     # subtitle line has emphasis words for visual reinforcement of the hook.
@@ -1446,7 +2095,175 @@ async def burn_captions(
                 hook_subtitle_text,
             )
     caption_decisions["hook_first3_reinforced"] = hook_first3_reinforced
-    lines = segment_words_into_lines(words, max_words_per_line=max_words_per_line, emphasis_indices=emphasis_indices)
+    clip_duration_hint = float(words[-1].get("end", 0.0) if words else 0.0)
+    caption_density_hint = float(len(words) / max(1.0, clip_duration_hint or 1.0))
+    caption_polish_profile = choose_vpi_caption_polish_profile(
+        editorial_type=editorial_type,
+        clip_duration=clip_duration_hint,
+        caption_density=caption_density_hint,
+        hook_strategy_final=hook_intent or hook_first3_status,
+        premium_restraint_mode=str(caption_decisions.get("premium_restraint_mode") or ""),
+        visual_layout_strategy=str(caption_decisions.get("visual_layout_strategy") or ""),
+        broll_timing_strategy=str(caption_decisions.get("broll_timing_strategy") or ""),
+        cta_decision=str(caption_decisions.get("cta_decision") or ""),
+        sensitive_topic=bool(editorial_type == "decesos" or "decesos" in segment_text.lower()),
+        words_with_timestamps=words,
+    )
+    if not caption_timebase_corrected:
+        simple_profile = dict(caption_polish_profile or {})
+        simple_profile["caption_polish_profile"] = "standard_clean"
+        simple_profile["caption_pacing_reason"] = ",".join(
+            [part for part in [
+                str(simple_profile.get("caption_pacing_reason") or ""),
+                "timebase_approx_simple_mode",
+            ] if part]
+        )
+        simple_profile["max_words_per_caption"] = min(int(simple_profile.get("max_words_per_caption") or 5), 5)
+        simple_profile["max_caption_duration"] = min(float(simple_profile.get("max_caption_duration") or 2.2), 2.2)
+        simple_profile["max_chars_per_caption"] = min(int(simple_profile.get("max_chars_per_caption") or 30), 28)
+        caption_polish_profile = simple_profile
+    if int(caption_polish_profile.get("max_chars_per_caption") or 0) > 0:
+        logger.info(
+            "VPI_ASS_CAPTION_DENSITY_REDUCED profile=%s max_words=%d max_chars=%d max_dur=%.2f",
+            str(caption_polish_profile.get("caption_polish_profile") or "standard_clean"),
+            int(caption_polish_profile.get("max_words_per_caption") or 5),
+            int(caption_polish_profile.get("max_chars_per_caption") or 0),
+            float(caption_polish_profile.get("max_caption_duration") or 0.0),
+        )
+    lines = segment_words_into_lines(
+        words,
+        max_words_per_line=max_words_per_line,
+        emphasis_indices=emphasis_indices,
+        caption_polish_profile=caption_polish_profile,
+    )
+    line_durations = [float(line.line_end - line.line_start) for line in lines]
+    min_caption_duration = float(caption_polish_profile.get("min_caption_duration") or 0.0)
+    max_caption_duration = float(caption_polish_profile.get("max_caption_duration") or 0.0)
+    caption_linebreak_polish_applied = bool(
+        lines
+        and (
+            len(lines) != max(1, (len(words) + (int(caption_polish_profile.get("max_words_per_caption") or 5) - 1)) // int(caption_polish_profile.get("max_words_per_caption") or 5))
+            or any(len(line.words) == 1 for line in lines)
+            or any(_caption_tail_forms_protected_phrase(_caption_word_tokens(line.words[:-1]), _caption_polish_token(line.words[-1].text), _caption_phrase_tokens()) for line in lines if len(line.words) > 1)
+        )
+    )
+    caption_orphan_words_avoided = not any(len(line.words) == 1 for line in lines)
+    caption_protected_phrases_preserved = bool(
+        lines
+        and any(
+            any(
+                phrase in _caption_polish_token(line.full_text)
+                for phrase in (_caption_polish_token(p) for p in _CAPTION_PROTECTED_PHRASES)
+            )
+            for line in lines
+        )
+    )
+    caption_timing_polish_applied = bool(min_caption_duration or max_caption_duration)
+    caption_too_fast_adjusted = bool(min_caption_duration and any(duration <= (min_caption_duration + 0.03) for duration in line_durations))
+    caption_duration_balance_ok = bool(
+        lines
+        and all(
+            duration >= max(0.50, min_caption_duration - 0.05)
+            and (not max_caption_duration or duration <= max_caption_duration * 1.2)
+            for duration in line_durations
+        )
+    )
+    caption_keyword_highlight_count = max(captions_highlight_count, len([term for term in caption_overlay_terms if term]))
+    caption_highlight_policy = str(caption_polish_profile.get("caption_highlight_policy") or "single_keyword_sober")
+    caption_hook_conflict_avoided = bool(hook_caption_applied or not hook_text or caption_density_warning)
+    caption_cta_conflict_avoided = bool(str(caption_decisions.get("cta_decision") or "") != "show_cta" or caption_polish_profile.get("caption_polish_profile") != "dense_explainer")
+    caption_broll_conflict_avoided = bool(str(caption_decisions.get("broll_timing_strategy") or "") in {"", "no_broll"} or caption_polish_profile.get("caption_polish_profile") in {"calm_readable", "sensitive_soft"})
+    caption_visual_conflict_avoided = bool(caption_hook_conflict_avoided or caption_cta_conflict_avoided or caption_broll_conflict_avoided)
+    caption_priority_enforced = bool(daily_mode or caption_density_warning or hook_caption_applied or caption_visual_conflict_avoided)
+    hook_text_active = bool(hook_caption_applied or hook_subtitle_text or caption_decisions.get("hook_text"))
+    lower_third_active = bool(lower_third.get("applied") and lower_third_text)
+    suppressed_text_layers = list(
+        dict.fromkeys(
+            [
+                "hook_overlay" if hook_text_active and (daily_mode or caption_density_warning or caption_visual_conflict_avoided) else "",
+                "lower_third" if lower_third_active and (daily_mode or caption_density_warning or hook_text_active or caption_visual_conflict_avoided) else "",
+            ]
+        )
+    )
+    text_layer_count_final = int(1 + int(bool(hook_text_active and "hook_overlay" not in suppressed_text_layers)) + int(bool(lower_third_active and "lower_third" not in suppressed_text_layers)))
+    if caption_priority_enforced and text_layer_count_final > 2:
+        text_layer_count_final = 2
+    caption_decisions.update({
+        "caption_polish_profile": str(caption_polish_profile.get("caption_polish_profile") or "standard_clean"),
+        "caption_pacing_reason": str(caption_polish_profile.get("caption_pacing_reason") or ""),
+        "caption_polish_applied": bool(caption_polish_profile.get("caption_polish_applied", True)),
+        "caption_polish_partial": False,
+        "caption_linebreak_polish_applied": bool(caption_linebreak_polish_applied),
+        "caption_orphan_words_avoided": bool(caption_orphan_words_avoided),
+        "caption_protected_phrases_preserved": bool(caption_protected_phrases_preserved),
+        "caption_timing_polish_applied": bool(caption_timing_polish_applied),
+        "caption_too_fast_adjusted": bool(caption_too_fast_adjusted),
+        "caption_duration_balance_ok": bool(caption_duration_balance_ok),
+        "caption_keyword_highlight_count": int(caption_keyword_highlight_count),
+        "caption_highlight_policy": caption_highlight_policy,
+        "caption_hook_conflict_avoided": bool(caption_hook_conflict_avoided),
+        "caption_cta_conflict_avoided": bool(caption_cta_conflict_avoided),
+        "caption_broll_conflict_avoided": bool(caption_broll_conflict_avoided),
+        "caption_visual_conflict_avoided": bool(caption_visual_conflict_avoided),
+        "caption_priority_enforced": bool(caption_priority_enforced),
+        "text_overlap_prevented": bool(caption_visual_conflict_avoided or caption_priority_enforced or text_layer_count_final <= 2),
+        "suppressed_text_layers": suppressed_text_layers,
+        "text_layer_count_final": int(text_layer_count_final),
+    })
+    overlay_plan.update({
+        "caption_polish_profile": caption_decisions["caption_polish_profile"],
+        "caption_pacing_reason": caption_decisions["caption_pacing_reason"],
+        "caption_polish_applied": caption_decisions["caption_polish_applied"],
+        "caption_polish_partial": caption_decisions["caption_polish_partial"],
+        "caption_linebreak_polish_applied": caption_decisions["caption_linebreak_polish_applied"],
+        "caption_orphan_words_avoided": caption_decisions["caption_orphan_words_avoided"],
+        "caption_protected_phrases_preserved": caption_decisions["caption_protected_phrases_preserved"],
+        "caption_timing_polish_applied": caption_decisions["caption_timing_polish_applied"],
+        "caption_too_fast_adjusted": caption_decisions["caption_too_fast_adjusted"],
+        "caption_duration_balance_ok": caption_decisions["caption_duration_balance_ok"],
+        "caption_keyword_highlight_count": caption_decisions["caption_keyword_highlight_count"],
+        "caption_highlight_policy": caption_decisions["caption_highlight_policy"],
+        "caption_hook_conflict_avoided": caption_decisions["caption_hook_conflict_avoided"],
+        "caption_cta_conflict_avoided": caption_decisions["caption_cta_conflict_avoided"],
+        "caption_broll_conflict_avoided": caption_decisions["caption_broll_conflict_avoided"],
+        "caption_visual_conflict_avoided": caption_decisions["caption_visual_conflict_avoided"],
+    })
+    if caption_linebreak_polish_applied:
+        logger.info(
+            "VPI_CAPTION_LINEBREAK_POLISHED profile=%s protected=%s orphan_avoided=%s",
+            caption_decisions["caption_polish_profile"],
+            str(caption_protected_phrases_preserved).lower(),
+            str(caption_orphan_words_avoided).lower(),
+        )
+    if caption_timing_polish_applied:
+        logger.info(
+            "VPI_CAPTION_TIMING_POLISHED profile=%s min=%.2f max=%.2f fast_adjusted=%s",
+            caption_decisions["caption_polish_profile"],
+            min_caption_duration,
+            max_caption_duration,
+            str(caption_too_fast_adjusted).lower(),
+        )
+    if caption_keyword_highlight_count:
+        logger.info(
+            "VPI_CAPTION_HIGHLIGHT_APPLIED count=%d policy=%s",
+            caption_keyword_highlight_count,
+            caption_highlight_policy,
+        )
+    if caption_visual_conflict_avoided:
+        logger.info(
+            "VPI_CAPTION_VISUAL_CONFLICT_AVOIDED hook=%s cta=%s broll=%s",
+            str(caption_hook_conflict_avoided).lower(),
+            str(caption_cta_conflict_avoided).lower(),
+            str(caption_broll_conflict_avoided).lower(),
+        )
+    if not caption_duration_balance_ok or not caption_orphan_words_avoided or not caption_protected_phrases_preserved:
+        logger.warning(
+            "VPI_CAPTION_POLISH_WARNING profile=%s duration_ok=%s orphan_ok=%s protected_ok=%s",
+            caption_decisions["caption_polish_profile"],
+            str(caption_duration_balance_ok).lower(),
+            str(caption_orphan_words_avoided).lower(),
+            str(caption_protected_phrases_preserved).lower(),
+        )
 
     if not lines:
         logger.warning("[caption] No words provided — skipping caption burn-in")
@@ -1456,6 +2273,8 @@ async def burn_captions(
         lines, style=style, play_res_x=play_res_x, play_res_y=play_res_y,
         platform=platform, emphasis_threshold=emphasis_threshold,
         overlay_plan=overlay_plan,
+        safe_zone_context=safe_zone_context,
+        caption_polish_profile=caption_polish_profile,
     )
     if _is_beta_clean():
         logger.info("[caption-sync] source=cached_words words=%d lines=%d", len(words), len(lines))

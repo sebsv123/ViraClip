@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
-from src.services.vpi_music_service import discover_music_tracks, music_search_paths, select_music_track  # noqa: E402
+from src.services.vpi_music_service import DEFAULT_MUSIC_TARGET_DB, discover_music_tracks, music_search_paths, select_music_track  # noqa: E402
 
 
 def main() -> int:
@@ -21,7 +21,7 @@ def main() -> int:
         print(f"- track={track}")
     for editorial_type in ("emotional_protection", "client_objection", "coverage_explanation"):
         track, mood = select_music_track(editorial_type, tracks)
-        print(f"{editorial_type}: mood={mood} selected={track if track else 'none'} target_volume_db=-25")
+        print(f"{editorial_type}: mood={mood} selected={track if track else 'none'} target_volume_db={int(DEFAULT_MUSIC_TARGET_DB)}")
     if not tracks:
         print("[music] skipped reason=no_music_library")
     return 0

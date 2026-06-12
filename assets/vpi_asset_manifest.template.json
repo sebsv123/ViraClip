@@ -60,6 +60,12 @@
       "commercial_use_ok": true,
       "attribution_required": false,
       "notes": "SIL Open Font License. Keep OFL file."
+    },
+    "swishy_export": {
+      "license": "Manual Review Required",
+      "commercial_use_ok": false,
+      "attribution_required": false,
+      "notes": "Manual export source. Do not mark commercial_use_ok=true until legal review is completed."
     }
   },
   "assets": []

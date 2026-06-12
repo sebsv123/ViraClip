@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
-  Zap, Plus, Video, Settings, LogOut, Film, Clock, CheckCircle,
+  Bolt, Plus, Video, Settings, LogOut, Film, Clock, CheckCircle,
   Loader2, AlertCircle, ArrowRight, BarChart3, Sparkles, X, Link2
 } from "lucide-react";
 import Link from "next/link";
@@ -47,7 +47,7 @@ function Sidebar() {
           <div className="relative w-10 h-10">
             <div className="absolute inset-0 bg-gradient-to-br from-cyan-400 via-purple-500 to-pink-500 rounded-xl" />
             <div className="absolute inset-[2px] bg-[#0a0a0f] rounded-xl flex items-center justify-center">
-              <Zap className="w-5 h-5 text-cyan-400" />
+              <Bolt className="w-5 h-5 text-cyan-400" />
             </div>
           </div>
           <span className="text-xl font-bold">Vira<span className="text-cyan-400">Clip</span></span>
@@ -96,12 +96,13 @@ function Sidebar() {
 }
 
 function TaskCard({ task }: { task: Task }) {
-  const statusIcons: Record<string, JSX.Element> = {
+  const statusIcons: Record<string, React.ReactNode> = {
     completed: <CheckCircle className="w-5 h-5 text-green-400" />,
     processing: <Loader2 className="w-5 h-5 animate-spin text-cyan-400" />,
     queued: <Clock className="w-5 h-5 text-amber-400" />,
     failed: <AlertCircle className="w-5 h-5 text-red-400" />,
-    error: <AlertCircle className="w-5 h-5 text-red-400" />,
+    needs_review: <Clock className="w-5 h-5 text-purple-400" />,
+    fast_fail_editing_zero: <AlertCircle className="w-5 h-5 text-red-400" />,
   };
   const statusColors: Record<string, string> = {
     completed: "bg-green-500/10 border-green-500/20",
@@ -109,6 +110,8 @@ function TaskCard({ task }: { task: Task }) {
     queued: "bg-amber-500/10 border-amber-500/20",
     failed: "bg-red-500/10 border-red-500/20",
     error: "bg-red-500/10 border-red-500/20",
+    needs_review: "bg-purple-500/10 border-purple-500/20",
+    fast_fail_editing_zero: "bg-orange-500/10 border-orange-500/20",
   };
   const title = task.title || task.source_title || "Untitled Project";
   return (
@@ -374,12 +377,17 @@ export default function DashboardPage() {
   const tasksRef = useRef<Task[]>([]);
   useEffect(() => { tasksRef.current = tasks; }, [tasks]);
 
+  const isLoadingRef = useRef(false);
+
   useEffect(() => {
     loadTasks();
     const interval = setInterval(() => {
       const active = tasksRef.current.some((t) => t.status === "queued" || t.status === "processing");
-      if (active) loadTasks();
-    }, 2000);
+      if (active && !isLoadingRef.current) {
+        isLoadingRef.current = true;
+        loadTasks().finally(() => { isLoadingRef.current = false; });
+      }
+    }, 10000);
     return () => clearInterval(interval);
   }, [loadTasks]);
 

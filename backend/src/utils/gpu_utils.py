@@ -244,3 +244,22 @@ def log_gpu_status() -> None:
         logger.info("[gpu] nvenc available but disabled by VIRACLIP_ENABLE_NVENC=false")
     if (status["torch_cuda"] or status["nvenc_runtime"]) and not (enable_torch_cuda or enable_nvenc):
         logger.info("[gpu] gpu available but disabled by flags")
+def get_ffmpeg_exe() -> str:
+    """Return the system ffmpeg binary path, falling back to imageio_ffmpeg.
+
+    The system ffmpeg (from apt) includes NVENC support on NVIDIA GPU
+    containers.  The imageio_ffmpeg bundled binary does not include NVENC,
+    which forces CPU-only encoding (libx264) and makes rendering 3-5x slower.
+    """
+    import shutil
+    system_ffmpeg = shutil.which('ffmpeg')
+    if system_ffmpeg:
+        return system_ffmpeg
+    try:
+        import imageio_ffmpeg as _iio
+        return _iio.get_ffmpeg_exe()
+    except Exception:
+        return 'ffmpeg'
+
+
+

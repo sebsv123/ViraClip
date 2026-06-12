@@ -56,6 +56,27 @@ RUN uv pip install --no-cache \
     torchaudio==2.8.0+cu128 \
     --index-url https://download.pytorch.org/whl/cu128
 
+# Also install torch in system Python so `docker compose exec` and scripts
+# using sys.executable (e.g. vpi_gpu_runtime_probe.py, vpi_local_quality_gate.py)
+# can access torch CUDA without needing .venv/bin/python.
+RUN pip install --no-cache \
+    torch==2.8.0+cu128 \
+    torchaudio==2.8.0+cu128 \
+    --index-url https://download.pytorch.org/whl/cu128
+
+# Also install core runtime dependencies in system Python so that
+# `docker compose exec -T worker python /app/scripts/vpi_runtime_dependency_check.py`
+# and other validation scripts can import numpy, cv2, PIL, moviepy,
+# faster_whisper, yt_dlp, scipy without needing .venv/bin/python.
+RUN pip install --no-cache \
+    numpy \
+    opencv-python-headless \
+    Pillow \
+    "moviepy>=2.0.0" \
+    "faster-whisper==1.1.1" \
+    "yt-dlp[default]" \
+    scipy
+
 RUN uv pip install --no-cache whisperx
 
 # === Scene detection + HTTP ===
@@ -150,6 +171,7 @@ RUN uv pip install --no-cache \
 COPY src/ ./src/
 COPY fonts/ ./fonts/
 COPY transitions/ ./transitions/
+COPY assets/ ./assets/
 COPY scripts/ ./scripts/
 
 RUN mkdir -p /app/uploads /app/clips /app/logs /app/models /app/models/onnx /app/assets/sounds /app/assets/sounds/bgm /app/fonts /app/sfx_library /tmp \

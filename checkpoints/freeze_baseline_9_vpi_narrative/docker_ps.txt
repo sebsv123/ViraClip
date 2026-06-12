@@ -1,0 +1,6 @@
+NAMES               STATUS
+viraclip-frontend   Up 13 hours (healthy)
+viraclip-worker     Up 24 minutes (healthy)
+viraclip-backend    Up 25 minutes (healthy)
+viraclip-postgres   Up 44 hours (healthy)
+viraclip-redis      Up 44 hours (healthy)

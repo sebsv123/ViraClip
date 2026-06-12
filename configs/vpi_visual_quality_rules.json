@@ -1,0 +1,156 @@
+{
+  "global": {
+    "max_broll_per_30s": 3,
+    "min_speaker_hook_seconds": 3.5,
+    "max_highlights_per_line": 2,
+    "max_strong_highlights_per_line": 1,
+    "watermark_position": "top_right_safe",
+    "visual_density_max_per_window": 6,
+    "avoid": [
+      "documents_admin_dominant",
+      "wellness_meditation_tea",
+      "elderly_only_for_myth_debunk",
+      "fear_sad_literal",
+      "same_category_twice_consecutive",
+      "static_image_as_only_broll",
+      "zoom_plus_broll_plus_highlight_same_moment"
+    ]
+  },
+  "editorial_types": {
+    "emotional_protection": {
+      "visual_tone": "warm_human_family",
+      "visual_density": "medium",
+      "broll_preferred": ["family_protection", "emotional_reassurance", "financial_planning"],
+      "broll_avoid": ["documents_admin_dominant", "wellness", "tea", "meditation"],
+      "subtitle_highlights": ["pareja", "hijos", "proteger", "dependen de ti"],
+      "reframe": "subtle_push_in",
+      "hook": "speaker_focus_min_4s"
+    },
+    "client_objection": {
+      "visual_tone": "direct_professional_myth_debunk",
+      "visual_density": "medium_high",
+      "broll_preferred": ["advisor_consultation", "financial_planning", "documents_admin_support"],
+      "broll_avoid": ["elderly_only", "emotional_reassurance_generic"],
+      "subtitle_highlights": ["no es solo para", "responsabilidad", "mas adelante"],
+      "reframe": "emphasis_punch",
+      "hook": "objection_first_broll_after_verbal_hook"
+    },
+    "myth_debunk": {
+      "visual_tone": "clarifying_young_advisor",
+      "visual_density": "medium",
+      "broll_preferred": ["advisor_consultation", "financial_planning", "documents_admin_brief"],
+      "broll_avoid": ["elderly", "nursing_home", "hospital"],
+      "subtitle_highlights": ["no es solo para", "por la edad", "realidad"],
+      "reframe": "emphasis_punch",
+      "hook": "myth_first_then_clarify"
+    },
+    "risk_warning": {
+      "visual_tone": "serious_not_alarmist",
+      "visual_density": "medium",
+      "broll_preferred": ["risk_warning", "family_protection", "financial_planning"],
+      "broll_avoid": ["violence", "horror", "ambulance", "hospital"],
+      "subtitle_highlights": ["riesgo", "imprevisto", "proteger"],
+      "reframe": "subtle_push_in",
+      "hook": "risk_first_then_solution"
+    },
+    "coverage_explanation": {
+      "visual_tone": "informative_clear",
+      "visual_density": "low_medium",
+      "broll_preferred": ["documents_admin", "financial_planning"],
+      "broll_avoid": ["documents_admin_repeated", "generic"],
+      "subtitle_highlights": ["cobertura", "seguro de vida"],
+      "reframe": "none_or_minimal",
+      "hook": "speaker_focus"
+    },
+    "weak_intro": {
+      "visual_tone": "speaker_focus",
+      "visual_density": "low",
+      "broll_preferred": [],
+      "broll_avoid": ["any"],
+      "subtitle_highlights": [],
+      "reframe": "none",
+      "hook": "speaker_only"
+    },
+    "actionable_advice": {
+      "visual_tone": "useful_practical",
+      "visual_density": "medium",
+      "broll_preferred": ["documents_admin", "financial_planning"],
+      "broll_avoid": ["generic", "wellness"],
+      "subtitle_highlights": ["practical_terms"],
+      "reframe": "subtle_push_in",
+      "hook": "advice_first"
+    }
+  },
+  "broll": {
+    "preferred_sequences": {
+      "life_insurance_family_protection": [
+        "family/home context -> financial/advisor planning",
+        "advisor consultation -> documents support",
+        "speaker focus -> emotional broll -> speaker focus",
+        "family planning -> brief document"
+      ]
+    },
+    "avoid_sequences": [
+      "documents_admin -> documents_admin",
+      "paper_closeup -> paper_closeup",
+      "wellness -> paper",
+      "stock_office -> stock_office",
+      "static_image -> static_image"
+    ],
+    "duration_by_category": {
+      "documents_admin": [1.4, 1.8],
+      "emotional_reassurance": [1.8, 2.2],
+      "family_protection": [1.8, 2.2],
+      "financial_planning": [1.6, 2.0],
+      "risk_warning": [1.4, 1.8],
+      "advisor_consultation": [1.8, 2.2],
+      "default": [1.6, 2.0]
+    }
+  },
+  "subtitles": {
+    "highlight_terms": {
+      "emotional_protection": ["pareja", "hijos", "proteger", "dependen de ti", "familia", "miedo"],
+      "client_objection": ["no es solo para", "responsabilidad", "mas adelante", "realidad", "edad"],
+      "myth_debunk": ["no es solo para", "por la edad", "realidad", "sentido"],
+      "risk_warning": ["riesgo", "imprevisto", "proteger", "pasa algo"],
+      "coverage_explanation": ["cobertura", "seguro de vida", "poliza"],
+      "weak_intro": []
+    },
+    "avoid_oversaturation": true,
+    "max_strong_per_clip": 8
+  },
+  "branding": {
+    "watermark": {
+      "prefer_logo": true,
+      "logo_paths": ["frontend/public/logo.png", "assets/banner.png"],
+      "fallback_text": "Valentín Protección Integral",
+      "position": "top_right",
+      "opacity": 0.7,
+      "margin_x": 20,
+      "margin_y": 20,
+      "no_intro": true,
+      "no_cta_visual": true
+    }
+  },
+  "smart_reframe": {
+    "rules": {
+      "subtle_push_in": {
+        "scale_start": 1.0,
+        "scale_end": 1.035,
+        "duration_range": [1.2, 1.8],
+        "for_types": ["emotional_protection", "risk_warning", "actionable_advice"]
+      },
+      "emphasis_punch": {
+        "scale_start": 1.0,
+        "scale_end": 1.05,
+        "duration_range": [0.45, 0.7],
+        "for_types": ["client_objection", "myth_debunk"]
+      },
+      "no_zoom_types": ["weak_intro", "coverage_explanation"],
+      "max_events_with_broll": 1,
+      "max_events_without_broll": 2,
+      "min_start_s": 1.0,
+      "max_end_s_before_end": 2.0
+    }
+  }
+}

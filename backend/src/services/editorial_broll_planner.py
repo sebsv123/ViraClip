@@ -1,15 +1,194 @@
-"""Local heuristic planner for insurance-first editorial B-roll cues."""
+"""Local heuristic planner for insurance-first editorial B-roll cues.
+
+VPI Editorial B-roll Category Mapper
+Centralised local mapper that maps Spanish trigger text to allowed VPI B-roll
+categories BEFORE any LLM call.  This ensures stopwords/fillers produce NO
+B-roll slot and that only editorial-relevant categories are selected.
+
+Allowed VPI B-roll categories:
+    family_relief, family_protection, health_access, risk_warning_context,
+    paperwork_support, documents_admin, financial_planning,
+    practical_explanation, autonomous_work_stability, emotional_reassurance
+
+Confidence threshold: 0.65
+"""
 from __future__ import annotations
 
 import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .vpi_broll_intent import VisualIntent, detect_intent
 
 logger = logging.getLogger(__name__)
+
+# ── Allowed VPI B-roll categories ────────────────────────────────────────────
+ALLOWED_VPI_BROLL_CATEGORIES: set[str] = {
+    "family_relief",
+    "family_protection",
+    "health_access",
+    "risk_warning_context",
+    "paperwork_support",
+    "documents_admin",
+    "financial_planning",
+    "practical_explanation",
+    "autonomous_work_stability",
+    "emotional_reassurance",
+}
+
+_APPROVED_CATEGORY_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "documents_admin": ("paperwork_support",),
+    "emotional_reassurance": ("family_relief",),
+    "family_protection": ("family_relief",),
+    "financial_planning": ("practical_explanation", "paperwork_support"),
+}
+
+# ── Confidence thresholds ────────────────────────────────────────────────────
+# Primary editorial category match (direct VPI category from mapper)
+_PRIMARY_CONFIDENCE_THRESHOLD = 0.65
+# Fallback/generic/alias category match (resolved via alias or generic cue)
+_FALLBACK_CONFIDENCE_THRESHOLD = 0.75
+# Generic/cinematic abstract is never allowed for VPI insurance unless explicitly
+# approved with high confidence from a strong editorial cue
+_GENERIC_BROLL_NOT_ALLOWED = True
+
+# ── Skip reasons ─────────────────────────────────────────────────────────────
+_SKIP_REASON_LOW_EDITORIAL_CONFIDENCE = "low_editorial_confidence"
+_SKIP_REASON_GENERIC_BROLL_NOT_ALLOWED = "generic_broll_not_allowed"
+_SKIP_REASON_WEAK_ASSET_BRAND_FIT = "weak_asset_brand_fit"
+_SKIP_REASON_NO_TIMING_ANCHOR = "no_timing_anchor"
+
+
+# ── Spanish-to-VPI-category local mapper ─────────────────────────────────────
+# Maps Spanish trigger words/phrases directly to allowed VPI categories.
+# This is used BEFORE any LLM call to avoid unnecessary API usage.
+_VPI_CATEGORY_MAPPER: dict[str, str] = {
+    # miedo → risk_warning_context
+    "miedo": "risk_warning_context",
+    "temor": "risk_warning_context",
+    "peligro": "risk_warning_context",
+    "riesgo": "risk_warning_context",
+    "accidente": "risk_warning_context",
+    "imprevisto": "risk_warning_context",
+    "fallecimiento": "risk_warning_context",
+    "incapacidad": "risk_warning_context",
+    "enfermedad grave": "risk_warning_context",
+    "te pasa algo": "risk_warning_context",
+    "si faltas": "risk_warning_context",
+    "desprotegido": "risk_warning_context",
+    "desprotegida": "risk_warning_context",
+    "si manana te pasa algo": "risk_warning_context",
+    "vender miedo": "risk_warning_context",
+    # proteger → family_relief / family_protection
+    "proteger": "family_protection",
+    "proteccion": "family_protection",
+    "proteger a tu familia": "family_protection",
+    "proteger a los tuyos": "family_protection",
+    "seguro de vida": "family_protection",
+    "seguros de vida": "family_protection",
+    "proteccion familiar": "family_protection",
+    "dependen de ti": "family_protection",
+    "personas que dependen": "family_protection",
+    "familia": "family_relief",
+    "hijos": "family_relief",
+    "pareja": "family_relief",
+    "hogar": "family_relief",
+    "tranquilidad": "emotional_reassurance",
+    "tranquilo": "emotional_reassurance",
+    "calma": "emotional_reassurance",
+    "paz": "emotional_reassurance",
+    "para ti y los tuyos": "emotional_reassurance",
+    "los tuyos": "emotional_reassurance",
+    # salud → health_access
+    "salud": "health_access",
+    "salud preventiva": "health_access",
+    "estilo de vida saludable": "health_access",
+    "vida saludable": "health_access",
+    "deporte": "health_access",
+    "actividad fisica": "health_access",
+    "caminar": "health_access",
+    "ejercicio": "health_access",
+    # documentos → paperwork_support / documents_admin
+    "papeleo": "paperwork_support",
+    "papeles": "documents_admin",
+    "documentos": "documents_admin",
+    "documentacion": "documents_admin",
+    "tramite": "paperwork_support",
+    "tramites": "paperwork_support",
+    "solicitud": "documents_admin",
+    "gestion administrativa": "paperwork_support",
+    "extranjeria": "paperwork_support",
+    "residencia": "paperwork_support",
+    "nie": "documents_admin",
+    "permiso de residencia": "documents_admin",
+    "contrato": "documents_admin",
+    "contratos": "documents_admin",
+    "firma": "documents_admin",
+    "formulario": "documents_admin",
+    "formularios": "documents_admin",
+    "recibo": "documents_admin",
+    "condiciones": "documents_admin",
+    "letra pequena": "documents_admin",
+    "contratar": "documents_admin",
+    "poliza": "documents_admin",
+    "cobertura": "paperwork_support",
+    "cubre": "paperwork_support",
+    "no cubre": "paperwork_support",
+    "capital": "paperwork_support",
+    "prima": "paperwork_support",
+    "indemnizacion": "paperwork_support",
+    "carencia": "paperwork_support",
+    "exclusion": "paperwork_support",
+    # finanzas → financial_planning
+    "ahorro": "financial_planning",
+    "planificacion": "financial_planning",
+    "hipoteca": "financial_planning",
+    "prestamo": "financial_planning",
+    "pagos": "financial_planning",
+    "economia": "financial_planning",
+    "presupuesto": "financial_planning",
+    "responsabilidad": "financial_planning",
+    "proyecto": "financial_planning",
+    # explicacion → practical_explanation
+    "dar claridad": "practical_explanation",
+    "explicar claro": "practical_explanation",
+    "de forma clara": "practical_explanation",
+    "paso a paso": "practical_explanation",
+    "te explico": "practical_explanation",
+    # autonomo → autonomous_work_stability
+    "autonomo": "autonomous_work_stability",
+    "autonoma": "autonomous_work_stability",
+    "trabajo autonomo": "autonomous_work_stability",
+    "sosteniendo": "autonomous_work_stability",
+    "estructura": "autonomous_work_stability",
+}
+
+# ── Stopwords that must produce NO B-roll slot ───────────────────────────────
+_VPI_STOPWORDS: set[str] = {
+    "de", "la", "el", "los", "las", "que", "sea", "o", "y", "les", "me", "te",
+    "un", "una", "es", "en", "por", "para", "con", "como", "esto", "este",
+    "esta", "momento", "pues", "hola", "si", "no", "lo", "su", "se", "del",
+    "al", "ha", "he", "has", "han", "habia", "haber", "ser", "era", "fue",
+    "sido", "siendo", "estoy", "estas", "esta", "estamos", "estais", "estan",
+    "estaba", "estado", "tengo", "tiene", "tenemos", "tienen", "tenia",
+    "tuve", "tener", "teniendo", "hacer", "hago", "hace", "hacemos", "hacen",
+    "hacia", "hizo", "haciendo", "puedo", "puede", "podemos", "pueden",
+    "podia", "pudo", "poder", "pudiendo", "voy", "vas", "va", "vamos", "van",
+    "iba", "fui", "ir", "yendo", "doy", "das", "da", "damos", "dan", "daba",
+    "dio", "dar", "dando", "mi", "mis", "tu", "tus", "su", "sus", "nuestro",
+    "nuestra", "vuestro", "vuestra", "mas", "menos", "muy", "mucho", "poco",
+    "bastante", "demasiado", "tan", "tanto", "cada", "todo", "toda", "todos",
+    "todas", "algun", "alguna", "algunos", "algunas", "ningun", "ninguna",
+    "ningunos", "ningunas", "otro", "otra", "otros", "otras", "mismo",
+    "misma", "mismos", "mismas", "tal", "tales", "aquel", "aquella",
+    "aquellos", "aquellas", "alli", "aqui", "aca", "ahi", "donde", "cuando",
+    "como", "que", "cual", "cuales", "quien", "quienes", "cuyo", "cuya",
+    "cuyos", "cuyas", "cuanto", "cuanta", "cuantos", "cuantas",
+}
 
 
 @dataclass
@@ -33,6 +212,53 @@ class BrollCueDecision:
     min_score: float = 55.0
 
 
+def map_text_to_vpi_category(text: str) -> Optional[str]:
+    """Local editorial VPI category mapper.
+
+    Maps Spanish trigger text to an allowed VPI B-roll category using
+    the local _VPI_CATEGORY_MAPPER.  Returns None if no match is found
+    (caller should then decide whether to use LLM or skip).
+
+    This is a local-only operation — no API calls.
+    """
+    normalized = _normalize_text(text)
+    if not normalized:
+        return None
+
+    # Check for stopwords first — these produce NO category
+    words = normalized.split()
+    if len(words) <= 2 and all(w in _VPI_STOPWORDS for w in words):
+        return None
+
+    # Try multi-word patterns first (longest match wins)
+    sorted_patterns = sorted(_VPI_CATEGORY_MAPPER.keys(), key=len, reverse=True)
+    for pattern in sorted_patterns:
+        norm_pattern = _normalize_text(pattern)
+        if norm_pattern in normalized:
+            category = _VPI_CATEGORY_MAPPER[pattern]
+            if category in ALLOWED_VPI_BROLL_CATEGORIES:
+                return category
+
+    # Try single-word matches
+    for word in words:
+        if word in _VPI_STOPWORDS:
+            continue
+        if word in _VPI_CATEGORY_MAPPER:
+            category = _VPI_CATEGORY_MAPPER[word]
+            if category in ALLOWED_VPI_BROLL_CATEGORIES:
+                return category
+
+    return None
+
+
+def _normalize_text(text: str) -> str:
+    """Normalize text: lowercase, NFKD-decompose, remove diacritics."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
 class EditorialBrollPlanner:
     """Plan sober, local B-roll cues for Spanish insurance/finance clips."""
 
@@ -44,6 +270,12 @@ class EditorialBrollPlanner:
         "financial_planning": "financial_planning",
         "risk_warning": "risk_warning",
         "explain_coverage": "documents_admin",
+        "family_relief": "emotional_reassurance",
+        "health_access": "lifestyle_health",
+        "risk_warning_context": "risk_warning",
+        "paperwork_support": "documents_admin",
+        "practical_explanation": "practical_explanation",
+        "autonomous_work_stability": "financial_planning",
     }
 
     _PATTERNS: Dict[str, Tuple[str, ...]] = {
@@ -51,6 +283,7 @@ class EditorialBrollPlanner:
             "calma",
             "tranquilidad",
             "tranquilo",
+            "desde la calma",
             "paz",
             "para ti y los tuyos",
             "los tuyos",
@@ -70,6 +303,7 @@ class EditorialBrollPlanner:
             "salud preventiva",
         ),
         "risk_warning": (
+            "vender miedo",
             "si manana te pasa algo",
             "accidente",
             "imprevisto",
@@ -93,8 +327,6 @@ class EditorialBrollPlanner:
             "indemnizacion",
             "carencia",
             "exclusion",
-            "seguro de vida",
-            "seguros de vida",
         ),
         "documents_admin": (
             "documentos",
@@ -119,6 +351,8 @@ class EditorialBrollPlanner:
             "hijos",
             "pareja",
             "hogar",
+            "seguro de vida",
+            "seguros de vida",
             "proteccion familiar",
             "proteger a tu familia",
             "dependen de ti",
@@ -138,6 +372,13 @@ class EditorialBrollPlanner:
             "capital",
             "prima",
             "proyecto",
+        ),
+        "practical_explanation": (
+            "dar claridad",
+            "explicar claro",
+            "de forma clara",
+            "paso a paso",
+            "te explico",
         ),
         "revelation_hook": (
             "esto mucha gente no lo sabe",
@@ -164,6 +405,7 @@ class EditorialBrollPlanner:
         "documents_admin": "contract documents, insurance forms, signing paperwork",
         "family_protection": "family protection at home, parents and children calm",
         "financial_planning": "financial planning documents, calculator, advisor meeting",
+        "practical_explanation": "advisor explaining paperwork clearly, practical explanation meeting",
     }
 
     _STYLE: Dict[str, Tuple[str, str, float]] = {
@@ -174,6 +416,7 @@ class EditorialBrollPlanner:
         "documents_admin": ("clean_cut", "static", 0.85),
         "family_protection": ("soft_crossfade", "slow_push", 0.85),
         "financial_planning": ("clean_cut", "static", 0.85),
+        "practical_explanation": ("clean_cut", "static", 0.85),
         "revelation_hook": ("clean_cut", "static", 1.0),
         "direct_cta": ("clean_cut", "static", 1.0),
         "no_broll": ("clean_cut", "static", 1.0),
@@ -187,7 +430,28 @@ class EditorialBrollPlanner:
         "documents_admin": 1.8,
         "family_protection": 2.2,
         "financial_planning": 2.0,
+        "practical_explanation": 1.8,
     }
+
+    @staticmethod
+    def _resolve_local_asset_category(vpi_category: str) -> Tuple[str, List[Path]]:
+        from .local_broll_asset_bank import list_assets as _list_local_assets
+
+        primary_assets = _list_local_assets(vpi_category)
+        if primary_assets:
+            return vpi_category, primary_assets
+
+        for alias in _APPROVED_CATEGORY_ALIASES.get(vpi_category, tuple()):
+            alias_assets = _list_local_assets(alias)
+            if not alias_assets:
+                continue
+            logger.info(
+                "ASSET_CATEGORY_ALIAS_USED from=%s to=%s reason=no_primary_category_assets",
+                vpi_category,
+                alias,
+            )
+            return alias, alias_assets
+        return vpi_category, []
 
     def plan(
         self,
@@ -256,9 +520,145 @@ class EditorialBrollPlanner:
         approved_duration = 0.0
         max_coverage = clip_duration * 0.25
 
+        # ── VPI editorial B-roll category mapper + Groq budget ──────────────
+        # Use local mapper first; only fall back to LLM when local fails.
+        # Max 3 Groq calls per task for B-roll planning.
+        llm_calls_used = 0
+        LLM_CALL_BUDGET = 3
+
         for cue_type, trigger, char_start in matches:
-            visual_intent = self._build_visual_intent(cue_type, normalized, trigger)
-            duration = min(self._duration_for(cue_type), visual_intent.max_duration)
+            # ── Stopword guard: produce NO B-roll slot ──────────────────────
+            trigger_normalized = _normalize_text(trigger)
+            trigger_words = trigger_normalized.split()
+            meaningful_words = [w for w in trigger_words if w not in _VPI_STOPWORDS]
+            if not meaningful_words:
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=stopword_only cue_type=%s trigger=%r",
+                    cue_type, trigger,
+                )
+                decisions.append(
+                    self._decision(
+                        "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                        "Stopword-only cue: no B-roll slot",
+                    )
+                )
+                continue
+
+            # ── Local VPI category mapper (no API call) ─────────────────────
+            vpi_category = map_text_to_vpi_category(trigger)
+            if vpi_category is not None:
+                # Local mapper found a category — use it directly
+                logger.info(
+                    "EDITORIAL_BROLL_SELECTED reason=local_vpi_mapper cue_type=%s trigger=%r vpi_category=%s",
+                    cue_type, trigger, vpi_category,
+                )
+                resolved_category, local_assets = self._resolve_local_asset_category(vpi_category)
+                # Map VPI category back to internal cue_type for asset lookup
+                mapped_cue = self._CUE_ALIASES.get(resolved_category, resolved_category)
+                if not local_assets:
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=no_local_asset vpi_category=%s trigger=%r",
+                        vpi_category, trigger,
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            f"No local asset for VPI category {vpi_category}",
+                        )
+                    )
+                    continue
+
+                # ── Manifest-based editorial asset validation ────────────────
+                manifest_validation = self._validate_asset_against_manifest(
+                    vpi_category=vpi_category,
+                    resolved_category=resolved_category,
+                    cue_type=cue_type,
+                    trigger=trigger,
+                )
+                if manifest_validation.get("skip"):
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=%s cue_type=%s trigger=%r vpi_category=%s",
+                        manifest_validation["reason"],
+                        cue_type, trigger, vpi_category,
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            manifest_validation["reason"],
+                        )
+                    )
+                    continue
+
+                # Use the mapped cue_type for the rest of the pipeline
+                effective_cue_type = mapped_cue if mapped_cue in self._PATTERNS else cue_type
+            else:
+                # Local mapper found nothing — check if we should try LLM
+                if len(meaningful_words) < 2:
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=too_few_meaningful_words cue_type=%s trigger=%r words=%d",
+                        cue_type, trigger, len(meaningful_words),
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            "Too few meaningful words for B-roll cue",
+                        )
+                    )
+                    continue
+
+                # Check Groq budget
+                if llm_calls_used >= LLM_CALL_BUDGET:
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=llm_budget_exhausted cue_type=%s trigger=%r",
+                        cue_type, trigger,
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            "LLM budget exhausted for B-roll planning",
+                        )
+                    )
+                    continue
+
+                # Try LLM (Groq) for category detection
+                llm_category = self._llm_detect_category(trigger, text)
+                llm_calls_used += 1
+                if llm_category is None:
+                    logger.info(
+                        "BROLL_LLM_FALLBACK reason=llm_no_match cue_type=%s trigger=%r",
+                        cue_type, trigger,
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            "LLM could not determine B-roll category",
+                        )
+                    )
+                    continue
+
+                if llm_category not in ALLOWED_VPI_BROLL_CATEGORIES:
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=category_not_allowed cue_type=%s trigger=%r llm_category=%s",
+                        cue_type, trigger, llm_category,
+                    )
+                    decisions.append(
+                        self._decision(
+                            "reject", "no_broll", trigger, None, None, 2.8, 0.0,
+                            f"LLM category {llm_category} not in allowed VPI categories",
+                        )
+                    )
+                    continue
+
+                logger.info(
+                    "BROLL_LLM_FALLBACK reason=llm_match cue_type=%s trigger=%r llm_category=%s",
+                    cue_type, trigger, llm_category,
+                )
+                vpi_category = llm_category
+                effective_cue_type = self._CUE_ALIASES.get(vpi_category, cue_type)
+
+            # ── Build visual intent and timing ──────────────────────────────
+            visual_intent = self._build_visual_intent(effective_cue_type, normalized, trigger)
+            duration = min(self._duration_for(effective_cue_type), visual_intent.max_duration)
             start_s = self._estimate_start_s(
                 normalized=normalized,
                 trigger=trigger,
@@ -269,7 +669,7 @@ class EditorialBrollPlanner:
             start_s, duration = self._polish_timing(
                 start_s=start_s,
                 duration_s=duration,
-                cue_type=cue_type,
+                cue_type=effective_cue_type,
                 intent_type=visual_intent.intent_type,
                 clip_duration=clip_duration,
             )
@@ -278,10 +678,25 @@ class EditorialBrollPlanner:
             decision = "approve"
             min_start_s = 3.2 if visual_intent.intent_type in {"myth_debunk_age", "client_objection"} else 4.5
 
-            if cue_type == "revelation_hook":
+            # ── Determine if this is a primary or fallback match ────────────
+            # Primary = direct VPI category from local mapper
+            # Fallback = resolved via alias, LLM fallback, or generic cue
+            is_primary_match = vpi_category is not None and effective_cue_type in self._PATTERNS
+            is_alias_match = (
+                vpi_category is not None
+                and effective_cue_type not in self._PATTERNS
+                and any(
+                    alias in self._PATTERNS
+                    for alias in _APPROVED_CATEGORY_ALIASES.get(vpi_category, ())
+                )
+            )
+            is_fallback = not is_primary_match
+
+            # ── Apply editorial gates ───────────────────────────────────────
+            if effective_cue_type == "revelation_hook":
                 decision = "reject"
                 reason = "Hook/revelation moment: keep talking head"
-            elif cue_type == "direct_cta":
+            elif effective_cue_type == "direct_cta":
                 decision = "reject"
                 reason = "CTA moment: keep speaker visible"
             elif visual_intent.intent_type == "weak_intro":
@@ -296,9 +711,49 @@ class EditorialBrollPlanner:
             elif start_s > clip_duration - 2.0:
                 decision = "reject"
                 reason = "CTA/end protected"
-            elif confidence < 0.55:
+            # ── Generic/cinematic abstract guard ────────────────────────────
+            elif (
+                _GENERIC_BROLL_NOT_ALLOWED
+                and visual_intent.intent_type == "generic"
+                and visual_intent.confidence < _FALLBACK_CONFIDENCE_THRESHOLD
+            ):
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=%s cue_type=%s trigger=%r confidence=%.2f intent_type=%s",
+                    _SKIP_REASON_GENERIC_BROLL_NOT_ALLOWED,
+                    effective_cue_type, trigger, confidence, visual_intent.intent_type,
+                )
                 decision = "reject"
-                reason = "Confidence below threshold"
+                reason = _SKIP_REASON_GENERIC_BROLL_NOT_ALLOWED
+            # ── Dual-threshold confidence check ─────────────────────────────
+            # Primary matches use _PRIMARY_CONFIDENCE_THRESHOLD (0.65)
+            # Fallback/alias matches use _FALLBACK_CONFIDENCE_THRESHOLD (0.75)
+            elif is_fallback and confidence < _FALLBACK_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=%s cue_type=%s trigger=%r confidence=%.2f threshold=%.2f is_fallback=true",
+                    _SKIP_REASON_LOW_EDITORIAL_CONFIDENCE,
+                    effective_cue_type, trigger, confidence, _FALLBACK_CONFIDENCE_THRESHOLD,
+                )
+                decision = "reject"
+                reason = f"{_SKIP_REASON_LOW_EDITORIAL_CONFIDENCE} (fallback threshold={_FALLBACK_CONFIDENCE_THRESHOLD})"
+            elif is_primary_match and confidence < _PRIMARY_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=%s cue_type=%s trigger=%r confidence=%.2f threshold=%.2f is_primary=true",
+                    _SKIP_REASON_LOW_EDITORIAL_CONFIDENCE,
+                    effective_cue_type, trigger, confidence, _PRIMARY_CONFIDENCE_THRESHOLD,
+                )
+                decision = "reject"
+                reason = f"{_SKIP_REASON_LOW_EDITORIAL_CONFIDENCE} (primary threshold={_PRIMARY_CONFIDENCE_THRESHOLD})"
+            # ── Timing anchor check ─────────────────────────────────────────
+            # If the trigger text doesn't map to a clear editorial VPI category
+            # and confidence is below fallback threshold, skip
+            elif vpi_category is None and confidence < _FALLBACK_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=%s cue_type=%s trigger=%r confidence=%.2f vpi_category=None",
+                    _SKIP_REASON_NO_TIMING_ANCHOR,
+                    effective_cue_type, trigger, confidence,
+                )
+                decision = "reject"
+                reason = _SKIP_REASON_NO_TIMING_ANCHOR
             elif any(abs(start_s - previous) < 5.5 for previous in approved_starts):
                 decision = "reject"
                 reason = "Too close to previous approved B-roll"
@@ -312,22 +767,217 @@ class EditorialBrollPlanner:
             if decision == "approve" and start_s is not None:
                 approved_starts.append(start_s)
                 approved_duration += duration
+                logger.info(
+                    "EDITORIAL_BROLL_SELECTED reason=approved cue_type=%s trigger=%r "
+                    "confidence=%.2f start_s=%.1f timing_anchor=%s score=%.2f is_primary=%s",
+                    effective_cue_type, trigger, confidence, start_s,
+                    vpi_category or "none",
+                    visual_intent.confidence,
+                    is_primary_match,
+                )
 
             decisions.append(
                 self._decision(
                     decision,
-                cue_type,
-                trigger,
-                (visual_intent.preferred_queries[0] if visual_intent.preferred_queries else self._VISUAL_QUERIES.get(cue_type)),
-                start_s,
-                duration,
-                confidence,
-                reason,
-                visual_intent,
-            )
+                    effective_cue_type,
+                    trigger,
+                    (visual_intent.preferred_queries[0] if visual_intent.preferred_queries else self._VISUAL_QUERIES.get(effective_cue_type)),
+                    start_s,
+                    duration,
+                    confidence,
+                    reason,
+                    visual_intent,
+                )
             )
 
+        # ── VPI Premium Productive Hardening: B-roll Budget Log ──────────────
+        approved_count = len([d for d in decisions if d.decision == "approve"])
+        total_requested = len(decisions)
+        max_broll_slots = cue_limit
+        logger.info(
+            "BROLL_BUDGET_APPLIED requested=%d kept=%d max=%d",
+            total_requested, approved_count, max_broll_slots,
+        )
+
         return decisions
+
+    @staticmethod
+    def _validate_asset_against_manifest(
+        *,
+        vpi_category: str,
+        resolved_category: Optional[str] = None,
+        cue_type: str,
+        trigger: str,
+    ) -> Dict[str, Any]:
+        """Validate a VPI category against the asset manifest.
+
+        Checks:
+        - Taxonomy matches the selected category
+        - brand_fit is not false
+        - avoid_contexts don't match current cue/context
+
+        Returns dict with 'skip' (bool) and 'reason' (str).
+        """
+        result: Dict[str, Any] = {"skip": False, "reason": ""}
+
+        try:
+            from .vpi_asset_library_service import build_asset_index as _build_index
+            index = _build_index()
+            verified_broll = list((index.get("verified") or {}).get("broll") or [])
+            if not verified_broll:
+                # No manifest assets to validate against — allow through
+                return result
+
+            active_category = resolved_category or vpi_category
+            accepted_categories = {vpi_category, active_category}
+            accepted_categories.update(_APPROVED_CATEGORY_ALIASES.get(vpi_category, tuple()))
+
+            # Check if any verified asset matches this category (or approved alias) with valid taxonomy
+            compatible_assets = []
+            for asset in verified_broll:
+                asset_category = str(asset.get("category") or "").strip()
+                asset_taxonomy = str(asset.get("taxonomy") or "").strip()
+                asset_brand_fit = bool(asset.get("brand_fit", True))
+                asset_avoid_contexts = list(asset.get("avoid_contexts") or [])
+
+                # Taxonomy match: asset category/taxonomy must align with primary or approved alias categories
+                taxonomy_match = (
+                    asset_category in accepted_categories
+                    or asset_taxonomy in accepted_categories
+                    or any(c in asset_taxonomy for c in accepted_categories)
+                    or any(c in asset_category for c in accepted_categories)
+                )
+                if not taxonomy_match:
+                    continue
+
+                # Brand fit check
+                if not asset_brand_fit:
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED reason=asset_brand_fit_false "
+                        "vpi_category=%s asset=%s",
+                        vpi_category,
+                        str(asset.get("path") or ""),
+                    )
+                    result["skip"] = True
+                    result["reason"] = "asset_brand_fit_false"
+                    return result
+
+                # Avoid contexts check
+                for avoid_ctx in asset_avoid_contexts:
+                    if avoid_ctx and (
+                        avoid_ctx in vpi_category
+                        or avoid_ctx in cue_type
+                        or avoid_ctx in trigger
+                    ):
+                        logger.info(
+                            "EDITORIAL_BROLL_SKIPPED reason=avoid_context_match "
+                            "vpi_category=%s avoid_context=%s asset=%s",
+                            vpi_category,
+                            avoid_ctx,
+                            str(asset.get("path") or ""),
+                        )
+                        result["skip"] = True
+                        result["reason"] = "avoid_context_match"
+                        return result
+
+                compatible_assets.append(asset)
+
+            if not compatible_assets:
+                # No manifest asset matched this category — taxonomy mismatch
+                logger.info(
+                    "EDITORIAL_BROLL_SKIPPED reason=asset_taxonomy_mismatch "
+                    "vpi_category=%s cue_type=%s",
+                    vpi_category,
+                    cue_type,
+                )
+                result["skip"] = True
+                result["reason"] = "asset_taxonomy_mismatch"
+                return result
+
+            # All checks passed — manifest validated
+            logger.info(
+                "EDITORIAL_BROLL_SELECTED reason=manifest_validated "
+                "vpi_category=%s cue_type=%s manifest_validated=true "
+                "compatible_assets=%d",
+                vpi_category,
+                cue_type,
+                len(compatible_assets),
+            )
+            return result
+
+        except Exception as exc:
+            logger.debug(
+                "[editorial-broll] manifest validation error for %s: %s",
+                vpi_category, exc,
+            )
+            # On error, allow through (don't block B-roll)
+            return result
+
+    @staticmethod
+    def _llm_detect_category(trigger: str, text: str) -> Optional[str]:
+        """Use Groq LLM to detect VPI B-roll category for a trigger text.
+
+        Returns an allowed VPI category string, or None if:
+        - No Groq API key configured
+        - 429 rate limit (fallback silently)
+        - LLM response is unparseable
+        - Category not in ALLOWED_VPI_BROLL_CATEGORIES
+        """
+        import httpx
+        groq_key = os.getenv("GROQ_API_KEY", "")
+        if not groq_key:
+            logger.info("BROLL_LLM_FALLBACK reason=no_groq_key trigger=%r", trigger)
+            return None
+
+        prompt = (
+            "You are a B-roll category classifier for Spanish insurance/finance videos. "
+            "Given a trigger phrase and transcript context, classify the trigger into "
+            "exactly one of these VPI B-roll categories:\n"
+            + ", ".join(sorted(ALLOWED_VPI_BROLL_CATEGORIES)) + "\n\n"
+            "Rules:\n"
+            "- Return ONLY the category name, nothing else.\n"
+            "- If none match, return 'none'.\n"
+            "- Do NOT invent categories outside the list.\n\n"
+            f"Transcript context: ...{text[-300:]}...\n"
+            f"Trigger phrase: {trigger}\n"
+            "Category:"
+        )
+        try:
+            resp = httpx.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 20,
+                    "temperature": 0.1,
+                },
+                timeout=8,
+            )
+            if resp.status_code == 429:
+                logger.info("BROLL_LLM_FALLBACK reason=429 trigger=%r", trigger)
+                return None
+            resp.raise_for_status()
+            content = resp.json()["choices"][0]["message"]["content"].strip().lower()
+            # Clean up the response
+            content = content.strip("'\"").strip()
+            if content in ALLOWED_VPI_BROLL_CATEGORIES:
+                logger.info(
+                    "BROLL_LLM_FALLBACK reason=llm_match trigger=%r category=%s",
+                    trigger, content,
+                )
+                return content
+            logger.info(
+                "BROLL_LLM_FALLBACK reason=llm_no_match trigger=%r llm_output=%r",
+                trigger, content,
+            )
+            return None
+        except Exception as exc:
+            logger.debug(
+                "[editorial-broll] LLM category detection failed for %r: %s",
+                trigger, exc,
+            )
+            return None
 
     @classmethod
     def _decision(
@@ -342,6 +992,7 @@ class EditorialBrollPlanner:
         reason: str,
         visual_intent: Optional[VisualIntent] = None,
     ) -> BrollCueDecision:
+
         transition, motion, opacity = cls._STYLE.get(cue_type, cls._STYLE["no_broll"])
         intent_type = visual_intent.intent_type if visual_intent else ""
         preferred_queries = visual_intent.preferred_queries if visual_intent else None

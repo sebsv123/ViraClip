@@ -41,9 +41,12 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 ENV NEXT_TELEMETRY_DISABLED=1
 
-# Start development server with hot-reload
-# Run prisma generate first to handle volume mount scenarios where node_modules is overwritten
-CMD ["sh", "-c", "bunx prisma generate && bun run dev"]
+# Default: start development server with hot-reload.
+# Override with FRONTEND_RUNTIME=production to run the pre-built app
+# Apply Better Auth scrypt patch for fast login on Bun (local dev)
+RUN sh /app/scripts/patch-better-auth-scrypt.sh || echo "PATCH: scrypt patch skipped (will apply at runtime)"
+# (docker compose build --build-arg FRONTEND_BUILD_TARGET=runner ...).
+CMD ["bun", "run", "dev:docker"]
 
 # Builder stage (for production)
 FROM base AS builder
@@ -92,8 +95,9 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Copy Prisma generated client and schema
-COPY --from=builder --chown=nextjs:nodejs /app/node_modules/.prisma ./node_modules/.prisma
+# Copy Prisma generated client (output: src/generated/prisma per schema.prisma)
+# and the Prisma runtime engine (node_modules/@prisma).
+COPY --from=builder --chown=nextjs:nodejs /app/src/generated ./src/generated
 COPY --from=builder --chown=nextjs:nodejs /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/prisma ./prisma
 
@@ -105,4 +109,4 @@ ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
 # Start the application
-CMD ["bun", "server.js"]
+CMD ["bun", "run", "start"]

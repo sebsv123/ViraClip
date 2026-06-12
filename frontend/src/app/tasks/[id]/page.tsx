@@ -135,6 +135,9 @@ interface Clip {
   smart_edit_summary?: string;
   smart_edit_time_saved?: number;
   text_pops_applied?: number;
+  // OUTPUT RESCUE: review/publishable visibility
+  qc_status?: string | null;
+  qc_reasons?: string[];
   // Phase 10: Viral Polish & A/B
   cta_overlay_applied?: boolean;
   emoji_overlays_applied?: boolean;
@@ -172,6 +175,26 @@ interface TaskDetails {
       reasoning?: string;
     }>;
   };
+  delivery_diagnostics?: {
+    requested_clips?: number;
+    render_attempted_count?: number;
+    render_success_count?: number;
+    effective_clips_count?: number;
+    inserted_clips_count?: number;
+    visible_clip_cards_count?: number;
+    missing_clip_count?: number;
+    failed_clip_reasons?: FailedClipReason[];
+    reason_if_zero_clips?: string;
+  };
+}
+
+interface FailedClipReason {
+  clip_index?: number;
+  start_time?: string;
+  end_time?: string;
+  stage?: string;
+  reason?: string;
+  detail?: string;
 }
 
 interface FontOption {
@@ -187,6 +210,7 @@ export default function TaskPage() {
   const [clips, setClips] = useState<Clip[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [clipsError, setClipsError] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
   const [progressMessage, setProgressMessage] = useState("");
   const [isEditing, setIsEditing] = useState(false);
@@ -234,6 +258,21 @@ export default function TaskPage() {
 
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/**
+ * Safely build a clip video URL from a backend-returned path.
+ * - absolute http(s) URL => return as-is
+ * - /generated/... => prefix with apiBase
+ * - generated/... => prefix with apiBase + slash
+ * - empty/malformed => return empty string
+ */
+function normalizeClipUrl(videoUrl: string | null | undefined, apiBase: string): string {
+  if (!videoUrl) return "";
+  if (videoUrl.startsWith("http://") || videoUrl.startsWith("https://")) return videoUrl;
+  const base = apiBase.replace(/\/+$/, "");
+  const path = videoUrl.startsWith("/") ? videoUrl : `/${videoUrl}`;
+  return `${base}${path}`;
+}
+
   // Load available music tracks once
   useEffect(() => {
     fetch(`${apiUrl}/clips/music/tracks`)
@@ -268,8 +307,26 @@ export default function TaskPage() {
       queued: { label: "Queued", className: "bg-amber-500/15 text-amber-400 border-amber-500/30" },
       failed: { label: "Failed", className: "bg-red-500/15 text-red-400 border-red-500/30" },
       error: { label: "Error", className: "bg-red-500/15 text-red-400 border-red-500/30" },
+      needs_review: { label: "Needs Review", className: "bg-purple-500/15 text-purple-400 border-purple-500/30" },
+      fast_fail_editing_zero: { label: "No Clips", className: "bg-orange-500/15 text-orange-400 border-orange-500/30" },
     };
     const s = map[status] ?? { label: status, className: "bg-white/5 text-gray-300 border-white/10" };
+    return (
+      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${s.className}`}>{s.label}</span>
+    );
+  };
+
+  const getQcStatusBadge = (qcStatus?: string | null) => {
+    if (!qcStatus) return null;
+    const map: Record<string, { label: string; className: string }> = {
+      ready: { label: "Publishable", className: "bg-green-500/15 text-green-600 border-green-500/30" },
+      publishable: { label: "Publishable", className: "bg-green-500/15 text-green-600 border-green-500/30" },
+      needs_review: { label: "Needs Review", className: "bg-purple-500/15 text-purple-500 border-purple-500/30" },
+      rejected: { label: "Rejected", className: "bg-red-500/15 text-red-500 border-red-500/30" },
+      rejected_technical: { label: "Rejected (technical)", className: "bg-red-500/15 text-red-500 border-red-500/30" },
+      failed: { label: "Failed", className: "bg-red-500/15 text-red-500 border-red-500/30" },
+    };
+    const s = map[qcStatus] ?? { label: qcStatus, className: "bg-white/5 text-gray-400 border-white/10" };
     return (
       <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${s.className}`}>{s.label}</span>
     );
@@ -349,33 +406,35 @@ export default function TaskPage() {
         setProjectIncludeBroll(Boolean(taskData.include_broll));
 
         // Fetch clips if task is completed or processing (incremental clips)
-        if (taskData.status === "completed" || taskData.status === "processing") {
+        if (taskData.status === "completed" || taskData.status === "processing" || taskData.status === "needs_review") {
           const clipsResponse = await fetch(`${taskApiUrl}/${params.id}/clips`, {
             cache: "no-store",
           });
 
           if (!clipsResponse.ok) {
-            throw new Error(await buildSupportError(clipsResponse, `Failed to fetch clips: ${clipsResponse.status}`));
+            // OUTPUT RESCUE: a clips fetch failure must not hide the task itself.
+            setClipsError(await buildSupportError(clipsResponse, `Failed to fetch clips: ${clipsResponse.status}`));
+          } else {
+            setClipsError(null);
+            const clipsData = await clipsResponse.json();
+            const nextClips = clipsData.clips || [];
+            setClips((prev) => {
+              if (taskData.status === "completed") {
+                return nextClips;
+              }
+
+              const merged = new Map<string, Clip>();
+              for (const clip of prev) {
+                merged.set(clip.id, clip);
+              }
+              for (const clip of nextClips) {
+                merged.set(clip.id, clip);
+              }
+              return Array.from(merged.values()).sort(
+                (a, b) => (a.clip_order ?? 0) - (b.clip_order ?? 0),
+              );
+            });
           }
-
-          const clipsData = await clipsResponse.json();
-          const nextClips = clipsData.clips || [];
-          setClips((prev) => {
-            if (taskData.status === "completed") {
-              return nextClips;
-            }
-
-            const merged = new Map<string, Clip>();
-            for (const clip of prev) {
-              merged.set(clip.id, clip);
-            }
-            for (const clip of nextClips) {
-              merged.set(clip.id, clip);
-            }
-            return Array.from(merged.values()).sort(
-              (a, b) => (a.clip_order ?? 0) - (b.clip_order ?? 0),
-            );
-          });
         }
 
         return true;
@@ -819,6 +878,49 @@ export default function TaskPage() {
     URL.revokeObjectURL(blobUrl);
   };
 
+  // OUTPUT RESCUE: placeholder cards for requested-but-missing clips.
+  const requestedClips = task?.delivery_diagnostics?.requested_clips ?? 0;
+  const failedClipReasons: FailedClipReason[] = task?.delivery_diagnostics?.failed_clip_reasons ?? [];
+  const missingClipCount =
+    task?.status === "completed" && requestedClips > clips.length ? requestedClips - clips.length : 0;
+  const stageLabel = (stage?: string) => {
+    if (!stage) return "Not generated";
+    if (stage === "post_refinement_duplicate") return "Duplicate removed";
+    if (stage === "render_timeout") return "Render timeout";
+    if (stage === "technical_qc_failed") return "Technical QC failed";
+    if (stage === "publishable_qc_failed") return "Editorial QC rejected";
+    return stage.replaceAll("_", " ");
+  };
+  const renderMissingClipCards = () =>
+    Array.from({ length: missingClipCount }).map((_, idx) => {
+      const info = failedClipReasons[idx];
+      return (
+        <Card
+          key={`missing-${idx}`}
+          className="overflow-hidden border-2 border-dashed border-amber-500/40 bg-amber-500/5"
+        >
+          <CardContent className="p-6">
+            <div className="flex items-center gap-3 mb-2 flex-wrap">
+              <AlertCircle className="w-5 h-5 text-amber-500 shrink-0" />
+              <h3 className="font-semibold text-lg">Clip not delivered</h3>
+              <span className="text-xs px-2 py-0.5 rounded-full border font-medium bg-amber-500/15 text-amber-600 border-amber-500/30">
+                {stageLabel(info?.stage)}
+              </span>
+              {info?.start_time && info?.end_time && (
+                <span className="text-xs text-gray-500">
+                  {info.start_time} - {info.end_time}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-gray-400">
+              {info?.reason || info?.detail ||
+                "This clip was requested but the pipeline did not deliver a final MP4 for it."}
+            </p>
+          </CardContent>
+        </Card>
+      );
+    });
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-[#0a0a0f] text-white flex">
@@ -1072,7 +1174,7 @@ export default function TaskPage() {
                       <CardContent className="p-0">
                         <div className="flex flex-col lg:flex-row">
                           <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
-                            <DynamicVideoPlayer src={`${apiUrl}${clip.video_url}`} poster="/placeholder-video.jpg" />
+                            <DynamicVideoPlayer src={normalizeClipUrl(clip.video_url, apiUrl)} poster="/placeholder-video.jpg" />
                           </div>
                           <div className="p-6 flex-1">
                             <div className="flex items-start justify-between mb-4">
@@ -1129,7 +1231,7 @@ export default function TaskPage() {
                                 ))}
                               </div>
                               <Button size="sm" variant="outline" asChild>
-                                <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
+                                <a href={normalizeClipUrl(clip.video_url, apiUrl)} download={clip.filename}>
                                   <Download className="w-4 h-4" />
                                   Download
                                 </a>
@@ -1144,12 +1246,15 @@ export default function TaskPage() {
             )}
           </div>
         ) : !task ? (
-          <div className="flex flex-col items-center justify-center min-h-[50vh] py-16">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2 h-2 bg-neutral-300 rounded-full animate-[pulse_1.4s_ease-in-out_infinite]" />
-              <span className="w-2 h-2 bg-neutral-300 rounded-full animate-[pulse_1.4s_ease-in-out_0.2s_infinite]" />
-              <span className="w-2 h-2 bg-neutral-300 rounded-full animate-[pulse_1.4s_ease-in-out_0.4s_infinite]" />
-            </div>
+          <div className="flex flex-col items-center justify-center min-h-[50vh] py-16 text-center">
+            <AlertCircle className="w-12 h-12 text-amber-500 mb-4" />
+            <p className="text-gray-400 mb-2">Task details could not be loaded.</p>
+            <button
+              onClick={() => window.location.reload()}
+              className="text-cyan-400 hover:underline text-sm"
+            >
+              Retry
+            </button>
           </div>
         ) : task?.status === "error" ? (
           <Card>
@@ -1180,6 +1285,27 @@ export default function TaskPage() {
                     The task completed but no clips were generated. The video may not have had suitable content for
                     clipping.
                   </p>
+                  {clipsError && (
+                    <p className="text-sm text-red-400 mb-4">Clips could not be loaded: {clipsError}</p>
+                  )}
+                  {task?.delivery_diagnostics && (
+                    <div className="text-left text-xs text-gray-400 bg-white/5 border border-white/10 rounded p-3 mb-4 space-y-1">
+                      <p>
+                        requested: {task.delivery_diagnostics.requested_clips ?? "?"} · render attempted:{" "}
+                        {task.delivery_diagnostics.render_attempted_count ?? "?"} · render success:{" "}
+                        {task.delivery_diagnostics.render_success_count ?? "?"} · inserted:{" "}
+                        {task.delivery_diagnostics.inserted_clips_count ?? "?"}
+                      </p>
+                      {task.delivery_diagnostics.reason_if_zero_clips && (
+                        <p>reason: {task.delivery_diagnostics.reason_if_zero_clips}</p>
+                      )}
+                      {failedClipReasons.map((r, idx) => (
+                        <p key={idx}>
+                          clip {r.clip_index ?? idx + 1}: {stageLabel(r.stage)} — {r.reason || r.detail || "unknown"}
+                        </p>
+                      ))}
+                    </div>
+                  )}
                   <Link href="/">
                     <Button>
                       <ArrowLeft className="w-4 h-4" />
@@ -1202,6 +1328,12 @@ export default function TaskPage() {
           </Card>
         ) : (
           <div className="grid gap-6">
+            {clipsError && (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>Clips could not be loaded: {clipsError}</AlertDescription>
+              </Alert>
+            )}
             <div className="flex items-center justify-between">
               <Button variant="outline" size="sm" onClick={() => setSettingsSheetOpen(true)}>
                 <Settings2 className="w-4 h-4" />
@@ -1341,7 +1473,7 @@ export default function TaskPage() {
                     {/* Video Player */}
                     <div className="relative flex-shrink-0 bg-black rounded-lg overflow-hidden m-3">
                       <DynamicVideoPlayer
-                        src={`${apiUrl}${clip.video_url}`}
+                        src={normalizeClipUrl(clip.video_url, apiUrl)}
                         poster={clip.thumbnail_url ? `${apiUrl}${clip.thumbnail_url}` : "/placeholder-video.jpg"}
                       />
                     </div>
@@ -1358,7 +1490,15 @@ export default function TaskPage() {
                             />
                             Select for merge
                           </label>
-                          <h3 className="font-semibold text-lg text-black mb-1">Clip {clip.clip_order}</h3>
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <h3 className="font-semibold text-lg text-black">Clip {clip.clip_order}</h3>
+                            {getQcStatusBadge(clip.qc_status)}
+                          </div>
+                          {clip.qc_status === "needs_review" && (clip.qc_reasons?.length ?? 0) > 0 && (
+                            <p className="text-xs text-purple-400 mb-1">
+                              Review: {(clip.qc_reasons ?? []).slice(0, 4).join(", ")}
+                            </p>
+                          )}
                           <div className="flex items-center gap-2 text-sm text-gray-400">
                             <span>
                               {clip.start_time} - {clip.end_time}
@@ -1786,7 +1926,7 @@ export default function TaskPage() {
 
                       <div className="flex gap-2">
                         <Button size="sm" variant="outline" asChild>
-                          <a href={`${apiUrl}${clip.video_url}`} download={clip.filename}>
+                          <a href={normalizeClipUrl(clip.video_url, apiUrl)} download={clip.filename}>
                             <Download className="w-4 h-4" />
                             Download
                           </a>
@@ -1981,6 +2121,7 @@ export default function TaskPage() {
                 </CardContent>
               </Card>
             ))}
+            {renderMissingClipCards()}
           </div>
         )}
       </div>

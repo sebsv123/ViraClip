@@ -1,0 +1,106 @@
+{
+  "categories": {
+    "family_protection": {
+      "display_name": "Family Protection",
+      "description": "Family scenes, parents with children, home life, multi-generational warmth",
+      "visual_texture": "warm_human_family",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "luxury"],
+      "target_count": 12,
+      "priority": 1
+    },
+    "advisor_consultation": {
+      "display_name": "Advisor Consultation",
+      "description": "Financial advisor meetings, client consultations, professional office settings",
+      "visual_texture": "direct_professional",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "stock market", "trading", "luxury"],
+      "target_count": 12,
+      "priority": 1
+    },
+    "financial_planning": {
+      "display_name": "Financial Planning",
+      "description": "Budget planning, reviewing documents, calculators, savings discussions",
+      "visual_texture": "informative_clear",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "trading", "luxury", "handshake only"],
+      "target_count": 12,
+      "priority": 1
+    },
+    "documents_support": {
+      "display_name": "Documents & Admin Support",
+      "description": "Signing documents, paperwork, policy review, filing, close-ups of hands writing",
+      "visual_texture": "clean_explanation",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "stock market", "trading", "luxury"],
+      "target_count": 8,
+      "priority": 2
+    },
+    "risk_responsibility": {
+      "display_name": "Risk & Responsibility",
+      "description": "Thoughtful/concerned expressions, serious conversations, protective moments",
+      "visual_texture": "serious_not_alarmist",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "violence", "horror", "ambulance", "luxury"],
+      "target_count": 8,
+      "priority": 2
+    },
+    "local_trust": {
+      "display_name": "Local Trust & Community",
+      "description": "Local businesses, community centers, neighborhood settings, trusted advisor interactions",
+      "visual_texture": "warm_local",
+      "preferred_orientation": "portrait",
+      "min_width": 720,
+      "min_height": 720,
+      "avoid_terms": ["meditation", "yoga", "tea", "coffee", "funeral", "hospital", "stock market", "trading", "luxury"],
+      "target_count": 6,
+      "priority": 3
+    }
+  },
+  "global_avoid_terms": [
+    "meditation",
+    "yoga",
+    "tea",
+    "coffee",
+    "funeral",
+    "hospital",
+    "stock market",
+    "luxury",
+    "trading",
+    "handshake only",
+    "ambulance",
+    "violence",
+    "horror",
+    "nursing home",
+    "cemetery",
+    "alcohol",
+    "smoking",
+    "gambling",
+    "weapon",
+    "war",
+    "poverty",
+    "homeless"
+  ],
+  "quality_filters": {
+    "min_duration_s": 4.0,
+    "max_duration_s": 20.0,
+    "hard_min_duration_s": 3.0,
+    "hard_max_duration_s": 45.0,
+    "min_width": 640,
+    "min_height": 640,
+    "preferred_min_width": 720,
+    "preferred_min_height": 720,
+    "prefer_portrait": true,
+    "prefer_crop_friendly": true
+  }
+}

@@ -19,6 +19,10 @@ ASSET_TYPE_MAP = {
     "broll": "broll",
     "sfx": "sfx",
     "bgm": "bgm",
+    "overlay": "motion_overlay",
+    "overlays": "motion_overlay",
+    "motion_overlay": "motion_overlay",
+    "motion_overlays": "motion_overlay",
 }
 
 ALLOWED_ROOTS = {
@@ -27,6 +31,7 @@ ALLOWED_ROOTS = {
     "bgm": ("assets/sounds/bgm", "backend/assets/sounds/bgm", "/app/assets/sounds/bgm"),
     "icons": ("assets/icons", "backend/assets/icons", "/app/assets/icons"),
     "fonts": ("assets/fonts", "backend/assets/fonts", "/app/assets/fonts"),
+    "motion_overlay": ("assets/overlays", "backend/assets/overlays", "/app/assets/overlays"),
 }
 
 ALLOWED_EXTS = {
@@ -35,6 +40,7 @@ ALLOWED_EXTS = {
     "bgm": {".mp3", ".wav", ".ogg", ".m4a"},
     "icons": {".svg", ".png"},
     "fonts": {".ttf", ".otf", ".woff", ".woff2"},
+    "motion_overlay": {".mov", ".mp4", ".webm", ".png", ".apng", ".gif"},
 }
 
 READY_THRESHOLDS = {"broll": 10, "sfx": 10, "icons": 10, "bgm": 3, "fonts": 1}
@@ -53,6 +59,18 @@ KNOWN_SOURCES = {
     "google_fonts_ofl": {"license": "SIL Open Font License", "commercial_use_ok": True, "attribution_required": False},
     "google_fonts": {"license": "SIL Open Font License", "commercial_use_ok": True, "attribution_required": False},
 }
+
+
+def _ensure_services_import_path() -> None:
+    candidates = [
+        ROOT / "backend" / "src",  # repo-root execution
+        ROOT / "src",              # container /app execution
+    ]
+    for candidate in candidates:
+        path_txt = str(candidate)
+        if candidate.exists() and path_txt not in sys.path:
+            sys.path.insert(0, path_txt)
+            return
 
 
 def _bool_from_text(value: str) -> bool:
@@ -173,6 +191,9 @@ def _validate_new_asset(asset: Dict[str, Any], existing_assets: List[Dict[str, A
             return False, "topics_missing"
         if not str(asset.get("sensitive_tone") or "").strip():
             return False, "sensitive_tone_missing"
+    if asset_type == "motion_overlay":
+        if not str(asset.get("sensitive_tone") or "").strip():
+            return False, "sensitive_tone_missing"
     return True, "ok"
 
 
@@ -226,13 +247,15 @@ def _normalize_asset_entry(raw: Dict[str, Any]) -> Dict[str, Any]:
     }
     if "duration_hint" in raw and raw.get("duration_hint") is not None:
         out["duration_hint"] = float(raw["duration_hint"])
+    if "review_required" in raw and raw.get("review_required") is not None:
+        out["review_required"] = bool(raw.get("review_required"))
     if raw.get("avoid_for"):
         out["avoid_for"] = [str(item).strip() for item in list(raw["avoid_for"]) if str(item).strip()]
     return out
 
 
 def _build_index_from_manifest_data(manifest: Dict[str, Any]) -> Dict[str, Any]:
-    verified: Dict[str, List[Dict[str, Any]]] = {k: [] for k in ("broll", "sfx", "bgm", "icons", "fonts")}
+    verified: Dict[str, List[Dict[str, Any]]] = {k: [] for k in ("broll", "sfx", "bgm", "icons", "fonts", "motion_overlay")}
     invalid_assets: List[Dict[str, Any]] = []
     warnings: List[str] = []
     assets = [item for item in manifest.get("assets", []) if isinstance(item, dict)]
@@ -259,8 +282,8 @@ def _build_index_from_manifest_data(manifest: Dict[str, Any]) -> Dict[str, Any]:
         "verified": verified,
         "invalid_assets": invalid_assets,
         "warnings": warnings,
-        "unverified_local": {k: [] for k in ("broll", "sfx", "bgm", "icons", "fonts")},
-        "all_discovered": {"summary": {k: 0 for k in ("broll", "sfx", "bgm", "icons", "fonts")}},
+        "unverified_local": {k: [] for k in ("broll", "sfx", "bgm", "icons", "fonts", "motion_overlay")},
+        "all_discovered": {"summary": {k: 0 for k in ("broll", "sfx", "bgm", "icons", "fonts", "motion_overlay")}},
     }
 
 
@@ -268,6 +291,11 @@ def cmd_add(args: argparse.Namespace) -> int:
     try:
         commercial_use_ok = _bool_from_text(args.commercial_use_ok)
         attribution_required = _bool_from_text(args.attribution_required)
+        review_required = (
+            _bool_from_text(args.review_required)
+            if args.review_required is not None
+            else None
+        )
     except ValueError as exc:
         print(f"[asset-intake] validation_pass=false reason={exc}")
         return 1
@@ -286,6 +314,7 @@ def cmd_add(args: argparse.Namespace) -> int:
         "topics": args.topics or [],
         "sensitive_tone": args.sensitive_tone or "",
         "duration_hint": args.duration_hint,
+        "review_required": review_required,
     }
     print(f"[asset-intake] add requested id={args.id} type={args.type} path={args.path}")
 
@@ -329,8 +358,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             print(f"[asset-intake] validate_error=manifest_error:{exc}")
             return 1
 
-    if str(ROOT / "backend" / "src") not in sys.path:
-        sys.path.insert(0, str(ROOT / "backend" / "src"))
+    _ensure_services_import_path()
     from services.vpi_asset_library_service import build_asset_library_qc_report  # type: ignore
 
     index = _build_index_from_manifest_data(manifest)
@@ -345,7 +373,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
     print(f"[asset-intake] invalid_assets={invalid_count}")
     print(
         "[asset-intake] verified_by_type="
-        f"broll:{len(verified.get('broll', []))}|sfx:{len(verified.get('sfx', []))}|bgm:{len(verified.get('bgm', []))}|icons:{len(verified.get('icons', []))}|fonts:{len(verified.get('fonts', []))}"
+        f"broll:{len(verified.get('broll', []))}|sfx:{len(verified.get('sfx', []))}|bgm:{len(verified.get('bgm', []))}|icons:{len(verified.get('icons', []))}|fonts:{len(verified.get('fonts', []))}|motion_overlay:{len(verified.get('motion_overlay', []))}"
     )
     for warning in list(qc.get("license_warnings") or []):
         print(f"[asset-intake] warning={warning}")
@@ -426,6 +454,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--topics", nargs="*", default=[])
     add.add_argument("--sensitive-tone", default="")
     add.add_argument("--duration-hint", type=float, default=None)
+    add.add_argument("--review-required", default=None)
     add.set_defaults(func=cmd_add)
 
     validate = sub.add_parser("validate", help="Validate manifest and print status")

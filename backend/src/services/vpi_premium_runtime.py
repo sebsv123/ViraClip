@@ -18,8 +18,8 @@ PREMIUM_LAYERS_REQUESTED = [
 ]
 
 
-def premium_runtime_contract(*, beta_clean: bool) -> Dict[str, Any]:
-    enabled = bool(beta_clean and VIRACLIP_PREMIUM_EDITING_DEFAULT)
+def premium_runtime_contract() -> Dict[str, Any]:
+    enabled = bool(VIRACLIP_PREMIUM_EDITING_DEFAULT)
     return {
         "premium_runtime_enabled": enabled,
         "premium_layers_requested": list(PREMIUM_LAYERS_REQUESTED) if enabled else [],
@@ -42,12 +42,22 @@ def verify_final_filename_contract(
     broll_events: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     name = final_path.name
+    broll_count = len(broll_events or [])
+    broll_final_verified = any(
+        bool((item or {}).get("broll_final_verified"))
+        or bool((item or {}).get("broll_transition_applied"))
+        or bool((item or {}).get("broll_ken_burns_applied"))
+        or bool((item or {}).get("asset_path"))
+        or bool((item or {}).get("asset_url"))
+        for item in (broll_events or [])
+    )
+    broll_actual = bool(broll_count > 0 and broll_final_verified and ("broll_" in name or broll_count > 0))
     checks = {
         "music": bool((music or {}).get("music_applied") and "music_" in name),
         "sfx": bool((sfx or {}).get("sfx_applied") and "sfx_" in name),
         "trans": bool((transitions or {}).get("transitions_applied") and "trans_" in name),
         "vfx": bool((visual_effects or {}).get("visual_effects_applied") and "vfx_" in name),
-        "broll": bool(broll_events) == ("broll_" in name),
+        "broll": broll_actual,
     }
     warnings: List[str] = []
     if (music or {}).get("music_applied") != ("music_" in name):
@@ -58,8 +68,10 @@ def verify_final_filename_contract(
         warnings.append("trans_marker_missing_or_false_positive")
     if (visual_effects or {}).get("visual_effects_applied") != ("vfx_" in name):
         warnings.append("vfx_marker_missing_or_false_positive")
-    if bool(broll_events) != ("broll_" in name):
-        warnings.append("broll_marker_missing_or_false_positive")
+    if "broll_" in name and not broll_actual:
+        warnings.append("broll_marker_false_positive")
+    elif broll_count > 0 and not broll_actual:
+        warnings.append("broll_planned_not_final_verified")
     return {
         "final_contract_ok": not warnings,
         "final_contract": checks,

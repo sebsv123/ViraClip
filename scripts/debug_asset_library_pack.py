@@ -13,6 +13,7 @@ from services.vpi_asset_library_service import (  # noqa: E402
     build_asset_index,
     build_asset_library_qc_report,
     load_asset_manifest,
+    select_verified_bgm_candidate,
     validate_asset_entry,
 )
 from services.caption_service import plan_caption_overlay_pack  # noqa: E402
@@ -49,6 +50,10 @@ def main() -> int:
         allowed_sfx_dir.mkdir(parents=True, exist_ok=True)
         allowed_sfx = allowed_sfx_dir / "debug_soft_chime.mp3"
         allowed_sfx.write_bytes(b"fake")
+        allowed_overlay_dir = ROOT / "assets" / "overlays" / "__debug_tmp__" / "shield"
+        allowed_overlay_dir.mkdir(parents=True, exist_ok=True)
+        allowed_overlay = allowed_overlay_dir / "shield_debug_001.webm"
+        allowed_overlay.write_bytes(b"fake")
         valid_entry = validate_asset_entry(
             {
                 "id": "test_broll",
@@ -138,9 +143,28 @@ def main() -> int:
             }
         )
         check("path_traversal_blocked", not bool(traversal_entry.get("asset_valid")) and traversal_entry.get("reason") == "path_outside_assets", str(traversal_entry))
+
+        overlay_entry = validate_asset_entry(
+            {
+                "id": "overlay_ok",
+                "type": "motion_overlay",
+                "path": str(allowed_overlay),
+                "source": "swishy_export",
+                "license_name": "Manual Review",
+                "commercial_use_ok": True,
+                "attribution_required": False,
+                "tags": ["shield", "motion_overlay"],
+                "topics": ["proteccion"],
+                "sensitive_tone": "safe",
+            }
+        )
+        check("motion_overlay_validated", bool(overlay_entry.get("asset_valid")), str(overlay_entry))
         try:
             allowed_sfx.unlink()
             allowed_sfx_dir.rmdir()
+            allowed_overlay.unlink()
+            allowed_overlay_dir.rmdir()
+            allowed_overlay_dir.parent.rmdir()
         except OSError:
             pass
 
@@ -198,11 +222,13 @@ def main() -> int:
                 "bgm": [{"path": "a", "commercial_use_ok": True}] * 3,
                 "icons": [{"path": "a", "commercial_use_ok": True}] * 10,
                 "fonts": [{"path": "a", "commercial_use_ok": True}],
+                "motion_overlay": [],
             }
         }
     )
     check("qc_partial_thresholds", partial_qc.get("asset_library_status") == "PARTIAL", str(partial_qc))
     check("qc_ready_thresholds", ready_qc.get("asset_library_status") == "READY", str(ready_qc))
+    check("qc_overlay_not_required_for_ready", int((ready_qc.get("counts") or {}).get("motion_overlay") or 0) == 0, str(ready_qc.get("counts")))
 
     caption_plan = plan_caption_overlay_pack("Texto limpio sin iconos locales verificados.", hook_intent="neutral_explanation")
     font_registry = dict(caption_plan.get("font_registry") or {})
@@ -213,6 +239,19 @@ def main() -> int:
     )
 
     runtime_index = build_asset_index()
+    runtime_bgm = select_verified_bgm_candidate(
+        editorial_type="decesos",
+        hook_intent="emotional_closure",
+        segment_text="tranquilidad para la familia",
+        index=runtime_index,
+    )
+    check(
+        "bgm_manifest_verified_selection",
+        (not runtime_bgm.get("matched")) or bool(runtime_bgm.get("manifest_verified")),
+        str(runtime_bgm),
+    )
+    if runtime_bgm.get("matched"):
+        check("bgm_selected_path_exists", Path(str(runtime_bgm.get("path"))).exists(), str(runtime_bgm.get("path")))
     runtime_qc = build_asset_library_qc_report(runtime_index)
     print(f"ASSET_LIBRARY_STATUS={runtime_qc.get('asset_library_status')}")
     print(f"[debug-asset-library-pack] results={PASS} PASS / {FAIL} FAIL")

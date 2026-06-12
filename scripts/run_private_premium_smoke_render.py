@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import json
 import os
 import subprocess
 import sys
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -116,6 +118,64 @@ def timestamp(seconds: float) -> str:
     mm = total // 60
     ss = total % 60
     return f"{mm:02d}:{ss:02d}"
+
+
+def ensure_local_optional_deps(warnings: List[str]) -> None:
+    """
+    Provide minimal local stubs for optional runtime deps that may be missing
+    in smoke-harness python, without changing backend/package state.
+    """
+    try:
+        import dotenv  # type: ignore  # noqa: F401
+    except Exception:
+        mod = types.ModuleType("dotenv")
+
+        def _load_dotenv(*_args: Any, **_kwargs: Any) -> bool:
+            return False
+
+        mod.load_dotenv = _load_dotenv  # type: ignore[attr-defined]
+        sys.modules["dotenv"] = mod
+        warnings.append("dotenv_stubbed_for_local_smoke")
+
+
+def detect_runtime_dependencies() -> Dict[str, Any]:
+    """
+    Detect critical runtime deps for real render before entering pipeline.
+    """
+    required = ["numpy"]
+    optional = ["cv2", "moviepy"]
+    missing_required: List[str] = []
+    missing_optional: List[str] = []
+    for mod in required:
+        try:
+            importlib.import_module(mod)
+        except Exception:
+            missing_required.append(mod)
+    for mod in optional:
+        try:
+            importlib.import_module(mod)
+        except Exception:
+            missing_optional.append(mod)
+    return {
+        "python_executable": sys.executable,
+        "missing_required": missing_required,
+        "missing_optional": missing_optional,
+    }
+
+
+def build_missing_dep_fix_hint(missing_required: List[str]) -> str:
+    missing_txt = ",".join(missing_required)
+    if Path("/app/.venv/bin/python").exists():
+        return (
+            f"Missing deps ({missing_txt}) in interpreter {sys.executable}. "
+            "Run smoke with /app/.venv/bin/python or install deps into this interpreter."
+        )
+    return (
+        f"Missing deps ({missing_txt}) in interpreter {sys.executable}. "
+        "Recommended: run inside container venv, e.g. "
+        "\"docker compose exec backend /app/.venv/bin/python /app/scripts/run_private_premium_smoke_render.py ...\" "
+        "or install backend requirements in the same interpreter."
+    )
 
 
 def extract_premium_evidence(clip: Dict[str, Any]) -> Dict[str, Any]:
@@ -267,6 +327,7 @@ def main(argv: List[str] | None = None) -> int:
     input_path = Path(args.input)
     warnings: List[str] = []
     errors: List[str] = []
+    ensure_local_optional_deps(warnings)
 
     preflight_ok, preflight_steps = run_required_preflight()
     if not preflight_ok:
@@ -316,6 +377,9 @@ def main(argv: List[str] | None = None) -> int:
         "warnings": warnings,
         "errors": errors,
         "preflight_steps": preflight_steps,
+        "python_executable": sys.executable,
+        "missing_dependency": "",
+        "suggested_fix": "",
     }
 
     for step in preflight_steps:
@@ -337,6 +401,22 @@ def main(argv: List[str] | None = None) -> int:
         print("SMOKE_RENDER_STATUS=DRY_RUN")
         print(f"SMOKE_REPORT={report_path}")
         return 0
+
+    dep = detect_runtime_dependencies()
+    missing_required = list(dep.get("missing_required") or [])
+    missing_optional = list(dep.get("missing_optional") or [])
+    report["python_executable"] = str(dep.get("python_executable") or sys.executable)
+    if missing_optional:
+        report["warnings"].append("missing_optional_dependencies:" + ",".join(missing_optional))
+    if missing_required:
+        report["reason"] = "missing_runtime_dependency"
+        report["missing_dependency"] = missing_required[0]
+        report["suggested_fix"] = build_missing_dep_fix_hint(missing_required)
+        report["errors"].append(f"missing_required_dependencies:{','.join(missing_required)}")
+        report_path = save_report(output_dir, report)
+        print("SMOKE_RENDER_STATUS=MISSING_RUNTIME_DEPENDENCY")
+        print(f"SMOKE_REPORT={report_path}")
+        return 3
 
     try:
         render_result = asyncio.run(

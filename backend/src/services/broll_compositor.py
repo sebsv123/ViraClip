@@ -204,8 +204,11 @@ def normalize_broll(
 
     if output_path is None:
         suffix = ".mp4"
+        # /app/assets is mounted read-only in Docker — fall back to the system
+        # temp dir when the asset's directory is not writable.
+        _tmp_dir = str(broll_path.parent) if os.access(broll_path.parent, os.W_OK) else None
         tmp = tempfile.NamedTemporaryFile(suffix=suffix, delete=False,
-                                          dir=broll_path.parent)
+                                          dir=_tmp_dir)
         output_path = Path(tmp.name)
         tmp.close()
 
@@ -344,9 +347,6 @@ def compose_overlay(
     broll_path  = Path(broll_path)
     output_path = Path(output_path)
 
-    if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes"):
-        logger.info("[beta-clean] broll PIP disabled")
-
     w, h, _fps = probe_dimensions(main_path)
 
     # Normalise B-roll — sin fade negro para no oscurecer la imagen
@@ -367,6 +367,10 @@ def compose_overlay(
             f"setpts=PTS+{timestamp:.3f}/TB[bv];"
         )
         logger.info("[broll-transition] fade_in=%.2f fade_out=%.2f applied=true", visual_fade, visual_fade)
+        logger.info(
+            "VPI_OUTPUT_QUALITY_TRANSITION_VISIBLE type=broll_cutaway_crossfade fade=%.2f at=%.2f-%.2f",
+            visual_fade, timestamp, end_ts,
+        )
     else:
         broll_chain = f"[1:v]setpts=PTS-STARTPTS+{timestamp:.3f}/TB[bv];"
     filter_complex = (
@@ -441,9 +445,6 @@ async def compose_overlay_multi(
 
     main_path   = Path(main_path)
     output_path = Path(output_path)
-
-    if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in ("1", "true", "yes"):
-        logger.info("[beta-clean] broll PIP disabled")
 
     w, h, _fps = probe_dimensions(main_path)
 

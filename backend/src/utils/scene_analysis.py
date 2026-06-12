@@ -11,11 +11,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
-    try:
-        import imageio_ffmpeg as _iio
-        return _iio.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
+    """Return ffmpeg binary path, preferring system ffmpeg with NVENC."""
+    from src.utils.gpu_utils import get_ffmpeg_exe
+    return get_ffmpeg_exe()
+
+
 
 
 def analyze_clip_rhythm(video_path: Path) -> dict:

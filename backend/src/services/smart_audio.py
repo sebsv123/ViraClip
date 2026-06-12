@@ -16,6 +16,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from .vpi_production_safe_edit import production_safe_mode_active
+
 logger = logging.getLogger(__name__)
 
 # SFX filenames to look for (without extension) per event type/category
@@ -66,6 +68,11 @@ class SmartAudio:
         """
         try:
             current = input_path
+            legacy_bgm_blocked = bool(
+                production_safe_mode_active()
+                and bgm_path is not None
+                and "music_legacy" in str(bgm_path).lower().replace("\\", "/")
+            )
 
             # Step 1: loudnorm
             normed = await self._loudnorm(current)
@@ -82,7 +89,9 @@ class SmartAudio:
                     current = with_sfx
 
             # Step 3: BGM mix
-            if bgm_path and bgm_path.exists():
+            if legacy_bgm_blocked:
+                logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=smart_audio_legacy reason=premium_local_stability")
+            elif bgm_path and bgm_path.exists():
                 with_bgm = await self._mix_bgm(current, bgm_path)
                 if with_bgm and with_bgm.exists():
                     if current != input_path:
@@ -167,6 +176,24 @@ class SmartAudio:
     # ── SFX injection ─────────────────────────────────────────────────────────
 
     def _build_sfx_events(self, timeline_events: list) -> "list[_SfxEvent]":
+        # OUTPUT RESCUE hard guard: per-event SFX injection (rapid click/glitch hits
+        # that read as a typewriter sound) is forbidden in VPI daily / production-safe
+        # mode, regardless of which caller reaches this legacy route.
+        try:
+            from .vpi_production_safe_edit import (
+                vpi_daily_mode_enabled as _vpi_daily,
+                production_safe_mode_active as _prod_safe,
+                typewriter_sfx_disabled_by_default as _tw_disabled,
+            )
+            if _vpi_daily() or _prod_safe() or _tw_disabled():
+                logger.info(
+                    "VPI_OUTPUT_RESCUE_SFX_SKIPPED_DAILY_MODE route=smart_audio_build_sfx_events events_blocked=%d",
+                    len(timeline_events or []),
+                )
+                logger.info("VPI_OUTPUT_RESCUE_TYPEWRITER_DISABLED route=smart_audio_build_sfx_events")
+                return []
+        except Exception:
+            return []
         sfx_dir = Path(os.environ.get("SFX_LIBRARY_PATH", "/app/assets/sounds"))
         if not sfx_dir.exists():
             return []
@@ -262,7 +289,7 @@ class SmartAudio:
 
 
 def find_bgm_track() -> "Path | None":
-    """Return a random BGM track from known music directories (Docker mount: ./backend/music:/app/assets/sounds)."""
+    """Return a random BGM track from known music directories."""
     search_dirs = [
         "/app/assets/sounds/bgm",    # dedicated BGM subfolder (preferred)
         "/app/assets/sounds/music",
@@ -270,6 +297,11 @@ def find_bgm_track() -> "Path | None":
         "/app/music/bgm",
         "/app/music",
     ]
+    if not production_safe_mode_active():
+        search_dirs.extend([
+            "/app/music_legacy/bgm",
+            "/app/music_legacy",
+        ])
     bgm_exclude = {"whoosh", "punch", "ding", "bass", "tension", "glitch"}  # skip SFX
     for d in search_dirs:
         p = Path(d)

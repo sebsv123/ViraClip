@@ -51,6 +51,7 @@ from .api.routes.billing import router as billing_router
 from .api.routes.clips import router as clips_router
 from .services.video_service import VideoService, UPLOAD_URL_PREFIX
 from .services.llm_service import LLMService
+from .repositories.clip_repository import ClipRepository
 
 config = Config()
 
@@ -219,6 +220,10 @@ async def _list_music_tracks():
 clips_dir = Path(config.temp_dir) / "clips"
 clips_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/clips", StaticFiles(directory=str(clips_dir)), name="clips")
+generated_dir = Path("/app/outputs/generated")
+generated_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/generated", StaticFiles(directory=str(generated_dir), html=False), name="generated")
+logger.info("GENERATED_STATIC_ROUTE_READY directory=%s exists=%s mounted=%s", generated_dir, generated_dir.exists(), True)
 
 
 def _get_authenticated_user_id(request: Request) -> str:
@@ -774,49 +779,7 @@ async def get_task_clips(task_id: str, db: AsyncSession = Depends(get_db)):
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
 
-        # Get clips for this task (including virality scores)
-        clips_result = await db.execute(
-            text("""
-        SELECT id, filename, file_path, start_time, end_time, duration,
-               text, relevance_score, reasoning, clip_order, created_at,
-               virality_score, hook_score, engagement_score, value_score,
-               shareability_score, hook_type, strategic_advice, conversion_tips
-        FROM generated_clips
-        WHERE task_id = :task_id
-        ORDER BY clip_order ASC
-      """),
-            {"task_id": task_id},
-        )
-        clips = clips_result.fetchall()
-
-        # Convert to list of dictionaries and add serving URLs
-        clips_data = []
-        for clip in clips:
-            clip_data = {
-                "id": clip.id,
-                "filename": clip.filename,
-                "file_path": clip.file_path,
-                "start_time": clip.start_time,
-                "end_time": clip.end_time,
-                "duration": clip.duration,
-                "text": clip.text,
-                "relevance_score": clip.relevance_score,
-                "reasoning": clip.reasoning,
-                "clip_order": clip.clip_order,
-                "created_at": clip.created_at.isoformat(),
-                "video_url": f"/clips/{clip.filename}",  # URL for frontend to access the clip
-                # Virality scores
-                "virality_score": clip.virality_score or 0,
-                "hook_score": clip.hook_score or 0,
-                "engagement_score": clip.engagement_score or 0,
-                "value_score": clip.value_score or 0,
-                "shareability_score": clip.shareability_score or 0,
-                "hook_type": clip.hook_type,
-                "strategic_advice": clip.strategic_advice,
-                "conversion_tips": clip.conversion_tips,
-            }
-            clips_data.append(clip_data)
-
+        clips_data = await ClipRepository.get_clips_by_task(db, task_id)
         return {"task_id": task_id, "clips": clips_data, "total_clips": len(clips_data)}
 
     except Exception as e:

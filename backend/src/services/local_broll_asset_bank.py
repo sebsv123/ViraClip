@@ -40,15 +40,25 @@ _USES_PENALTY_PER_USE = 10
 _JITTER_MAX = 5
 
 # ── Cue type → subdirectory mapping ───────────────────────────────────────────
+# Maps allowed VPI B-roll categories to local asset subdirectories.
+# Allowed categories: family_relief, family_protection, health_access,
+# risk_warning_context, paperwork_support, documents_admin, financial_planning,
+# practical_explanation, autonomous_work_stability, emotional_reassurance
 _CUE_TYPE_DIR_MAP: dict[str, str | None] = {
-    "family_protection":      "family_protection",
-    "emotional_reassurance":  "emotional_reassurance",
-    "risk_warning":           "risk_warning",
-    "documents_admin":        "documents_admin",
-    "advisor_meeting":        "advisor_meeting",
-    "healthy_lifestyle":      "healthy_lifestyle",
-    "financial_planning":     "financial_planning",
-    "no_broll":               None,
+    "family_protection":           "family_protection",
+    "family_relief":               "family_protection",       # shares family assets
+    "emotional_reassurance":       "emotional_reassurance",
+    "risk_warning":                "risk_warning",
+    "risk_warning_context":        "risk_warning",            # shares risk assets
+    "documents_admin":             "documents_admin",
+    "paperwork_support":           "documents_admin",         # shares documents assets
+    "advisor_meeting":             "advisor_meeting",
+    "healthy_lifestyle":           "healthy_lifestyle",
+    "health_access":               "healthy_lifestyle",       # shares lifestyle assets
+    "financial_planning":          "financial_planning",
+    "practical_explanation":       "practical_explanation",
+    "autonomous_work_stability":   "financial_planning",      # shares financial assets
+    "no_broll":                    None,
 }
 
 _ASSET_EXTENSIONS = {".mp4", ".mov", ".webm", ".jpg", ".jpeg", ".png"}

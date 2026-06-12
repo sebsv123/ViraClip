@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
+from .vpi_production_safe_edit import production_safe_mode_active
+
 logger = logging.getLogger(__name__)
 
 # ── Configuration (read once at import, stable for process lifetime) ──────────
@@ -87,6 +89,10 @@ def get_provider_order(priority_label: str = "NORMAL") -> List[ProviderType]:
     premium = list(_PREMIUM_PROVIDERS) if BROLL_ENABLE_PREMIUM else []
     stock = list(_STOCK_PROVIDERS) if BROLL_ENABLE_STOCK else []
 
+    if production_safe_mode_active():
+        premium = []
+        stock = [provider for provider in stock if provider == ProviderType.CACHE]
+
     # HIGH: skip image fallback to keep assets video-only
     if prio == "HIGH":
         stock = [p for p in stock if p != ProviderType.STOCK_IMAGE]
@@ -96,6 +102,8 @@ def get_provider_order(priority_label: str = "NORMAL") -> List[ProviderType]:
     else:
         order += stock + premium
 
+    if production_safe_mode_active():
+        order = [provider for provider in order if provider in {ProviderType.LOCAL, ProviderType.CACHE}]
     return order
 
 

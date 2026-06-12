@@ -52,8 +52,8 @@ services:
           memory: 8G
     environment:
       - RENDER_CONCURRENCY=6
-      - WHISPER_DEVICE=cpu
-      - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-true}
+      - WHISPER_DEVICE=cuda
+      - BROLL_FORCE_CPU=${BROLL_FORCE_CPU:-false}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
       - WHISPER_COMPUTE_TYPE=float16
       - SAM2_ENABLED=true

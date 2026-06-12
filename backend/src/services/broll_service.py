@@ -43,6 +43,7 @@ from .vpi_broll_intent import (
     is_broll_asset_forbidden,
     score_broll_phrase_fit,
     score_broll_candidate,
+    normalize_text as _vpi_normalize_text,
 )
 from .broll_provider_strategy import (
     BROLL_PROVIDER_PRIORITY,
@@ -53,8 +54,16 @@ from .broll_provider_strategy import (
     diagnose_providers,
     passes_quality_gate,
 )
+from .vpi_production_safe_edit import (
+    production_safe_mode_active,
+    production_safe_route_allowed,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _production_safe_blocked(route_name: str) -> bool:
+    return bool(production_safe_mode_active() and not production_safe_route_allowed(route_name))
 
 # ── B-roll tuning ─────────────────────────────────────────────────────────────
 _BROLL_DOWNLOAD_TIMEOUT = int(os.environ.get("BROLL_DOWNLOAD_TIMEOUT", "30"))
@@ -70,6 +79,51 @@ _GENERIC_BAD_TERMS = {
     "tea", "coffee", "meditation", "yoga", "wellness", "spa", "zen",
     "stock market", "trading", "luxury", "cash", "funeral", "hospital",
 }
+_EDITORIAL_BROLL_STOPWORD_STEMS = {
+    "de", "la", "el", "los", "las", "que", "sea", "o", "y", "les", "me", "te",
+    "un", "una", "es", "en", "por", "para", "con", "como", "esto", "este",
+    "esta", "momento", "pues", "hola",
+}
+
+_PRODUCTION_SAFE_BROLL_TERMS = {
+    "proteccion familiar",
+    "protección familiar",
+    "tranquilidad",
+    "salud",
+    "médico",
+    "medico",
+    "hospitalizacion",
+    "hospitalización",
+    "accidente",
+    "riesgo",
+    "ahorro",
+    "dinero",
+    "imprevisto",
+    "familia",
+    "proteger",
+}
+
+
+def _is_high_relevance_broll_cue(
+    *,
+    cue: BrollCueDecision,
+    segment_text: str,
+    theme: ClipTheme,
+) -> Tuple[bool, str]:
+    cue_text = " ".join([
+        str(cue.visual_query or ""),
+        str(cue.trigger_text or ""),
+        str(cue.reason or ""),
+        segment_text or "",
+        theme.central_topic or "",
+        theme.domain or "",
+    ])
+    normalized = _vpi_normalize_text(cue_text)
+    if cue.confidence < 0.75:
+        return False, "confidence_below_threshold"
+    if not any(term in normalized for term in _PRODUCTION_SAFE_BROLL_TERMS):
+        return False, "no_explicit_semantic_match"
+    return True, "high_confidence_explicit_match"
 
 # ── Semantic keyword classification for generative B-roll ────────────────────
 _MOTION_KEYWORDS = {
@@ -146,6 +200,29 @@ class BrollService:
         self._task_seen_filename_stems: set[str] = set()
         self._broll_hard_guard_rejections: List[Dict[str, Any]] = []
         self._last_broll_selection_stats: Dict[str, Any] = {}
+
+    @staticmethod
+    def _normalize_editorial_asset_selection(
+        result: Any,
+    ) -> Tuple[Optional[Path], str, float, List[str], Optional[str]]:
+        """Normalize selector output into a safe 5-tuple."""
+        if result is None:
+            return (None, "none", 0.0, ["no_contextual_match"], None)
+        if isinstance(result, (tuple, list)) and len(result) == 5:
+            asset, source, score, reasons, category = result
+            if isinstance(asset, str) and asset:
+                asset = Path(asset)
+            if asset is not None and not isinstance(asset, Path):
+                asset = None
+            return (
+                asset,
+                str(source or "none"),
+                float(score or 0.0),
+                [str(r) for r in (reasons or [])],
+                str(category) if category else None,
+            )
+        logger.warning("[editorial-broll] malformed selection result type=%s", type(result).__name__)
+        return (None, "none", 0.0, ["malformed_selection_result"], None)
 
     @classmethod
     def _shared_task_sets(cls, task_id: Optional[str]) -> Tuple[set[str], set[str], set[str]]:
@@ -472,6 +549,11 @@ class BrollService:
         query: Optional[str] = None,
         provider_asset_id: Optional[str] = None,
     ) -> Optional[List[str]]:
+        stem = asset.stem.lower().strip()
+        if stem in _EDITORIAL_BROLL_STOPWORD_STEMS:
+            logger.info("[broll-hard-guard] reject asset=%s reasons=stopword_asset_filename", asset)
+            return ["stopword_asset_filename"]
+
         context = self._hard_guard_context(
             asset=asset,
             cue=cue,
@@ -790,7 +872,10 @@ class BrollService:
             "broll_no_broll_reason": None,
         }
 
-        if local_bank_enabled:
+        # ── VPI local-only mode: use VPI asset library, bypass external APIs ──
+        _vpi_local_only = os.environ.get("VPI_BROLL_LOCAL_ONLY", "").lower() in ("1", "true", "yes")
+
+        if local_bank_enabled or _vpi_local_only:
             try:
                 from .local_broll_asset_bank import list_assets as _list_local_assets
                 from .local_broll_asset_bank import mark_used as _mark_asset_used
@@ -943,152 +1028,97 @@ class BrollService:
             except Exception as _local_e:
                 logger.debug("[editorial-broll] local asset bank error: %s", _local_e)
 
-        need_diversity_stock = (
-            theme.central_topic == "life_insurance_family_protection"
-            and (
-                cue.intent_type in {"myth_debunk_age", "client_objection"}
-                or task_seen_categories.get("documents_admin", 0) > 0
-                or not any(item[4] == "advisor_consultation" for item in candidates)
-            )
-        )
-        best_local = self._choose_diverse_candidate(candidates, min_score, theme, task_seen_categories)
-        if best_local and not need_diversity_stock:
-            best_local[3].extend([
-                f"broll_candidates_total:{stats['broll_candidates_total']}",
-                f"broll_candidates_rejected_forbidden:{stats['broll_candidates_rejected_forbidden']}",
-                f"broll_candidates_rejected_cooldown:{stats['broll_candidates_rejected_cooldown']}",
-                f"broll_candidates_rejected_relevance:{stats['broll_candidates_rejected_relevance']}",
-                f"broll_candidates_usable:{stats['broll_candidates_usable']}",
-            ])
+        # ── VPI asset library as additional local B-roll source ──
+        if _vpi_local_only or local_bank_enabled:
             try:
-                _mark_asset_used(best_local[1], task_id=task_id)  # type: ignore[name-defined]
-            except Exception:
-                pass
-            self._record_selected_asset(
-                asset=best_local[1],
-                source=best_local[2],
-                category=best_local[4],
-                task_id=task_id,
-                clip_index=clip_index,
-                cue=cue,
-                theme=theme,
-                score=best_local[0],
-            )
-            self._mark_selected_for_repeat_guard(
-                asset=best_local[1],
-                source=best_local[2],
-                category=best_local[4],
-                provider_asset_id=self._downloaded_provider_asset_ids.get(str(best_local[1])),
-            )
-            self._mark_selected_for_task_diversity(
-                task_id=task_id,
-                asset=best_local[1],
-                source=best_local[2],
-                category=best_local[4],
-                provider_asset_id=self._downloaded_provider_asset_ids.get(str(best_local[1])),
-            )
-            logger.info(
-                "[broll-select] selected source=local cue=%s asset=%s start=%.2f dur=%.2f score=%.1f",
-                best_local[4], best_local[1], cue.start_s or 0.0, cue.duration_s, best_local[0],
-            )
-            self._last_broll_selection_stats = {**stats, "broll_no_broll_reason": None}
-            return best_local[1], best_local[2], best_local[0], best_local[3], best_local[4]
-
-        if candidates and not best_local:
-            rejected = max(candidates, key=lambda item: item[0])
-            logger.info(
-                "[broll-candidate] reject source=local asset=%s score=%.1f reasons=below_threshold",
-                rejected[1],
-                rejected[0],
-            )
-
-        query_intent = detect_intent(
-            cue.trigger_text or cue.reason or "",
-            suggested_broll_cue_type=cue.cue_type,
-            matched_patterns=[cue.trigger_text] if cue.trigger_text else [],
-        )
-        if cue.preferred_queries:
-            query_intent.pexels_queries = list(cue.preferred_queries)
-        stock_query_pairs: List[Tuple[str, str]] = []
-        if need_diversity_stock:
-            for category, query in self._diversity_queries_for(cue, theme)[:2]:
-                logger.info("[pexels-diversity] query=%s reason=need_advisor_or_human_context", query)
-                stock_query_pairs.append((category, query))
-        if best_local is None:
-            stock_query_pairs.extend((cue.cue_type, query) for query in (build_stock_queries(query_intent, limit=3) or [cue.visual_query or ""]))
-
-        for stock_category, query in stock_query_pairs[:3]:
-            if not query:
-                continue
-            if query in attempted_stock_queries:
-                continue
-            attempted_stock_queries.add(query)
-            logger.info("[pexels-query] intent=%s query=%s", cue.intent_type or cue.cue_type, query)
-            asset = await self.fetch_editorial_broll_asset(query)
-            if asset is None:
-                continue
-            stats["broll_candidates_total"] += 1
-            provider_asset_id = self._downloaded_provider_asset_ids.get(str(asset))
-            guard_reasons = self._reject_for_hard_guard(
-                asset=asset,
-                cue=cue,
-                source="stock",
-                category=stock_category,
-                theme=theme,
-                task_seen_assets=task_seen_assets,
-                task_seen_categories=task_seen_categories,
-                task_id=task_id,
-                query=query,
-                provider_asset_id=provider_asset_id,
-            )
-            if guard_reasons:
-                bucket = self._guard_rejection_bucket(guard_reasons)
-                if bucket == "forbidden":
-                    stats["broll_candidates_rejected_forbidden"] += 1
-                elif bucket in {"cooldown", "repeat"}:
-                    stats["broll_candidates_rejected_cooldown"] += 1
-                else:
-                    stats["broll_candidates_rejected_relevance"] += 1
-                if self._only_cooldown_reasons(guard_reasons):
-                    relevance_ok, relevance_score, relevance_reason = self._broll_relevance_for_candidate(
-                        cue=cue,
-                        category=stock_category,
-                        theme=theme,
-                        query=query,
-                    )
-                    if relevance_ok:
-                        phrase_fit = self._score_phrase_fit_for_candidate(
-                            asset=asset,
+                from .vpi_asset_library_service import discover_asset_library as _vpi_discover
+                from .vpi_asset_library_service import _classify_broll_by_filename as _vpi_classify_broll
+                _vpi_lib = _vpi_discover()
+                _vpi_broll_paths = _vpi_lib.get("broll", [])
+                if _vpi_broll_paths:
+                    logger.info("[vpi-broll] discovered %d VPI broll assets", len(_vpi_broll_paths))
+                    for _vpi_asset in _vpi_broll_paths:
+                        _vpi_path_str = _vpi_asset.get("path") if isinstance(_vpi_asset, dict) else str(_vpi_asset)
+                        if not _vpi_path_str:
+                            continue
+                        _vpi_path = Path(_vpi_path_str)
+                        if not _vpi_path.exists():
+                            continue
+                        _vpi_intent, _vpi_tags = _vpi_classify_broll(_vpi_path_str)
+                        # Match against cue categories
+                        _vpi_categories = cue.preferred_categories or [cue.cue_type]
+                        _vpi_matched = False
+                        for _vpi_cat in _vpi_categories:
+                            if not _vpi_cat:
+                                continue
+                            _vpi_cat_lower = _vpi_cat.lower()
+                            if _vpi_intent and _vpi_intent in _vpi_cat_lower:
+                                _vpi_matched = True
+                                break
+                            if any(tag in _vpi_cat_lower for tag in _vpi_tags):
+                                _vpi_matched = True
+                                break
+                            # Also match if any tag is in the intent name
+                            if _vpi_intent and any(tag in _vpi_intent for tag in _vpi_cat_lower.split("_")):
+                                _vpi_matched = True
+                                break
+                        if not _vpi_matched:
+                            logger.info("[vpi-broll] skip asset=%s intent=%s no_match_for_categories=%s",
+                                        _vpi_path_str, _vpi_intent, _vpi_categories)
+                            continue
+                        stats["broll_candidates_total"] += 1
+                        guard_reasons = self._reject_for_hard_guard(
+                            asset=_vpi_path,
                             cue=cue,
-                            category=stock_category,
+                            source="vpi_local",
+                            category=_vpi_intent or "generic",
                             theme=theme,
-                            query=query,
+                            task_seen_assets=task_seen_assets,
+                            task_seen_categories=task_seen_categories,
+                            task_id=task_id,
                         )
-                        motion_type, motion_bonus, is_image = self._asset_motion_type(asset)
-                        if float(phrase_fit.get("phrase_fit_score") or 0.0) < 60.0:
-                            logger.info("[broll-safe-recovery] rejected asset=%s reason=low_phrase_fit", asset)
+                        if guard_reasons:
+                            bucket = self._guard_rejection_bucket(guard_reasons)
+                            if bucket == "forbidden":
+                                stats["broll_candidates_rejected_forbidden"] += 1
+                            elif bucket in {"cooldown", "repeat"}:
+                                stats["broll_candidates_rejected_cooldown"] += 1
+                            else:
+                                stats["broll_candidates_rejected_relevance"] += 1
+                            logger.info("[vpi-broll] reject asset=%s reason=%s", _vpi_path_str, guard_reasons)
                             continue
-                        if motion_type != "video_motion" and not (is_image and phrase_fit.get("allowed_as_support")):
-                            logger.info("[broll-safe-recovery] rejected asset=%s reason=weak_motion_type", asset)
-                            continue
-                        recovery_score, recovery_reasons = self._score_broll_candidate(
-                            asset,
-                            cue,
-                            "stock",
+                        relevance_ok, relevance_score, relevance_reason = self._broll_relevance_for_candidate(
+                            cue=cue,
+                            category=_vpi_intent or "generic",
                             theme=theme,
-                            category=stock_category,
-                            query=query,
+                        )
+                        if not relevance_ok:
+                            stats["broll_candidates_rejected_relevance"] += 1
+                            logger.info("[vpi-broll] relevance reject asset=%s reason=%s", _vpi_path_str, relevance_reason)
+                            continue
+                        phrase_fit = self._score_phrase_fit_for_candidate(
+                            asset=_vpi_path,
+                            cue=cue,
+                            category=_vpi_intent or "generic",
+                            theme=theme,
+                        )
+                        motion_type, motion_bonus, is_image = self._asset_motion_type(_vpi_path)
+                        logger.info("[vpi-broll] asset=%s intent=%s motion=%s bonus=%.1f",
+                                    _vpi_path_str, _vpi_intent, motion_type, motion_bonus)
+                        score, reasons = self._score_broll_candidate(
+                            _vpi_path,
+                            cue,
+                            "vpi_local",
+                            theme=theme,
+                            category=_vpi_intent or "generic",
                             task_seen=task_seen_assets,
                             category_seen=task_seen_categories,
-                            memory=None,
+                            memory=self.asset_memory,
                             task_id=task_id,
-                            provider_asset_id=provider_asset_id,
                         )
-                        recovery_reasons.extend([
+                        reasons.extend([
                             f"broll_relevance_score:{relevance_score:.1f}",
                             f"broll_relevance_reason:{relevance_reason}",
-                            "broll_used_with_cooldown_exception:true",
-                            "cooldown_exception_reason:safe_asset_better_than_no_broll",
                             f"broll_phrase_fit_score:{phrase_fit['phrase_fit_score']}",
                             f"broll_phrase_fit_label:{phrase_fit['phrase_fit_label']}",
                             f"broll_phrase_fit_reason:{phrase_fit['phrase_fit_reason']}",
@@ -1098,173 +1128,56 @@ class BrollService:
                             f"broll_static_penalty:{motion_bonus if is_image else 0.0}",
                             f"broll_is_image:{str(is_image).lower()}",
                             f"broll_ken_burns_applied:{str(is_image).lower()}",
+                            f"broll_vpi_intent:{_vpi_intent}",
+                            f"broll_vpi_tags:{','.join(_vpi_tags)}",
+                            f"broll_source:vpi_local",
                         ])
-                        recovery_score += motion_bonus
-                        cooldown_recovery_candidates.append((recovery_score, asset, "stock", recovery_reasons, stock_category))
-                continue
-            relevance_ok, relevance_score, relevance_reason = self._broll_relevance_for_candidate(
-                cue=cue,
-                category=stock_category,
-                theme=theme,
-                query=query,
-            )
-            if not relevance_ok:
-                logger.info(
-                    "[broll-relevance] reject asset=%s reason=%s",
-                    asset,
-                    relevance_reason,
+                        score += motion_bonus
+                        logger.info("[vpi-broll] accept asset=%s intent=%s score=%.1f", _vpi_path_str, _vpi_intent, score)
+                        stats["broll_candidates_usable"] += 1
+                        candidates.append((score, _vpi_path, "vpi_local", reasons, _vpi_intent or "generic"))
+            except Exception as _vpi_e:
+                logger.debug("[vpi-broll] VPI asset library error: %s", _vpi_e)
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            score, asset, source, reasons, category = candidates[0]
+            stats["broll_no_broll_reason"] = None
+            self._last_broll_selection_stats = stats
+            if task_id:
+                self._record_selected_asset(
+                    asset=asset,
+                    source=source,
+                    category=category,
+                    task_id=task_id,
+                    clip_index=clip_index,
+                    cue=cue,
+                    theme=theme,
+                    score=score,
                 )
-                stats["broll_candidates_rejected_relevance"] += 1
-                continue
-            phrase_fit = self._score_phrase_fit_for_candidate(
-                asset=asset,
-                cue=cue,
-                category=stock_category,
-                theme=theme,
-                query=query,
-            )
-            motion_type, motion_bonus, is_image = self._asset_motion_type(asset)
-            logger.info("[broll-motion] asset=%s type=%s penalty=%.1f", asset, motion_type, motion_bonus)
-            if not phrase_fit.get("allowed_as_primary"):
-                stats["broll_candidates_rejected_relevance"] += 1
-                logger.info("[broll-phrase-fit] reject asset=%s reason=weak_phrase_fit", asset)
-                continue
-            if is_image:
-                stats["broll_candidates_rejected_relevance"] += 1
-                logger.info("[broll-motion] reject static_image reason=primary_requires_video")
-                continue
-            score, reasons = self._score_broll_candidate(
-                asset,
-                cue,
-                "stock",
-                theme=theme,
-                category=stock_category,
-                query=query,
-                task_seen=task_seen_assets,
-                category_seen=task_seen_categories,
-                memory=self.asset_memory,
-                task_id=task_id,
-                provider_asset_id=provider_asset_id,
-            )
-            reasons.extend([
-                f"broll_relevance_score:{relevance_score:.1f}",
-                f"broll_relevance_reason:{relevance_reason}",
-                f"broll_phrase_fit_score:{phrase_fit['phrase_fit_score']}",
-                f"broll_phrase_fit_label:{phrase_fit['phrase_fit_label']}",
-                f"broll_phrase_fit_reason:{phrase_fit['phrase_fit_reason']}",
-                f"broll_allowed_as_primary:{str(bool(phrase_fit['allowed_as_primary'])).lower()}",
-                f"broll_allowed_as_support:{str(bool(phrase_fit['allowed_as_support'])).lower()}",
-                f"broll_motion_type:{motion_type}",
-                f"broll_static_penalty:{motion_bonus if is_image else 0.0}",
-                f"broll_is_image:{str(is_image).lower()}",
-                f"broll_ken_burns_applied:{str(is_image).lower()}",
-            ])
-            score += motion_bonus
-            logger.info(
-                "[broll-relevance] accept cue=%s phrase=%s reason=%s",
-                stock_category,
-                cue.trigger_text or query or "",
-                relevance_reason,
-            )
-            logger.info("[broll-hard-guard] accept asset=%s category=%s score=%.1f", asset, stock_category, score)
-            logger.info(
-                "[broll-candidate] source=pexels cue=%s asset=%s score=%.1f reasons=%s",
-                stock_category,
-                asset,
-                score,
-                ",".join(reasons),
-            )
-            if score >= 60.0:
-                stats["broll_candidates_usable"] += 1
-                candidates.append((score, asset, "stock", reasons, stock_category))
-            else:
-                logger.info("[broll-candidate] reject source=pexels asset=%s score=%.1f reasons=below_threshold", asset, score)
+            return (asset, source, score, reasons, category)
 
-        selected = self._choose_diverse_candidate(candidates, min_score, theme, task_seen_categories)
-        if selected is None and cooldown_recovery_candidates:
-            safe_recovery = self._choose_diverse_candidate(cooldown_recovery_candidates, min_score, theme, task_seen_categories)
-            if safe_recovery is None:
-                cooldown_recovery_candidates.sort(key=lambda item: item[0], reverse=True)
-                safe_recovery = cooldown_recovery_candidates[0]
-            selected = safe_recovery
-            stats["broll_candidates_usable"] += 1
-            _selected_reasons = selected[3]
-            _fit_score = next((reason.split(":", 1)[1] for reason in _selected_reasons if reason.startswith("broll_phrase_fit_score:")), "unknown")
-            _motion_type = next((reason.split(":", 1)[1] for reason in _selected_reasons if reason.startswith("broll_motion_type:")), "unknown")
-            logger.info(
-                "[broll-safe-recovery] using asset=%s phrase_fit=%s motion=%s reason=safe_asset_better_than_no_broll",
-                selected[1],
-                _fit_score,
-                _motion_type,
-            )
-        if selected:
-            selected[3].extend([
-                f"broll_candidates_total:{stats['broll_candidates_total']}",
-                f"broll_candidates_rejected_forbidden:{stats['broll_candidates_rejected_forbidden']}",
-                f"broll_candidates_rejected_cooldown:{stats['broll_candidates_rejected_cooldown']}",
-                f"broll_candidates_rejected_relevance:{stats['broll_candidates_rejected_relevance']}",
-                f"broll_candidates_usable:{stats['broll_candidates_usable']}",
-            ])
-            if selected[2] == "local":
-                try:
-                    _mark_asset_used(selected[1], task_id=task_id)  # type: ignore[name-defined]
-                except Exception:
-                    pass
-            self._record_selected_asset(
-                asset=selected[1],
-                source=selected[2],
-                category=selected[4],
-                task_id=task_id,
-                clip_index=clip_index,
-                cue=cue,
-                theme=theme,
-                score=selected[0],
-            )
-            self._mark_selected_for_repeat_guard(
-                asset=selected[1],
-                source=selected[2],
-                category=selected[4],
-                provider_asset_id=self._downloaded_provider_asset_ids.get(str(selected[1])),
-            )
-            self._mark_selected_for_task_diversity(
-                task_id=task_id,
-                asset=selected[1],
-                source=selected[2],
-                category=selected[4],
-                provider_asset_id=self._downloaded_provider_asset_ids.get(str(selected[1])),
-            )
-            logger.info(
-                "[broll-select] selected source=%s cue=%s asset=%s start=%.2f dur=%.2f score=%.1f",
-                selected[2], selected[4], selected[1], cue.start_s or 0.0, cue.duration_s, selected[0],
-            )
-            self._last_broll_selection_stats = {**stats, "broll_no_broll_reason": None}
-            return selected[1], selected[2], selected[0], selected[3], selected[4]
+        if cooldown_recovery_candidates:
+            cooldown_recovery_candidates.sort(key=lambda item: item[0], reverse=True)
+            score, asset, source, reasons, category = cooldown_recovery_candidates[0]
+            stats["broll_no_broll_reason"] = "cooldown_exception_selected"
+            self._last_broll_selection_stats = stats
+            if task_id:
+                self._record_selected_asset(
+                    asset=asset,
+                    source=source,
+                    category=category,
+                    task_id=task_id,
+                    clip_index=clip_index,
+                    cue=cue,
+                    theme=theme,
+                    score=score,
+                )
+            return (asset, source, score, reasons, category)
 
-        if stats["broll_candidates_total"] and stats["broll_candidates_rejected_cooldown"] >= stats["broll_candidates_total"]:
-            no_broll_reason = "library_exhausted_by_cooldown"
-        elif cooldown_recovery_candidates and stats["broll_candidates_rejected_relevance"]:
-            no_broll_reason = "safe_recovery_not_better_than_speaker_focus"
-        elif stats["broll_candidates_rejected_relevance"]:
-            no_broll_reason = "no_semantic_match"
-        else:
-            no_broll_reason = "no_safe_relevant_asset"
-        stats["broll_no_broll_reason"] = no_broll_reason
-        self._last_broll_selection_stats = dict(stats)
-        if stats["broll_candidates_rejected_forbidden"] and stats["broll_candidates_usable"] <= 0:
-            logger.info("[broll-safe-recovery] skipped reason=only_forbidden_assets")
-        elif stats["broll_candidates_total"] and not cooldown_recovery_candidates:
-            logger.info("[broll-safe-recovery] skipped reason=no_candidates_after_memory")
-        logger.info("[broll-relevance] no_broll reason=%s cue=%s", no_broll_reason, cue.cue_type)
-        logger.info("[broll-select] no_broll reason=all_candidates_low_quality cue=%s min_score=%.1f", cue.cue_type, min_score)
-        return None, "none", 0.0, [
-            "all_candidates_low_quality",
-            f"no_broll_reason:{no_broll_reason}",
-            f"broll_candidates_total:{stats['broll_candidates_total']}",
-            f"broll_candidates_rejected_forbidden:{stats['broll_candidates_rejected_forbidden']}",
-            f"broll_candidates_rejected_cooldown:{stats['broll_candidates_rejected_cooldown']}",
-            f"broll_candidates_rejected_relevance:{stats['broll_candidates_rejected_relevance']}",
-            f"broll_candidates_usable:{stats['broll_candidates_usable']}",
-        ], None
+        stats["broll_no_broll_reason"] = "no_contextual_match"
+        self._last_broll_selection_stats = stats
+        return (None, "none", 0.0, ["no_contextual_match"], None)
 
     @staticmethod
     def _clip_index_from_path(video_path: str) -> int:
@@ -1345,6 +1258,9 @@ class BrollService:
         self, keyword: str, safe: str, transcript_context: str = ""
     ) -> Optional[Path]:
         """Try LTXV/FLUX generative B-roll based on keyword semantics."""
+        if _production_safe_blocked("comfyui"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=comfyui reason=premium_local_stability")
+            return None
         if not LTXV_ENABLED:
             logger.debug("[BRoll] LTXV disabled (LTXV_ENABLED=false)")
             return None
@@ -1382,6 +1298,9 @@ class BrollService:
 
     async def _try_animatediff(self, keyword: str, safe: str) -> Optional[Path]:
         """Try ComfyUI AnimateDiff. Returns Path or None."""
+        if _production_safe_blocked("comfyui"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=comfyui reason=premium_local_stability")
+            return None
         if not COMFYUI_ENABLED:
             logger.debug("[BRoll] ComfyUI AnimateDiff disabled (COMFYUI_ENABLED=false)")
             return None
@@ -1408,6 +1327,9 @@ class BrollService:
 
     async def _try_t2v(self, keyword: str, safe: str) -> Optional[Path]:
         """Try T2V Replicate. Returns Path or None."""
+        if _production_safe_blocked("t2v"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=t2v reason=premium_local_stability")
+            return None
         try:
             from .t2v_broll_service import T2VBrollService
             if T2VBrollService.is_available():
@@ -1426,6 +1348,9 @@ class BrollService:
 
     async def _try_stock_video(self, keyword: str, safe: str) -> Optional[Path]:
         """Try Pexels → Pixabay → Coverr. Returns Path or None."""
+        if _production_safe_blocked("external_pexels"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+            return None
         if not BROLL_ENABLE_STOCK:
             logger.debug("[BRoll] Stock providers disabled (BROLL_ENABLE_STOCK=false)")
             return None
@@ -1457,6 +1382,9 @@ class BrollService:
 
     async def _try_stock_image(self, keyword: str, safe: str) -> Optional[Path]:
         """Try Pexels Photos. Returns Path or None."""
+        if _production_safe_blocked("pexels_overlay"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=pexels_overlay reason=premium_local_stability")
+            return None
         if not BROLL_ENABLE_STOCK:
             logger.debug("[BRoll] Stock providers disabled (BROLL_ENABLE_STOCK=false)")
             return None
@@ -1480,6 +1408,9 @@ class BrollService:
 
     async def _search_pexels_photos_and_download(self, keyword: str, safe_name: str) -> Optional[Path]:
         """Search Pexels Photos API and download a portrait image for *keyword*."""
+        if _production_safe_blocked("external_pexels"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+            return None
         key = self.config.pexels_api_key or os.getenv("PEXELS_API_KEY", "")
         if not key:
             return None
@@ -1509,6 +1440,9 @@ class BrollService:
             return None
 
     async def _search_pexels(self, query: str) -> Optional[str]:
+        if _production_safe_blocked("external_pexels"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+            return None
         key = self.config.pexels_api_key or os.getenv("PEXELS_API_KEY", "")
         if not key:
             return None
@@ -1787,6 +1721,25 @@ class BrollService:
                 cue for cue in cue_decisions
                 if cue.decision == "approve" and cue.visual_query and cue.start_s is not None
             ]
+            safe_approved_cues: List[BrollCueDecision] = []
+            for cue in approved_cues:
+                explicit_ok, explicit_reason = _is_high_relevance_broll_cue(
+                    cue=cue,
+                    segment_text=segment_text,
+                    theme=clip_theme,
+                )
+                if not explicit_ok:
+                    logger.info(
+                        "BROLL_REJECTED_LOW_RELEVANCE task_id=%s clip_order=%s cue=%s reason=%s confidence=%.2f",
+                        task_id or "",
+                        clip_index,
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                        explicit_reason,
+                        float(cue.confidence or 0.0),
+                    )
+                    continue
+                safe_approved_cues.append(cue)
+            approved_cues = safe_approved_cues
             if hook_broll_delay_until_s and hook_broll_delay_until_s > 0:
                 for cue in approved_cues:
                     old_start = float(cue.start_s or 0.0)
@@ -1856,7 +1809,7 @@ class BrollService:
                 if len(broll_assets) >= max_overlays:
                     break
 
-                asset, asset_source, asset_score, score_reasons, selected_category = await self._select_editorial_asset_for_cue(
+                selection = await self._select_editorial_asset_for_cue(
                     cue=cue,
                     task_id=task_id,
                     task_seen_assets=task_seen_assets,
@@ -1865,6 +1818,7 @@ class BrollService:
                     theme=clip_theme,
                     clip_index=clip_index,
                 )
+                asset, asset_source, asset_score, score_reasons, selected_category = self._normalize_editorial_asset_selection(selection)
 
                 if asset:
                     broll_assets.append(asset)
@@ -1883,7 +1837,44 @@ class BrollService:
                         asset_score,
                         ",".join(score_reasons),
                     )
+                    logger.info(
+                        "EDITORIAL_BROLL_SELECTED task_id=%s clip_order=%s category=%s asset=%s cue=%s manifest_validated=true",
+                        task_id or "",
+                        clip_index,
+                        selected_category or cue.cue_type,
+                        str(asset),
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                    )
                 else:
+                    logger.info(
+                        "LOCAL_BROLL_SKIPPED task_id=%s clip_order=%s reason=no_contextual_match",
+                        task_id or "",
+                        clip_index,
+                    )
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED task_id=%s clip_order=%s reason=no_editorial_broll_match cue=%s",
+                        task_id or "",
+                        clip_index,
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                    )
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED task_id=%s clip_order=%s reason=asset_taxonomy_mismatch cue=%s",
+                        task_id or "",
+                        clip_index,
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                    )
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED task_id=%s clip_order=%s reason=asset_brand_fit_false cue=%s",
+                        task_id or "",
+                        clip_index,
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                    )
+                    logger.info(
+                        "EDITORIAL_BROLL_SKIPPED task_id=%s clip_order=%s reason=avoid_context_match cue=%s",
+                        task_id or "",
+                        clip_index,
+                        cue.trigger_text or cue.visual_query or cue.cue_type,
+                    )
                     logger.info(
                         "[broll-select] skipped reason=no_asset_passed_scoring task=%s clip=%s cue=%s",
                         task_id or "",

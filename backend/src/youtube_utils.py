@@ -12,16 +12,29 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import requests
-import yt_dlp
+try:
+    import yt_dlp
+except Exception:  # pragma: no cover - optional dependency in lightweight script contexts
+    yt_dlp = None
 
 from .apify_youtube_downloader import ApifyDownloadError, download_video_via_apify
 from .config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+class _YtDlpMissingError(RuntimeError):
+    pass
+
+
+def _require_yt_dlp() -> Any:
+    if yt_dlp is None:
+        raise _YtDlpMissingError("yt_dlp is not installed in this environment")
+    return yt_dlp
 
 
 
@@ -136,10 +149,10 @@ class YouTubeDownloader:
             "quiet": True,
             "no_warnings": False,
             "ignoreerrors": False,
-            # Use the web client extractor (better 403 bypass than mweb)
+            # Use the web client extractor to avoid mobile/app availability failures.
             "extractor_args": {
                 "youtube": {
-                    "player_client": ["ios", "android", "web", "tv_embedded"],
+                    "player_client": ["web"],
                     "skip": ["translated_subs"],
                 }
             },
@@ -199,7 +212,7 @@ def _build_info_options() -> Dict[str, Any]:
         "nocheckcertificate": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["ios", "android", "web", "tv_embedded"],
+                "player_client": ["web"],
                 "skip": ["translated_subs"],
             }
         },
@@ -369,6 +382,56 @@ def get_youtube_video_id(url: str) -> Optional[str]:
     return None
 
 
+def normalize_youtube_url(url: str) -> str:
+    """
+    Normalize a YouTube URL to a canonical watch form when possible.
+
+    Example canonical output:
+      https://www.youtube.com/watch?v=<video_id>
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return raw
+
+    video_id = get_youtube_video_id(raw)
+    if not video_id:
+        return raw
+
+    return f"https://www.youtube.com/watch?v={video_id}"
+
+
+def canonical_transcript_cache_keys(url: str) -> List[str]:
+    """
+    Build ordered, de-duplicated cache lookup keys for equivalent YouTube URLs.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return []
+
+    keys: List[str] = []
+
+    def _add(value: Optional[str]) -> None:
+        text = (value or "").strip()
+        if text and text not in keys:
+            keys.append(text)
+
+    _add(raw)
+    _add(raw.split("?", 1)[0])
+
+    video_id = get_youtube_video_id(raw)
+    if video_id:
+        _add(video_id)
+        _add(f"https://www.youtube.com/watch?v={video_id}")
+        _add(f"https://youtube.com/watch?v={video_id}")
+        _add(f"https://m.youtube.com/watch?v={video_id}")
+        _add(f"https://youtu.be/{video_id}")
+        _add(f"youtu.be/{video_id}")
+        _add(f"youtube.com/watch?v={video_id}")
+
+    _add(normalize_youtube_url(raw))
+    return keys
+
+
 def validate_youtube_url(url: str) -> bool:
     """Validate if URL is a proper YouTube URL."""
     video_id = get_youtube_video_id(url)
@@ -380,8 +443,9 @@ def _fetch_video_info_with_ytdlp(url: str) -> Dict[str, Any]:
     if not video_id:
         raise ValueError(f"Invalid YouTube URL: {url}")
 
+    _yt_dlp = _require_yt_dlp()
     ydl_opts = _build_info_options()
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
 
     return {
@@ -578,6 +642,7 @@ def _download_youtube_video_with_ytdlp(
     Download YouTube video with optimized settings and retry logic.
     Returns the path to the downloaded file, or None if download fails.
     """
+    _yt_dlp = _require_yt_dlp()
     logger.info(f"Starting YouTube download: {url}")
 
     video_id = get_youtube_video_id(url)
@@ -608,8 +673,8 @@ def _download_youtube_video_with_ytdlp(
 
             ydl_opts = downloader.get_optimal_download_options(video_id)
 
-            # Use subprocess CLI to support --js-runtimes node --remote-components ejs:github
-            # (Python API does not expose these options, but they are required since 2025)
+            # Use subprocess CLI for the local yt-dlp binary.
+            # Keep the invocation conservative so it works with the installed yt-dlp build.
             output_template = str(downloader.temp_dir / f"{video_id}.%(ext)s")
 
             # Locate ffmpeg for yt-dlp merge step (not in system PATH; use imageio_ffmpeg).
@@ -627,8 +692,6 @@ def _download_youtube_video_with_ytdlp(
                 _ytdlp_path = "yt-dlp"  # fallback to PATH
             cmd = [
                 _ytdlp_path,
-                "--js-runtimes", "node",
-                "--remote-components", "ejs:github",
                 "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/bestvideo+bestaudio/best",
                 "-S", "ext:mp4,vcodec:h264,res:1920,fps",
                 "--merge-output-format", "mp4",
@@ -653,7 +716,7 @@ def _download_youtube_video_with_ytdlp(
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
                 stderr = proc.stderr.strip()
-                raise yt_dlp.utils.DownloadError(stderr or "yt-dlp subprocess failed")
+                raise _yt_dlp.utils.DownloadError(stderr or "yt-dlp subprocess failed")
 
             logger.info(f"Searching for downloaded file: {video_id}.*")
             downloaded_files = [
@@ -701,7 +764,7 @@ def _download_youtube_video_with_ytdlp(
 
             logger.warning("No video file found after download attempt %s", attempt + 1)
 
-        except yt_dlp.utils.DownloadError as e:
+        except _yt_dlp.utils.DownloadError as e:
             last_error = str(e)
             logger.warning("Download attempt %s failed: %s", attempt + 1, e)
             if attempt < max_retries - 1:
@@ -748,6 +811,38 @@ def download_youtube_video(
         return None
 
     downloader = YouTubeDownloader()
+
+    cached_task_files = sorted(
+        (
+            path
+            for path in downloader.temp_dir.glob(f"tasks/*/{video_id}.mp4")
+            if path.is_file()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if cached_task_files:
+        cached_path = cached_task_files[0]
+        logger.info(
+            "[download] Reusing cached task-scoped YouTube video for %s: %s",
+            video_id,
+            cached_path,
+        )
+        if task_id:
+            task_scoped = _resolve_task_scoped_path(
+                downloader.temp_dir, video_id, task_id,
+            )
+            if cached_path.resolve() != task_scoped.resolve():
+                logger.info(
+                    "[download] Copying cached task video %s → task-scoped %s",
+                    cached_path,
+                    task_scoped,
+                )
+                shutil.copy2(cached_path, task_scoped)
+                logger.info("[download] task-scoped source path: %s", task_scoped)
+                return task_scoped
+        return cached_path
+
     _remove_cached_downloads(downloader.temp_dir, video_id)
 
     config = get_config()

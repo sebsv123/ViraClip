@@ -1,4 +1,8 @@
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:  # pragma: no cover - optional in lightweight script envs
+    def load_dotenv(*args, **kwargs):  # type: ignore
+        return False
 from typing import Optional
 import os
 import logging
@@ -11,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 class Config:
     def __init__(self):
+        self.viraclip_mode = (os.getenv("VIRACLIP_MODE", "") or "").strip().lower() or "default"
+        self.premium_productive_mode = self.viraclip_mode == "premium_productive"
+        self.vpi_daily_mode = self._get_bool_env("VPI_DAILY_MODE", False)
+        self.vpi_daily_mode_allow_unsafe = self._get_bool_env("VPI_DAILY_MODE_ALLOW_UNSAFE", False)
+        if self.vpi_daily_mode and not self.vpi_daily_mode_allow_unsafe:
+            os.environ["VIRACLIP_BETA_CLEAN"] = "true"
+            os.environ["VPI_PRODUCTION_SAFE_EDIT"] = "true"
+            os.environ["VIRACLIP_ENABLE_PREMIUM_EDITING"] = "true"
+            os.environ["VIRACLIP_REMOTION_OVERLAYS"] = "false"
+            os.environ["VIRACLIP_COMPOSE_REMOTION_OVERLAY"] = "false"
+        self.render_first_clip_probe = self._get_bool_env("VIRACLIP_RENDER_FIRST_CLIP_PROBE", False)
+
         self.openai_api_key = self._get_optional_env("OPENAI_API_KEY")
         self.anthropic_api_key = self._get_optional_env("ANTHROPIC_API_KEY")
         self.google_api_key = self._get_optional_env("GOOGLE_API_KEY")
@@ -107,7 +123,8 @@ class Config:
         self.freesound_api_key = os.getenv("FREESOUND_API_KEY", "")
         self.freesound_auto_match = self._get_bool_env("FREESOUND_AUTO_MATCH", True)
         self.freesound_sfx_enabled = self._get_bool_env("FREESOUND_SFX_ENABLED", True)
-        self.broll_enabled = self._get_bool_env("BROLL_ENABLED", False)
+        _broll_default = True if self.premium_productive_mode else False
+        self.broll_enabled = self._get_bool_env("BROLL_ENABLED", _broll_default)
         self.sam2_enabled = self._get_bool_env("SAM2_ENABLED", False)
 
         # Rust sidecar agent
@@ -127,7 +144,19 @@ class Config:
         self.notifications_enabled = self._get_bool_env("NOTIFICATIONS_ENABLED", False)
         self.music_ducking_enabled = self._get_bool_env("MUSIC_DUCKING_ENABLED", True)
         self.beta_clean = self._get_bool_env("VIRACLIP_BETA_CLEAN", False)
-        self.enable_editorial_broll = self._get_bool_env("VIRACLIP_ENABLE_EDITORIAL_BROLL", False)
+        _deadline_safe_raw = self._get_bool_env("VIRACLIP_DEADLINE_SAFE_MODE", False)
+        self.deadline_safe_mode = bool(_deadline_safe_raw and not self.premium_productive_mode)
+        self.editorial_qc_blocking = self._get_bool_env(
+            "VIRACLIP_EDITORIAL_QC_BLOCKING",
+            False if self.premium_productive_mode else True,
+        )
+        # VPI Productive Minimum: when True (default in beta_clean), enables restrained
+        # local-only editing to guarantee at least one usable clip passes strict QC.
+        # Controls: local B-roll, subtle SFX, hook visibility, VFX/motion fallback,
+        # caption text badges, and aligned QC evidence requirements.
+        self.vpi_productive_minimum = self._get_bool_env("VPI_PRODUCTIVE_MINIMUM", True)
+        _editorial_broll_default = True if self.premium_productive_mode else False
+        self.enable_editorial_broll = self._get_bool_env("VIRACLIP_ENABLE_EDITORIAL_BROLL", _editorial_broll_default)
         self.enable_local_broll_bank = self._get_bool_env("VIRACLIP_ENABLE_LOCAL_BROLL_BANK", True)
         self.local_broll_asset_dir = os.getenv("LOCAL_BROLL_ASSET_DIR", "/app/assets/broll")
 
@@ -155,6 +184,15 @@ class Config:
         # Admin JWT auth
         self.admin_secret = os.getenv("ADMIN_SECRET", "")
         
+        # Remotion overlay composition into final video
+        self.compose_remotion_overlay = self._get_bool_env(
+            "VIRACLIP_COMPOSE_REMOTION_OVERLAY", False
+        )
+        self.remotion_experimental_safe_disabled = not (
+            self._get_bool_env("VIRACLIP_REMOTION_OVERLAYS", False)
+            and self.compose_remotion_overlay
+        )
+
         # FIX: Validate configuration on startup
         self._validate_config()
     

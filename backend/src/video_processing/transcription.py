@@ -273,7 +273,64 @@ def get_whisper_model():
                 **( {"download_root": _models_root} if _models_root else {} ),
             )
     _whisper_model_config = current_config
+    logger.info(
+        "WHISPER_RUNTIME_DEVICE device=%s compute_type=%s cuda_available=%s model=%s",
+        device,
+        compute_type,
+        str(device == "cuda").lower(),
+        model_size,
+    )
     return _whisper_model
+
+
+def _format_cached_words_to_lines(words: List[Dict[str, Any]]) -> str:
+    """Rebuild the canonical "[MM:SS - MM:SS] text" transcript from cached v2 words.
+
+    The fresh-transcription path returns bracketed timestamped lines, but cache
+    hits used to return the plain `text` field — losing every timestamp and
+    silently blinding all transcript-line consumers (semantic boundary
+    adjustment, anti-backstage trimming). Word times are in milliseconds.
+    """
+    lines: List[str] = []
+    current: List[str] = []
+    current_start: Optional[int] = None
+    last_end = 0
+
+    def _flush() -> None:
+        nonlocal current, current_start
+        if not current or current_start is None:
+            return
+        # MM:SS resolution: guarantee end > start or the line parser drops it.
+        end_ms = max(last_end, current_start + 1000)
+        if (end_ms // 1000) <= (current_start // 1000):
+            end_ms = (current_start // 1000 + 1) * 1000
+        lines.append(
+            f"[{format_ms_to_timestamp(current_start)} - {format_ms_to_timestamp(end_ms)}] "
+            + " ".join(current)
+        )
+        current = []
+        current_start = None
+
+    for word in words or []:
+        text = str(word.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            w_start = int(word.get("start") or 0)
+            w_end = int(word.get("end") or w_start)
+        except Exception:
+            continue
+        if current_start is None:
+            current_start = w_start
+        current.append(text)
+        last_end = w_end
+        span_ms = last_end - current_start
+        if (len(current) >= 8 and span_ms >= 1500) or (
+            text.endswith((".", "!", "?", "…")) and span_ms >= 1200
+        ) or len(current) >= 14:
+            _flush()
+    _flush()
+    return "\n".join(lines)
 
 
 async def get_video_transcript(
@@ -300,6 +357,14 @@ async def get_video_transcript(
             cached_data = await get_redis_transcript_cache(video_hash)
             if cached_data:
                 text = cached_data.get("text", "")
+                if "[" not in (text or "")[:48] and cached_data.get("words"):
+                    rebuilt = _format_cached_words_to_lines(cached_data.get("words") or [])
+                    if rebuilt:
+                        text = rebuilt
+                        logger.info(
+                            "[TRANSCRIPTION] cache HIT text normalized to timestamped lines (%d chars)",
+                            len(rebuilt),
+                        )
                 logger.info(f"[TRANSCRIPTION] Redis cache HIT - skipping Whisper for {video_path.name}")
                 return text, cached_data
 
@@ -307,6 +372,14 @@ async def get_video_transcript(
         file_cached = load_cached_transcript_data(video_path)
         if file_cached:
             text = file_cached.get("text", "")
+            if "[" not in (text or "")[:48] and file_cached.get("words"):
+                rebuilt = _format_cached_words_to_lines(file_cached.get("words") or [])
+                if rebuilt:
+                    text = rebuilt
+                    logger.info(
+                        "[TRANSCRIPTION] file cache HIT text normalized to timestamped lines (%d chars)",
+                        len(rebuilt),
+                    )
             if text:
                 logger.info(f"[TRANSCRIPTION] File cache HIT - skipping Whisper for {video_path.name}")
                 return text, file_cached
@@ -340,14 +413,19 @@ async def get_video_transcript(
         
         # Cache to local file and Redis
         cache_transcript_data(video_path, all_segments)
+        transcript_data = load_cached_transcript_data(video_path)
+        logger.info(
+            "[TRANSCRIPTION] cached transcript words=%d utterances=%d",
+            len((transcript_data or {}).get("words") or []),
+            len((transcript_data or {}).get("utterances") or []),
+        )
         
         # Also cache to Redis for distributed access
         if use_cache:
-            transcript_data = load_cached_transcript_data(video_path)
             if transcript_data and video_hash:
                 await set_redis_transcript_cache(video_hash, transcript_data)
         
-        return result, transcript_data if 'transcript_data' in dir() else None
+        return result, transcript_data
         
     except Exception as exc:
         logger.error(f"faster-whisper error: {exc}")

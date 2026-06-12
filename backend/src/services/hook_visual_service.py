@@ -195,11 +195,6 @@ class HookVisualService:
         Returns:
             Path del video resultante
         """
-        if os.environ.get("VIRACLIP_BETA_CLEAN", "").lower() in {"1", "true", "yes"}:
-            logger.info("[beta-clean] HookVisualService skipped")
-            logger.info("[beta-clean] top text overlay skipped")
-            return video_path
-
         try:
             # Construir filtro
             hook_filter = self.create_hook_overlay_filter(hook)

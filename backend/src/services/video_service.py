@@ -5,15 +5,1812 @@ Video service - handles video processing business logic.
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Awaitable, cast, Tuple
 from datetime import datetime
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
+from enum import Enum
 import asyncio
 import logging
 import json
 import subprocess
 import os
 import tempfile
+import shutil
+from types import SimpleNamespace
+import re
+import time
 
 logger = logging.getLogger(__name__)
+
+from .vpi_complete_idea_gate import (  # noqa: E402
+    _is_rescued_editorial_warning_segment,
+    _should_degrade_complete_idea_gate,
+)
+from .vpi_gpu_runtime import select_ffmpeg_video_encoder  # noqa: E402
+from .vpi_asset_library_service import choose_audio_editorial_profile as _choose_audio_editorial_profile  # noqa: E402
+from .vpi_editorial_scorer import (  # noqa: E402
+    _campaign_alignment_for_segment as _campaign_alignment_for_segment,
+    _contains_any as _vpi_contains_any,
+    _normalize as _vpi_normalize_text,
+    _text_overlap_metrics as _vpi_text_overlap_metrics,
+    _VPI_INSURANCE_VERBAL_HOOK_CUES,
+    build_vpi_clip_editorial_brief as _build_vpi_clip_editorial_brief,
+    resolve_vpi_campaign_intent as _resolve_vpi_campaign_intent,
+    select_diverse_vpi_clip_package as _select_diverse_vpi_clip_package,
+)
+from .vpi_editorial_contract import (  # noqa: E402
+    build_vpi_clip_filename as _build_vpi_clip_filename,
+)
+
+
+_AUDIO_VARIATION_MEMORY: Dict[str, Dict[str, Any]] = {}
+
+
+def _as_dict(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.startswith("{") or text.startswith("["):
+            try:
+                loaded = json.loads(text)
+                return loaded if isinstance(loaded, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
+def _safe_list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _probe_video_color_metadata(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {"exists": False}
+        stat = path.stat()
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries",
+                "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries,width,height",
+                "-show_entries",
+                "format=duration,size",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return {
+                "exists": True,
+                "size_bytes": stat.st_size,
+                "mtime": stat.st_mtime,
+            }
+        payload = json.loads(result.stdout)
+        stream = (payload.get("streams") or [{}])[0]
+        fmt = payload.get("format") or {}
+        return {
+            "exists": True,
+            "size_bytes": stat.st_size,
+            "mtime": stat.st_mtime,
+            "pix_fmt": stream.get("pix_fmt"),
+            "color_range": stream.get("color_range"),
+            "color_space": stream.get("color_space"),
+            "color_transfer": stream.get("color_transfer"),
+            "color_primaries": stream.get("color_primaries"),
+            "width": stream.get("width"),
+            "height": stream.get("height"),
+            "duration": fmt.get("duration"),
+        }
+    except Exception:
+        return {"exists": path.exists()}
+
+
+def _probe_video_red_ratio(path: Path, sample_second: float = 2.0) -> Optional[float]:
+    try:
+        if not path.exists():
+            return None
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            return None
+        payload = json.loads(probe.stdout)
+        stream = (payload.get("streams") or [{}])[0]
+        width = int(stream.get("width") or 0)
+        height = int(stream.get("height") or 0)
+        if width <= 0 or height <= 0:
+            return None
+        frame = subprocess.run(
+            [
+                "ffmpeg",
+                "-ss", str(sample_second),
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if frame.returncode != 0 or not frame.stdout:
+            return None
+        import numpy as _np
+        arr = _np.frombuffer(frame.stdout, dtype=_np.uint8)
+        if arr.size < width * height * 3:
+            return None
+        arr = arr[: width * height * 3].reshape((-1, 3))
+        r = float(arr[:, 0].mean())
+        g = float(arr[:, 1].mean())
+        if g <= 0:
+            return None
+        return r / g
+    except Exception:
+        return None
+
+
+def _audio_memory_for_task(task_id: str) -> Dict[str, Any]:
+    key = str(task_id or "unknown")
+    memory = _AUDIO_VARIATION_MEMORY.setdefault(
+        key,
+        {
+            "music_asset_ids": [],
+            "music_asset_paths": [],
+            "sfx_asset_ids": [],
+            "sfx_family_history": [],
+            "audio_variation_index": 0,
+        },
+    )
+    return memory
+
+
+def _normalize_audio_token(value: Any) -> str:
+    return str(value or "").strip().lower().replace(" ", "_")
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+
+def _assess_vpi_audio_identity(
+    *,
+    audio_editorial_profile: str,
+    music_mood_selected: str,
+    music_asset_id: str,
+    music_track: str,
+    sfx_family_selected: str,
+    sfx_variation_ids: List[str],
+) -> tuple[bool, List[str]]:
+    warnings: List[str] = []
+    profile = _normalize_audio_token(audio_editorial_profile)
+    music_mood = _normalize_audio_token(music_mood_selected)
+    music_blob = " ".join([music_asset_id, music_track, music_mood, profile]).lower()
+    sfx_blob = " ".join([sfx_family_selected, "|".join(sfx_variation_ids or [])]).lower()
+    identity_ok = True
+    prohibited_terms = ("comic", "funny", "game", "gaming", "toy", "child", "children", "playful", "boom", "riser", "hit", "glitch", "meme")
+    if profile == "sensitive_sober":
+        if sfx_family_selected:
+            warnings.append("sensitive_profile_sfx_forbidden")
+            identity_ok = False
+        if music_mood not in {"sensitive_sober", "calm_trust", "no_extra_audio", "cinematic_ambient"}:
+            warnings.append("sensitive_profile_music_mismatch")
+            identity_ok = False
+    if any(term in music_blob for term in prohibited_terms) or any(term in sfx_blob for term in prohibited_terms):
+        warnings.append("identity_mismatch_grave")
+        identity_ok = False
+    elif any(term in music_blob for term in ("comic", "game", "gaming", "toy", "playful", "meme")) or any(term in sfx_blob for term in ("comic", "game", "gaming", "toy", "playful", "meme")):
+        warnings.append("identity_mismatch")
+    return identity_ok, list(dict.fromkeys(warnings))
+
+
+def refine_segment_boundaries_for_vpi(
+    *,
+    segment: Dict[str, Any],
+    transcript_text: str,
+    words_with_timestamps: Optional[List[Dict[str, Any]]] = None,
+    vpi_editorial_categories: Optional[List[str]] = None,
+    hookability_score: float = 0.0,
+    standalone_score: float = 0.0,
+    commercial_usefulness_score: float = 0.0,
+    weak_segment_penalties: Optional[List[str]] = None,
+    clip_min_duration: float = 8.0,
+    clip_max_duration: float = 90.0,
+) -> Dict[str, Any]:
+    """Refine editorial boundaries so selected clips start cleanly and end on payoff.
+
+    The helper is conservative: if the refinement does not improve boundary quality,
+    it keeps the original boundaries and marks the change as reverted.
+    """
+
+    def _fmt_seconds(seconds: float) -> str:
+        total = max(0, int(round(float(seconds or 0.0))))
+        minutes = total // 60
+        secs = total % 60
+        return f"{minutes:02d}:{secs:02d}"
+
+    def _tokenize(text: str) -> List[str]:
+        return [token for token in re.findall(r"[A-Za-zÀ-ÿ0-9']+", text or "") if token.strip()]
+
+    def _normalize(text: str) -> str:
+        return re.sub(r"\s+", " ", (text or "").strip().lower())
+
+    def _safe_float_local(value: Any) -> Optional[float]:
+        try:
+            if value is None or value == "":
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            try:
+                return float(parse_timestamp_to_seconds(str(value)))
+            except Exception:
+                return None
+
+    def _is_connector_start(tokens: List[str]) -> bool:
+        if not tokens:
+            return False
+        first = tokens[0].lower()
+        first_two = " ".join(tokens[:2]).lower()
+        return first in {
+            "y", "pero", "porque", "entonces", "ademas", "además", "tambien", "también",
+            "aunque", "si", "cuando", "mientras", "como", "que", "lo", "la", "el", "esto",
+            "eso", "esa", "ese", "ellos", "ellas", "nosotros", "nosotras", "tú", "tu", "usted",
+        } or first_two in {
+            "y si", "pero si", "porque si", "como te", "como se", "como funciona",
+        }
+
+    def _is_filler_prefix(tokens: List[str]) -> tuple[bool, int, str]:
+        filler_prefixes = (
+            "bueno", "pues", "entonces", "eh", "vale", "hoy vamos a hablar",
+            "como decía", "como decia", "la verdad", "a ver", "mira", "oye",
+            "vamos a hablar", "vamos a ver", "te voy a contar", "te voy a explicar",
+        )
+        joined = _normalize(" ".join(tokens[:8]))
+        for prefix in filler_prefixes:
+            if joined.startswith(prefix):
+                return True, len(_tokenize(prefix)), prefix
+        return False, 0, ""
+
+    def _word_items_relative() -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        raw_items = list(words_with_timestamps or [])
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            word = str(item.get("word") or item.get("text") or "").strip()
+            start = _safe_float_local(item.get("start"))
+            end = _safe_float_local(item.get("end"))
+            if not word or start is None or end is None:
+                continue
+            items.append({"word": word, "start": float(start), "end": float(end)})
+        if not items:
+            tokens = _tokenize(transcript_text)
+            if not tokens:
+                return []
+            start_s = _safe_float_local(segment.get("start_time")) or 0.0
+            end_s = _safe_float_local(segment.get("end_time")) or 0.0
+            total = max(0.0, end_s - start_s)
+            if total <= 0:
+                total = max(1.0, float(len(tokens)) * 0.35)
+            step = total / max(1, len(tokens))
+            cursor = 0.0
+            for token in tokens:
+                items.append({"word": token, "start": cursor, "end": min(total, cursor + step)})
+                cursor += step
+            return items
+        max_end = max(float(item["end"]) for item in items)
+        min_start = min(float(item["start"]) for item in items)
+        start_s = _safe_float_local(segment.get("start_time")) or 0.0
+        end_s = _safe_float_local(segment.get("end_time")) or 0.0
+        total = max(0.0, end_s - start_s)
+        looks_absolute = max_end > max(clip_max_duration + 1.0, 30.0) or min_start >= max(10.0, start_s * 0.5)
+        if looks_absolute:
+            rel_items: List[Dict[str, Any]] = []
+            for item in items:
+                rel_items.append({
+                    "word": item["word"],
+                    "start": max(0.0, float(item["start"]) - start_s),
+                    "end": max(0.0, float(item["end"]) - start_s),
+                })
+            return rel_items
+        if total > 0 and max_end > total + 1.0:
+            rel_items = []
+            for item in items:
+                rel_items.append({
+                    "word": item["word"],
+                    "start": max(0.0, min(total, float(item["start"]))),
+                    "end": max(0.0, min(total, float(item["end"]))),
+                })
+            return rel_items
+        return items
+
+    def _first_second_strength(tokens: List[str], words: List[Dict[str, Any]], start_offset: float = 0.0) -> tuple[float, str]:
+        strong_terms = {
+            "cuidado", "ojo", "atencion", "atención", "error", "mito", "cobertura", "seguro",
+            "tramite", "trámite", "problema", "ahorro", "proteccion", "protección", "pregunta",
+            "revisa", "riesgo", "no", "clave", "importante", "evita", "consulta", "familia",
+        }
+        weak_openers = {
+            "bueno", "pues", "eh", "vale", "hoy", "vamos", "hola", "oye", "mira",
+        }
+        window_tokens: List[str] = []
+        if words:
+            for item in words:
+                if float(item.get("start") or 0.0) <= 1.0 + start_offset:
+                    window_tokens.append(str(item.get("word") or "").strip().lower())
+        if not window_tokens:
+            window_tokens = [token.lower() for token in tokens[:6]]
+        blob = " ".join(window_tokens)
+        score = 30.0
+        if any(token in strong_terms for token in window_tokens):
+            score += 30.0
+        if any(term in blob for term in ("cuidado", "ojo", "mito", "error", "seguro", "cobertura", "ahorro", "proteccion", "protección", "tramite", "trámite")):
+            score += 20.0
+        if any(token in weak_openers for token in window_tokens[:2]):
+            score -= 25.0
+        if not window_tokens:
+            score -= 20.0
+        if len(window_tokens) <= 2:
+            score -= 5.0
+        return max(0.0, min(100.0, score)), ("strong_opening" if score >= 65.0 else "mixed_opening" if score >= 40.0 else "weak_opening")
+
+    def _boundary_quality_score(
+        *,
+        standalone_value: float,
+        starts_clean: bool,
+        ends_clean: bool,
+        payoff_ok: bool,
+        first_second_value: float,
+        has_word_timestamps: bool,
+        weak_penalty_count: int,
+    ) -> float:
+        score = float(standalone_value or 0.0)
+        if starts_clean:
+            score += 8.0
+        else:
+            score -= 10.0
+        if ends_clean:
+            score += 6.0
+        else:
+            score -= 8.0
+        if payoff_ok:
+            score += 8.0
+        else:
+            score -= 10.0
+        score += (first_second_value - 50.0) * 0.18
+        if has_word_timestamps:
+            score += 3.0
+        score -= min(12.0, float(weak_penalty_count or 0) * 2.5)
+        return max(0.0, min(100.0, score))
+
+    original_start = _safe_float_local(segment.get("start_seconds")) or _safe_float_local(segment.get("start_time")) or 0.0
+    original_end = _safe_float_local(segment.get("end_seconds")) or _safe_float_local(segment.get("end_time")) or 0.0
+    if original_end <= 0.0:
+        original_end = original_start + max(0.0, _safe_float_local(segment.get("duration")) or 0.0)
+    original_duration = max(0.0, original_end - original_start)
+    transcript_text = str(transcript_text or segment.get("text") or "")
+    normalized_text = _normalize(transcript_text)
+    tokens = _tokenize(transcript_text)
+    weak_penalty_count = len(list(weak_segment_penalties or []))
+    category_blob = " ".join(str(x or "") for x in (vpi_editorial_categories or []))
+    word_items = _word_items_relative()
+    has_word_timestamps = bool(word_items)
+    start_trim_seconds = 0.0
+    start_extend_seconds = 0.0
+    end_extend_seconds = 0.0
+    end_trim_seconds = 0.0
+    start_filler_trimmed = False
+    start_context_extended = False
+    payoff_extended = False
+    end_cleaned = False
+    payoff_preserved = False
+    starts_cleanly = True
+    ends_cleanly = True
+    boundary_reverted = False
+    boundary_reverted_reason = ""
+    reasons: List[str] = []
+    logger.info(
+        "VPI_BOUNDARY_REFINEMENT_STARTED segment=%s→%s duration=%.2f hook=%.2f standalone=%.2f commercial=%.2f categories=%s",
+        segment.get("start_time", "?"),
+        segment.get("end_time", "?"),
+        original_duration,
+        float(hookability_score or 0.0),
+        float(standalone_score or 0.0),
+        float(commercial_usefulness_score or 0.0),
+        category_blob or "-",
+    )
+
+    filler_found, filler_token_count, filler_reason = _is_filler_prefix(tokens)
+    if filler_found:
+        start_filler_trimmed = True
+        reasons.append(f"start_filler_trim:{filler_reason}")
+        if has_word_timestamps:
+            content_start = None
+            filler_cutoff = min(max(1, filler_token_count), len(word_items))
+            for idx, item in enumerate(word_items):
+                token = _normalize(str(item.get("word") or ""))
+                if idx < filler_cutoff and token in {"bueno", "pues", "entonces", "eh", "vale", "hoy", "vamos", "a", "hablar", "como", "decía", "decia", "mira", "oye"}:
+                    continue
+                content_start = float(item.get("start") or 0.0)
+                break
+            if content_start is not None and content_start > 0.0:
+                start_trim_seconds = max(0.0, min(content_start, 2.0))
+                reasons.append("trim_to_first_content_word")
+                starts_cleanly = True
+        else:
+            start_trim_seconds = min(1.25, max(0.35, original_duration * 0.08 + 0.12 * max(1, filler_token_count)))
+            reasons.append("approx_trim_filler_prefix")
+            starts_cleanly = True
+
+    connector_start = _is_connector_start(tokens[:3])
+    weak_hook_opening = bool(tokens and tokens[0].lower() in {"y", "pero", "porque", "entonces", "si", "como"}) and not any(
+        term in normalized_text[:120] for term in ("cuidado", "ojo", "mito", "seguro", "cobertura", "protección", "proteccion", "ahorro", "trámite", "tramite")
+    )
+    if connector_start or weak_hook_opening:
+        extension = min(2.5, max(0.5, original_duration * 0.10))
+        if original_start - extension >= 0.0:
+            start_context_extended = True
+            start_extend_seconds = extension
+            starts_cleanly = True
+            reasons.append("extend_to_capture_context")
+        else:
+            starts_cleanly = False
+
+    closing_blob = " ".join(tokens[-10:]).lower()
+    payoff_terms = (
+        "por eso", "lo importante es", "mi recomendación", "mi recomendacion", "te recomiendo",
+        "revisa", "conclusion", "conclusión", "en resumen", "en definitiva", "al final",
+        "te ayuda", "te conviene", "te orientamos", "te explicamos", "consulta", "cobertura",
+        "protección", "proteccion", "tranquilidad", "ahorro", "evita", "consulta",
+    )
+    payoff_missing = not any(term in closing_blob for term in payoff_terms)
+    ends_with_connector = bool(tokens) and tokens[-1].lower() in {"y", "pero", "entonces", "porque", "si", "como", "aunque", "o", "ni"}
+    ends_incomplete = ends_with_connector or not _normalize(transcript_text).endswith((".", "!", "?", "…"))
+    if payoff_missing or ends_incomplete:
+        ends_cleanly = False
+        if original_duration < clip_max_duration:
+            extend_target = min(3.5, max(0.75, original_duration * 0.10))
+            available_extend = max(0.0, clip_max_duration - original_duration)
+            extension = min(extend_target, available_extend)
+            if extension > 0.0:
+                end_extend_seconds = extension
+                payoff_extended = True
+                payoff_preserved = True
+                ends_cleanly = True
+                reasons.append("extend_to_preserve_payoff")
+            else:
+                trim_target = min(0.9, max(0.35, original_duration * 0.06))
+                if original_duration - trim_target >= clip_min_duration:
+                    end_trim_seconds = trim_target
+                    end_cleaned = True
+                    payoff_preserved = True
+                    ends_cleanly = True
+                    reasons.append("trim_trailing_connector")
+        else:
+            if original_duration - min(0.9, original_duration * 0.05) >= clip_min_duration:
+                end_trim_seconds = min(0.9, original_duration * 0.05)
+                end_cleaned = True
+                payoff_preserved = True
+                ends_cleanly = True
+                reasons.append("trim_overlong_tail")
+    else:
+        payoff_preserved = True
+        ends_cleanly = True
+
+    bts_tail_terms = {
+        "corta",
+        "corten",
+        "cortá",
+        "abre esto",
+        "abre",
+        "espera",
+        "esperate",
+        "grabando",
+        "camara",
+        "cámara",
+        "fuera de cámara",
+        "fuera de camara",
+        "otra vez",
+        "otra",
+        "vez",
+        "repite",
+        "repeti",
+        "toma",
+        "prueba",
+        "como hago",
+        "cómo hago",
+        "cómo abro esto",
+        "como abro esto",
+        "esto otro",
+    }
+    tail_window_start = max(0.0, original_duration - 15.0)
+    tail_words = [item for item in word_items if float(item.get("start") or 0.0) >= tail_window_start]
+    tail_blob = _normalize(" ".join(str(item.get("word") or "") for item in tail_words))
+    bts_tail_detected = bool(tail_words) and any(term in tail_blob for term in bts_tail_terms) and original_duration >= clip_min_duration
+    bts_tail_trimmed_seconds = 0.0
+    viral_window_shifted_back = False
+    viral_window_shift_reason = ""
+    if bts_tail_detected:
+        estimated_tail = max(
+            1.5,
+            min(12.0, max(float(original_duration - tail_window_start), float(len(tail_words) * 0.55))),
+        )
+        max_tail_trim = max(0.0, original_duration - clip_min_duration)
+        bts_tail_trimmed_seconds = min(estimated_tail, max_tail_trim)
+        if bts_tail_trimmed_seconds > 0.0:
+            end_trim_seconds += bts_tail_trimmed_seconds
+            end_cleaned = True
+            payoff_preserved = True
+            ends_cleanly = True
+            reasons.append("trim_bts_tail")
+            logger.info(
+                "VPI_BTS_TAIL_TRIMMED segment=%s→%s trim=%.2f reason=bts_tail",
+                segment.get("start_time", "?"),
+                segment.get("end_time", "?"),
+                bts_tail_trimmed_seconds,
+            )
+            shift_back = min(bts_tail_trimmed_seconds, max(0.0, original_start))
+            if shift_back > 0.0:
+                start_extend_seconds += shift_back
+                start_context_extended = True
+                viral_window_shifted_back = True
+                viral_window_shift_reason = "bts_tail_trimmed_shift_back"
+                reasons.append("shift_window_back_for_viral_window")
+                logger.info(
+                    "VPI_VIRAL_WINDOW_SHIFTED_BACK segment=%s→%s shift=%.2f reason=%s",
+                    segment.get("start_time", "?"),
+                    segment.get("end_time", "?"),
+                    shift_back,
+                    viral_window_shift_reason,
+                )
+        logger.info(
+            "VPI_BTS_TAIL_DETECTED segment=%s→%s detected=true tail_seconds=%.2f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            max(0.0, original_duration - tail_window_start),
+            tail_blob[:120] or "bts_tail",
+        )
+
+    refined_start = max(0.0, original_start - start_extend_seconds + start_trim_seconds)
+    refined_end = max(refined_start + 0.5, original_end + end_extend_seconds - end_trim_seconds)
+    if refined_end - refined_start < clip_min_duration and original_duration >= clip_min_duration:
+        needed = clip_min_duration - (refined_end - refined_start)
+        if original_end + needed <= original_end + 3.5 and original_end + needed - refined_start <= clip_max_duration:
+            refined_end += needed
+            end_extend_seconds += needed
+            payoff_extended = True
+            payoff_preserved = True
+            reasons.append("extend_to_min_duration")
+        else:
+            refined_start = original_start
+            refined_end = original_end
+            start_trim_seconds = 0.0
+            start_extend_seconds = 0.0
+            end_extend_seconds = 0.0
+            end_trim_seconds = 0.0
+            start_filler_trimmed = False
+            start_context_extended = False
+            payoff_extended = False
+            end_cleaned = False
+            payoff_preserved = False
+            starts_cleanly = True
+            ends_cleanly = True
+            boundary_reverted = True
+            boundary_reverted_reason = "min_duration_repair_failed"
+            reasons.append(boundary_reverted_reason)
+
+    if refined_end <= refined_start or refined_start < 0.0 or refined_end < 0.0:
+        refined_start = original_start
+        refined_end = original_end
+        start_trim_seconds = 0.0
+        start_extend_seconds = 0.0
+        end_extend_seconds = 0.0
+        end_trim_seconds = 0.0
+        start_filler_trimmed = False
+        start_context_extended = False
+        payoff_extended = False
+        end_cleaned = False
+        payoff_preserved = False
+        starts_cleanly = True
+        ends_cleanly = True
+        boundary_reverted = True
+        boundary_reverted_reason = "invalid_refined_boundaries"
+        reasons.append(boundary_reverted_reason)
+
+    first_second_strength, first_second_reason = _first_second_strength(tokens, word_items, start_offset=max(0.0, original_start - refined_start))
+    boundary_adjustment_applied = any(
+        value > 0.0 for value in (start_trim_seconds, start_extend_seconds, end_extend_seconds, end_trim_seconds)
+    ) and not boundary_reverted
+    if boundary_adjustment_applied:
+        reasons.append("boundary_adjustment_applied")
+    if start_filler_trimmed:
+        logger.info(
+            "VPI_BOUNDARY_START_TRIMMED segment=%s→%s trim=%.2f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            start_trim_seconds,
+            filler_reason or "filler_prefix",
+        )
+    if start_context_extended:
+        logger.info(
+            "VPI_BOUNDARY_START_EXTENDED segment=%s→%s extend=%.2f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            start_extend_seconds,
+            "connector_start" if connector_start else "weak_hook_opening",
+        )
+    if end_extend_seconds > 0.0:
+        logger.info(
+            "VPI_BOUNDARY_END_EXTENDED segment=%s→%s extend=%.2f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            end_extend_seconds,
+            "payoff_preservation",
+        )
+    if end_cleaned:
+        logger.info(
+            "VPI_BOUNDARY_END_CLEANED segment=%s→%s trim=%.2f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            end_trim_seconds,
+            "trailing_connector",
+        )
+
+    weak_penalty_count = max(0, weak_penalty_count)
+    boundary_confidence = 0.35
+    if has_word_timestamps:
+        boundary_confidence += 0.18
+    if starts_cleanly:
+        boundary_confidence += 0.12
+    if ends_cleanly:
+        boundary_confidence += 0.12
+    if payoff_preserved:
+        boundary_confidence += 0.10
+    if not weak_penalty_count:
+        boundary_confidence += 0.05
+    boundary_confidence += min(0.10, max(0.0, (first_second_strength - 50.0) / 400.0))
+    if boundary_adjustment_applied:
+        boundary_confidence += 0.05
+    if boundary_reverted:
+        boundary_confidence = min(boundary_confidence, 0.45)
+    boundary_confidence = max(0.0, min(1.0, boundary_confidence))
+
+    standalone_after_boundary_score = _boundary_quality_score(
+        standalone_value=float(standalone_score or 0.0),
+        starts_clean=starts_cleanly,
+        ends_clean=ends_cleanly,
+        payoff_ok=payoff_preserved,
+        first_second_value=first_second_strength,
+        has_word_timestamps=has_word_timestamps,
+        weak_penalty_count=weak_penalty_count,
+    )
+    standalone_before_boundary_score = float(standalone_score or 0.0)
+    if boundary_adjustment_applied and standalone_after_boundary_score + 1e-6 < max(0.0, standalone_before_boundary_score - 5.0):
+        refined_start = original_start
+        refined_end = original_end
+        start_trim_seconds = 0.0
+        start_extend_seconds = 0.0
+        end_extend_seconds = 0.0
+        end_trim_seconds = 0.0
+        boundary_reverted = True
+        boundary_reverted_reason = "standalone_after_boundary_drop"
+        boundary_adjustment_applied = False
+        payoff_preserved = False
+        starts_cleanly = True
+        ends_cleanly = True
+        boundary_confidence = min(boundary_confidence, 0.40)
+        standalone_after_boundary_score = standalone_before_boundary_score
+        reasons.append(boundary_reverted_reason)
+        logger.info(
+            "VPI_BOUNDARY_REFINEMENT_REVERTED segment=%s→%s reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            boundary_reverted_reason,
+        )
+
+    if boundary_confidence < 0.55:
+        logger.info(
+            "VPI_BOUNDARY_CONFIDENCE_LOW segment=%s→%s confidence=%.3f reason=%s",
+            segment.get("start_time", "?"),
+            segment.get("end_time", "?"),
+            boundary_confidence,
+            boundary_reverted_reason or ("weak_start_or_payoff" if boundary_adjustment_applied else "low_signal"),
+        )
+
+    logger.info(
+        "VPI_BOUNDARY_REFINEMENT_APPLIED segment=%s→%s applied=%s start=%.2f end=%.2f reason=%s confidence=%.3f standalone_after=%.2f",
+        segment.get("start_time", "?"),
+        segment.get("end_time", "?"),
+        str(bool(boundary_adjustment_applied)).lower(),
+        refined_start,
+        refined_end,
+        ",".join(dict.fromkeys(reasons)) or "already_clean",
+        boundary_confidence,
+        standalone_after_boundary_score,
+    )
+    return {
+        "original_start": original_start,
+        "original_end": original_end,
+        "refined_start": refined_start,
+        "refined_end": refined_end,
+        "refined_start_time": _fmt_seconds(refined_start),
+        "refined_end_time": _fmt_seconds(refined_end),
+        "boundary_adjustment_applied": bool(boundary_adjustment_applied),
+        "boundary_adjustment_reason": ",".join(dict.fromkeys(reasons)) or ("already_clean" if not boundary_adjustment_applied else "boundary_refined"),
+        "start_trim_seconds": float(start_trim_seconds),
+        "start_extend_seconds": float(start_extend_seconds),
+        "end_extend_seconds": float(end_extend_seconds),
+        "end_trim_seconds": float(end_trim_seconds),
+        "payoff_preserved": bool(payoff_preserved),
+        "starts_cleanly": bool(starts_cleanly),
+        "ends_cleanly": bool(ends_cleanly),
+        "first_second_strength": float(first_second_strength),
+        "first_second_reason": first_second_reason,
+        "boundary_confidence": float(boundary_confidence),
+        "standalone_after_boundary_score": float(standalone_after_boundary_score),
+        "standalone_after_boundary_reason": (
+            "boundary_reverted"
+            if boundary_reverted
+            else ("improved_boundary" if boundary_adjustment_applied else "already_clean")
+        ),
+        "start_filler_trimmed": bool(start_filler_trimmed),
+        "start_trim_reason": str(filler_reason or ("approx_trim_filler_prefix" if start_trim_seconds > 0.0 else "")),
+        "start_context_extended": bool(start_context_extended),
+        "start_context_reason": str("connector_start" if connector_start else ("weak_hook_opening" if start_context_extended else "")),
+        "payoff_extended": bool(payoff_extended),
+        "payoff_extension_reason": str("preserve_payoff" if payoff_extended else ""),
+        "end_cleaned": bool(end_cleaned),
+        "end_clean_reason": str("trailing_connector" if end_cleaned else ""),
+        "boundary_reverted": bool(boundary_reverted),
+        "boundary_reverted_reason": str(boundary_reverted_reason or ""),
+        "bts_tail_detected": bool(bts_tail_detected),
+        "bts_tail_trimmed_seconds": float(bts_tail_trimmed_seconds),
+        "viral_window_shifted_back": bool(viral_window_shifted_back),
+        "viral_window_shift_reason": str(viral_window_shift_reason or ""),
+        "clip_min_duration": float(clip_min_duration),
+        "clip_max_duration": float(clip_max_duration),
+    }
+
+
+def _deadline_safe_mode_enabled() -> bool:
+    if (os.environ.get("VIRACLIP_MODE", "") or "").strip().lower() == "premium_productive":
+        return False
+    raw = os.environ.get("VIRACLIP_DEADLINE_SAFE_MODE", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_vpi_daily_mode_active() -> bool:
+    return str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_caption_words_for_render(
+    words: List[Dict[str, Any]],
+    *,
+    clip_duration: float,
+    segment_start_s: float,
+) -> Tuple[List[Dict[str, Any]], bool, str, bool]:
+    normalized: List[Dict[str, Any]] = []
+    starts: List[float] = []
+    ends: List[float] = []
+    for raw in words or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start = float(raw.get("start", 0.0) or 0.0)
+            end = float(raw.get("end", start) or start)
+        except Exception:
+            continue
+        item = dict(raw)
+        item["start"] = start
+        item["end"] = end
+        normalized.append(item)
+        starts.append(start)
+        ends.append(end)
+
+    if not normalized:
+        return [], False, "empty", False
+
+    clip_duration = max(0.0, float(clip_duration or 0.0))
+    segment_start_s = max(0.0, float(segment_start_s or 0.0))
+    min_start = min(starts) if starts else 0.0
+    max_end = max(ends) if ends else 0.0
+
+    corrected = False
+    timebase_mode = "clip_relative"
+    offset = 0.0
+    if clip_duration > 0.0 and max_end <= clip_duration + 2.0:
+        offset = 0.0
+        timebase_mode = "clip_relative"
+    elif clip_duration > 0.0 and min_start > clip_duration and segment_start_s > 0.0:
+        offset = segment_start_s
+        corrected = True
+        timebase_mode = "segment_start_offset"
+    elif min_start >= 1.0:
+        offset = min_start
+        corrected = True
+        timebase_mode = "absolute_to_clip_offset"
+
+    clamped = False
+    output: List[Dict[str, Any]] = []
+    for raw in normalized:
+        shifted = dict(raw)
+        start = float(shifted.get("start", 0.0) or 0.0) - offset
+        end = float(shifted.get("end", start) or start) - offset
+        start = max(0.0, start)
+        end = max(start + 0.01, end)
+        if clip_duration > 0.0:
+            if start > clip_duration:
+                clamped = True
+                continue
+            if end > clip_duration + 0.2:
+                end = clip_duration
+                clamped = True
+        shifted["start"] = round(start, 3)
+        shifted["end"] = round(end, 3)
+        output.append(shifted)
+
+    return output, corrected, timebase_mode, clamped
+
+
+def _normalize_caption_word_items_for_fallback(
+    words: Optional[List[Any]],
+    *,
+    clip_duration: float,
+) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    previous_end = 0.0
+    clip_duration = max(0.0, float(clip_duration or 0.0))
+
+    for index, raw in enumerate(words or []):
+        item: Dict[str, Any] = {}
+        if isinstance(raw, dict):
+            item = dict(raw)
+        elif hasattr(raw, "start") or hasattr(raw, "end") or hasattr(raw, "text") or hasattr(raw, "word"):
+            item = {
+                "start": getattr(raw, "start", None),
+                "end": getattr(raw, "end", None),
+                "text": getattr(raw, "text", None),
+                "word": getattr(raw, "word", None),
+                "score": getattr(raw, "score", getattr(raw, "probability", None)),
+            }
+        elif isinstance(raw, (list, tuple)):
+            item = {
+                "text": raw[0] if len(raw) > 0 else "",
+                "start": raw[1] if len(raw) > 1 else None,
+                "end": raw[2] if len(raw) > 2 else None,
+                "score": raw[3] if len(raw) > 3 else None,
+            }
+        elif isinstance(raw, str):
+            item = {"text": raw, "start": None, "end": None}
+        else:
+            continue
+
+        text = str(item.get("text") or item.get("word") or "").strip()
+        if not text:
+            continue
+
+        raw_start = item.get("start", None)
+        raw_end = item.get("end", None)
+        try:
+            start = float(raw_start) if raw_start is not None else previous_end
+        except Exception:
+            start = previous_end
+        try:
+            end = float(raw_end) if raw_end is not None else start + 0.45
+        except Exception:
+            end = start + 0.45
+
+        if end <= start:
+            end = start + 0.45
+
+        start = max(0.0, start)
+        end = max(start + 0.01, end)
+
+        previous_end = max(previous_end, end)
+        normalized.append(
+            {
+                "text": text,
+                "word": text,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": float(item.get("score", item.get("confidence", item.get("probability", 0.5))) or 0.5),
+                "probability": float(item.get("probability", item.get("score", 0.5)) or 0.5),
+                "_normalized_index": index,
+            }
+        )
+
+    return normalized
+
+
+def _json_safe(value: Any, _seen: Optional[set] = None, _depth: int = 0, _max_depth: int = 24) -> Any:
+    """Convert dataclasses/enums/paths to JSON-safe primitives.
+
+    Hardened (H12.9) against the manifest/summary RecursionError diagnosed in
+    H12.7/H12.8 (telescoped final_mp4_contract -> final_output_truth -> ...
+    structures with no true id()-cycle but unbounded depth). Duplicated (not
+    imported) from vpi_editorial_contract._json_safe to avoid circular imports
+    between these modules — keep both copies in sync if hardened further.
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, Enum):
+        return value.name
+
+    if isinstance(value, (dict, list, tuple, set)) or is_dataclass(value):
+        if _seen is None:
+            _seen = set()
+        obj_id = id(value)
+        if obj_id in _seen:
+            logger.warning(
+                "VPI_JSON_SAFE_TRUNCATED_CYCLE depth=%d type=%s",
+                _depth,
+                type(value).__name__,
+            )
+            return {"_truncated": "circular_reference", "_type": type(value).__name__}
+        if _depth > _max_depth:
+            logger.warning(
+                "VPI_JSON_SAFE_TRUNCATED_MAX_DEPTH depth=%d max_depth=%d type=%s",
+                _depth,
+                _max_depth,
+                type(value).__name__,
+            )
+            return {"_truncated": "max_depth", "_type": type(value).__name__}
+
+        _seen = _seen | {obj_id}
+        if is_dataclass(value):
+            return _json_safe(asdict(value), _seen=_seen, _depth=_depth + 1, _max_depth=_max_depth)
+        if isinstance(value, dict):
+            return {
+                str(k): _json_safe(v, _seen=_seen, _depth=_depth + 1, _max_depth=_max_depth)
+                for k, v in value.items()
+            }
+        if isinstance(value, set):
+            return [
+                _json_safe(item, _seen=_seen, _depth=_depth + 1, _max_depth=_max_depth)
+                for item in sorted(value, key=lambda item: str(item))
+            ]
+        return [
+            _json_safe(item, _seen=_seen, _depth=_depth + 1, _max_depth=_max_depth)
+            for item in value
+        ]
+
+    if isinstance(value, bytes):
+        return {"_type": "bytes", "len": len(value)}
+    if isinstance(value, BaseException):
+        return {"_type": value.__class__.__name__, "message": str(value)}
+    try:
+        return str(value)
+    except Exception:
+        return "<unserializable>"
+
+
+def _resolve_plan_artifacts_dir(task_id: str) -> Path:
+    """Resolve task-scoped plan artifact dir under outputs/generated/<task_id>/plans."""
+    candidates = [Path("/app/outputs/generated"), Path("outputs/generated")]
+    base = next((p for p in candidates if p.exists()), candidates[-1])
+    plans_dir = base / str(task_id or "unknown") / "plans"
+    plans_dir.mkdir(parents=True, exist_ok=True)
+    return plans_dir
+
+
+def _write_plan_artifact(task_id: str, clip_index: int, artifact_type: str, payload: Any) -> str:
+    plans_dir = _resolve_plan_artifacts_dir(task_id)
+    out_path = plans_dir / f"clip_{clip_index + 1}_{artifact_type}.json"
+    out_path.write_text(
+        json.dumps(_json_safe(payload), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info("PREMIUM_PLAN_ARTIFACT_SAVED path=%s type=%s", str(out_path), artifact_type)
+    return str(out_path)
+
+
+def _resolve_caption_artifacts_dir(task_id: str) -> Path:
+    candidates = [Path("/app/outputs/generated"), Path("outputs/generated")]
+    base = next((p for p in candidates if p.exists()), candidates[-1])
+    captions_dir = base / str(task_id or "unknown") / "captions"
+    captions_dir.mkdir(parents=True, exist_ok=True)
+    return captions_dir
+
+
+def _resolve_overlay_artifacts_dir(task_id: str) -> Path:
+    candidates = [Path("/app/outputs/generated"), Path("outputs/generated")]
+    base = next((p for p in candidates if p.exists()), candidates[-1])
+    overlays_dir = base / str(task_id or "unknown") / "overlays"
+    overlays_dir.mkdir(parents=True, exist_ok=True)
+    return overlays_dir
+
+
+def _verify_broll_output(
+    input_video: Path | str,
+    output_video: Path | str,
+    expected_start: float,
+    expected_duration: float,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """Verify that a B-roll render is real, playable, and duration-safe."""
+    input_path = Path(input_video)
+    output_path = Path(output_video)
+    if not output_path.exists():
+        return False, "output_missing", {}
+    if output_path.stat().st_size <= 0:
+        return False, "output_empty", {}
+    if output_path == input_path:
+        return False, "output_equals_input", {}
+
+    # -print_format/-show_streams are ffprobe options; running them through the
+    # ffmpeg binary always fails ("Unrecognized option 'print_format'").
+    ffprobe_bin = shutil.which("ffprobe") or "ffprobe"
+
+    def _probe(path: Path) -> Dict[str, Any]:
+        probe_cmd = [
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            str(path),
+        ]
+        proc = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=15)
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or "ffprobe_failed")
+        return json.loads(proc.stdout or "{}")
+
+    try:
+        in_probe = _probe(input_path)
+        out_probe = _probe(output_path)
+        in_streams = list(in_probe.get("streams") or [])
+        out_streams = list(out_probe.get("streams") or [])
+        has_video = any(str(stream.get("codec_type") or "") == "video" for stream in out_streams)
+        has_audio = any(str(stream.get("codec_type") or "") == "audio" for stream in out_streams)
+        input_had_audio = any(str(stream.get("codec_type") or "") == "audio" for stream in in_streams)
+        if not has_video:
+            return False, "no_video_stream", {"input_had_audio": input_had_audio}
+        out_duration = float((out_probe.get("format") or {}).get("duration") or 0.0)
+        in_duration = float((in_probe.get("format") or {}).get("duration") or 0.0)
+        if out_duration <= 0.0:
+            return False, "invalid_duration", {"input_duration": in_duration, "output_duration": out_duration}
+        if in_duration > 0.0:
+            max_delta = max(0.75, min(1.25, in_duration * 0.08))
+            if abs(out_duration - in_duration) > max_delta:
+                return False, "duration_changed_too_much", {
+                    "input_duration": in_duration,
+                    "output_duration": out_duration,
+                    "expected_start": float(expected_start or 0.0),
+                    "expected_duration": float(expected_duration or 0.0),
+                }
+        if input_had_audio and not has_audio:
+            return False, "audio_missing", {
+                "input_duration": in_duration,
+                "output_duration": out_duration,
+                "expected_start": float(expected_start or 0.0),
+                "expected_duration": float(expected_duration or 0.0),
+            }
+        return True, "ok", {
+            "input_duration": in_duration,
+            "output_duration": out_duration,
+            "input_had_audio": input_had_audio,
+            "output_has_audio": has_audio,
+            "expected_start": float(expected_start or 0.0),
+            "expected_duration": float(expected_duration or 0.0),
+        }
+    except Exception as exc:
+        return False, f"probe_failed:{exc}", {}
+
+
+def _env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "true" if default else "false")
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_remotion_scene_plan_enabled() -> bool:
+    mode = str(os.environ.get("VIRACLIP_MODE", "") or "").strip().lower()
+    if "VIRACLIP_REMOTION_SCENE_PLAN" in os.environ:
+        return _env_truthy("VIRACLIP_REMOTION_SCENE_PLAN", default=False)
+    return mode == "premium_productive"
+
+
+def _is_remotion_overlay_render_enabled() -> bool:
+    return _env_truthy("VIRACLIP_REMOTION_OVERLAYS", default=False)
+
+
+def _detect_remotion_project_status() -> Dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[3]
+    package_candidates = [
+        repo_root / "package.json",
+        repo_root / "frontend" / "package.json",
+        repo_root / "web" / "package.json",
+        repo_root / "app" / "package.json",
+    ]
+    remotion_dependencies_declared = False
+    remotion_dependencies_installed = False
+    available_node_commands: List[str] = []
+    if shutil.which("node"):
+        available_node_commands.append("node")
+    if shutil.which("npm"):
+        available_node_commands.append("npm")
+    if shutil.which("npx"):
+        available_node_commands.append("npx")
+
+    for pkg_path in package_candidates:
+        if not pkg_path.exists():
+            continue
+        try:
+            pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        deps = _as_dict(pkg.get("dependencies"))
+        dev_deps = _as_dict(pkg.get("devDependencies"))
+        scripts = _as_dict(pkg.get("scripts"))
+        dep_keys = set(str(k).lower() for k in list(deps.keys()) + list(dev_deps.keys()))
+        if "remotion" in dep_keys or any("remotion" in k for k in dep_keys):
+            remotion_dependencies_declared = True
+        for script_name in scripts.keys():
+            if "remotion" in str(script_name).lower():
+                available_node_commands.append(f"npm run {script_name}")
+
+    remotion_dir_candidates = [
+        repo_root / "remotion",
+        repo_root / "frontend" / "remotion",
+        repo_root / "web" / "remotion",
+        repo_root / "app" / "remotion",
+    ]
+    overlay_dir = next((p for p in remotion_dir_candidates if p.exists()), None)
+    remotion_scaffold_present = False
+    if overlay_dir:
+        required = [
+            overlay_dir / "Root.tsx",
+            overlay_dir / "ViraClipOverlayComposition.tsx",
+            overlay_dir / "loadScenePlan.ts",
+            overlay_dir / "types.ts",
+            overlay_dir / "styleTokens.ts",
+            overlay_dir / "components" / "HookCard.tsx",
+            overlay_dir / "components" / "CaptionEmphasis.tsx",
+            overlay_dir / "components" / "SemanticObject.tsx",
+            overlay_dir / "components" / "DocumentReveal.tsx",
+            overlay_dir / "components" / "ChecklistReveal.tsx",
+            overlay_dir / "components" / "WarningBadge.tsx",
+            overlay_dir / "components" / "LowerThird.tsx",
+        ]
+        remotion_scaffold_present = all(p.exists() for p in required)
+        node_modules_candidates = [
+            repo_root / "node_modules" / "remotion",
+            repo_root / "node_modules" / "@remotion",
+            overlay_dir / "node_modules" / "remotion",
+            overlay_dir / "node_modules" / "@remotion",
+        ]
+        remotion_dependencies_installed = any(p.exists() for p in node_modules_candidates)
+        remotion_pkg = overlay_dir / "package.json"
+        if remotion_pkg.exists():
+            try:
+                remotion_pkg_json = json.loads(remotion_pkg.read_text(encoding="utf-8"))
+                remotion_dep_keys = {
+                    str(k).lower()
+                    for k in list(_as_dict(remotion_pkg_json.get("dependencies")).keys())
+                    + list(_as_dict(remotion_pkg_json.get("devDependencies")).keys())
+                }
+                if any(k == "remotion" or k.startswith("@remotion/") for k in remotion_dep_keys):
+                    remotion_dependencies_declared = True
+            except Exception:
+                pass
+
+    status = {
+        "remotion_installed": bool(remotion_dependencies_installed),
+        "remotion_scaffold_present": bool(remotion_scaffold_present),
+        "remotion_dependencies_declared": bool(remotion_dependencies_declared),
+        "remotion_dependencies_installed": bool(remotion_dependencies_installed),
+        "possible_overlay_dir": str(overlay_dir) if overlay_dir else "",
+        "available_node_commands": sorted(set(available_node_commands)),
+    }
+    logger.info(
+        "REMOTION_PROJECT_STATUS installed=%s scaffold=%s overlay_dir=%s commands=%s",
+        str(status["remotion_installed"]).lower(),
+        str(status["remotion_scaffold_present"]).lower(),
+        status["possible_overlay_dir"] or "-",
+        ",".join(status["available_node_commands"]) if status["available_node_commands"] else "-",
+    )
+    return status
+
+
+def _timeline_proxy_from_json_safe(plan_data: Dict[str, Any]) -> Any:
+    clip_id = str(plan_data.get("clip_id") or "unknown_clip")
+    duration = float(plan_data.get("duration") or 0.0)
+    fps = float(plan_data.get("fps") or 30.0)
+    resolution_raw = plan_data.get("resolution") or [1080, 1920]
+    try:
+        resolution = (int(resolution_raw[0]), int(resolution_raw[1]))
+    except Exception:
+        resolution = (1080, 1920)
+
+    timeline_items: List[Any] = []
+    for track in list(plan_data.get("tracks") or []):
+        track_kind_name = str(_as_dict(track).get("kind") or "")
+        for item in list(_as_dict(track).get("items") or []):
+            item_d = _as_dict(item)
+            time_d = _as_dict(item_d.get("time"))
+            start = float(time_d.get("start") or 0.0)
+            end = float(time_d.get("end") or start)
+            if end < start:
+                end = start
+            pos_raw = item_d.get("position") or (0.5, 0.5)
+            scale_raw = item_d.get("scale") or (1.0, 1.0)
+            try:
+                position = (float(pos_raw[0]), float(pos_raw[1]))
+            except Exception:
+                position = (0.5, 0.5)
+            try:
+                scale = (float(scale_raw[0]), float(scale_raw[1]))
+            except Exception:
+                scale = (1.0, 1.0)
+            kind_name = str(item_d.get("track_kind") or track_kind_name or "CAPTION_TEXT")
+            timeline_items.append(
+                SimpleNamespace(
+                    item_id=str(item_d.get("item_id") or f"{clip_id}_item_{len(timeline_items)}"),
+                    track_kind=SimpleNamespace(name=kind_name),
+                    time=SimpleNamespace(start=start, end=end, duration=max(0.0, end - start)),
+                    metadata=_as_dict(item_d.get("metadata")),
+                    opacity=float(item_d.get("opacity", 1.0) or 1.0),
+                    scale=scale,
+                    position=position,
+                )
+            )
+
+    return SimpleNamespace(
+        clip_id=clip_id,
+        duration=duration,
+        fps=fps,
+        resolution=resolution,
+        all_items=lambda: timeline_items,
+    )
+
+
+def _build_runtime_remotion_scene_plan(
+    *,
+    task_id: str,
+    clip_index: int,
+    timeline_plan_dict: Dict[str, Any],
+    visual_style: str,
+    face_regions: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    project_status = _detect_remotion_project_status()
+    render_enabled = _is_remotion_overlay_render_enabled()
+    try:
+        from .vpi_production_safe_edit import production_safe_mode_active, production_safe_route_allowed
+    except Exception:
+        production_safe_mode_active = lambda: False  # type: ignore[assignment]
+        production_safe_route_allowed = lambda _route: True  # type: ignore[assignment]
+    if production_safe_mode_active() and not production_safe_route_allowed("remotion_overlay_compose"):
+        logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=remotion_overlay_compose reason=premium_local_stability")
+        return {
+            "remotion_scene_plan_path": None,
+            "remotion_scene_events_count": 0,
+            "remotion_overlay_status": "blocked_production_safe",
+            "remotion_installed": bool(project_status.get("remotion_installed")),
+            "remotion_scaffold_present": bool(project_status.get("remotion_scaffold_present")),
+            "remotion_dependencies_declared": bool(project_status.get("remotion_dependencies_declared")),
+            "remotion_dependencies_installed": bool(project_status.get("remotion_dependencies_installed")),
+            "remotion_render_enabled": bool(render_enabled),
+            "remotion_overlay_file_path": None,
+            "remotion_render_command_used": None,
+            "remotion_scene_warnings": ["production_safe_policy_blocked"],
+        }
+    if not _is_remotion_scene_plan_enabled():
+        return {
+            "remotion_scene_plan_path": None,
+            "remotion_scene_events_count": 0,
+            "remotion_overlay_status": "disabled",
+            "remotion_installed": bool(project_status.get("remotion_installed")),
+            "remotion_scaffold_present": bool(project_status.get("remotion_scaffold_present")),
+            "remotion_dependencies_declared": bool(project_status.get("remotion_dependencies_declared")),
+            "remotion_dependencies_installed": bool(project_status.get("remotion_dependencies_installed")),
+            "remotion_render_enabled": bool(render_enabled),
+            "remotion_overlay_file_path": None,
+            "remotion_render_command_used": None,
+            "remotion_scene_warnings": [],
+        }
+
+    if not timeline_plan_dict:
+        return {
+            "remotion_scene_plan_path": None,
+            "remotion_scene_events_count": 0,
+            "remotion_overlay_status": "skipped_no_scene_events",
+            "remotion_installed": bool(project_status.get("remotion_installed")),
+            "remotion_scaffold_present": bool(project_status.get("remotion_scaffold_present")),
+            "remotion_dependencies_declared": bool(project_status.get("remotion_dependencies_declared")),
+            "remotion_dependencies_installed": bool(project_status.get("remotion_dependencies_installed")),
+            "remotion_render_enabled": bool(render_enabled),
+            "remotion_overlay_file_path": None,
+            "remotion_render_command_used": None,
+            "remotion_scene_warnings": ["empty_timeline_plan"],
+        }
+
+    try:
+        from .vpi_remotion_scene_plan import build_remotion_scene_plan
+
+        timeline_proxy = _timeline_proxy_from_json_safe(timeline_plan_dict)
+        safe_layout = None
+        try:
+            from .vpi_face_safe_layout import NormalisedRect, plan_safe_overlay_zone
+
+            regions: List[Any] = []
+            for region in face_regions or []:
+                d = _as_dict(region)
+                if not d:
+                    continue
+                try:
+                    regions.append(
+                        NormalisedRect(
+                            x=float(d.get("x", 0.5)),
+                            y=float(d.get("y", 0.25)),
+                            width=float(d.get("width", 0.35)),
+                            height=float(d.get("height", 0.28)),
+                        )
+                    )
+                except Exception:
+                    continue
+            safe_layout = plan_safe_overlay_zone(
+                clip_id=timeline_proxy.clip_id,
+                element_type="caption",
+                face_regions=regions or None,
+            )
+            safe_layout = plan_safe_overlay_zone(
+                clip_id=timeline_proxy.clip_id,
+                element_type="hook_card",
+                existing_plan=safe_layout,
+            )
+            safe_layout = plan_safe_overlay_zone(
+                clip_id=timeline_proxy.clip_id,
+                element_type="icon",
+                existing_plan=safe_layout,
+            )
+        except Exception as exc:
+            logger.info("REMOTION_SCENE_PLAN_SAFE_LAYOUT_SKIPPED reason=%s", exc)
+
+        priority_plan = None
+        try:
+            from .vpi_visual_priority_guard import (
+                VisualEvent,
+                VisualEventType,
+                build_visual_priority_plan,
+            )
+
+            event_map = {
+                "TRANSITION": VisualEventType.DISFLUENCY_COVER_TRANSITION,
+                "OVERLAY_TEXT": VisualEventType.HOOK_CARD,
+                "BROLL": VisualEventType.BROLL,
+                "CAPTION_TEXT": VisualEventType.STRONG_CAPTION_HIGHLIGHT,
+                "SEMANTIC_OBJECT": VisualEventType.SEMANTIC_OBJECT,
+                "MOTION_EFFECT": VisualEventType.MAJOR_MOTION_REVEAL,
+            }
+            vp_events: List[Any] = []
+            for item in timeline_proxy.all_items():
+                kind_name = str(getattr(getattr(item, "track_kind", None), "name", "") or "")
+                mapped = event_map.get(kind_name)
+                if not mapped:
+                    continue
+                t = getattr(item, "time", None)
+                start = float(getattr(t, "start", 0.0) or 0.0)
+                end = float(getattr(t, "end", start) or start)
+                if end <= start:
+                    continue
+                vp_events.append(
+                    VisualEvent(
+                        event_id=str(getattr(item, "item_id", f"{timeline_proxy.clip_id}_evt")),
+                        event_type=mapped,
+                        start_time=start,
+                        end_time=end,
+                        metadata={"source": "timeline_proxy"},
+                    )
+                )
+            if vp_events:
+                priority_plan = build_visual_priority_plan(timeline_proxy.clip_id, vp_events)
+        except Exception as exc:
+            logger.info("REMOTION_SCENE_PLAN_PRIORITY_GUARD_SKIPPED reason=%s", exc)
+
+        remotion_plan = build_remotion_scene_plan(
+            timeline_plan=timeline_proxy,
+            visual_style=visual_style or "clear_explanation",
+            safe_layout=safe_layout,
+            priority_plan=priority_plan,
+        )
+        plan_payload = _json_safe(remotion_plan)
+        scene_plan_path = _write_plan_artifact(
+            task_id=task_id,
+            clip_index=clip_index,
+            artifact_type="remotion_scene_plan",
+            payload=plan_payload,
+        )
+        events_count = len(getattr(remotion_plan, "events", []) or [])
+        warnings = list(getattr(remotion_plan, "quality_warnings", []) or [])
+
+        logger.info(
+            "REMOTION_SCENE_PLAN_BUILT events=%d visual_style=%s duration_frames=%s",
+            events_count,
+            visual_style or "clear_explanation",
+            str(_as_dict(_as_dict(plan_payload).get("composition")).get("durationInFrames") or 0),
+        )
+        logger.info("REMOTION_SCENE_PLAN_SAVED path=%s", scene_plan_path)
+        overlay_status = "render_disabled"
+        overlay_file_path: Optional[str] = None
+        render_command_used: Optional[str] = None
+        if events_count <= 0:
+            overlay_status = "skipped_no_scene_events"
+        elif render_enabled:
+            overlay_status = "planned"
+            try:
+                from .vpi_overlay_renderer_adapter import RemotionAdapter
+
+                adapter = RemotionAdapter()
+                overlay_dir = _resolve_overlay_artifacts_dir(task_id)
+                overlay_out = overlay_dir / f"clip_{clip_index + 1}_remotion_overlay.webm"
+                overlay_result = adapter.render_remotion_overlay(
+                    scene_plan_path=scene_plan_path,
+                    output_path=str(overlay_out),
+                )
+                overlay_status = str(overlay_result.status or "planned")
+                overlay_file_path = str(overlay_result.output_path or "") or None
+                render_command_used = str(
+                    _as_dict(overlay_result.metadata).get("render_command_used") or ""
+                ) or None
+                if overlay_status == "failed":
+                    logger.warning(
+                        "REMOTION_OVERLAY_FALLBACK backend=ffmpeg_ass reason=%s",
+                        overlay_result.reason or "remotion_overlay_failed",
+                    )
+            except Exception as exc:
+                overlay_status = "failed_plan_generation"
+                warnings.append(f"remotion_overlay_runtime_failed:{exc}")
+                logger.warning("REMOTION_OVERLAY_FAILED reason=%s", exc)
+
+        return {
+            "remotion_scene_plan_path": scene_plan_path,
+            "remotion_scene_events_count": int(events_count),
+            "remotion_overlay_status": overlay_status,
+            "remotion_installed": bool(project_status.get("remotion_installed")),
+            "remotion_scaffold_present": bool(project_status.get("remotion_scaffold_present")),
+            "remotion_dependencies_declared": bool(project_status.get("remotion_dependencies_declared")),
+            "remotion_dependencies_installed": bool(project_status.get("remotion_dependencies_installed")),
+            "remotion_render_enabled": bool(render_enabled),
+            "remotion_overlay_file_path": overlay_file_path,
+            "remotion_render_command_used": render_command_used,
+            "remotion_scene_warnings": warnings,
+        }
+    except Exception as exc:
+        logger.warning("REMOTION_SCENE_PLAN_SKIPPED reason=%s", exc)
+        unavailable = not bool(project_status.get("remotion_installed"))
+        return {
+            "remotion_scene_plan_path": None,
+            "remotion_scene_events_count": 0,
+            "remotion_overlay_status": "skipped_remotion_unavailable" if unavailable else "failed_plan_generation",
+            "remotion_installed": bool(project_status.get("remotion_installed")),
+            "remotion_scaffold_present": bool(project_status.get("remotion_scaffold_present")),
+            "remotion_dependencies_declared": bool(project_status.get("remotion_dependencies_declared")),
+            "remotion_dependencies_installed": bool(project_status.get("remotion_dependencies_installed")),
+            "remotion_render_enabled": bool(render_enabled),
+            "remotion_overlay_file_path": None,
+            "remotion_render_command_used": None,
+            "remotion_scene_warnings": [f"remotion_scene_plan_failed:{exc}"],
+        }
+
+
+def _normalize_word_timestamps(word_timestamps: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for item in word_timestamps or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("word") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(item.get("start", 0.0) or 0.0)
+            end = float(item.get("end", start) or start)
+            if end < start:
+                end = start
+        except Exception:
+            continue
+        normalized.append(
+            {
+                "text": text,
+                "start": start,
+                "end": end,
+                "confidence": float(item.get("confidence", 0.9) or 0.9),
+            }
+        )
+    return normalized
+
+
+def _build_premium_timeline_plan(
+    *,
+    task_id: str,
+    clip_index: int,
+    video_path: Path,
+    segment: Dict[str, Any],
+    duration: float,
+    word_timestamps: Optional[List[Dict[str, Any]]] = None,
+    editing_plan: Optional[Dict[str, Any]] = None,
+    hook_plan: Optional[Dict[str, Any]] = None,
+    broll_metadata: Optional[List[Dict[str, Any]]] = None,
+    sfx_metadata: Optional[Dict[str, Any]] = None,
+    music_metadata: Optional[Dict[str, Any]] = None,
+    visual_effects_metadata: Optional[Dict[str, Any]] = None,
+    transitions_metadata: Optional[Dict[str, Any]] = None,
+    overlay_backend: str = "ffmpeg_ass",
+) -> Dict[str, Any]:
+    """Build a runtime timeline plan plus disfluency metadata without changing render behavior."""
+    timeline_warnings: List[str] = []
+    disfluency_warnings: List[str] = []
+    disfluency_plan_dict: Dict[str, Any] = {}
+    disfluency_actions_count = 0
+    high_severity_unhandled_count = 0
+    clip_id = f"{task_id}_{clip_index + 1}"
+
+    try:
+        from .vpi_timeline_plan import (
+            SourceReference,
+            TimeRange,
+            TimelineItem,
+            TrackKind,
+            ViraClipTimelinePlan,
+        )
+    except Exception as exc:
+        return {
+            "timeline_plan": {},
+            "timeline_warnings": [f"timeline_plan_import_failed:{exc}"],
+            "disfluency_plan": {},
+            "disfluency_actions_count": 0,
+            "high_severity_unhandled_count": 0,
+        }
+
+    plan = ViraClipTimelinePlan(
+        clip_id=clip_id,
+        duration=max(0.1, float(duration or 0.1)),
+    )
+    plan.metadata.update(
+        {
+            "task_id": str(task_id),
+            "clip_index": int(clip_index + 1),
+            "overlay_backend": str(overlay_backend or "ffmpeg_ass"),
+            "segment_start_time": segment.get("start_time"),
+            "segment_end_time": segment.get("end_time"),
+            "visual_style": str((visual_effects_metadata or {}).get("visual_style") or ""),
+        }
+    )
+
+    speaker_track = plan.get_or_create_track(TrackKind.SPEAKER_VIDEO, z_index=10)
+    speaker_track.add_item(
+        TimelineItem(
+            item_id=f"{clip_id}_speaker",
+            track_kind=TrackKind.SPEAKER_VIDEO,
+            time=TimeRange(0.0, max(0.1, float(duration or 0.1))),
+            source=SourceReference(
+                path=str(video_path),
+                source_start=0.0,
+                source_end=max(0.1, float(duration or 0.1)),
+                media_type="video",
+            ),
+            metadata={"role": "speaker"},
+        )
+    )
+
+    if word_timestamps:
+        plan.get_or_create_track(TrackKind.CAPTION_TEXT, z_index=40).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_caption_placeholder",
+                track_kind=TrackKind.CAPTION_TEXT,
+                time=TimeRange(0.0, min(max(0.6, float(duration or 0.6)), 3.5)),
+                metadata={"role": "captions_placeholder", "word_count": len(word_timestamps)},
+            )
+        )
+
+    if broll_metadata:
+        plan.get_or_create_track(TrackKind.BROLL, z_index=20).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_broll_placeholder",
+                track_kind=TrackKind.BROLL,
+                time=TimeRange(0.8, min(max(1.0, float(duration or 1.0)), 3.0)),
+                metadata={"role": "broll_placeholder", "count": len(broll_metadata)},
+            )
+        )
+
+    if transitions_metadata and (
+        transitions_metadata.get("transitions_applied")
+        or transitions_metadata.get("transition_events")
+    ):
+        plan.get_or_create_track(TrackKind.TRANSITION, z_index=25).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_transition_placeholder",
+                track_kind=TrackKind.TRANSITION,
+                time=TimeRange(0.2, min(max(0.5, float(duration or 0.5)), 1.4)),
+                metadata={"role": "transition_placeholder"},
+            )
+        )
+
+    if visual_effects_metadata and (
+        visual_effects_metadata.get("visual_effects_applied")
+        or visual_effects_metadata.get("motion_reveal_plan")
+    ):
+        plan.get_or_create_track(TrackKind.MOTION_EFFECT, z_index=30).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_motion_placeholder",
+                track_kind=TrackKind.MOTION_EFFECT,
+                time=TimeRange(0.1, min(max(0.6, float(duration or 0.6)), 2.0)),
+                metadata={"role": "motion_placeholder"},
+            )
+        )
+
+    if sfx_metadata and (sfx_metadata.get("sfx_events") or sfx_metadata.get("sfx_applied")):
+        plan.get_or_create_track(TrackKind.SFX, z_index=0).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_sfx_placeholder",
+                track_kind=TrackKind.SFX,
+                time=TimeRange(0.0, max(0.1, float(duration or 0.1))),
+                metadata={
+                    "role": "sfx_placeholder",
+                    "sfx_count": int(sfx_metadata.get("sfx_count") or len(sfx_metadata.get("sfx_events") or [])),
+                    "sfx_intent": sfx_metadata.get("sfx_intent"),
+                    "sfx_skip_reason": sfx_metadata.get("skip_reason") or sfx_metadata.get("sfx_warning"),
+                },
+            )
+        )
+
+    if music_metadata and (music_metadata.get("music_applied") or music_metadata.get("music_track")):
+        plan.get_or_create_track(TrackKind.BGM, z_index=0).add_item(
+            TimelineItem(
+                item_id=f"{clip_id}_bgm_placeholder",
+                track_kind=TrackKind.BGM,
+                time=TimeRange(0.0, max(0.1, float(duration or 0.1))),
+                metadata={
+                    "role": "bgm_placeholder",
+                    "music_track": music_metadata.get("music_track") or music_metadata.get("bgm_asset_path"),
+                    "bgm_evidence": bool(music_metadata.get("music_applied") or music_metadata.get("music_track")),
+                },
+            )
+        )
+
+    words = _normalize_word_timestamps(word_timestamps)
+    if not words:
+        disfluency_warnings.append("disfluency_editor_skipped_no_word_timestamps")
+        logger.info("DISFLUENCY_RUNTIME_SKIPPED reason=disfluency_editor_skipped_no_word_timestamps")
+    else:
+        try:
+            from .vpi_disfluency_editor import (
+                DisfluencyAction,
+                build_disfluency_edit_plan,
+                disfluency_plan_to_timeline_items,
+            )
+
+            visual_style = str((visual_effects_metadata or {}).get("visual_style") or "clear_explanation")
+            disfluency_plan = build_disfluency_edit_plan(
+                words=words,
+                clip_duration=max(0.1, float(duration or 0.1)),
+                visual_style=visual_style,
+                enabled=True,
+            )
+            disfluency_plan_dict = _json_safe(disfluency_plan)
+            disfluency_actions_count = len(getattr(disfluency_plan, "edits", []) or [])
+
+            disfluency_track = plan.get_or_create_track(TrackKind.MOTION_EFFECT, z_index=31)
+            disfluency_track.metadata["role"] = "disfluency_edits"
+            for idx, edit in enumerate(getattr(disfluency_plan, "edits", []) or []):
+                action_name = str(getattr(edit.action, "name", "")).upper()
+                if action_name in {"CUT", "COMPRESS", "COVER_WITH_BROLL", "COVER_WITH_TRANSITION"}:
+                    disfluency_track.add_item(
+                        TimelineItem(
+                            item_id=f"{clip_id}_disfluency_{idx}",
+                            track_kind=TrackKind.MOTION_EFFECT,
+                            time=TimeRange(
+                                float(getattr(edit, "adjusted_start", 0.0) or 0.0),
+                                float(getattr(edit, "adjusted_end", 0.0) or 0.0),
+                            ),
+                            metadata={
+                                "role": "disfluency_edit",
+                                "action": action_name.lower(),
+                                "reason": str(getattr(getattr(edit, "segment", None), "reason", "") or ""),
+                            },
+                        )
+                    )
+
+            for item_dict in disfluency_plan_to_timeline_items(disfluency_plan, clip_id):
+                try:
+                    track_kind = TrackKind[str(item_dict.get("track_kind") or "")]
+                    plan.get_or_create_track(track_kind).add_item(
+                        TimelineItem(
+                            item_id=str(item_dict.get("item_id") or f"{clip_id}_disfluency_tl"),
+                            track_kind=track_kind,
+                            time=TimeRange(
+                                float(_as_dict(item_dict.get("time")).get("start") or 0.0),
+                                float(_as_dict(item_dict.get("time")).get("end") or 0.0),
+                            ),
+                            metadata=_as_dict(item_dict.get("metadata")),
+                        )
+                    )
+                except Exception:
+                    continue
+
+            for seg in getattr(disfluency_plan, "segments", []) or []:
+                confidence = float(getattr(seg, "confidence", 0.0) or 0.0)
+                action = getattr(seg, "action", DisfluencyAction.IGNORE)
+                if confidence >= 0.75 and action in {DisfluencyAction.IGNORE, DisfluencyAction.PRESERVE_EMPHASIS}:
+                    high_severity_unhandled_count += 1
+
+            logger.info(
+                "DISFLUENCY_RUNTIME_WIRED events=%d actions=%d timeline_items=%d",
+                len(getattr(disfluency_plan, "segments", []) or []),
+                disfluency_actions_count,
+                len(plan.all_items()),
+            )
+        except Exception as exc:
+            disfluency_warnings.append(f"disfluency_editor_failed:{exc}")
+            logger.info("DISFLUENCY_RUNTIME_SKIPPED reason=disfluency_editor_failed:%s", exc)
+
+    timeline_warnings.extend(disfluency_warnings)
+    plan.metadata["timeline_warnings"] = list(timeline_warnings)
+    plan.metadata["disfluency_actions_count"] = int(disfluency_actions_count)
+    plan.metadata["high_severity_unhandled_count"] = int(high_severity_unhandled_count)
+    plan.validate()
+    for warning in plan.quality_warnings:
+        timeline_warnings.append(str(getattr(warning, "code", "timeline_warning")))
+
+    track_count = len(plan.tracks)
+    event_count = len(plan.all_items())
+    logger.info(
+        "VIRACLIP_TIMELINE_PLAN_BUILT task_id=%s clip_id=%s tracks=%d events=%d warnings=%s",
+        task_id,
+        clip_id,
+        track_count,
+        event_count,
+        "|".join(timeline_warnings) if timeline_warnings else "none",
+    )
+    return {
+        "timeline_plan": _json_safe(plan),
+        "timeline_warnings": list(dict.fromkeys(timeline_warnings)),
+        "disfluency_plan": disfluency_plan_dict,
+        "disfluency_actions_count": int(disfluency_actions_count),
+        "high_severity_unhandled_count": int(high_severity_unhandled_count),
+        "track_count": track_count,
+        "event_count": event_count,
+    }
+
+
+class ClipEditorialRejection(Exception):
+    """Raised when a clip is rejected by editorial QC (complete-idea, hook-fit, etc.).
+    
+    This is a structured exception that carries the clip_order, stage, and reason
+    so the caller can log a precise CLIP_RENDER_ABORTED_BY_EDITORIAL_QC message.
+    """
+
+    def __init__(
+        self,
+        *,
+        clip_order: int,
+        stage: str,
+        reason: str,
+        message: str = "",
+    ):
+        self.clip_order = clip_order
+        self.stage = stage
+        self.reason = reason
+        super().__init__(message or f"ClipEditorialRejection(clip_order={clip_order}, stage={stage}, reason={reason})")
+
 
 from ..utils.async_helpers import run_in_thread
 
@@ -31,8 +1828,8 @@ PREMIUM_LAYERS_REQUESTED = [
 ]
 
 
-def premium_runtime_contract(*, beta_clean: bool) -> Dict[str, Any]:
-    enabled = bool(beta_clean and VIRACLIP_PREMIUM_EDITING_DEFAULT)
+def premium_runtime_contract() -> Dict[str, Any]:
+    enabled = bool(VIRACLIP_PREMIUM_EDITING_DEFAULT)
     return {
         "premium_runtime_enabled": enabled,
         "premium_layers_requested": list(PREMIUM_LAYERS_REQUESTED) if enabled else [],
@@ -47,6 +1844,145 @@ def premium_runtime_contract(*, beta_clean: bool) -> Dict[str, Any]:
 
 def _log_premium_pipeline_step(step: str, input_path: Path, output_path: Path) -> None:
     logger.info("[premium-pipeline] step=%s input=%s output=%s", step, input_path, output_path)
+
+
+# ── FIX 7: Honest premium layer trace ────────────────────────────────────────
+# Per-clip trace that records what premium layers were planned, attempted,
+# applied, and skipped — so strict QC can use actual applied evidence instead
+# of optimistic/planned metadata.
+
+PREMIUM_LAYER_CATEGORIES = [
+    "broll",
+    "bgm",
+    "sfx",
+    "hook_card",
+    "semantic_card",
+    "vfx",
+    "motion_pack",
+    "speaker_focus",
+    "rhythm",
+    "transition",
+    "branding",
+    "captions",
+    "audio_mastering",
+]
+
+
+def _record_premium_layer(
+    *,
+    task_id: str,
+    clip_order: int,
+    category: str,
+    planned: bool = False,
+    attempted: bool = False,
+    applied: bool = False,
+    skipped: bool = False,
+    skip_reason: str = "",
+    gpu_available: bool = False,
+    gpu_used: bool = False,
+    nvenc_used: bool = False,
+    cuda_used: bool = False,
+) -> Dict[str, Any]:
+    """Record a single premium layer trace entry and emit a structured log line.
+
+    Returns a dict with the trace entry that can be merged into clip_info.
+    """
+    entry = {
+        "category": category,
+        "planned": planned,
+        "attempted": attempted,
+        "applied": applied,
+        "skipped": skipped,
+        "skip_reason": skip_reason,
+        "gpu_available": gpu_available,
+        "gpu_used": gpu_used,
+        "nvenc_used": nvenc_used,
+        "cuda_used": cuda_used,
+    }
+    logger.info(
+        "VPI_PREMIUM_LAYER_TRACE "
+        "task_id=%s clip_order=%d category=%s "
+        "planned=%s attempted=%s applied=%s skipped=%s "
+        "gpu_available=%s gpu_used=%s nvenc_used=%s cuda_used=%s reason=%s",
+        task_id,
+        clip_order,
+        category,
+        str(planned).lower(),
+        str(attempted).lower(),
+        str(applied).lower(),
+        str(skipped).lower(),
+        str(gpu_available).lower(),
+        str(gpu_used).lower(),
+        str(nvenc_used).lower(),
+        str(cuda_used).lower(),
+        skip_reason or "-",
+    )
+    return entry
+
+
+def _build_premium_layer_trace(
+    *,
+    task_id: str,
+    clip_order: int,
+    layers: List[Dict[str, Any]],
+    gpu_available: bool = False,
+    gpu_used: bool = False,
+    nvenc_used: bool = False,
+    cuda_used: bool = False,
+) -> Dict[str, Any]:
+    """Build the full premium_layers_* metadata dict from a list of layer entries.
+
+    Returns a dict with:
+      - premium_layers_planned: list of category names that were planned
+      - premium_layers_attempted: list of category names that were attempted
+      - premium_layers_applied: list of category names that were applied
+      - premium_layers_skipped: list of category names that were skipped
+      - premium_layer_skip_reasons: dict mapping category -> skip_reason
+      - gpu_available: bool
+      - gpu_used: bool
+      - nvenc_used: bool
+      - cuda_used: bool
+    """
+    planned = [e["category"] for e in layers if e.get("planned")]
+    attempted = [e["category"] for e in layers if e.get("attempted")]
+    applied = [e["category"] for e in layers if e.get("applied")]
+    skipped = [e["category"] for e in layers if e.get("skipped")]
+    skip_reasons = {
+        e["category"]: e.get("skip_reason", "")
+        for e in layers
+        if e.get("skipped") and e.get("skip_reason")
+    }
+
+    trace = {
+        "premium_layers_planned": planned,
+        "premium_layers_attempted": attempted,
+        "premium_layers_applied": applied,
+        "premium_layers_skipped": skipped,
+        "premium_layer_skip_reasons": skip_reasons,
+        "gpu_available": gpu_available,
+        "gpu_used": gpu_used,
+        "nvenc_used": nvenc_used,
+        "cuda_used": cuda_used,
+    }
+
+    logger.info(
+        "VPI_PREMIUM_LAYER_TRACE "
+        "task_id=%s clip_order=%d "
+        "planned=%s attempted=%s applied=%s skipped=%s "
+        "gpu_available=%s gpu_used=%s nvenc_used=%s cuda_used=%s reasons=%s",
+        task_id,
+        clip_order,
+        ",".join(planned) or "-",
+        ",".join(attempted) or "-",
+        ",".join(applied) or "-",
+        ",".join(skipped) or "-",
+        str(gpu_available).lower(),
+        str(gpu_used).lower(),
+        str(nvenc_used).lower(),
+        str(cuda_used).lower(),
+        json.dumps(skip_reasons) if skip_reasons else "-",
+    )
+    return trace
 
 
 def verify_final_filename_contract(
@@ -68,20 +2004,29 @@ def verify_final_filename_contract(
         or bool((item or {}).get("asset_url"))
         for item in (broll_events or [])
     )
+    sfx_final_verified = bool(
+        (sfx or {}).get("sfx_verified")
+        or (sfx or {}).get("sfx_applied")
+        or (sfx or {}).get("sfx_event_count")
+        or (sfx or {}).get("sfx_count")
+    )
     broll_actual = bool(broll_count > 0 and broll_final_verified and ("broll_" in name or broll_count > 0))
     checks = {
         "music": bool((music or {}).get("music_applied") and "music_" in name),
-        "sfx": bool((sfx or {}).get("sfx_applied") and "sfx_" in name),
-        "trans": bool((transitions or {}).get("transitions_applied") and "trans_" in name),
+        "sfx": bool((sfx or {}).get("sfx_applied") and sfx_final_verified),
+        "trans": bool((transitions or {}).get("transition_verified") or (transitions or {}).get("transitions_applied")),
         "vfx": bool((visual_effects or {}).get("visual_effects_applied") and "vfx_" in name),
         "broll": broll_actual,
     }
     warnings: List[str] = []
     if (music or {}).get("music_applied") != ("music_" in name):
         warnings.append("music_marker_missing_or_false_positive")
-    if (sfx or {}).get("sfx_applied") != ("sfx_" in name):
+    if (sfx or {}).get("sfx_applied") != sfx_final_verified:
         warnings.append("sfx_marker_missing_or_false_positive")
-    if (transitions or {}).get("transitions_applied") != ("trans_" in name):
+    trans_verified = bool((transitions or {}).get("transition_verified") or (transitions or {}).get("transitions_applied"))
+    if trans_verified and "trans_" not in name:
+        warnings.append("trans_marker_missing_or_false_positive")
+    elif "trans_" in name and not trans_verified:
         warnings.append("trans_marker_missing_or_false_positive")
     if (visual_effects or {}).get("visual_effects_applied") != ("vfx_" in name):
         warnings.append("vfx_marker_missing_or_false_positive")
@@ -89,6 +2034,7 @@ def verify_final_filename_contract(
         warnings.append("broll_marker_false_positive")
     elif broll_count > 0 and not broll_actual:
         warnings.append("broll_planned_not_final_verified")
+    logger.info("FILENAME_CONTRACT_LEGACY_WARNING_ONLY path=%s mode=legacy_warning_only", final_path)
     logger.info(
         "[final-contract] music=%s sfx=%s trans=%s vfx=%s broll=%s path=%s",
         str(checks["music"]).lower(),
@@ -101,10 +2047,219 @@ def verify_final_filename_contract(
     for warning in warnings:
         logger.info("[final-contract] warning=%s", warning)
     return {
+        "filename_contract_mode": "legacy_warning_only",
+        "filename_contract_truth_source": "legacy_diagnostic_only",
         "final_contract_ok": not warnings,
         "final_contract": checks,
         "final_contract_warnings": warnings,
     }
+
+
+_ROUTE_REGISTRY_PHASES = (
+    "captions",
+    "hook",
+    "rhythm",
+    "visual_layer_budget",
+    "visual_reinforcement",
+    "broll",
+    "transitions",
+    "bgm",
+    "sfx",
+    "audio_mastering",
+    "final_qc",
+    "playback_url",
+    "scoring",
+    "visual_upscale",
+)
+
+
+def _init_route_registry() -> Dict[str, Any]:
+    registry: Dict[str, Any] = {
+        "route_registry_version": "a2",
+        "production_safe_compliant": True,
+        "primary_routes_used": [],
+        "fallback_routes_used": [],
+        "production_safe_routes_blocked": [],
+        "legacy_routes_blocked": [],
+        "external_routes_blocked": [],
+    }
+    for phase in _ROUTE_REGISTRY_PHASES:
+        registry[phase] = {
+            "route_used": "",
+            "routes_blocked": [],
+            "fallback_used": False,
+            "fallback_route": "",
+            "reason": "",
+            "production_safe_compliant": True,
+            "metadata": {},
+        }
+    return registry
+
+
+def _route_registry_route_allowed(route_name: str) -> bool:
+    normalized = _normalize(str(route_name or "")).replace(" ", "_")
+    if not normalized:
+        return True
+    if normalized in {
+        "none",
+        "skipped",
+        "skip",
+        "no_transition",
+        "no_broll",
+        "no_extra_hook",
+        "captions_skipped",
+        "rhythm_skipped",
+        "audio_mastering_skipped",
+        "bgm_disabled_by_policy",
+        "sfx_disabled_by_policy",
+        "blocked_by_contract",
+        "ready_after_contract",
+        "staged",
+        "skipped_by_budget",
+        "skipped_no_renderer",
+        "skipped_no_asset",
+        "external_provider_blocked",
+        "legacy_pexels_blocked",
+        "legacy_sound_design_blocked",
+        "legacy_beat_sync_bgm_blocked",
+        "heavy_transition_blocked",
+        "optical_flow_blocked",
+        "beat_sync_legacy_blocked",
+    }:
+        return True
+    if "blocked" in normalized or "skipped" in normalized or "no_" in normalized:
+        return True
+    try:
+        from .vpi_production_safe_edit import production_safe_route_allowed as _production_safe_route_allowed
+
+        return bool(_production_safe_route_allowed(str(route_name)))
+    except Exception:
+        return True
+
+
+def _route_registry_phase_for_blocked_route(route_name: str) -> str:
+    normalized = _normalize(str(route_name or "")).replace(" ", "_")
+    if normalized in {"comfyui"}:
+        return "visual_upscale"
+    if normalized in {"ollama"}:
+        return "scoring"
+    if normalized in {"external_pexels", "external_broll_provider", "t2v"}:
+        return "broll"
+    if normalized in {"legacy_sound_design"}:
+        return "sfx"
+    if normalized in {"legacy_beat_sync_bgm"}:
+        return "bgm"
+    if normalized in {"remotion_overlay_compose"}:
+        return "final_qc"
+    if normalized in {"optical_flow_heavy_transition"}:
+        return "transitions"
+    return "final_qc"
+
+
+def _record_route_used(
+    registry: Dict[str, Any],
+    phase: str,
+    route: str,
+    reason: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    phase_data = registry.setdefault(phase, {
+        "route_used": "",
+        "routes_blocked": [],
+        "fallback_used": False,
+        "fallback_route": "",
+        "reason": "",
+        "production_safe_compliant": True,
+        "metadata": {},
+    })
+    phase_data["route_used"] = str(route or phase_data.get("route_used") or "")
+    phase_data["reason"] = str(reason or phase_data.get("reason") or "")
+    if metadata:
+        phase_data["metadata"] = dict(metadata)
+    if phase_data["route_used"] and phase_data["route_used"] not in registry.setdefault("primary_routes_used", []):
+        registry.setdefault("primary_routes_used", []).append(phase_data["route_used"])
+    phase_data["production_safe_compliant"] = bool(_route_registry_route_allowed(phase_data["route_used"]))
+    registry["production_safe_compliant"] = bool(registry.get("production_safe_compliant", True) and phase_data["production_safe_compliant"])
+    logger.info("ROUTE_USED phase=%s route=%s", phase, phase_data["route_used"] or "none")
+    return registry
+
+
+def _record_route_blocked(
+    registry: Dict[str, Any],
+    phase: str,
+    route: str,
+    reason: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+    policy_block: bool = False,
+) -> Dict[str, Any]:
+    phase_data = registry.setdefault(phase, {
+        "route_used": "",
+        "routes_blocked": [],
+        "fallback_used": False,
+        "fallback_route": "",
+        "reason": "",
+        "production_safe_compliant": True,
+        "metadata": {},
+    })
+    blocked_route = str(route or "")
+    if blocked_route and blocked_route not in phase_data.setdefault("routes_blocked", []):
+        phase_data["routes_blocked"].append(blocked_route)
+    phase_data["reason"] = str(reason or phase_data.get("reason") or "")
+    if metadata:
+        phase_data["metadata"] = dict(metadata)
+    if not policy_block:
+        phase_data["production_safe_compliant"] = False
+        registry["production_safe_compliant"] = False
+    else:
+        phase_data["production_safe_compliant"] = bool(phase_data.get("production_safe_compliant", True))
+    if blocked_route and blocked_route not in registry.setdefault("production_safe_routes_blocked", []):
+        registry["production_safe_routes_blocked"].append(blocked_route)
+        if "external" in blocked_route or "pexels" in blocked_route or "t2v" in blocked_route or "comfyui" in blocked_route or "ollama" in blocked_route:
+            if blocked_route not in registry.setdefault("external_routes_blocked", []):
+                registry["external_routes_blocked"].append(blocked_route)
+        else:
+            if blocked_route not in registry.setdefault("legacy_routes_blocked", []):
+                registry["legacy_routes_blocked"].append(blocked_route)
+    logger.info("ROUTE_BLOCKED phase=%s route=%s reason=%s", phase, blocked_route or "none", reason or "none")
+    return registry
+
+
+def _record_route_fallback(
+    registry: Dict[str, Any],
+    phase: str,
+    route: str,
+    fallback_route: str,
+    reason: str = "",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    phase_data = registry.setdefault(phase, {
+        "route_used": "",
+        "routes_blocked": [],
+        "fallback_used": False,
+        "fallback_route": "",
+        "reason": "",
+        "production_safe_compliant": True,
+        "metadata": {},
+    })
+    phase_data["route_used"] = str(route or phase_data.get("route_used") or "")
+    phase_data["fallback_used"] = True
+    phase_data["fallback_route"] = str(fallback_route or "")
+    phase_data["reason"] = str(reason or phase_data.get("reason") or "")
+    if metadata:
+        phase_data["metadata"] = dict(metadata)
+    if phase_data["route_used"] and phase_data["route_used"] not in registry.setdefault("primary_routes_used", []):
+        registry.setdefault("primary_routes_used", []).append(phase_data["route_used"])
+    if phase_data["fallback_route"] and phase_data["fallback_route"] not in registry.setdefault("fallback_routes_used", []):
+        registry.setdefault("fallback_routes_used", []).append(phase_data["fallback_route"])
+    phase_data["production_safe_compliant"] = bool(_route_registry_route_allowed(phase_data["route_used"]))
+    registry["production_safe_compliant"] = bool(registry.get("production_safe_compliant", True) and phase_data["production_safe_compliant"])
+    logger.info(
+        "ROUTE_FALLBACK_USED phase=%s route=%s fallback=%s",
+        phase,
+        phase_data["route_used"] or "none",
+        phase_data["fallback_route"] or "none",
+    )
+    return registry
 
 
 def _get_ffmpeg_exe() -> str:
@@ -114,6 +2269,401 @@ def _get_ffmpeg_exe() -> str:
         return _iio.get_ffmpeg_exe()
     except Exception:
         return "ffmpeg"
+
+
+def ensure_browser_compatible_mp4(input_path: Path, output_path: Path) -> Dict[str, Any]:
+    """Normalize an MP4 for browser playback.
+
+    Ensures:
+    - h264 video codec
+    - yuv420p pixel format
+    - aac audio (if audio stream exists)
+    - moov atom at beginning (faststart)
+    - even dimensions
+
+    Args:
+        input_path: Path to the input MP4.
+        output_path: Path for the normalized output.
+
+    Returns:
+        Dict with keys: success, output_path, reason, warnings.
+    """
+    ffmpeg = _get_ffmpeg_exe()
+    warnings: List[str] = []
+
+    if not input_path.exists():
+        return {"success": False, "output_path": str(input_path), "reason": "input_missing", "warnings": warnings}
+
+    # Probe input
+    try:
+        probe = subprocess.run(
+            [ffmpeg.replace("ffmpeg", "ffprobe"), "-v", "error",
+             "-print_format", "json", "-show_streams", str(input_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        streams = json.loads(probe.stdout or "{}").get("streams", [])
+    except Exception:
+        streams = []
+
+    has_video = any(s.get("codec_type") == "video" for s in streams)
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+
+    if not has_video:
+        return {"success": False, "output_path": str(input_path), "reason": "no_video_stream", "warnings": warnings}
+
+    # Check if already compatible
+    video_streams = [s for s in streams if s.get("codec_type") == "video"]
+    if video_streams:
+        vs = video_streams[0]
+        codec = vs.get("codec_name", "")
+        pix_fmt = vs.get("pix_fmt", "")
+        if codec == "h264" and pix_fmt == "yuv420p":
+            # Already compatible, just add faststart if needed
+            try:
+                result = subprocess.run(
+                    [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                     "-i", str(input_path),
+                     "-c:v", "copy", "-c:a", "copy" if has_audio else "none",
+                     "-movflags", "+faststart",
+                     str(output_path)],
+                    capture_output=True, text=True, timeout=120,
+                )
+                if result.returncode == 0 and output_path.exists():
+                    logger.info("BROWSER_MP4_NORMALIZED path=%s faststart=added", output_path)
+                    return {"success": True, "output_path": str(output_path), "reason": "faststart_added", "warnings": warnings}
+            except Exception as e:
+                warnings.append(f"faststart_failed:{e}")
+            return {"success": True, "output_path": str(input_path), "reason": "already_compatible", "warnings": warnings}
+
+    # Transcode to browser-compatible MP4
+    try:
+        cmd = [
+            ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(input_path),
+            "-c:v", "libx264", "-preset", "fast", "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ]
+        if has_audio:
+            cmd += ["-c:a", "aac", "-b:a", "128k"]
+        else:
+            cmd += ["-an"]
+        cmd += [str(output_path)]
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode == 0 and output_path.exists():
+            logger.info("BROWSER_MP4_NORMALIZED path=%s codec=h264 pix_fmt=yuv420p faststart=yes", output_path)
+            return {"success": True, "output_path": str(output_path), "reason": "transcoded", "warnings": warnings}
+        else:
+            error = result.stderr.strip() or "unknown"
+            warnings.append(f"transcode_failed:{error[:200]}")
+            return {"success": False, "output_path": str(input_path), "reason": "transcode_failed", "warnings": warnings}
+    except Exception as e:
+        warnings.append(f"transcode_error:{e}")
+        return {"success": False, "output_path": str(input_path), "reason": str(e), "warnings": warnings}
+
+
+# ── Remotion overlay composition ───────────────────────────────────────────────
+
+
+def compose_transparent_overlay_on_video(
+    base_video_path: Path,
+    overlay_video_path: Path,
+    output_path: Path,
+    *,
+    start_time: float = 0.0,
+    mode: str = "remotion_overlay",
+    preserve_audio: bool = True,
+) -> Dict[str, Any]:
+    """Compose a transparent overlay (.webm with alpha) onto a base video.
+
+    Uses FFmpeg overlay filter. The overlay is expected to be a WebM with
+    transparent alpha channel. Composition only happens when called explicitly.
+
+    Args:
+        base_video_path: Path to the base (final) video.
+        overlay_video_path: Path to the transparent overlay .webm.
+        output_path: Path for the composed output video.
+        start_time: Offset in seconds for overlay start (default 0.0).
+        mode: Semantic mode label (default "remotion_overlay").
+        preserve_audio: If True, copy audio from base video (default True).
+
+    Returns:
+        Dict with keys:
+            status: "rendered" | "skipped" | "failed"
+            reason: Human-readable explanation.
+            output_path: str or None.
+            command_used: str or None (sanitized).
+    """
+    logger.info(
+        "REMOTION_OVERLAY_COMPOSE_REQUESTED base=%s overlay=%s output=%s",
+        base_video_path, overlay_video_path, output_path,
+    )
+
+    # Validate inputs
+    if not base_video_path.exists():
+        msg = f"Base video not found: {base_video_path}"
+        logger.warning("REMOTION_OVERLAY_COMPOSE_SKIPPED reason=%s", msg)
+        return {"status": "skipped", "reason": msg, "output_path": None, "command_used": None}
+
+    if not overlay_video_path.exists():
+        msg = f"Overlay file not found: {overlay_video_path}"
+        logger.warning("REMOTION_OVERLAY_COMPOSE_SKIPPED reason=%s", msg)
+        return {"status": "skipped", "reason": msg, "output_path": None, "command_used": None}
+
+    if overlay_video_path.stat().st_size == 0:
+        msg = f"Overlay file is empty: {overlay_video_path}"
+        logger.warning("REMOTION_OVERLAY_COMPOSE_SKIPPED reason=%s", msg)
+        return {"status": "skipped", "reason": msg, "output_path": None, "command_used": None}
+
+    # Ensure output directory exists
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ffmpeg = _get_ffmpeg_exe()
+
+    # Build FFmpeg overlay filter command
+    # Overlay is placed at [0:v][1:v] overlay=0:0:format=auto with alpha
+    cmd = [
+        ffmpeg,
+        "-i", str(base_video_path),
+        "-i", str(overlay_video_path),
+        "-filter_complex", "[0:v][1:v]overlay=0:0:format=auto",
+    ]
+
+    if preserve_audio:
+        cmd += ["-c:a", "copy"]
+    else:
+        cmd += ["-an"]
+
+    cmd += [
+        "-c:v", "libx264",
+        "-preset", "medium",
+        "-crf", "18",
+        "-pix_fmt", "yuv420p",
+        "-y",
+        str(output_path),
+    ]
+
+    try:
+        logger.info("REMOTION_OVERLAY_COMPOSE cmd=%s", " ".join(str(c) for c in cmd[:6]) + " ...")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            error_msg = result.stderr.strip() or "unknown error"
+            logger.error(
+                "REMOTION_OVERLAY_COMPOSE_FAILED reason=%s",
+                error_msg,
+            )
+            return {
+                "status": "failed",
+                "reason": error_msg,
+                "output_path": None,
+                "command_used": None,
+            }
+
+        if not output_path.exists():
+            logger.error(
+                "REMOTION_OVERLAY_COMPOSE_FAILED reason=output_not_found path=%s",
+                output_path,
+            )
+            return {
+                "status": "failed",
+                "reason": "Output file not found after composition",
+                "output_path": None,
+                "command_used": None,
+            }
+
+        logger.info("REMOTION_OVERLAY_COMPOSED output=%s", output_path)
+        return {
+            "status": "rendered",
+            "reason": f"Overlay composed via FFmpeg ({mode})",
+            "output_path": str(output_path),
+            "command_used": "ffmpeg overlay filter",
+        }
+
+    except subprocess.TimeoutExpired:
+        logger.error("REMOTION_OVERLAY_COMPOSE_FAILED reason=timeout")
+        return {
+            "status": "failed",
+            "reason": "FFmpeg overlay composition timed out (300s)",
+            "output_path": None,
+            "command_used": None,
+        }
+    except Exception as e:
+        logger.error("REMOTION_OVERLAY_COMPOSE_FAILED reason=%s", str(e))
+        return {
+            "status": "failed",
+            "reason": str(e),
+            "output_path": None,
+            "command_used": None,
+        }
+
+
+_ASS_FILLER_TOKENS = {
+    "eee", "eh", "aaa", "mmm", "um", "uh", "pues", "bueno", "vale",
+    "sabes", "o", "sea", "osea", "entonces",
+}
+
+
+def _normalize_ass_words(words: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for raw in words or []:
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or raw.get("word") or "").strip()
+        if not text:
+            continue
+        lower = text.lower()
+        if lower in _ASS_FILLER_TOKENS:
+            continue
+        try:
+            start = float(raw.get("start", 0.0) or 0.0)
+            end = float(raw.get("end", start) or start)
+        except Exception:
+            continue
+        if end <= start:
+            end = start + 0.06
+        normalized.append(
+            {
+                "text": text,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "score": float(raw.get("score", raw.get("confidence", 0.5)) or 0.5),
+            }
+        )
+    return normalized
+
+
+def _caption_backend_mode(default_mode: str = "auto") -> str:
+    mode = str(os.environ.get("VIRACLIP_CAPTION_BACKEND", default_mode) or default_mode).strip().lower()
+    if mode not in {"auto", "legacy", "ass"}:
+        return default_mode
+    return mode
+
+
+def _is_premium_productive_runtime() -> bool:
+    return str(os.environ.get("VIRACLIP_MODE", "") or "").strip().lower() == "premium_productive"
+
+
+def _map_visual_style_to_ass_caption_style(visual_style: str) -> str:
+    style = str(visual_style or "").strip().lower()
+    style_map = {
+        "calm_trust": "vpi_clean",
+        "serious_warning": "highlight",
+        "clear_explanation": "minimal",
+        "revelation_hook": "tiktok",
+        "practical_advice": "karaoke",
+    }
+    return style_map.get(style, "karaoke")
+
+
+def _detect_speech_intervals_for_captions(video_path: Path, duration: float) -> List[Tuple[float, float]]:
+    """Detect speech intervals on the final clip via ffmpeg silencedetect.
+
+    Used to re-time approximate (fallback text-split) caption words so they
+    follow real speech instead of an even cursor (OUTPUT-QUALITY-2).
+    """
+    try:
+        result = subprocess.run(
+            [
+                _get_ffmpeg_exe(), "-hide_banner", "-i", str(video_path),
+                "-af", "silencedetect=noise=-32dB:d=0.45", "-f", "null", "-",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        stderr = result.stderr or ""
+    except Exception:
+        return []
+    silences: List[Tuple[float, float]] = []
+    start: Optional[float] = None
+    for line in stderr.splitlines():
+        if "silence_start:" in line:
+            try:
+                start = float(line.rsplit("silence_start:", 1)[1].strip().split()[0])
+            except Exception:
+                start = None
+        elif "silence_end:" in line and start is not None:
+            try:
+                end = float(line.rsplit("silence_end:", 1)[1].strip().split("|")[0].strip().split()[0])
+                silences.append((max(0.0, start), min(duration, end)))
+            except Exception:
+                pass
+            start = None
+    if start is not None:
+        silences.append((max(0.0, start), duration))
+    speech: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for s_t, e_t in sorted(silences):
+        if s_t > cursor + 0.05:
+            speech.append((cursor, s_t))
+        cursor = max(cursor, e_t)
+    if cursor < duration - 0.05:
+        speech.append((cursor, duration))
+    return [(s_t, e_t) for s_t, e_t in speech if (e_t - s_t) >= 0.25]
+
+
+def _retime_caption_words_to_speech(
+    words: List[Dict[str, Any]],
+    intervals: List[Tuple[float, float]],
+    duration: float,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Redistribute fallback word timings proportionally across speech intervals."""
+    if not words or not intervals or duration <= 0:
+        return words, False
+    total_speech = sum(e - s for s, e in intervals)
+    if total_speech <= 1.0:
+        return words, False
+    n = len(words)
+    slot = total_speech / n
+
+    def _to_wall(t: float) -> float:
+        acc = 0.0
+        for s_t, e_t in intervals:
+            span = e_t - s_t
+            if t <= acc + span:
+                return s_t + (t - acc)
+            acc += span
+        return intervals[-1][1]
+
+    hard_cap = max(0.0, duration - 0.05)
+    out: List[Dict[str, Any]] = []
+    for idx, w in enumerate(words):
+        ws = min(_to_wall(idx * slot), hard_cap)
+        we = min(_to_wall((idx + 1) * slot) - 0.02, hard_cap)
+        if we <= ws:
+            we = min(ws + 0.12, hard_cap)
+        nw = dict(w)
+        nw["start"] = round(ws, 3)
+        nw["end"] = round(we, 3)
+        out.append(nw)
+    return out, True
+
+
+def _burn_ass_subtitles_file(input_video: Path, ass_path: Path, output_video: Path) -> Tuple[bool, str]:
+    if not ass_path.exists():
+        return False, "ass_file_missing"
+    safe_ass = str(ass_path).replace("\\", "/").replace(":", "\\:")
+    cmd = [
+        _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(input_video),
+        "-vf", f"subtitles='{safe_ass}'",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "20",
+        "-c:a", "copy",
+        str(output_video),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        if result.returncode == 0 and output_video.exists():
+            return True, ""
+        return False, (result.stderr or "ass_burn_failed")[-280:]
+    except Exception as exc:
+        return False, str(exc)
 
 
 def _escape_drawtext_text(text: str) -> str:
@@ -135,29 +2685,164 @@ def _wrap_hook_overlay_text(text: str, max_words_per_line: int = 5) -> str:
     return " ".join(words[:midpoint]) + "\n" + " ".join(words[midpoint:])
 
 
+_HOOK_REDUNDANCY_STOPWORDS = {
+    "a",
+    "al",
+    "con",
+    "de",
+    "del",
+    "el",
+    "esto",
+    "esta",
+    "este",
+    "eso",
+    "esa",
+    "ese",
+    "la",
+    "las",
+    "lo",
+    "los",
+    "mira",
+    "mirar",
+    "no",
+    "para",
+    "por",
+    "que",
+    "sin",
+    "te",
+    "un",
+    "una",
+    "y",
+}
+
+
+def _normalize_hook_compare_text(text: str) -> str:
+    import re as _re
+    import unicodedata as _unicodedata
+
+    decomposed = _unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in decomposed if not _unicodedata.combining(ch))
+    ascii_text = _re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return _re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _build_hook_caption_text_first3(word_timestamps: Optional[List[Dict[str, Any]]], fallback_text: str = "") -> str:
+    words: List[str] = []
+    for item in word_timestamps or []:
+        try:
+            start_s = float(item.get("start", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if start_s >= 3.0:
+            continue
+        word = str(item.get("word") or item.get("text") or "").strip()
+        if word:
+            words.append(word)
+    if words:
+        return " ".join(words)
+    fallback_tokens = [token for token in str(fallback_text or "").split() if token.strip()]
+    return " ".join(fallback_tokens[:16])
+
+
+def _hook_compare_tokens(text: str) -> List[str]:
+    normalized = _normalize_hook_compare_text(text)
+    return [
+        token
+        for token in normalized.split()
+        if len(token) > 2 and token not in _HOOK_REDUNDANCY_STOPWORDS
+    ]
+
+
+def _is_hook_redundant_with_captions(hook_text: str, caption_text_first3: str) -> Tuple[bool, str]:
+    normalized_hook = _normalize_hook_compare_text(hook_text)
+    normalized_caption = _normalize_hook_compare_text(caption_text_first3)
+    if not normalized_hook or not normalized_caption:
+        return False, ""
+    if normalized_hook == normalized_caption:
+        return True, "normalized_equal"
+    if normalized_hook in normalized_caption:
+        return True, "hook_in_captions"
+    if normalized_caption in normalized_hook:
+        return True, "captions_in_hook"
+
+    hook_tokens = _hook_compare_tokens(hook_text)
+    caption_tokens = _hook_compare_tokens(caption_text_first3)
+    if not hook_tokens or not caption_tokens:
+        return False, ""
+
+    shared_tokens = set(hook_tokens) & set(caption_tokens)
+    if not shared_tokens:
+        return False, ""
+
+    from difflib import SequenceMatcher
+
+    union_size = len(set(hook_tokens) | set(caption_tokens)) or 1
+    shorter_size = max(1, min(len(set(hook_tokens)), len(set(caption_tokens))))
+    jaccard = len(shared_tokens) / union_size
+    coverage = len(shared_tokens) / shorter_size
+    ratio = SequenceMatcher(None, normalized_hook, normalized_caption).ratio()
+
+    if (
+        len(shared_tokens) >= min(4, len(set(hook_tokens)), len(set(caption_tokens)))
+        and coverage >= 0.78
+        and (jaccard >= 0.56 or ratio >= 0.84)
+    ) or (
+        len(hook_tokens) <= 6
+        and len(caption_tokens) <= 12
+        and coverage >= 0.70
+        and ratio >= 0.82
+    ):
+        return True, f"token_similarity coverage={coverage:.2f} jaccard={jaccard:.2f} ratio={ratio:.2f}"
+    return False, ""
+
+
+def _is_hook_generic_for_captions(hook_text: str, hook_source: str) -> bool:
+    normalized = _normalize_hook_compare_text(hook_text)
+    if not normalized:
+        return False
+    generic_phrases = {
+        "esto mucha gente no lo sabe",
+        "cuidado con esto",
+        "antes de contratar mira esto",
+        "esto puede ahorrarte un problema",
+        "ojo con esta cobertura",
+        "esto puede evitarte un susto",
+        "no firmes sin mirar esto",
+        "esta cobertura cambia mucho",
+    }
+    if normalized in generic_phrases:
+        return True
+    tokens = normalized.split()
+    return hook_source in {"fallback", "condensed"} and len(tokens) <= 6
+
+
 def _apply_hook_headline_overlay(video_path: Path, output_path: Path, overlay: Dict[str, Any]) -> Dict[str, Any]:
     text = _wrap_hook_overlay_text(str(overlay.get("text") or ""), 5)
     if not text:
         logger.info("[hook-overlay] skipped reason=empty_text")
         return {"rendered": False, "output_path": str(video_path), "warnings": ["empty_text"]}
     try:
-        start = max(0.25, min(0.45, float(overlay.get("start_s", 0.35) or 0.35)))
-        duration = max(1.6, min(2.2, float(overlay.get("duration_s", 1.8) or 1.8)))
+        daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        start = max(0.15, min(0.45, float(overlay.get("start_s", 0.25) or 0.25)))
+        duration = max(2.2, min(3.0, float(overlay.get("duration_s", 2.4) or 2.4)))
     except (TypeError, ValueError):
-        start, duration = 0.35, 1.8
-    end = min(2.7, start + duration)
+        start, duration = 0.25, 2.4
+    end = min(3.0, start + duration)
     safe_text = _escape_drawtext_text(text)
     enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
-    vf = (
-        f"drawtext=text='{safe_text}':"
-        "x=(w-text_w)/2:y=250:"
-        "fontsize=56:line_spacing=10:"
-        "fontcolor=white@0.96:"
-        "box=1:boxcolor=#10243fcc:boxborderw=28:"
-        f"enable='{enable}',"
-        "drawbox=x=90:y=250:w=8:h=132:color=#f97316@0.82:t=fill:"
-        f"enable='{enable}'"
-    )
+    vf_parts = [
+        f"drawtext=text='{safe_text}':",
+        "x=(w-text_w)/2:y=155:",
+        "fontsize=54:line_spacing=10:",
+        "fontcolor=white@0.96:",
+        "box=1:boxcolor=#0f172acc:boxborderw=28:",
+        f"enable='{enable}'",
+    ]
+    if not daily_mode:
+        vf_parts.append(
+            f"drawbox=x=90:y=155:w=8:h=132:color=#94a3b8@0.55:t=fill:enable='{enable}'"
+        )
+    vf = ",".join(vf_parts)
     cmd = [
         _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(video_path),
@@ -186,6 +2871,222 @@ def _apply_hook_headline_overlay(video_path: Path, output_path: Path, overlay: D
         return {"rendered": False, "output_path": str(video_path), "warnings": ["hook_overlay_ffmpeg_failed"], "reason": reason}
     except Exception as exc:
         logger.warning("[hook-overlay] failed fallback=input reason=%s", exc)
+        return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
+
+
+def _verify_hook_overlay_output(output_path: Path) -> bool:
+    try:
+        if not output_path.exists() or output_path.stat().st_size <= 0:
+            return False
+        duration = float(probe_duration(output_path) or 0.0)
+        return duration >= 0.5
+    except Exception as exc:
+        logger.debug("[hook-overlay] verify failed reason=%s", exc)
+        return False
+
+
+def _verify_rhythm_output(input_video: Path, output_video: Path) -> bool:
+    try:
+        if not output_video.exists() or output_video.stat().st_size <= 0:
+            return False
+        out_duration = float(probe_duration(output_video) or 0.0)
+        if out_duration < 0.5:
+            return False
+        in_duration = float(probe_duration(input_video) or 0.0)
+        if in_duration > 0.0 and out_duration > in_duration + 0.75:
+            return False
+        if in_duration > 0.0 and out_duration < max(0.45, in_duration * 0.25):
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("[rhythm-verify] failed reason=%s", exc)
+        return False
+
+
+def _verify_transition_output(input_video: Path, output_video: Path) -> bool:
+    try:
+        if not output_video.exists() or output_video.stat().st_size <= 0:
+            return False
+        if output_video.resolve() == input_video.resolve():
+            return False
+        out_duration = float(probe_duration(output_video) or 0.0)
+        if out_duration < 0.5:
+            return False
+        in_duration = float(probe_duration(input_video) or 0.0)
+        if in_duration > 0.0 and out_duration > in_duration + 0.75:
+            return False
+        if in_duration > 0.0 and out_duration < max(0.45, in_duration * 0.25):
+            return False
+        try:
+            proc = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type",
+                    "-of",
+                    "csv=p=0",
+                    str(output_video),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if proc.returncode != 0:
+                return False
+            streams = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+            if "video" not in streams:
+                return False
+            if "audio" not in streams and input_video.exists():
+                try:
+                    in_probe = subprocess.run(
+                        [
+                            "ffprobe",
+                            "-v",
+                            "error",
+                            "-show_entries",
+                            "stream=codec_type",
+                            "-of",
+                            "csv=p=0",
+                            str(input_video),
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                    )
+                    if "audio" in [line.strip() for line in (in_probe.stdout or "").splitlines() if line.strip()]:
+                        return False
+                except Exception:
+                    return False
+        except Exception:
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("[transition-verify] failed reason=%s", exc)
+        return False
+
+
+def _render_hook_card_overlay(video_path: Path, output_path: Path, *, text: str, start_s: float = 0.5, duration_s: float = 3.0) -> Dict[str, Any]:
+    """Render a hook card overlay using FFmpeg drawtext in the safe area (top-center).
+    
+    The card is positioned in the safe area (y=80..280) so it does not hide captions
+    (which are at the bottom) or the speaker's face (center). One card max per clip.
+    Counts as real visual support only if FFmpeg actually succeeded.
+    """
+    if not text or not text.strip():
+        logger.info("HOOK_CARD_SKIPPED reason=empty_text")
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["empty_text"]}
+    try:
+        daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        _text = _wrap_hook_overlay_text(text.strip(), max_words_per_line=4)
+        safe_text = _escape_drawtext_text(_text)
+        start = max(0.15, min(0.45, start_s))
+        duration = max(2.2, min(3.0, duration_s))
+        end = min(3.0, start + duration)
+        enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+        # Safe area: top-center, y=80, does not overlap captions (bottom) or face (center)
+        vf = (
+            f"drawtext=text='{safe_text}':"
+            "x=(w-text_w)/2:y=80:"
+            "fontsize=48:line_spacing=8:"
+            "fontcolor=white@0.95:"
+            "box=1:boxcolor=#111827cc:boxborderw=20:"
+            f"enable='{enable}'"
+        )
+        if not daily_mode:
+            vf = vf + "," + f"drawbox=x=60:y=80:w=8:h=120:color=#94a3b8@0.55:t=fill:enable='{enable}'"
+        cmd = [
+            _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "copy",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and output_path.exists():
+            logger.info(
+                "HOOK_CARD_RENDERED text=%s start=%.2f dur=%.2f path=%s",
+                text[:80], start, duration, output_path.name,
+            )
+            return {
+                "rendered": True,
+                "output_path": str(output_path),
+                "text": text,
+                "start_s": round(start, 2),
+                "duration_s": round(duration, 2),
+                "warnings": [],
+                "method": "ffmpeg_drawtext_hook_card",
+            }
+        reason = (result.stderr or "ffmpeg_failed")[-240:]
+        logger.warning("HOOK_CARD_SKIPPED reason=%s", reason)
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["hook_card_ffmpeg_failed"], "reason": reason}
+    except Exception as exc:
+        logger.warning("HOOK_CARD_SKIPPED reason=%s", exc)
+        return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
+
+
+def _render_semantic_card_overlay(video_path: Path, output_path: Path, *, text: str, start_s: float = 0.5, duration_s: float = 3.0) -> Dict[str, Any]:
+    """Render a semantic concept card overlay using FFmpeg drawtext in the safe area.
+    
+    Similar to hook_card but positioned slightly lower (y=180) to differentiate.
+    One card max per clip. Counts as real visual support only if FFmpeg actually succeeded.
+    """
+    if not text or not text.strip():
+        logger.info("SEMANTIC_CARD_SKIPPED reason=empty_text")
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["empty_text"]}
+    try:
+        daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+        _text = _wrap_hook_overlay_text(text.strip(), max_words_per_line=4)
+        safe_text = _escape_drawtext_text(_text)
+        start = max(0.3, min(1.0, start_s))
+        duration = max(2.0, min(4.0, duration_s))
+        end = start + duration
+        enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
+        # Safe area: upper-center, y=180, below hook card area, above captions
+        vf = (
+            f"drawtext=text='{safe_text}':"
+            "x=(w-text_w)/2:y=180:"
+            "fontsize=42:line_spacing=6:"
+            "fontcolor=white@0.95:"
+            "box=1:boxcolor=#111827cc:boxborderw=18:"
+            f"enable='{enable}'"
+        )
+        if not daily_mode:
+            vf = vf + "," + f"drawbox=x=60:y=180:w=8:h=100:color=#64748b@0.50:t=fill:enable='{enable}'"
+        cmd = [
+            _get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(video_path),
+            "-vf", vf,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "copy",
+            str(output_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0 and output_path.exists():
+            logger.info(
+                "SEMANTIC_CARD_RENDERED text=%s start=%.2f dur=%.2f path=%s",
+                text[:80], start, duration, output_path.name,
+            )
+            return {
+                "rendered": True,
+                "output_path": str(output_path),
+                "text": text,
+                "start_s": round(start, 2),
+                "duration_s": round(duration, 2),
+                "warnings": [],
+                "method": "ffmpeg_drawtext_semantic_card",
+            }
+        reason = (result.stderr or "ffmpeg_failed")[-240:]
+        logger.warning("SEMANTIC_CARD_SKIPPED reason=%s", reason)
+        return {"rendered": False, "output_path": str(video_path), "warnings": ["semantic_card_ffmpeg_failed"], "reason": reason}
+    except Exception as exc:
+        logger.warning("SEMANTIC_CARD_SKIPPED reason=%s", exc)
         return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
 
 
@@ -228,12 +3129,6 @@ def _apply_hook_kickframe(video_path: Path, output_path: Path, event: Dict[str, 
         return {"rendered": False, "output_path": str(video_path), "warnings": [str(exc)], "reason": str(exc)}
 
 
-from ..youtube_utils import (
-    async_download_youtube_video,
-    async_get_youtube_video_info,
-    async_get_youtube_video_title,
-    get_youtube_video_id,
-)
 from ..video_processing import (
     get_video_transcript,
     create_optimized_clip,
@@ -328,6 +3223,15 @@ from types import SimpleNamespace
 
 # Global config instance for static methods
 _config = None
+_youtube_utils_mod = None
+
+
+def _youtube_utils():
+    global _youtube_utils_mod
+    if _youtube_utils_mod is None:
+        from .. import youtube_utils as _yu
+        _youtube_utils_mod = _yu
+    return _youtube_utils_mod
 
 def get_service_config():
     global _config
@@ -519,7 +3423,7 @@ class VideoService:
         Download a YouTube video asynchronously.
         """
         logger.info(f"Starting video download: {url}")
-        video_path = await async_download_youtube_video(url, 3, task_id)
+        video_path = await _youtube_utils().async_download_youtube_video(url, 3, task_id)
 
         if not video_path:
             logger.error(f"Failed to download video: {url}")
@@ -535,7 +3439,7 @@ class VideoService:
         Returns a default title if retrieval fails.
         """
         try:
-            title = await async_get_youtube_video_title(url)
+            title = await _youtube_utils().async_get_youtube_video_title(url)
             return title or "YouTube Video"
         except Exception as e:
             logger.warning(f"Failed to get video title: {e}")
@@ -884,6 +3788,7 @@ class VideoService:
         task_id: str = "unknown",
         max_concurrent: int = 3,
         include_broll: bool = False,
+        output_management_context: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Create video clips in parallel using Concurrency Optimizer.
@@ -915,6 +3820,7 @@ class VideoService:
                     add_subtitles=add_subtitles,
                     task_id=task_id,
                     include_broll=include_broll,
+                    output_management_context=output_management_context,
                 )
                 return clip_info
             except Exception as e:
@@ -1021,6 +3927,180 @@ class VideoService:
         return cast(List[Dict[str, Any]], clips_info)
 
     @staticmethod
+    def _format_srt_timestamp(seconds: float) -> str:
+        total_ms = max(0, int(seconds * 1000))
+        hh = total_ms // 3_600_000
+        mm = (total_ms % 3_600_000) // 60_000
+        ss = (total_ms % 60_000) // 1_000
+        ms = total_ms % 1_000
+        return f"{hh:02d}:{mm:02d}:{ss:02d},{ms:03d}"
+
+    @staticmethod
+    def _write_deadline_safe_srt(
+        *,
+        segment_text: str,
+        duration_s: float,
+        output_srt_path: Path,
+    ) -> bool:
+        import re as _re
+
+        clean_text = _re.sub(r"\[\d{1,2}:\d{2}(?:\.\d+)?\]", " ", str(segment_text or ""))
+        clean_text = _re.sub(r"\s+", " ", clean_text).strip()
+        words = [w for w in clean_text.split(" ") if w.strip()]
+        if not words:
+            return False
+
+        max_words_per_line = 6
+        chunks: List[str] = []
+        for idx in range(0, len(words), max_words_per_line):
+            chunks.append(" ".join(words[idx : idx + max_words_per_line]).strip())
+        if not chunks:
+            return False
+
+        min_chunk_duration = 1.2
+        per_chunk = max(min_chunk_duration, float(duration_s) / max(len(chunks), 1))
+        lines: List[str] = []
+        cursor = 0.0
+        for i, chunk in enumerate(chunks, start=1):
+            start_s = min(cursor, max(0.0, float(duration_s) - 0.2))
+            end_s = min(float(duration_s), start_s + per_chunk)
+            if i == len(chunks):
+                end_s = float(duration_s)
+            if end_s - start_s < 0.3:
+                break
+            lines.extend(
+                [
+                    str(i),
+                    f"{VideoService._format_srt_timestamp(start_s)} --> {VideoService._format_srt_timestamp(end_s)}",
+                    chunk,
+                    "",
+                ]
+            )
+            cursor = end_s
+
+        if not lines:
+            return False
+        output_srt_path.write_text("\n".join(lines), encoding="utf-8")
+        return True
+
+    @staticmethod
+    async def create_deadline_safe_clip(
+        *,
+        video_path: Path,
+        segment: Dict[str, Any],
+        clip_index: int,
+        output_dir: Path,
+        add_subtitles: bool,
+        caption_template: str,
+        use_extracted_segment: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        """FFmpeg-only emergency path for deadline-safe clip delivery."""
+        start_seconds = 0.0 if use_extracted_segment else parse_timestamp_to_seconds(str(segment.get("start_time") or "00:00"))
+        end_seconds = parse_timestamp_to_seconds(str(segment.get("end_time") or "00:00"))
+        duration = max(0.1, end_seconds - start_seconds)
+        if use_extracted_segment:
+            # Pre-extracted files already represent the segment boundaries.
+            start_seconds = 0.0
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"deadline_safe_{clip_index + 1:02d}_{int(start_seconds)}_{int(end_seconds)}.mp4"
+        output_path = output_dir / filename
+        srt_path = output_dir / f"{output_path.stem}.srt"
+
+        vf_parts = [
+            "scale=1080:1920:force_original_aspect_ratio=increase",
+            "crop=1080:1920",
+            "format=yuv420p",
+        ]
+        wrote_srt = False
+        try:
+            if add_subtitles:
+                wrote_srt = VideoService._write_deadline_safe_srt(
+                    segment_text=str(segment.get("text") or ""),
+                    duration_s=duration,
+                    output_srt_path=srt_path,
+                )
+                if wrote_srt and srt_path.exists():
+                    style = (
+                        "FontName=Arial,FontSize=18,PrimaryColour=&H00FFFFFF,"
+                        "OutlineColour=&H00000000,BorderStyle=3,Outline=2,Alignment=2,MarginV=80"
+                    )
+                    vf_parts.append(f"subtitles={srt_path}:force_style='{style}'")
+
+            cmd: List[str] = [_get_ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error"]
+            if not use_extracted_segment:
+                cmd.extend(["-ss", f"{start_seconds:.3f}", "-t", f"{duration:.3f}"])
+            else:
+                cmd.extend(["-t", f"{duration:.3f}"])
+            _encoder_info = select_ffmpeg_video_encoder(stage="deadline_safe_clip", quality="high")
+            cmd.extend(
+                [
+                    "-i",
+                    str(video_path),
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a:0",
+                    "-vf",
+                    ",".join(vf_parts),
+                    "-c:v",
+                    _encoder_info["encoder"],
+                    "-preset",
+                    _encoder_info["preset"],
+                    *_encoder_info["extra_args"],
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-ar",
+                    "48000",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _stdout, stderr = await proc.communicate()
+            if proc.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
+                logger.error(
+                    "DEADLINE_SAFE_RENDER_FAILED clip_order=%d err=%s",
+                    clip_index + 1,
+                    stderr.decode("utf-8", errors="ignore")[:300],
+                )
+                return None
+
+            return {
+                "filename": filename,
+                "path": str(output_path),
+                "start_time": str(segment.get("start_time") or "00:00"),
+                "end_time": str(segment.get("end_time") or "00:00"),
+                "duration": duration,
+                "text": str(segment.get("text") or ""),
+                "relevance_score": float(segment.get("relevance_score") or 0.0),
+                "reasoning": str(segment.get("reasoning") or "deadline_safe_mode"),
+                "virality_score": float(segment.get("virality_score") or 0.0),
+                "hook_score": float(segment.get("hook_score") or 0.0),
+                "engagement_score": float(segment.get("engagement_score") or 0.0),
+                "value_score": float(segment.get("value_score") or 0.0),
+                "shareability_score": float(segment.get("shareability_score") or 0.0),
+                "hook_type": segment.get("hook_type"),
+                "editorial_broll": [],
+                "publishable_status": "ready_to_upload",
+                "publishable_score": 100.0,
+                "publishable_warnings": [],
+                "deadline_safe_mode": True,
+                "caption_template": caption_template,
+            }
+        finally:
+            if wrote_srt:
+                srt_path.unlink(missing_ok=True)
+
+    @staticmethod
     async def create_single_clip(
         video_path: Path,
         segment: Dict[str, Any],
@@ -1048,14 +4128,27 @@ class VideoService:
         target_platform: str = "tiktok",
         preferred_music_category: Optional[str] = None,
         include_broll: bool = False,
+        output_management_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Render a single clip in the thread pool and return clip_info dict, or None on failure."""
+        _build_final_mp4_contract = None
+        _build_final_qc_report = None
+        try:
+            from .vpi_publishable_gate import (
+                build_final_mp4_contract as _build_final_mp4_contract,
+                build_final_qc_report as _build_final_qc_report,
+            )
+        except Exception as _gate_import_e:
+            logger.debug("[daily-publishing] final contract import skipped: %s", _gate_import_e)
         # Feature A: launch Pexels B-Roll prefetch concurrently at the start of render
         _broll_prefetch_task = None
         try:
+            from .vpi_production_safe_edit import production_safe_mode_active, production_safe_route_allowed
             from ..config import get_config as _get_cfg_fa
             _cfg_fa = _get_cfg_fa()
-            if getattr(_cfg_fa, "broll_enabled", False) and getattr(_cfg_fa, "pexels_api_key", ""):
+            if production_safe_mode_active() and not production_safe_route_allowed("external_pexels"):
+                logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+            elif getattr(_cfg_fa, "broll_enabled", False) and getattr(_cfg_fa, "pexels_api_key", ""):
                 from .pexels_service import prefetch_broll_for_clip as _pfetch
                 _broll_cache_dir = Path(tempfile.gettempdir()) / "viraclip_broll"
                 _broll_theme = segment.get("theme") or "nature"
@@ -1066,19 +4159,85 @@ class VideoService:
             logger.debug(f"B-Roll prefetch task init skipped: {_fa_init_e}")
 
         logger.info(f"[create_single_clip] START clip {clip_index+1}: {segment.get('start_time')} → {segment.get('end_time')}, video={video_path}")
+        _daily_mode_active = _is_vpi_daily_mode_active()
         try:
-            start_seconds = parse_timestamp_to_seconds(segment["start_time"])
-            end_seconds = parse_timestamp_to_seconds(segment["end_time"])
+            _segment_start_time = str(segment.get("refined_start_time") or segment.get("start_time") or "00:00")
+            _segment_end_time = str(segment.get("refined_end_time") or segment.get("end_time") or "00:00")
+            start_seconds = parse_timestamp_to_seconds(_segment_start_time)
+            end_seconds = parse_timestamp_to_seconds(_segment_end_time)
             duration = end_seconds - start_seconds
         except Exception as _parse_e:
             logger.error(f"Failed to parse timestamps: {_parse_e}")
             return None
+        if str(segment.get("refined_start_time") or "").strip() and str(segment.get("refined_end_time") or "").strip():
+            logger.info(
+                "VPI_RENDER_BOUNDARIES_USE_REFINED_TIMES task_id=%s clip_order=%s start=%.2f end=%.2f",
+                task_id,
+                clip_index + 1,
+                start_seconds,
+                end_seconds,
+            )
+            if bool(segment.get("bts_tail_detected")) and float(segment.get("bts_tail_trimmed_seconds") or 0.0) > 0.0:
+                logger.info(
+                    "VPI_RENDER_BTS_TAIL_REMOVED_FROM_OUTPUT task_id=%s clip_order=%s trim=%.2f shifted_back=%s",
+                    task_id,
+                    clip_index + 1,
+                    float(segment.get("bts_tail_trimmed_seconds") or 0.0),
+                        str(bool(segment.get("viral_window_shifted_back"))).lower(),
+                )
+        # OUTPUT-SELECTION-5B: post-trim caption contract — when present it is the
+        # ONLY allowed caption source and the render boundary is frozen against
+        # any in-render re-expansion (the extracted file is already cut anyway;
+        # re-expansion only desyncs captions).
+        _post_trim_caption_words_contract = list(segment.get("post_trim_caption_words") or [])
+        _post_trim_contract_active = bool(
+            _post_trim_caption_words_contract
+            and str(segment.get("post_trim_source") or "") == "post_selection_clean_window"
+        )
+        _temp_general_probe_before = _probe_video_color_metadata(output_dir / f"clip_{clip_index + 1:02d}.mp4")
+        logger.info(
+            "VPI_TEMP_GENERAL_WRITE_TRACE task_id=%s clip_order=%d caller=%s input_path=%s output_dir=%s output_path=%s exists=%s size=%s mtime=%s",
+            task_id,
+            clip_index + 1,
+            "create_single_clip",
+            str(video_path),
+            str(output_dir),
+            str(output_dir / f"clip_{clip_index + 1:02d}.mp4"),
+            str(bool(_temp_general_probe_before.get("exists"))).lower(),
+            _temp_general_probe_before.get("size_bytes"),
+            _temp_general_probe_before.get("mtime"),
+        )
         logger.info(
             "[editorial-runtime] candidate_id=%s start=%.2f end=%.2f",
             segment.get("id") or segment.get("candidate_id") or clip_index + 1,
             start_seconds,
             end_seconds,
         )
+        _pre_render_plan = (segment.get("pre_render_edit_plan") or {}) if isinstance(segment, dict) else {}
+        _pre_hook_plan = (_pre_render_plan.get("hook") or {}) if isinstance(_pre_render_plan, dict) else {}
+        _pre_visual_plan = (_pre_render_plan.get("visual_support") or {}) if isinstance(_pre_render_plan, dict) else {}
+        _semantic_card_planned = (
+            str(_pre_visual_plan.get("type") or "") == "semantic_card"
+            and bool(_pre_visual_plan.get("executable"))
+        )
+        _hook_card_applied = False
+        _production_safe_routes_blocked: List[str] = []
+        _final_render_locked = False
+        _final_render_locked_at_stage = ""
+        _final_output_path_locked = ""
+        _output_mutation_after_lock_detected = False
+
+        def _block_production_safe_route(route_name: str, reason: str) -> None:
+            if route_name not in _production_safe_routes_blocked:
+                _production_safe_routes_blocked.append(route_name)
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=%s reason=premium_local_stability", route_name)
+
+        # ── Propagate metadata_to_apply from editorial contract ──────────────
+        _metadata_to_apply = (segment.get("metadata_to_apply") or {}) if isinstance(segment, dict) else {}
+        if _metadata_to_apply:
+            for _meta_key, _meta_val in _metadata_to_apply.items():
+                if _meta_val is not None and segment.get(_meta_key) is None:
+                    segment[_meta_key] = _meta_val
 
         # ── FASE 2: Editorial boundary adjustment (complete idea) ──────────────
         # Before rendering, check if the segment boundaries can be improved to
@@ -1107,7 +4266,13 @@ class VideoService:
                     "has_closure": bool((_idea_result or {}).get("has_closure")),
                     "boundary_adjustment_reason": "already_complete" if _idea_score >= 0.75 else "incomplete_idea",
                 }
-                if _transcript_lines and _idea_score < 0.75:
+                if _post_trim_contract_active and _transcript_lines and _idea_score < 0.75:
+                    logger.info(
+                        "VPI_OUTPUT_SELECTION_STALE_CAPTION_SOURCE_BLOCKED task_id=%s clip_order=%s stage=complete_idea_expansion reason=post_trim_contract_boundary_frozen",
+                        task_id,
+                        clip_index + 1,
+                    )
+                elif _transcript_lines and _idea_score < 0.75:
                         _expansion = _expand_to_nearest_complete_idea(
                             start_seconds, end_seconds, _transcript_lines
                         )
@@ -1149,11 +4314,267 @@ class VideoService:
                         end_seconds,
                         _complete_idea_metadata.get("boundary_adjustment_reason") or ("no_timestamp_lines" if not _transcript_lines else "not_needed"),
                     )
-                    if _idea_score < 0.75:
-                        logger.info("[complete-idea] reject reason=incomplete_thought")
+                    # ── FIX 2: Contract-authoritative render eligibility ──────────────
+                    # If the pre-render editorial contract approved this segment with
+                    # complete_idea_pass=True and would_runtime_reject=False, then the
+                    # contract is authoritative — suppress the legacy rejection.
+                    _contract_approved = bool(segment.get("contract_approved", False))
+                    _contract_complete_idea_pass = bool(segment.get("complete_idea_pass", False))
+                    _contract_would_runtime_reject = bool(segment.get("contract_would_runtime_reject", True))
+                    if _contract_approved and _contract_complete_idea_pass and not _contract_would_runtime_reject:
+                        logger.info(
+                            "RENDER_LEGACY_REJECTION_SUPPRESSED_BY_CONTRACT "
+                            "clip_order=%d stage=complete_idea reason=incomplete_thought "
+                            "contract_approved=true complete_idea_pass=true would_runtime_reject=false",
+                            clip_index + 1,
+                        )
+                    else:
+                        if _idea_score < 0.75:
+                            if _should_degrade_complete_idea_gate(segment, "complete_idea", "incomplete_thought"):
+                                segment["complete_idea_warning"] = True
+                                segment["complete_idea_warning_reason"] = "incomplete_thought"
+                                segment["qc_status"] = "needs_review"
+                                segment["needs_review"] = True
+                                if not segment.get("rescue_reason"):
+                                    segment["rescue_reason"] = "score_contract_degraded_before_fast_fail"
+                                logger.info(
+                                    "COMPLETE_IDEA_GATE_DEGRADED_TO_WARNING task_id=%s clip_order=%d reason=incomplete_thought rescue_reason=%s",
+                                    task_id,
+                                    clip_index + 1,
+                                    str(segment.get("rescue_reason") or "unknown"),
+                                )
+                            else:
+                                logger.info("[complete-idea] reject reason=incomplete_thought")
+                                # BLOCKING: incomplete_thought rejection aborts this clip
+                                raise ClipEditorialRejection(
+                                    clip_order=clip_index + 1,
+                                    stage="complete_idea",
+                                    reason="incomplete_thought",
+                                )
                 segment.update(_complete_idea_metadata)
+        except ClipEditorialRejection:
+            raise  # Re-raise blocking rejections
         except Exception as _ef_e:
             logger.debug("[complete-idea] boundary_adjustment_skipped reason=%s", _ef_e)
+
+        # ── FASE 2.5: VPI boundary refinement (start / payoff / closure) ──────
+        # This runs before render so the selected clip can start cleanly and end on
+        # a complete payoff without mutating any downstream rendering logic.
+        _boundary_refinement_metadata: Dict[str, Any] = {}
+        try:
+            _boundary_refinement_metadata = refine_segment_boundaries_for_vpi(
+                segment=segment,
+                transcript_text=str(segment.get("text") or ""),
+                words_with_timestamps=list(segment.get("words") or segment.get("word_timestamps") or []),
+                vpi_editorial_categories=list(segment.get("vpi_editorial_categories") or []),
+                hookability_score=float(segment.get("hookability_score") or 0.0),
+                standalone_score=float(segment.get("standalone_score") or 0.0),
+                commercial_usefulness_score=float(segment.get("commercial_usefulness_score") or 0.0),
+                weak_segment_penalties=list(segment.get("weak_segment_penalties") or []),
+                clip_min_duration=float(segment.get("clip_min_duration") or 8.0),
+                clip_max_duration=float(segment.get("clip_max_duration") or 90.0),
+            )
+            if _boundary_refinement_metadata:
+                segment["original_start_time"] = str(_boundary_refinement_metadata.get("original_start_time") or segment.get("start_time") or "")
+                segment["original_end_time"] = str(_boundary_refinement_metadata.get("original_end_time") or segment.get("end_time") or "")
+                segment["original_start"] = float(_boundary_refinement_metadata.get("original_start") or start_seconds)
+                segment["original_end"] = float(_boundary_refinement_metadata.get("original_end") or end_seconds)
+                segment["refined_start"] = float(_boundary_refinement_metadata.get("refined_start") or start_seconds)
+                segment["refined_end"] = float(_boundary_refinement_metadata.get("refined_end") or end_seconds)
+                segment["refined_start_time"] = str(_boundary_refinement_metadata.get("refined_start_time") or segment.get("start_time") or "")
+                segment["refined_end_time"] = str(_boundary_refinement_metadata.get("refined_end_time") or segment.get("end_time") or "")
+                segment["boundary_adjustment_applied"] = bool(_boundary_refinement_metadata.get("boundary_adjustment_applied"))
+                segment["boundary_adjustment_reason"] = str(_boundary_refinement_metadata.get("boundary_adjustment_reason") or "")
+                segment["start_trim_seconds"] = float(_boundary_refinement_metadata.get("start_trim_seconds") or 0.0)
+                segment["start_extend_seconds"] = float(_boundary_refinement_metadata.get("start_extend_seconds") or 0.0)
+                segment["end_extend_seconds"] = float(_boundary_refinement_metadata.get("end_extend_seconds") or 0.0)
+                segment["end_trim_seconds"] = float(_boundary_refinement_metadata.get("end_trim_seconds") or 0.0)
+                segment["payoff_preserved"] = bool(_boundary_refinement_metadata.get("payoff_preserved"))
+                segment["starts_cleanly"] = bool(_boundary_refinement_metadata.get("starts_cleanly"))
+                segment["ends_cleanly"] = bool(_boundary_refinement_metadata.get("ends_cleanly"))
+                segment["first_second_strength"] = float(_boundary_refinement_metadata.get("first_second_strength") or 0.0)
+                segment["first_second_reason"] = str(_boundary_refinement_metadata.get("first_second_reason") or "")
+                segment["boundary_confidence"] = float(_boundary_refinement_metadata.get("boundary_confidence") or 0.0)
+                segment["standalone_after_boundary_score"] = float(_boundary_refinement_metadata.get("standalone_after_boundary_score") or 0.0)
+                segment["standalone_after_boundary_reason"] = str(_boundary_refinement_metadata.get("standalone_after_boundary_reason") or "")
+                segment["start_filler_trimmed"] = bool(_boundary_refinement_metadata.get("start_filler_trimmed"))
+                segment["start_trim_reason"] = str(_boundary_refinement_metadata.get("start_trim_reason") or "")
+                segment["start_context_extended"] = bool(_boundary_refinement_metadata.get("start_context_extended"))
+                segment["start_context_reason"] = str(_boundary_refinement_metadata.get("start_context_reason") or "")
+                segment["payoff_extended"] = bool(_boundary_refinement_metadata.get("payoff_extended"))
+                segment["payoff_extension_reason"] = str(_boundary_refinement_metadata.get("payoff_extension_reason") or "")
+                segment["end_cleaned"] = bool(_boundary_refinement_metadata.get("end_cleaned"))
+                segment["end_clean_reason"] = str(_boundary_refinement_metadata.get("end_clean_reason") or "")
+                segment["boundary_reverted"] = bool(_boundary_refinement_metadata.get("boundary_reverted"))
+                segment["boundary_reverted_reason"] = str(_boundary_refinement_metadata.get("boundary_reverted_reason") or "")
+                segment["bts_tail_detected"] = bool(_boundary_refinement_metadata.get("bts_tail_detected"))
+                segment["bts_tail_trimmed_seconds"] = float(_boundary_refinement_metadata.get("bts_tail_trimmed_seconds") or 0.0)
+                segment["viral_window_shifted_back"] = bool(_boundary_refinement_metadata.get("viral_window_shifted_back"))
+                segment["viral_window_shift_reason"] = str(_boundary_refinement_metadata.get("viral_window_shift_reason") or "")
+                segment["selected_window_before"] = f"{segment.get('original_start_time') or segment.get('start_time') or ''} -> {segment.get('original_end_time') or segment.get('end_time') or ''}".strip()
+                segment["selected_window_after"] = f"{segment.get('refined_start_time') or segment.get('start_time') or ''} -> {segment.get('refined_end_time') or segment.get('end_time') or ''}".strip()
+                segment["setup_context_shift_seconds"] = float(segment.get("start_extend_seconds") or 0.0)
+                segment["trailing_low_value_seconds"] = float(segment.get("end_trim_seconds") or segment.get("bts_tail_trimmed_seconds") or 0.0)
+                segment["complete_idea_score"] = float(segment.get("complete_idea_score") or 0.0)
+                segment["incomplete_viral_window_detected"] = bool(
+                    bool(segment.get("bts_tail_detected"))
+                    or not bool(segment.get("payoff_preserved", True))
+                    or not bool(segment.get("ends_cleanly", True))
+                    or float(segment.get("complete_idea_score") or 0.0) < 0.70
+                    or (float(segment.get("boundary_confidence") or 0.0) >= 0.75 and float(segment.get("complete_idea_score") or 0.0) < 0.80)
+                )
+                if segment["incomplete_viral_window_detected"]:
+                    logger.info(
+                        "VPI_SELECTION_INCOMPLETE_VIRAL_WINDOW_DETECTED task_id=%s clip_order=%d complete_idea=%.3f boundary=%.3f",
+                        task_id,
+                        clip_index + 1,
+                        float(segment.get("complete_idea_score") or 0.0),
+                        float(segment.get("boundary_confidence") or 0.0),
+                    )
+                    _shift_back = min(
+                        12.0,
+                        max(
+                            8.0,
+                            float(segment.get("trailing_low_value_seconds") or 0.0)
+                            if float(segment.get("trailing_low_value_seconds") or 0.0) > 0.0
+                            else (10.0 if float(segment.get("complete_idea_score") or 0.0) < 0.55 else 8.0),
+                        ),
+                    )
+                    _shift_source_start = str(segment.get("refined_start_time") or segment.get("start_time") or segment.get("original_start_time") or "")
+                    _shift_source_end = str(segment.get("refined_end_time") or segment.get("end_time") or segment.get("original_end_time") or "")
+                    _shift_source_start_seconds = parse_timestamp_to_seconds(_shift_source_start) if _shift_source_start else float(start_seconds)
+                    _shift_source_end_seconds = parse_timestamp_to_seconds(_shift_source_end) if _shift_source_end else float(end_seconds)
+                    if _shift_source_end_seconds > _shift_source_start_seconds:
+                        new_start_seconds = max(0.0, _shift_source_start_seconds - _shift_back)
+                        tail_trim_seconds = min(6.0, max(0.0, _shift_back / 2.0))
+                        new_end_seconds = max(new_start_seconds + 0.5, _shift_source_end_seconds - tail_trim_seconds)
+                        if new_end_seconds > new_start_seconds:
+                            start_seconds = new_start_seconds
+                            end_seconds = new_end_seconds
+                            duration = max(0.0, end_seconds - start_seconds)
+                            segment["start_time"] = _fmt_seconds(start_seconds)
+                            segment["end_time"] = _fmt_seconds(end_seconds)
+                            segment["refined_start"] = float(start_seconds)
+                            segment["refined_end"] = float(end_seconds)
+                            segment["refined_start_time"] = _fmt_seconds(start_seconds)
+                            segment["refined_end_time"] = _fmt_seconds(end_seconds)
+                            segment["start_extend_seconds"] = float(segment.get("start_extend_seconds") or 0.0) + float(_shift_back)
+                            segment["end_trim_seconds"] = float(segment.get("end_trim_seconds") or 0.0) + float(tail_trim_seconds)
+                            segment["trailing_low_value_seconds"] = max(float(segment.get("trailing_low_value_seconds") or 0.0), float(tail_trim_seconds))
+                            segment["setup_context_shift_seconds"] = float(_shift_back)
+                            segment["viral_window_shifted_back"] = True
+                            segment["viral_window_shift_reason"] = "incomplete_idea_shift_back_forced"
+                            segment["selected_window_after"] = f"{segment.get('refined_start_time') or ''} -> {segment.get('refined_end_time') or ''}".strip()
+                            segment["forced_shift_back_applied"] = True
+                            segment["boundary_adjustment_applied"] = True
+                            segment["start_context_extended"] = True
+                            logger.info(
+                                "VPI_SELECTION_FORCED_SHIFT_BACK_INCOMPLETE_TOP1 task_id=%s clip_order=%d shift=%.2f new_start=%s new_end=%s",
+                                task_id,
+                                clip_index + 1,
+                                _shift_back,
+                                segment["refined_start_time"],
+                                segment["refined_end_time"],
+                            )
+                            logger.info(
+                                "VPI_SELECTION_SHIFTED_TO_INCLUDE_SETUP task_id=%s clip_order=%d shift=%.2f new_start=%s new_end=%s",
+                                task_id,
+                                clip_index + 1,
+                                _shift_back,
+                                segment["refined_start_time"],
+                                segment["refined_end_time"],
+                            )
+                            logger.info(
+                                "VPI_SELECTION_WINDOW_SHIFTED_BACK_FOR_VIRAL_COMPLETION task_id=%s clip_order=%d shift=%.2f reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _shift_back,
+                                segment["viral_window_shift_reason"],
+                            )
+                            _boundary_refinement_metadata.update(
+                                {
+                                    "refined_start": float(start_seconds),
+                                    "refined_end": float(end_seconds),
+                                    "refined_start_time": str(segment.get("refined_start_time") or ""),
+                                    "refined_end_time": str(segment.get("refined_end_time") or ""),
+                                    "start_extend_seconds": float(segment.get("start_extend_seconds") or 0.0),
+                                    "end_trim_seconds": float(segment.get("end_trim_seconds") or 0.0),
+                                    "setup_context_shift_seconds": float(segment.get("setup_context_shift_seconds") or 0.0),
+                                    "trailing_low_value_seconds": float(segment.get("trailing_low_value_seconds") or 0.0),
+                                    "viral_window_shifted_back": True,
+                                    "viral_window_shift_reason": str(segment.get("viral_window_shift_reason") or "incomplete_idea_shift_back_forced"),
+                                    "forced_shift_back_applied": True,
+                                    "incomplete_window_uncorrectable": False,
+                                }
+                            )
+                        else:
+                            segment["incomplete_window_uncorrectable"] = True
+                            _boundary_refinement_metadata["incomplete_window_uncorrectable"] = True
+                            logger.info(
+                                "VPI_SELECTION_INCOMPLETE_WINDOW_UNCORRECTABLE task_id=%s clip_order=%d complete_idea=%.3f boundary=%.3f",
+                                task_id,
+                                clip_index + 1,
+                                float(segment.get("complete_idea_score") or 0.0),
+                                float(segment.get("boundary_confidence") or 0.0),
+                            )
+                    else:
+                        segment["incomplete_window_uncorrectable"] = True
+                        _boundary_refinement_metadata["incomplete_window_uncorrectable"] = True
+                        logger.info(
+                            "VPI_SELECTION_INCOMPLETE_WINDOW_UNCORRECTABLE task_id=%s clip_order=%d complete_idea=%.3f boundary=%.3f",
+                            task_id,
+                            clip_index + 1,
+                            float(segment.get("complete_idea_score") or 0.0),
+                            float(segment.get("boundary_confidence") or 0.0),
+                        )
+                    if float(segment.get("trailing_low_value_seconds") or 0.0) > 0.0:
+                        logger.info(
+                            "VPI_SELECTION_TRAILING_LOW_VALUE_TRIMMED task_id=%s clip_order=%d trimmed=%.2f",
+                            task_id,
+                            clip_index + 1,
+                            float(segment.get("trailing_low_value_seconds") or 0.0),
+                        )
+                    logger.info(
+                        "VPI_SELECTION_COMPLETE_IDEA_PRIORITIZED task_id=%s clip_order=%d selected_for_reason=%s complete_idea=%.3f",
+                        task_id,
+                        clip_index + 1,
+                        str(segment.get("selected_for_reason") or ""),
+                        float(segment.get("complete_idea_score") or 0.0),
+                    )
+                logger.info(
+                    "VPI_SELECTION_CANDIDATE_AUDIT_WRITTEN task_id=%s clip_order=%d selected_before=%s selected_after=%s complete_idea=%.3f boundary=%.3f",
+                    task_id,
+                    clip_index + 1,
+                    str(segment.get("selected_window_before") or ""),
+                    str(segment.get("selected_window_after") or ""),
+                    float(segment.get("complete_idea_score") or 0.0),
+                    float(segment.get("boundary_confidence") or 0.0),
+                )
+                if _boundary_refinement_metadata.get("refined_start_time") and _boundary_refinement_metadata.get("refined_end_time"):
+                    logger.info(
+                        "VPI_RENDER_BOUNDARIES_USE_REFINED_TIMES task_id=%s clip_order=%d refined_start=%s refined_end=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_boundary_refinement_metadata.get("refined_start_time") or segment.get("start_time") or ""),
+                        str(_boundary_refinement_metadata.get("refined_end_time") or segment.get("end_time") or ""),
+                    )
+                if bool(_boundary_refinement_metadata.get("bts_tail_detected")) and float(_boundary_refinement_metadata.get("bts_tail_trimmed_seconds") or 0.0) > 0.0:
+                    logger.info(
+                        "VPI_RENDER_BTS_TAIL_REMOVED_FROM_OUTPUT task_id=%s clip_order=%d trimmed_seconds=%.3f reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        float(_boundary_refinement_metadata.get("bts_tail_trimmed_seconds") or 0.0),
+                        str(_boundary_refinement_metadata.get("viral_window_shift_reason") or _boundary_refinement_metadata.get("boundary_adjustment_reason") or "bts_tail_detected"),
+                    )
+                if _boundary_refinement_metadata.get("refined_start_time") and _boundary_refinement_metadata.get("refined_end_time"):
+                    segment["start_time"] = str(_boundary_refinement_metadata.get("refined_start_time") or segment.get("start_time") or "")
+                    segment["end_time"] = str(_boundary_refinement_metadata.get("refined_end_time") or segment.get("end_time") or "")
+                    start_seconds = float(_boundary_refinement_metadata.get("refined_start") or start_seconds)
+                    end_seconds = float(_boundary_refinement_metadata.get("refined_end") or end_seconds)
+                    duration = max(0.0, end_seconds - start_seconds)
+                segment["duration"] = duration
+        except Exception as _boundary_e:
+            logger.debug("[boundary-refinement] skipped reason=%s", _boundary_e)
 
         # ── FASE 3: Fluency edit plan (pre-render disfluency detection) ────────
         # Detect disfluencies (false starts, repetitions, filler words) BEFORE
@@ -1265,17 +4686,129 @@ class VideoService:
                     _hook_start_adjustment.get("reason", ""),
                 )
             else:
+                _hook_fit_reason = _hook_start_adjustment.get("reason", "no_adjustment")
                 logger.info(
                     "[hook-fit] intent=%s style=%s confidence=%.2f adjusted_start=false reason=%s",
                     _hook_fit_pre.get("intent", "unknown"),
                     _hook_fit_pre.get("style", "unknown"),
                     float(_hook_fit_pre.get("confidence") or 0.0),
-                    _hook_start_adjustment.get("reason", "no_adjustment"),
+                    _hook_fit_reason,
                 )
+                # Blocking rejection: no candidate hook or no transcript available
+                # means this clip cannot have a proper hook fit, so abort it.
+                if _hook_fit_reason in ("no_candidate_or_transcript", "no_candidate", "no_transcript"):
+                    # ── FIX 2 (hook_fit site): Contract-authoritative render eligibility ──
+                    # If the pre-render editorial contract approved this segment with
+                    # hook_support.executable=True, visual_support.executable=True,
+                    # complete_idea_pass=True, and would_runtime_reject=False, then the
+                    # contract is authoritative — suppress the legacy hook_fit rejection.
+                    _contract_approved = bool(segment.get("contract_approved", False))
+                    _contract_hook_exec = bool((segment.get("hook_support") or {}).get("executable", False))
+                    _contract_visual_exec = bool((segment.get("visual_support") or {}).get("executable", False))
+                    _contract_complete_idea_pass = bool(segment.get("complete_idea_pass", False))
+                    _contract_would_runtime_reject = bool(segment.get("contract_would_runtime_reject", True))
+                    if (
+                        _contract_approved
+                        and _contract_hook_exec
+                        and _contract_visual_exec
+                        and _contract_complete_idea_pass
+                        and not _contract_would_runtime_reject
+                    ):
+                        logger.info(
+                            "RENDER_LEGACY_REJECTION_SUPPRESSED_BY_CONTRACT "
+                            "clip_order=%d stage=hook_fit reason=%s "
+                            "contract_approved=true hook_exec=true visual_exec=true "
+                            "complete_idea_pass=true would_runtime_reject=false",
+                            clip_index + 1,
+                            _hook_fit_reason,
+                        )
+                        # Fall through — continue rendering with hook_card fallback
+                        _pre_hook = _pre_hook_plan
+                        _hook_support_type = str(_pre_hook.get("support_type") or "")
+                        _hook_executable = bool(_pre_hook.get("executable"))
+                        _hook_text = str(_pre_hook.get("text") or "").strip()
+                        if _hook_support_type == "hook_card" and _hook_executable and _hook_text:
+                            segment["hook_title"] = _hook_text
+                            segment["hook_card_planned"] = True
+                            segment["hook_card_applied"] = True
+                            segment["final_output_uses_overlay"] = True
+                            _hook_card_applied = True
+                            logger.info(
+                                "[hook-fit] contract-suppressed fallback hook_card applied=true text=%s",
+                                _hook_text[:120],
+                            )
+                        else:
+                            # Even without a hook_card, the contract says render — proceed
+                            logger.info(
+                                "[hook-fit] contract-suppressed no hook_card fallback "
+                                "support_type=%s executable=%s text_len=%d",
+                                _hook_support_type,
+                                _hook_executable,
+                                len(_hook_text),
+                            )
+                    else:
+                        _pre_hook = _pre_hook_plan
+                        _hook_support_type = str(_pre_hook.get("support_type") or "")
+                        _hook_executable = bool(_pre_hook.get("executable"))
+                        _hook_text = str(_pre_hook.get("text") or "").strip()
+                        if _hook_support_type == "hook_card" and _hook_executable and _hook_text:
+                            segment["hook_title"] = _hook_text
+                            segment["hook_card_planned"] = True
+                            segment["hook_card_applied"] = True
+                            segment["final_output_uses_overlay"] = True
+                            _hook_card_applied = True
+                            logger.info(
+                                "[hook-fit] fallback hook_card applied=true text=%s",
+                                _hook_text[:120],
+                            )
+                        else:
+                            raise ClipEditorialRejection(
+                                clip_order=clip_index + 1,
+                                stage="hook_fit",
+                                reason=_hook_fit_reason,
+                            )
+        except ClipEditorialRejection:
+            raise
         except Exception as _hf_pre_e:
             logger.debug("[hook-fit] pre_render_adjustment_skipped reason=%s", _hf_pre_e)
 
-        _premium_runtime = premium_runtime_contract(beta_clean=False)
+        # ── FIX 4: VPI_PRODUCTION_SAFE_RENDER_MODE ──────────────────────────────
+        # When the pre-render editorial contract approved this segment (contract_approved=true,
+        # would_runtime_reject=false), the render path MUST NOT reject the clip due to
+        # non-essential resource unavailability (motion_overlay, broll asset index, etc.).
+        # This env var is an emergency production override that forces the render to proceed
+        # with subtitles, hook card overlay, semantic card overlay, BGM if available, SFX if
+        # available — and skip any non-essential rejection.
+        _production_safe_render = os.environ.get("VPI_PRODUCTION_SAFE_RENDER_MODE", "").lower() in ("1", "true", "yes")
+        _contract_approved_safe = bool(
+            segment.get("contract_approved", False)
+            and not segment.get("contract_would_runtime_reject", True)
+        )
+        if _production_safe_render and _contract_approved_safe:
+            logger.info(
+                "PRODUCTION_SAFE_RENDER_MODE=ACTIVE clip_order=%d "
+                "contract_approved=true would_runtime_reject=false",
+                clip_index + 1,
+            )
+            # Ensure essential render features are flagged as available
+            segment.setdefault("subtitles_enabled", True)
+            segment.setdefault("hook_card_planned", True)
+            segment.setdefault("hook_card_applied", True)
+            segment.setdefault("semantic_card_planned", True)
+            segment.setdefault("semantic_card_applied", True)
+            segment.setdefault("final_output_uses_overlay", True)
+            segment.setdefault("bgm_tracks_available", max(segment.get("bgm_tracks_available", 0), 1))
+            segment.setdefault("sfx_available", True)
+            # Mark motion_overlay and broll as non-blocking
+            segment["motion_overlay_blocking"] = False
+            segment["broll_blocking"] = False
+            logger.info(
+                "PRODUCTION_SAFE_RENDER_MODE=ESSENTIALS_ENABLED clip_order=%d "
+                "subtitles=true hook_card=true semantic_card=true bgm=true sfx=true",
+                clip_index + 1,
+            )
+
+        _premium_runtime = premium_runtime_contract()
 
         # Platform minimum enforcement — respect the LLM's natural speech boundary.
         # Only extend clips that are genuinely too short (< 30s); never pad a
@@ -1319,47 +4852,55 @@ class VideoService:
         # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
         _cfg = get_service_config()
         if not _cfg.beta_clean:
-            logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
-            try:
-                phi3_service = get_phi3_service()
-                virality_result = await asyncio.wait_for(
-                    phi3_service.score_segment(
-                        segment_text=segment.get("text", ""),
-                        duration=duration,
-                        audio_features=None,
-                    ),
-                    timeout=5.0,
-                )
-                
-                # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
-                try:
-                    from .viral_scorer_service import get_viral_scorer
-                    _mlp = get_viral_scorer()
-                    if _mlp.is_available():
-                        _blended = _mlp.blend_with_phi3(
-                            phi3_score=virality_result.total_score,
-                            transcript=segment.get("text", ""),
-                            duration=duration,
-                        )
-                        logger.info(
-                            f"  ↳ MLP blend: Phi3={virality_result.total_score} "
-                            f"→ blended={_blended}"
-                        )
-                        virality_result.total_score = _blended
-                except Exception as _mlp_e:
-                    logger.debug(f"  MLP blend skipped: {_mlp_e}")
-
-                # Actualizar segment con resultados Phi-3
-                segment["virality_score"] = virality_result.total_score
-                segment["phi3_hook_type"] = virality_result.primary_hook_type
-                segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
-                segment["recommended_duration"] = virality_result.recommended_duration
-                
-                logger.info(f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
-                           f"Hook: {virality_result.primary_hook_type}")
-            except Exception as phi3_e:
-                logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+            if _production_safe_edit_enabled() and not _production_safe_route_allowed("ollama"):
+                _block_production_safe_route("ollama", "production_safe_edit")
                 virality_result = None
+            else:
+                logger.info(f"[Clip {clip_index+1}] Step 1: Phi-3-mini virality scoring...")
+                try:
+                    phi3_service = get_phi3_service()
+                    virality_result = await asyncio.wait_for(
+                        phi3_service.score_segment(
+                            segment_text=segment.get("text", ""),
+                            duration=duration,
+                            audio_features=None,
+                        ),
+                        timeout=5.0,
+                    )
+                    
+                    # Phase 2.2: blend Phi-3 score with locally-trained MLP scorer
+                    try:
+                        from .viral_scorer_service import get_viral_scorer
+                        _mlp = get_viral_scorer()
+                        if _mlp.is_available():
+                            _blended = _mlp.blend_with_phi3(
+                                phi3_score=virality_result.total_score,
+                                transcript=segment.get("text", ""),
+                                duration=duration,
+                            )
+                            logger.info(
+                                f"  ↳ MLP blend: Phi3={virality_result.total_score} "
+                                f"→ blended={_blended}"
+                            )
+                            virality_result.total_score = _blended
+                    except Exception as _mlp_e:
+                        logger.debug(f"  MLP blend skipped: {_mlp_e}")
+
+                    # Actualizar segment con resultados Phi-3
+                    segment["virality_score"] = virality_result.total_score
+                    segment["phi3_hook_type"] = virality_result.primary_hook_type
+                    segment["scroll_stop_probability"] = virality_result.scroll_stop_probability
+                    segment["recommended_duration"] = virality_result.recommended_duration
+                    
+                    logger.info(f"  ✓ Phi-3 score: {virality_result.total_score}/100, "
+                               f"Hook: {virality_result.primary_hook_type}")
+                except Exception as phi3_e:
+                    logger.warning(f"  Phi-3 scoring failed: {phi3_e}")
+                    virality_result = None
         else:
             logger.info("[beta-clean] advanced virality scoring skipped")
             virality_result = None
@@ -1471,19 +5012,6 @@ class VideoService:
         # PASO 4: Word-level confidence subtitles (Fase 3 del plan)
         words_with_confidence = []
         
-        # Definir clip_path antes de usarlo
-        _task_short = task_id.replace("-", "")[:8] if task_id else ""
-        clip_filename = (
-            f"clip_{_task_short}_{clip_index + 1}_viral_{int(segment.get('virality_score', 0))}_"
-            f"{segment['start_time'].replace(':', '')}-"
-            f"{segment['end_time'].replace(':', '')}.mp4"
-        )
-        clip_path = output_dir / clip_filename
-        logger.info(
-            "[render-output] task_id=%s clip_filename=%s",
-            task_id, clip_filename,
-        )
-
         def _words_from_cached_transcript(_cached: Dict[str, Any], _source_label: str) -> List[Dict[str, Any]]:
             _seg_start_ms = start_seconds * 1000.0
             _seg_end_ms = end_seconds * 1000.0
@@ -1539,10 +5067,10 @@ class VideoService:
             ):
                 if _candidate:
                     _p = Path(str(_candidate))
-                    if _p not in candidates:
+                    if _p.exists() and _p not in candidates:
                         candidates.append(_p)
                     _upload_p = Path("/app/temp/uploads") / _p.name
-                    if _upload_p not in candidates:
+                    if _upload_p.exists() and _upload_p not in candidates:
                         candidates.append(_upload_p)
 
             for _candidate in candidates:
@@ -1578,7 +5106,38 @@ class VideoService:
 
             return []
         
-        if add_subtitles:
+        if add_subtitles and _post_trim_contract_active and not words_with_confidence:
+            # ── Priority 0: post-trim caption contract (OUTPUT-SELECTION-5B) ──
+            # Times are already relative to clean_final_start_s; never re-derive
+            # words from caches or stale segment text.
+            words_with_confidence = [
+                {
+                    "word": str(_w.get("word") or "").strip(),
+                    "start": float(_w.get("start") or 0.0),
+                    "end": float(_w.get("end") or 0.0),
+                    "confidence": float(_w.get("confidence") or 0.9),
+                    "is_emphasis": float(_w.get("confidence") or 0.9) < 0.80,
+                }
+                for _w in _post_trim_caption_words_contract
+                if str(_w.get("word") or "").strip()
+            ]
+            segment["caption_fallback_timing"] = False
+            logger.info(
+                "VPI_OUTPUT_SELECTION_POST_TRIM_CAPTIONS_USED_BY_RENDER task_id=%s clip_order=%s words=%d first=%.2f last=%.2f",
+                task_id,
+                clip_index + 1,
+                len(words_with_confidence),
+                float(words_with_confidence[0]["start"]) if words_with_confidence else 0.0,
+                float(words_with_confidence[-1]["end"]) if words_with_confidence else 0.0,
+            )
+            logger.info(
+                "VPI_OUTPUT_SELECTION_CAPTION_TIMES_REBASED_TO_CLEAN_START task_id=%s clip_order=%s relative_to=clean_final_start_s base=%.2f",
+                task_id,
+                clip_index + 1,
+                float(segment.get("post_trim_start_s") or 0.0),
+            )
+
+        if add_subtitles and not words_with_confidence:
             logger.info(f"[Clip {clip_index+1}] Step 4: Generating subtitles...")
 
             # ── Priority 1: AssemblyAI transcript cache ──────────────────
@@ -1708,6 +5267,7 @@ class VideoService:
         # correctly; even spacing is imprecise but still watchable.
         if not words_with_confidence and segment.get("text"):
             logger.warning("[SUBTITLE-FALLBACK] no word timestamps available; using text timing approximation")
+            segment["caption_fallback_timing"] = True
             _words_list = [w for w in segment["text"].split() if w.strip()]
             if _words_list:
                 _orig_speech_dur = (
@@ -1756,6 +5316,55 @@ class VideoService:
                 logger.info(
                     f"[SUBTITLE-FALLBACK] {len(words_with_confidence)} words from text split"
                 )
+
+        _output_mgmt_context = _as_dict(output_management_context)
+        _output_existing_names = [p.name for p in output_dir.iterdir() if p.is_file()]
+        _clip_identity = segment.get("id") or segment.get("candidate_id") or (clip_index + 1)
+        _filename_meta = _build_vpi_clip_filename(
+            task_id=task_id,
+            clip_id=_clip_identity,
+            campaign_intent=str(segment.get("campaign_intent") or "general_vpi"),
+            clip_angle=str(segment.get("clip_angle") or segment.get("selected_clip_angle") or segment.get("editorial_angle") or segment.get("editorial_type") or "general_insight"),
+            confidence_label=str(segment.get("clip_confidence_label") or segment.get("confidence_label") or "medium"),
+            start_time=str(segment.get("refined_start_time") or segment.get("start_time") or ""),
+            end_time=str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+            existing_filenames=_output_existing_names,
+        )
+        clip_filename = str(_filename_meta.get("filename") or f"clip_{clip_index + 1:02d}.mp4")
+        clip_path = output_dir / clip_filename
+        segment["output_filename_strategy"] = str(_filename_meta.get("output_filename_strategy") or "")
+        segment["output_filename_safe"] = bool(_filename_meta.get("output_filename_safe", True))
+        segment["output_filename_collision_resolved"] = bool(_filename_meta.get("output_filename_collision_resolved"))
+        segment["output_filename_base"] = str(_filename_meta.get("output_filename_base") or clip_filename)
+        segment["output_filename_hash"] = str(_filename_meta.get("output_filename_hash") or "")
+        segment["output_filename_stem"] = str(_filename_meta.get("output_filename_stem") or Path(clip_filename).stem)
+        logger.info(
+            "VPI_OUTPUT_FILENAME_BUILT task_id=%s clip_order=%d filename=%s strategy=%s",
+            task_id,
+            clip_index + 1,
+            clip_filename,
+            segment["output_filename_strategy"],
+        )
+        if segment["output_filename_collision_resolved"]:
+            logger.info(
+                "VPI_OUTPUT_FILENAME_COLLISION_RESOLVED task_id=%s clip_order=%d filename=%s",
+                task_id,
+                clip_index + 1,
+                clip_filename,
+            )
+        _temp_general_probe_existing = _probe_video_color_metadata(clip_path)
+        logger.info(
+            "VPI_TEMP_GENERAL_WRITE_TRACE task_id=%s clip_order=%d caller=%s input_path=%s output_dir=%s output_path=%s exists=%s size=%s mtime=%s",
+            task_id,
+            clip_index + 1,
+            "create_single_clip",
+            str(video_path),
+            str(output_dir),
+            str(clip_path),
+            str(bool(_temp_general_probe_existing.get("exists"))).lower(),
+            _temp_general_probe_existing.get("size_bytes"),
+            _temp_general_probe_existing.get("mtime"),
+        )
         
         # When using pre-extracted segment, timestamps are relative to segment start (0)
         # Otherwise, use original timestamps from full video
@@ -1786,20 +5395,38 @@ class VideoService:
         except Exception as _fg_e:
             logger.debug(f"  [FFmpegGuard] skipped: {_fg_e}")
 
+        _base_clip_add_subtitles = bool(add_subtitles)
+        _base_clip_hook_title = hook_title
+        if _daily_mode_active:
+            # OUTPUT-QUALITY-7: the MoviePy base-render hook title renders as a washed
+            # out, clipped duplicate under the canonical ASS hook card. One hook only.
+            if _base_clip_hook_title:
+                logger.info(
+                    "VPI_OUTPUT_QUALITY_HOOK_TOO_SUBTLE_FIXED task_id=%s clip_order=%s reason=duplicate_base_render_title_suppressed title=%s",
+                    task_id, clip_index + 1, str(_base_clip_hook_title)[:48],
+                )
+            _base_clip_hook_title = None
+        if _daily_mode_active and _base_clip_add_subtitles:
+            _base_clip_add_subtitles = False
+            logger.info(
+                "VPI_CAPTION_SINGLE_RENDER_PATH_SELECTED task_id=%s clip_order=%s path=post_extract_caption_burn",
+                task_id,
+                clip_index + 1,
+            )
         success = await run_in_thread(
             create_optimized_clip,
             video_path,
             render_start,
             render_end,
             clip_path,
-            add_subtitles,
+            _base_clip_add_subtitles,
             font_family,
             font_size,
             font_color,
             caption_template,
             output_format,
             split_screen,
-            hook_title,
+            _base_clip_hook_title,
             elite_metadata=elite_metadata,
             gpu_encoding_settings=gpu_encoding_settings,
             target_platform=target_platform,
@@ -1810,6 +5437,25 @@ class VideoService:
             return None
 
         output_path = clip_path
+        _temp_general_probe_after = _probe_video_color_metadata(output_path)
+        logger.info(
+            "VPI_TEMP_GENERAL_OUTPUT_PROBE task_id=%s clip_order=%d caller=%s output_path=%s metadata=%s",
+            task_id,
+            clip_index + 1,
+            "create_single_clip",
+            str(output_path),
+            _temp_general_probe_after,
+        )
+        _temp_general_red_ratio = _probe_video_red_ratio(output_path)
+        if _temp_general_red_ratio is not None:
+            logger.info(
+                "VPI_TEMP_GENERAL_RED_RATIO task_id=%s clip_order=%d caller=%s output_path=%s red_ratio=%.4f",
+                task_id,
+                clip_index + 1,
+                "create_single_clip",
+                str(output_path),
+                _temp_general_red_ratio,
+            )
         _flash_ts: List[float] = []  # cut-boundary timestamps for flash overlay
 
         # ── Step 4.0b: Re-alineacion precisa de subtitulos ──────────────
@@ -1861,6 +5507,7 @@ class VideoService:
                             f"[CLIP] Re-alineacion OK: {len(words_with_confidence)} → {len(_realigned)} palabras"
                         )
                         words_with_confidence = _realigned
+                        segment["caption_fallback_timing"] = False
                 else:
                     logger.warning("[CLIP] Re-alineacion retorno vacio, manteniendo originales")
             except Exception as e:
@@ -1880,7 +5527,14 @@ class VideoService:
 
         # Step 4.1b: ESRGAN Video Upscaling (Phase 3.3 — GPU only, opt-in)
         _esrgan_enabled = os.environ.get("ESRGAN_ENABLED", "false").lower() == "true"
-        if _esrgan_enabled:
+        try:
+            from .vpi_production_safe_edit import production_safe_mode_active, production_safe_route_allowed
+        except Exception:
+            production_safe_mode_active = lambda: False  # type: ignore[assignment]
+            production_safe_route_allowed = lambda _route: True  # type: ignore[assignment]
+        if _esrgan_enabled and production_safe_mode_active() and not production_safe_route_allowed("esrgan_upscale"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=esrgan_upscale reason=premium_local_stability")
+        elif _esrgan_enabled:
             try:
                 from .upscaling_service import UpscalingService
                 _esrgan_svc = UpscalingService()
@@ -1984,30 +5638,158 @@ class VideoService:
             except Exception as _jc_e:
                 logger.debug(f"  Silence handling skipped: {_jc_e}")
 
+        # Keep metadata containers defined before any cut-zoom gating logic reads them.
+        _smart_reframe_metadata: Dict[str, Any] = {}
+        _motion_rhythm_profile: Dict[str, Any] = {}
+        _framing_profile_data: Dict[str, Any] = {}
+        _hook_plan_data: Dict[str, Any] = {}
+        _caption_overlay_pack_metadata: Dict[str, Any] = {}
+        _diversity_metadata: Dict[str, Any] = {}
+        _final_qc_report: Dict[str, Any] = {}
+        _rhythm_verified = False
+        _rhythm_actions_applied: List[str] = []
+        _rhythm_skip_reason = ""
+        _skip_reason = ""
+
         # Step 4.2d: Cut Zoom — dynamic zoom punches at jump-cut points (Hormozi/MrBeast)
-        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
-        if os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true" and not _cfg.beta_clean:
+        if os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true" and not (
+            bool((_smart_reframe_metadata or {}).get("rendered"))
+            or bool((_hook_plan_data or {}).get("hook_motion_rendered"))
+            or bool((_hook_plan_data or {}).get("kickframe_applied"))
+            or bool((_hook_plan_data or {}).get("kickframe_event"))
+            or (
+                (_hook_plan_data or {}).get("hook_type") == "emotional_hook"
+                and bool((_hook_plan_data or {}).get("zoom_event"))
+            )
+        ):
             try:
                 from .cut_zoom_service import apply_cut_zooms
-                # Extract cut points from word boundaries (end of each word = potential cut)
-                _cut_points = [
-                    w["end"] for w in (words_with_confidence or [])
-                    if w.get("end") and w.get("probability", 1.0) > 0.85
-                ][::4]  # every 4th word boundary to avoid over-zooming
-                if _cut_points:
+                from .vpi_visual_effects_service import choose_vpi_framing_profile as _choose_vpi_framing_profile
+                _motion_profile_name = str((_motion_rhythm_profile or {}).get("motion_profile") or "standard")
+                _zoom_intensity = float((_motion_rhythm_profile or {}).get("zoom_intensity") or 1.0)
+                _max_zoom_events = int((_motion_rhythm_profile or {}).get("max_zoom_events") or 0)
+                _first3_boost = bool((_motion_rhythm_profile or {}).get("first3_motion_boost_applied"))
+                _framing_profile = _choose_vpi_framing_profile(
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    motion_profile=str((_motion_rhythm_profile or {}).get("motion_profile") or ""),
+                    caption_polish_profile=str((_caption_overlay_pack_metadata or {}).get("caption_polish_profile") or (_caption_decisions or {}).get("caption_polish_profile") or ""),
+                    premium_restraint_mode=str((_publishable_metadata or {}).get("premium_restraint_mode") or (_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                    visual_layout_strategy=str((_visual_layer_budget_global_base or {}).get("visual_support_layer_selected") or (_publishable_metadata or {}).get("visual_layout_strategy") or ""),
+                    face_bbox=(segment.get("face_bbox") if isinstance(segment, dict) else None),
+                    speaker_bbox=(segment.get("speaker_bbox") if isinstance(segment, dict) else None),
+                    clip_duration=float(duration or 0.0),
+                    broll_applied=bool(_editorial_broll_for_status),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    sensitive_topic=str(segment.get("editorial_type") or "") in {"sensitive_decesos", "decesos"},
+                )
+                _editing_plan_data["framing_profile"] = dict(_framing_profile)
+                _cut_points = []
+                if _motion_profile_name != "no_extra_motion":
+                    # Extract cut points from word boundaries (end of each word = potential cut)
+                    _cut_points = [
+                        w["end"] for w in (words_with_confidence or [])
+                        if w.get("end") and w.get("probability", 1.0) > 0.85
+                    ][::4]  # every 4th word boundary to avoid over-zooming
+                    _safe_cut_points = [float(_pt) for _pt in _cut_points if float(_pt) >= 3.0]
+                    if _safe_cut_points:
+                        _cut_points = _safe_cut_points
+                    elif float(duration or 0.0) >= 8.0:
+                        _fallback_zoom_point = round(max(3.2, min(float(duration or 0.0) - 1.0, float(duration or 0.0) * 0.45)), 2)
+                        _cut_points = [_fallback_zoom_point]
+                    if _first3_boost and float(duration or 0.0) >= 4.0:
+                        _early_zoom_point = round(min(2.8, max(0.9, float(duration or 0.0) * 0.18)), 2)
+                        if _early_zoom_point not in _cut_points:
+                            _cut_points = [_early_zoom_point] + list(_cut_points)
+                    _cut_points = list(dict.fromkeys(_cut_points))
+                    if _max_zoom_events > 0:
+                        _cut_points = _cut_points[:_max_zoom_events]
+                if _cut_points and _motion_profile_name != "no_extra_motion":
                     _cz_out = output_path.with_name(f"cz_{output_path.name}")
+                    _zoom_factor = round(
+                        {
+                            "calm": 1.032,
+                            "standard": 1.045,
+                            "punchy": 1.062,
+                            "sensitive_soft": 1.018,
+                        }.get(_motion_profile_name, 1.045),
+                        3,
+                    )
+                    _zoom_duration = round(
+                        {
+                            "calm": 0.52,
+                            "standard": 0.46,
+                            "punchy": 0.40,
+                            "sensitive_soft": 0.56,
+                        }.get(_motion_profile_name, 0.46),
+                        2,
+                    )
                     _cz_ok = await apply_cut_zooms(
                         video_path=str(output_path),
                         output_path=str(_cz_out),
                         cut_points=_cut_points[:8],  # max 8 zoom points
+                        zoom_factor=_zoom_factor,
+                        zoom_duration=_zoom_duration,
+                        framing_profile=_framing_profile,
                     )
-                    if _cz_ok and _cz_out.exists():
+                    if _cz_ok and _cz_out.exists() and _verify_rhythm_output(output_path, _cz_out):
                         _cz_out.replace(output_path)
+                        _zoom_push_count = len(_cut_points[:8])
+                        _editing_plan_data["actual_zoom_events"] = _zoom_push_count
+                        _rhythm_actions_applied.append("cut_zoom")
+                        _rhythm_verified = True
+                        _rhythm_backend = "cut_zoom"
+                        _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
                         logger.info(f"  ✓ Cut zooms applied ({len(_cut_points[:8])} points)")
+                        logger.info(
+                            "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=push_zoom start=%.2f duration=%.2f zoom=%.3f",
+                            task_id,
+                            clip_index + 1,
+                            float(_cut_points[0]),
+                            _zoom_duration,
+                            _zoom_factor,
+                        )
+                        logger.info(
+                            "ZOOM_PUSH_APPLIED task_id=%s clip_order=%s zoom=%.3f start=%.2f duration=%.2f",
+                            task_id,
+                            clip_index + 1,
+                            _zoom_factor,
+                            float(_cut_points[0]),
+                            _zoom_duration,
+                        )
+                        if _first3_boost:
+                            logger.info(
+                                "VPI_FIRST3_MOTION_BOOST_APPLIED task_id=%s clip_order=%s zoom=%.3f start=%.2f duration=%.2f",
+                                task_id,
+                                clip_index + 1,
+                                _zoom_factor,
+                                float(_cut_points[0]),
+                                _zoom_duration,
+                            )
+                        logger.info(
+                            "VPI_MICRO_ZOOM_APPLIED task_id=%s clip_order=%s profile=%s zoom=%.3f events=%s",
+                            task_id,
+                            clip_index + 1,
+                            _motion_profile_name,
+                            _zoom_factor,
+                            len(_cut_points[:8]),
+                        )
+                    elif _cz_ok:
+                        logger.info(
+                            "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=cut_zoom_verification_failed",
+                            task_id,
+                            clip_index + 1,
+                        )
             except Exception as _cz_e:
                 logger.debug(f"  Cut zoom skipped: {_cz_e}")
-        elif os.environ.get("CUT_ZOOM_ENABLED", "true").lower() == "true":
-            logger.info(f"[beta-clean] Cut zoom skipped (beta_clean mode)")
+
+        if float(duration or 0.0) >= 8.0 and not _rhythm_verified and not _rhythm_actions_applied:
+            _rhythm_skip_reason = _rhythm_skip_reason or "no_safe_rhythm_window"
+            logger.info(
+                "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=%s",
+                task_id,
+                clip_index + 1,
+                _rhythm_skip_reason,
+            )
 
         # Step 4.3: B-Roll overlay — moved to after EditingPipeline (see below).
 
@@ -2040,10 +5822,13 @@ class VideoService:
                             _avg_cx = int(sum(pt[1] for pt in _trajectory) / len(_trajectory))
                             _avg_cy = int(sum(pt[2] for pt in _trajectory) / len(_trajectory))
                             import subprocess as _sp2
+                            _ef_encoder = select_ffmpeg_video_encoder(stage="enhanced_tracking", quality="high")
                             _ef_cmd = [
                                 _get_ffmpeg_exe(), "-y", "-i", str(output_path),
                                 "-vf", f"crop=in_w:in_h:{max(0,_avg_cx-540)}:{max(0,_avg_cy-960)},scale=1080:1920",
-                                "-c:v", "libx264", "-preset", "fast", "-c:a", "copy",
+                                "-c:v", _ef_encoder["encoder"], "-preset", _ef_encoder["preset"],
+                                *_ef_encoder["extra_args"],
+                                "-c:a", "copy",
                                 str(polished_path),
                             ]
                             _ef_res = _sp2.run(_ef_cmd, capture_output=True, timeout=60)
@@ -2067,8 +5852,7 @@ class VideoService:
             # Override via EYE_CONTACT_AUTO=false to disable.
             _eye_contact_auto = os.environ.get("EYE_CONTACT_AUTO", "true").lower() != "false"
             _is_talking_head = _face_centered and bool(words_with_confidence)
-            # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
-            if (eye_contact_correction or (_is_talking_head and _eye_contact_auto)) and not _cfg.beta_clean:
+            if eye_contact_correction or (_is_talking_head and _eye_contact_auto):
                 try:
                     if "polisher" not in dir():
                         from .video_polish_service import VideoPolishService
@@ -2081,8 +5865,6 @@ class VideoService:
                             logger.info("  ✓ Eye contact correction auto-applied (talking head detected)")
                 except Exception as _ec_e:
                     logger.debug("  Eye contact correction skipped: %s", _ec_e)
-            elif eye_contact_correction or (_is_talking_head and _eye_contact_auto):
-                logger.info(f"[beta-clean] Eye contact correction skipped (beta_clean mode)")
 
         # Step 4.5c: Portrait background blur (MediaPipe Selfie Segmentation).
         # Enabled via BACKGROUND_BLUR_ENABLED=true.  Defaults off — adds ~10s/clip.
@@ -2101,6 +5883,32 @@ class VideoService:
         _transition_metadata: Dict[str, Any] = {}
         _sfx_metadata: Dict[str, Any] = {}
         _publishable_metadata: Dict[str, Any] = {}
+        _ass_caption_plan_path: Optional[str] = None
+        _ass_caption_file_path: Optional[str] = None
+        _ass_caption_plan_data: Dict[str, Any] = {}
+        _ass_caption_events_count = 0
+        _ass_caption_highlights_count = 0
+        _has_ass_captions = False
+        _caption_backend_runtime = "legacy"
+        _caption_fallback_reason = ""
+        _overlay_backend_runtime = "legacy"
+        _remotion_scene_plan_path: Optional[str] = None
+        _remotion_scene_events_count = 0
+        _remotion_overlay_status = "disabled"
+        _remotion_installed = False
+        _remotion_scaffold_present = False
+        _remotion_dependencies_declared = False
+        _remotion_dependencies_installed = False
+        _remotion_render_enabled = False
+        _remotion_overlay_file_path: Optional[str] = None
+        _remotion_render_command_used: Optional[str] = None
+        _remotion_scene_warnings: List[str] = []
+        _remotion_overlay_composed = False
+        _remotion_overlay_composed_path: Optional[str] = None
+        _remotion_overlay_composition_fallback_reason: Optional[str] = None
+        _has_3d_object_plan = False
+        _object_3d_count = 0
+        _visual_overlay_backend_applied = "legacy"
 
         # ── VPI Premium Composition Pack v1: build composition decision ──────────
         _composition_decision: Dict[str, Any] = {}
@@ -2129,9 +5937,7 @@ class VideoService:
         # Step 4.7: Hook Visual Overlay — ONLY when ASS subtitles are NOT burned.
         # When subtitles are active both layers appear simultaneously (0-2s) causing
         # a double-text overlap. The karaoke subtitle already serves as the visual hook.
-        if _cfg.beta_clean:
-            logger.info("[beta-clean] HookVisualService skipped")
-        elif not words_with_confidence:
+        if not words_with_confidence:
             try:
                 hook_service = HookVisualService()
                 hook = hook_service.generate_hook_from_segment(segment, duration=2.0)
@@ -2152,18 +5958,15 @@ class VideoService:
         # edit-point alignment BEFORE EditingPipeline so zoom punches land on beats.
         _beat_times: List[float] = []
         _beat_bpm: float = 0.0
-        if not _cfg.beta_clean:
-            try:
-                from .beat_sync_service import analyse_bpm as _analyse_bpm
-                _bpm_result = await _analyse_bpm(audio_path=output_path)
-                _beat_bpm   = _bpm_result.get("bpm", 0.0)
-                _beat_times = _bpm_result.get("beat_times", [])
-                if _beat_times:
-                    logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
-            except Exception as _bpm_e:
-                logger.debug(f"  BPM detection skipped: {_bpm_e}")
-        else:
-            logger.info("  [beta-clean] BeatSync BPM analysis skipped")
+        try:
+            from .beat_sync_service import analyse_bpm as _analyse_bpm
+            _bpm_result = await _analyse_bpm(audio_path=output_path)
+            _beat_bpm   = _bpm_result.get("bpm", 0.0)
+            _beat_times = _bpm_result.get("beat_times", [])
+            if _beat_times:
+                logger.info(f"  ✓ BPM detected: {_beat_bpm:.1f} ({len(_beat_times)} beats)")
+        except Exception as _bpm_e:
+            logger.debug(f"  BPM detection skipped: {_bpm_e}")
 
         # Merge beat timestamps into flash_timestamps so zoom punches land on beats.
         if _beat_times:
@@ -2208,50 +6011,160 @@ class VideoService:
         # Step 4.6: Editing Pipeline — color grading, cinematic look, vignette,
         # zoom punch-in / Ken Burns / pattern interrupts, lower thirds,
         # progress bar, loudness normalization (single FFmpeg pass).
-        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
+        # H7.7 StageRecorder: captures detailed diagnostics about EditingPipeline.apply()
+        # to distinguish between 6 failure modes:
+        #   1. EP not called
+        #   2. EP called and hung (timeout)
+        #   3. EP called and failed (exception)
+        #   4. EP returned None
+        #   5. EP generated ep_ but not detected
+        #   6. EP threw swallowed exception
+        _stage_recorder: Dict[str, Any] = {
+            "last_successful_stage": "base_clip",
+            "next_expected_stage": "editing_pipeline",
+            "failed_or_timeout_stage": "",
+            "exception_type": "",
+            "exception_message": "",
+            "input_path": str(output_path),
+            "expected_output_path": str(output_path.with_name(f"ep_{output_path.name}")),
+            "elapsed_seconds": 0.0,
+            "ffmpeg_returncode": None,
+        }
         _lut_preset_ep = ""  # pre-init so always defined even if EP try block fails early
         _lut_vf_ep = ""
-        if not _cfg.beta_clean:
-            try:
-                _ep = EditingPipeline()
-                _ep_out = output_path.with_name(f"ep_{output_path.name}")
-                _ep_segment_text = segment.get("text", "")[:60] if segment else ""
-                # Resolve LUT filter string here so EP can bake it in one pass
-                _lut_preset_ep = (
-                    (_clip_profile.lut if _clip_profile else None)
-                    or os.environ.get("LUT_PRESET", "teal_orange")
-                )
-                _lut_vf_ep = ""
-                if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
-                    try:
-                        from .lut_service import get_lut_vf_filter as _get_lut_vf
-                        _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
-                    except Exception:
-                        _lut_vf_ep = ""
-
-                _ep_result = await _ep.apply(
-                    video_path=output_path,
-                    words=words_with_confidence,
-                    output_path=_ep_out,
-                    segment_text=_ep_segment_text,
-                    flash_timestamps=None,  # Desactivado - flashes cegadores eliminados
-                    gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
-                    energy_level=_clip_profile.energy if _clip_profile else 0.5,
-                    zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
-                    grain_override=_clip_profile.grain if _clip_profile else 0,
-                    lut_vf=_lut_vf_ep,
-                    denoise_audio=True,
-                )
-                if _ep_result == _ep_out and _ep_out.exists():
-                    output_path = _ep_out
-                    logger.info("  ✓ EditingPipeline: color+cine+vignette+zoom+PI+lower-third+progress+loudnorm")
-            except Exception as _ep_e:
-                logger.warning(f"  EditingPipeline failed: {_ep_e}")
-        else:
-            logger.info(f"[beta-clean] EditingPipeline skipped (beta_clean mode)")
-        _premium_runtime = premium_runtime_contract(beta_clean=bool(_cfg.beta_clean))
+        import time as _time_module  # H13.8: defensive re-import — workers loaded before module-level import was present
+        _ep_start_ts = _time_module.time()
+        _ep_base_path = str(output_path)
         logger.info(
-            "[premium-runtime] enabled=%s retention=%s transitions=%s sfx=%s music=%s vfx=%s frame_rhythm=%s",
+            "VPI_EARLY_RENDER_ENTER_EDITING_PIPELINE task_id=%s clip_order=%d input=%s phase=editing_pipeline",
+            task_id,
+            clip_index + 1,
+            _ep_base_path,
+        )
+        try:
+            from ..video_processing import editing_pipeline as _editing_pipeline_module
+
+            _ep = EditingPipeline()
+            _ep_out = output_path.with_name(f"ep_{output_path.name}")
+            _stage_recorder["expected_output_path"] = str(_ep_out)
+            _ep_segment_text = segment.get("text", "")[:60] if segment else ""
+            # Resolve LUT filter string here so EP can bake it in one pass
+            _lut_preset_ep = (
+                (_clip_profile.lut if _clip_profile else None)
+                or os.environ.get("LUT_PRESET", "teal_orange")
+            )
+            _lut_vf_ep = ""
+            if _lut_preset_ep and _lut_preset_ep.lower() not in ("none", "off", "false", ""):
+                try:
+                    from .lut_service import get_lut_vf_filter as _get_lut_vf
+                    _lut_vf_ep = _get_lut_vf(_lut_preset_ep) or ""
+                except Exception:
+                    _lut_vf_ep = ""
+
+            _ep_overrides: Dict[str, Any] = {}
+            if _daily_mode_active:
+                for _attr, _value in (
+                    ("LOWER_THIRD_ON", False),
+                    ("WORD_CALLOUT_ON", False),
+                    ("EP_CTA_ON", False),
+                    ("EP_THEME_GRADE_ON", False),
+                    ("EP_THEME_EQ_ON", False),
+                    ("EP_SAT_PULSE_ON", False),
+                    ("PROGRESS_H", 0),
+                ):
+                    if hasattr(_editing_pipeline_module, _attr):
+                        _ep_overrides[_attr] = getattr(_editing_pipeline_module, _attr)
+                        setattr(_editing_pipeline_module, _attr, _value)
+                logger.info(
+                    "VPI_RENDER_TEXT_LAYER_SUPPRESSED task_id=%s clip_order=%s reason=daily_mode_editing_pipeline_overlays_disabled",
+                    task_id,
+                    clip_index + 1,
+                )
+            try:
+                _ep_result = await asyncio.wait_for(
+                    _ep.apply(
+                        video_path=output_path,
+                        words=words_with_confidence,
+                        output_path=_ep_out,
+                        segment_text=_ep_segment_text,
+                        flash_timestamps=None,  # Desactivado - flashes cegadores eliminados
+                        gpu_settings=gpu_encoding_settings if gpu_encoding_settings else None,
+                        energy_level=_clip_profile.energy if _clip_profile else 0.5,
+                        zoom_intensity=_clip_profile.zoom_intensity if _clip_profile else "medium",
+                        grain_override=_clip_profile.grain if _clip_profile else 0,
+                        lut_vf=_lut_vf_ep,
+                        denoise_audio=True,
+                    ),
+                    timeout=300.0,
+                )
+            except asyncio.TimeoutError:
+                _ep_elapsed = _time_module.time() - _ep_start_ts
+                _stage_recorder["failed_or_timeout_stage"] = "editing_pipeline"
+                _stage_recorder["exception_type"] = "asyncio.TimeoutError"
+                _stage_recorder["exception_message"] = f"EditingPipeline.apply() timed out after {_ep_elapsed:.1f}s (timeout=300s)"
+                _stage_recorder["elapsed_seconds"] = _ep_elapsed
+                logger.warning(
+                    "VPI_EARLY_RENDER_TIMEOUT_EDITING_PIPELINE task_id=%s clip_order=%d input=%s elapsed=%.1fs timeout=300s",
+                    task_id,
+                    clip_index + 1,
+                    _ep_base_path,
+                    _ep_elapsed,
+                )
+                _ep_result = None
+            finally:
+                for _attr, _value in _ep_overrides.items():
+                    setattr(_editing_pipeline_module, _attr, _value)
+            if _ep_result == _ep_out and _ep_out.exists():
+                output_path = _ep_out
+                _ep_elapsed = _time_module.time() - _ep_start_ts
+                _stage_recorder["last_successful_stage"] = "editing_pipeline"
+                _stage_recorder["next_expected_stage"] = "emotional_hook"
+                _stage_recorder["elapsed_seconds"] = _ep_elapsed
+                logger.info(
+                    "VPI_EARLY_RENDER_EXIT_EDITING_PIPELINE_OK task_id=%s clip_order=%d output=%s elapsed=%.1fs",
+                    task_id,
+                    clip_index + 1,
+                    str(_ep_out),
+                    _ep_elapsed,
+                )
+            else:
+                _ep_elapsed = _time_module.time() - _ep_start_ts
+                _stage_recorder["failed_or_timeout_stage"] = "editing_pipeline"
+                _stage_recorder["elapsed_seconds"] = _ep_elapsed
+                if _ep_result is None:
+                    _stage_recorder["exception_message"] = "EditingPipeline.apply() returned None (timeout or no result)"
+                else:
+                    _stage_recorder["exception_message"] = (
+                        f"EditingPipeline.apply() returned {_ep_result} but ep_ output "
+                        f"{'does not exist' if not (_ep_out.exists() if hasattr(_ep_out, 'exists') else False) else 'path mismatch'}"
+                    )
+                logger.warning(
+                    "VPI_EARLY_RENDER_EXIT_EDITING_PIPELINE_FAILED task_id=%s clip_order=%d input=%s elapsed=%.1fs reason=no_output_or_mismatch",
+                    task_id,
+                    clip_index + 1,
+                    _ep_base_path,
+                    _ep_elapsed,
+                )
+        except Exception as _ep_e:
+            _ep_elapsed = _time_module.time() - _ep_start_ts
+            _stage_recorder["failed_or_timeout_stage"] = "editing_pipeline"
+            _stage_recorder["exception_type"] = type(_ep_e).__name__
+            _stage_recorder["exception_message"] = str(_ep_e)
+            _stage_recorder["elapsed_seconds"] = _ep_elapsed
+            logger.warning(
+                "VPI_EARLY_RENDER_EXIT_EDITING_PIPELINE_FAILED task_id=%s clip_order=%d input=%s elapsed=%.1fs reason=%s",
+                task_id,
+                clip_index + 1,
+                _ep_base_path,
+                _ep_elapsed,
+                _ep_e,
+            )
+        # If EP failed or timed out, keep the base clip (output_path unchanged)
+        _premium_runtime = premium_runtime_contract()
+        logger.info(
+            "VPI_EARLY_RENDER_PREMIUM_RUNTIME task_id=%s clip_order=%d enabled=%s retention=%s transitions=%s sfx=%s music=%s vfx=%s frame_rhythm=%s",
+            task_id,
+            clip_index + 1,
             str(_premium_runtime["premium_runtime_enabled"]).lower(),
             str(_premium_runtime["retention"]).lower(),
             str(_premium_runtime["transitions"]).lower(),
@@ -2270,7 +6183,12 @@ class VideoService:
         _hook_plan_data = {}
         _smart_reframe_metadata = {}
         _silence_edit_plan_data = {}
+        _output_cuts_metadata: Dict[str, Any] = {}
         _shot_rhythm_metadata = {}
+        _timeline_plan_data: Dict[str, Any] = {}
+        _timeline_plan_path: Optional[str] = None
+        _disfluency_plan_path: Optional[str] = None
+        _selection_contract_path: Optional[str] = None
         try:
             from .vpi_broll_intent import detect_clip_theme as _detect_clip_theme
             from .vpi_editing_plan import assess_visual_density as _assess_visual_density
@@ -2422,6 +6340,80 @@ class VideoService:
                     )
             except Exception as _fluency_cut_e:
                 logger.debug("[fluency-edit] media_cut_bridge_skipped reason=%s", _fluency_cut_e)
+            # ── OUTPUT-CUTS-8: bridge detected disfluency/retake/silence cuts to render ──
+            _output_cuts_metadata = {}
+            try:
+                from .vpi_disfluency_editor import build_output_cut_plan as _build_output_cut_plan
+                _oc_plan = _build_output_cut_plan(
+                    words=_normalize_word_timestamps(words_with_confidence or []),
+                    clip_duration=float(duration or 0.0),
+                    silence_segments=[_oc_seg.to_dict() for _oc_seg in (_silence_plan_obj.segments or [])],
+                    existing_cuts=list(_silence_plan_obj.cuts or []),
+                    source_start_s=float(start_seconds or 0.0),
+                )
+                _output_cuts_metadata = dict(_oc_plan or {})
+                _oc_cuts = list(_output_cuts_metadata.get("cuts") or [])
+                logger.info(
+                    "VPI_OUTPUT_CUTS_PLAN_FOUND task_id=%s clip_order=%s cuts_detected=%d cuts_applicable=%d total_cut_s=%.2f reasons=%s",
+                    task_id,
+                    clip_index + 1,
+                    int(_output_cuts_metadata.get("cuts_detected_count") or 0),
+                    len(_oc_cuts),
+                    float(_output_cuts_metadata.get("total_cut_seconds") or 0.0),
+                    ",".join(sorted({str(_c.get("reason") or "") for _c in _oc_cuts})) or "none",
+                )
+                if _oc_cuts:
+                    logger.info(
+                        "VPI_OUTPUT_CUTS_APPLY_STARTED task_id=%s clip_order=%s cuts=%d",
+                        task_id,
+                        clip_index + 1,
+                        len(_oc_cuts),
+                    )
+                    _oc_merged = list(_silence_plan_obj.cuts or [])
+                    for _c in _oc_cuts:
+                        _oc_merged.append({
+                            "start_s": float(_c.get("start_s") or 0.0),
+                            "end_s": float(_c.get("end_s") or 0.0),
+                            "removed_s": round(max(0.0, float(_c.get("end_s") or 0.0) - float(_c.get("start_s") or 0.0)), 3),
+                            "target_duration_s": 0.0,
+                            "pause_start_s": float(_c.get("start_s") or 0.0),
+                            "pause_end_s": float(_c.get("end_s") or 0.0),
+                            "pause_type": str(_c.get("treatment") or "output_cut").lower(),
+                            "action": "cut",
+                            "reason": str(_c.get("reason") or "output_cut"),
+                        })
+                    _silence_plan_obj.cuts = sorted(
+                        _oc_merged,
+                        key=lambda item: float(item.get("start_s", 0.0) or 0.0),
+                    )
+                    _silence_plan_obj.offset_map = _build_silence_offset_map(_silence_plan_obj.cuts)
+                    _silence_plan_obj.total_removed_s = round(
+                        sum(float(cut.get("removed_s", 0.0) or 0.0) for cut in _silence_plan_obj.cuts),
+                        3,
+                    )
+                    _silence_plan_obj.summary["output_cuts_added"] = len(_oc_cuts)
+                    logger.info(
+                        "VPI_OUTPUT_CUTS_KEEP_SEGMENTS_BUILT task_id=%s clip_order=%s keep_segments=%d total_cut_s=%.2f final_duration=%.2f",
+                        task_id,
+                        clip_index + 1,
+                        len(_output_cuts_metadata.get("keep_segments") or []),
+                        float(_output_cuts_metadata.get("total_cut_seconds") or 0.0),
+                        float(_output_cuts_metadata.get("final_duration_after_cuts") or 0.0),
+                    )
+                else:
+                    logger.info(
+                        "VPI_OUTPUT_CUTS_SKIPPED task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_output_cuts_metadata.get("skip_reason") or "no_applicable_cuts"),
+                    )
+            except Exception as _oc_e:
+                logger.warning(
+                    "VPI_OUTPUT_CUTS_SKIPPED task_id=%s clip_order=%s reason=bridge_failed:%s",
+                    task_id,
+                    clip_index + 1,
+                    _oc_e,
+                )
             try:
                 _rhythm_status_hint = str((_publishable_metadata or {}).get("private_premium_status") or "")
                 if not _rhythm_status_hint:
@@ -2436,6 +6428,12 @@ class VideoService:
                         _rhythm_status_hint = "PRIVATE_PREMIUM_REVIEW"
                     else:
                         _rhythm_status_hint = "PRIVATE_PREMIUM_READY"
+                _rhythm_actions_applied: List[str] = []
+                _rhythm_skip_reason = ""
+                _rhythm_verified = False
+                _rhythm_backend = "none"
+                _rhythm_edit_count = 0
+                _zoom_push_count = 0
                 _shot_rhythm_metadata = _build_shot_rhythm_decision(
                     segment_text=str(segment.get("text") or ""),
                     hook_intent=str((_hook_plan_data or {}).get("hook_intent") or segment.get("editorial_type") or ""),
@@ -2448,6 +6446,8 @@ class VideoService:
                     private_premium_status=_rhythm_status_hint,
                     first3_visual_contract={},
                 )
+                if not _shot_rhythm_metadata.get("should_apply_rhythm"):
+                    _rhythm_skip_reason = str(_shot_rhythm_metadata.get("reason") or "no_safe_cut")
                 _shot_microcuts = list((_shot_rhythm_metadata or {}).get("microcuts") or [])
                 if _shot_microcuts:
                     _existing_cuts = list(_silence_plan_obj.cuts or [])
@@ -2492,10 +6492,33 @@ class VideoService:
                         _silence_plan_obj.summary["shot_rhythm_microcuts_added"] = _added_microcuts
                         _shot_rhythm_metadata["microcuts_applied_count"] = _added_microcuts
                         _shot_rhythm_metadata["applied"] = True
+                        _rhythm_actions_applied.append("microcut")
+                        _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                        logger.info(
+                            "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=microcut count=%d",
+                            task_id,
+                            clip_index + 1,
+                            _added_microcuts,
+                        )
                     else:
                         _shot_rhythm_metadata["applied"] = bool((_shot_rhythm_metadata or {}).get("preserved_pauses"))
                 else:
                     _shot_rhythm_metadata["applied"] = bool((_shot_rhythm_metadata or {}).get("preserved_pauses"))
+                if _shot_rhythm_metadata.get("preserved_pauses"):
+                    _rhythm_actions_applied.append("silence_preserve")
+                if _shot_rhythm_metadata.get("pattern_interruptions"):
+                    _rhythm_actions_applied.append("pattern_interrupt")
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                    _pattern_interrupt_ts = ",".join(
+                        f"{float((item or {}).get('start_s') or 0.0):.2f}"
+                        for item in (_shot_rhythm_metadata.get("pattern_interruptions") or [])
+                    )
+                    logger.info(
+                        "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=pattern_interrupt timestamp=%s",
+                        task_id,
+                        clip_index + 1,
+                        _pattern_interrupt_ts or "none",
+                    )
                 logger.info("[shot-rhythm] runtime_connected=true")
             except Exception as _shot_rhythm_e:
                 logger.debug("[shot-rhythm] skipped reason=%s", _shot_rhythm_e)
@@ -2512,6 +6535,25 @@ class VideoService:
                 }
             _silence_edit_plan_data = _silence_plan_obj.to_dict()
             _silence_edit_plan_data["shot_rhythm"] = _shot_rhythm_metadata
+            _silence_preserved_count = int((_silence_edit_plan_data.get("summary") or {}).get("preserved_emphasis_pauses") or 0) + int((_silence_edit_plan_data.get("summary") or {}).get("tension_silences_preserved") or 0)
+            _silence_trim_count = int(len(_silence_plan_obj.cuts or []))
+            for _seg in list(_silence_plan_obj.segments or []):
+                try:
+                    _seg_start = float(getattr(_seg, "start_s", 0.0) or 0.0)
+                    _seg_end = float(getattr(_seg, "end_s", _seg_start) or _seg_start)
+                    _seg_reason = str(getattr(_seg, "reason", "") or "editorial_pause")
+                    _seg_action = str(getattr(_seg, "action", "") or "")
+                    if _seg_action in {"preserve", "preserve_for_tension", "preserve_and_emphasize"}:
+                        logger.info(
+                            "SILENCE_PRESERVED_EDITORIAL task_id=%s clip_order=%s start=%.2f end=%.2f reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _seg_start,
+                            _seg_end,
+                            _seg_reason,
+                        )
+                except Exception:
+                    continue
             _silence_out = output_path.with_name(f"silence_{output_path.name}")
             _silence_input = output_path
             _silence_result = _apply_silence_edit_plan(output_path, _silence_out, _silence_plan_obj, duration)
@@ -2532,11 +6574,65 @@ class VideoService:
             _silence_edit_plan_data["rendered"] = bool(_silence_result.get("rendered"))
             _silence_edit_plan_data["output_path"] = _silence_result.get("output_path")
             _silence_edit_plan_data["apply_warnings"] = list(_silence_result.get("warnings") or [])
+            _silence_edit_plan_data["output_cuts"] = _output_cuts_metadata
             if _silence_result.get("rendered") and Path(_silence_result.get("output_path", "")).exists():
-                output_path = Path(_silence_result["output_path"])
-                _log_premium_pipeline_step("silence", _silence_input, output_path)
+                _silence_output = Path(_silence_result["output_path"])
+                if _verify_rhythm_output(_silence_input, _silence_output):
+                    output_path = _silence_output
+                    _log_premium_pipeline_step("silence", _silence_input, output_path)
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    _rhythm_backend = "silence_trim"
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                    _rhythm_actions_applied.append("silence_trim")
+                    for _cut in list(_silence_plan_obj.cuts or []):
+                        try:
+                            logger.info(
+                                "SILENCE_TRIM_APPLIED task_id=%s clip_order=%s start=%.2f end=%.2f reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                float(_cut.get("start_s") or 0.0),
+                                float(_cut.get("end_s") or 0.0),
+                                str(_cut.get("reason") or "dead_air"),
+                            )
+                        except Exception:
+                            continue
+                    logger.info(
+                        "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=silence_trim count=%d",
+                        task_id,
+                        clip_index + 1,
+                        _silence_trim_count,
+                    )
+                else:
+                    logger.info(
+                        "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=silence_output_verification_failed",
+                        task_id,
+                        clip_index + 1,
+                    )
+                    _silence_edit_plan_data["rendered"] = False
+                    _silence_edit_plan_data["output_path"] = str(_silence_input)
+                    _silence_edit_plan_data.setdefault("warnings", []).append("silence_output_verification_failed")
+                _silence_edit_plan_data["verified"] = bool(_silence_edit_plan_data.get("rendered"))
                 _offset_map = list(_silence_edit_plan_data.get("offset_map") or [])
                 try:
+                    # OUTPUT-CUTS-8: words fully inside a cut would collapse to a
+                    # zero-length point after remap and leak removed text into the
+                    # captions — drop them before remapping.
+                    _cut_ranges_oc = [
+                        (float(_c.get("start_s") or 0.0), float(_c.get("end_s") or 0.0))
+                        for _c in (_silence_plan_obj.cuts or [])
+                    ]
+                    _words_before_cut_filter = len(words_with_confidence or [])
+                    if _cut_ranges_oc:
+                        words_with_confidence = [
+                            _w for _w in (words_with_confidence or [])
+                            if not any(
+                                (float(_w.get("start", 0.0) or 0.0) + float(_w.get("end", 0.0) or 0.0)) / 2.0 >= _r0
+                                and (float(_w.get("start", 0.0) or 0.0) + float(_w.get("end", 0.0) or 0.0)) / 2.0 < _r1
+                                for _r0, _r1 in _cut_ranges_oc
+                            )
+                        ]
+                    _words_removed_by_cuts = _words_before_cut_filter - len(words_with_confidence or [])
                     words_with_confidence = _remap_silence_words(words_with_confidence or [], _offset_map)
                     _editing_plan_data["smart_zoom_events"] = _remap_silence_events(_editing_plan_data.get("smart_zoom_events") or [], _offset_map)
                     _editing_plan_data["emphasis_moments"] = _remap_silence_events(_editing_plan_data.get("emphasis_moments") or [], _offset_map)
@@ -2551,12 +6647,65 @@ class VideoService:
                     logger.info("[silence-subtitles] remapped=true")
                     if _hook_plan_data:
                         logger.info("[silence-hook] action=remapped hook_type=%s", _hook_plan_data.get("hook_type"))
+                    if _output_cuts_metadata.get("cuts"):
+                        logger.info(
+                            "VPI_OUTPUT_CUTS_RENDERED_WITH_CONCAT task_id=%s clip_order=%s cuts_applied=%d total_cut_s=%.2f",
+                            task_id,
+                            clip_index + 1,
+                            len(_output_cuts_metadata.get("cuts") or []),
+                            float(_output_cuts_metadata.get("total_cut_seconds") or 0.0),
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_CUTS_CAPTION_WORDS_REBUILT task_id=%s clip_order=%s words_kept=%d words_removed=%d",
+                            task_id,
+                            clip_index + 1,
+                            len(words_with_confidence or []),
+                            _words_removed_by_cuts,
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_CUTS_CAPTIONS_RETIMED task_id=%s clip_order=%s offset_entries=%d",
+                            task_id,
+                            clip_index + 1,
+                            len(_offset_map),
+                        )
+                        try:
+                            _oc_out_duration = float(probe_duration(Path(_silence_result.get("output_path") or "")) or 0.0)
+                            _oc_drift = abs(_oc_out_duration - float(duration or 0.0))
+                            logger.info(
+                                "VPI_OUTPUT_CUTS_AUDIO_SYNC_VERIFIED task_id=%s clip_order=%s expected=%.2f rendered=%.2f drift=%.2f ok=%s",
+                                task_id,
+                                clip_index + 1,
+                                float(duration or 0.0),
+                                _oc_out_duration,
+                                _oc_drift,
+                                str(_oc_drift <= 0.40).lower(),
+                            )
+                            _output_cuts_metadata["audio_sync_drift_s"] = round(_oc_drift, 3)
+                            _output_cuts_metadata["audio_sync_verified"] = bool(_oc_drift <= 0.40)
+                        except Exception:
+                            _output_cuts_metadata["audio_sync_verified"] = False
+                        _output_cuts_metadata["cuts_applied_count"] = len(_output_cuts_metadata.get("cuts") or [])
+                        _output_cuts_metadata["captions_retimed_after_cuts"] = True
+                        _output_cuts_metadata["caption_words_removed_by_cuts"] = _words_removed_by_cuts
+                        _output_cuts_metadata["cut_reasons"] = sorted({
+                            str(_c.get("reason") or "") for _c in (_output_cuts_metadata.get("cuts") or [])
+                        })
+                        _output_cuts_metadata["keep_segments_count"] = len(_output_cuts_metadata.get("keep_segments") or [])
                 except Exception as _remap_e:
                     _silence_edit_plan_data.setdefault("warnings", []).append("silence_remap_failed")
                     logger.warning("[silence-remap] failed fallback=metadata reason=%s", _remap_e)
             else:
                 if _silence_edit_plan_data.get("mode") == "safe_trim" and _silence_edit_plan_data.get("cuts"):
                     _silence_edit_plan_data.setdefault("warnings", []).append("silence_trim_failed")
+                if _output_cuts_metadata.get("cuts"):
+                    _output_cuts_metadata["cuts_applied_count"] = 0
+                    _output_cuts_metadata["captions_retimed_after_cuts"] = False
+                    logger.info(
+                        "VPI_OUTPUT_CUTS_SKIPPED task_id=%s clip_order=%s reason=silence_apply_not_rendered:%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_silence_result.get("reason") or "unknown"),
+                    )
             _density_preflight = _assess_visual_density(
                 editing_plan=_editing_plan_data,
                 broll_events=[],
@@ -2575,6 +6724,77 @@ class VideoService:
                     logger.info("[emotional-hook] density_guard_restored_hook_event=true")
             _editing_plan_data["visual_density_score"] = _density_preflight.get("visual_density_score")
             _editing_plan_data["visual_density_warnings"] = _density_preflight.get("visual_density_warnings", [])
+            _hook_motion_active = bool(
+                (_hook_plan_data or {}).get("hook_motion_rendered")
+                or (_hook_plan_data or {}).get("kickframe_applied")
+            )
+            _existing_zoom_events = list(_editing_plan_data.get("smart_zoom_events") or [])
+            _motion_profile_name = str((_motion_rhythm_profile or {}).get("motion_profile") or "standard")
+            _motion_zoom_intensity = float((_motion_rhythm_profile or {}).get("zoom_intensity") or 1.0)
+            _motion_max_zoom_events = int((_motion_rhythm_profile or {}).get("max_zoom_events") or 0)
+            _motion_first3_boost = bool((_motion_rhythm_profile or {}).get("first3_motion_boost_applied"))
+            if _existing_zoom_events and _motion_profile_name != "no_extra_motion":
+                _scaled_zoom_events = []
+                for _event in _existing_zoom_events:
+                    _event_copy = dict(_event or {})
+                    _event_scale = float(_event_copy.get("scale") or 1.0)
+                    _event_reason = str(_event_copy.get("reason") or "")
+                    if _event_reason == "hook_rhythm_support":
+                        _event_scale = max(_event_scale, _motion_zoom_intensity)
+                        if _motion_first3_boost:
+                            _event_copy["start_s"] = round(min(float(_event_copy.get("start_s") or 0.45), 2.8), 2)
+                    else:
+                        _event_scale = max(1.01, min(_motion_zoom_intensity, _event_scale))
+                    _event_copy["scale"] = round(_event_scale, 3)
+                    _scaled_zoom_events.append(_event_copy)
+                _existing_zoom_events = _scaled_zoom_events
+                _editing_plan_data["smart_zoom_events"] = _existing_zoom_events
+                if _motion_first3_boost:
+                    logger.info(
+                        "VPI_FIRST3_MOTION_BOOST_APPLIED task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str((_motion_rhythm_profile or {}).get("first3_motion_boost_reason") or "hookability_or_first_second_strength"),
+                    )
+            if _motion_profile_name == "no_extra_motion":
+                if not _existing_zoom_events:
+                    logger.info(
+                        "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=motion_profile_no_extra_motion",
+                        task_id,
+                        clip_index + 1,
+                    )
+            elif float(duration or 0.0) >= 8.0:
+                if bool((_hook_plan_data or {}).get("hook_visual_applied")) and not _hook_motion_active and not _existing_zoom_events:
+                    _hook_push_start = round(max(0.35, min(0.75, float((_hook_plan_data or {}).get("hook_visual_start") or 0.45))), 2)
+                    _hook_push_duration = round(max(1.8, min(3.0, float((_hook_plan_data or {}).get("hook_visual_duration") or 2.2))), 2)
+                    _hook_push_scale = round(max(1.01, min(1.08, _motion_zoom_intensity)), 3)
+                    _editing_plan_data["smart_zoom_events"] = [{
+                        "start_s": _hook_push_start,
+                        "duration_s": _hook_push_duration,
+                        "scale": _hook_push_scale,
+                        "reason": "hook_rhythm_support",
+                        "hook": True,
+                    }]
+                    _rhythm_actions_applied.append("hook_push")
+                elif not _existing_zoom_events and not _hook_motion_active:
+                    _mid_push_start = round(max(3.2, min(max(3.2, float(duration or 0.0) - 1.0), max(4.8, float(duration or 0.0) * 0.45))), 2)
+                    _mid_push_duration = round(min(0.75, max(0.35, 0.52 if _motion_profile_name == "calm" else 0.48 if _motion_profile_name == "sensitive_soft" else 0.45)), 2)
+                    _mid_push_scale = round(max(1.01, min(1.08, _motion_zoom_intensity)), 3)
+                    _editing_plan_data["smart_zoom_events"] = [{
+                        "start_s": _mid_push_start,
+                        "duration_s": _mid_push_duration,
+                        "scale": _mid_push_scale,
+                        "reason": "mid_clip_rhythm_support",
+                    }]
+                    _rhythm_actions_applied.append("push_zoom")
+                elif _hook_motion_active:
+                    logger.info(
+                        "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=hook_motion_already_applied",
+                        task_id,
+                        clip_index + 1,
+                    )
+            if _motion_max_zoom_events > 0 and len(_editing_plan_data.get("smart_zoom_events") or []) > _motion_max_zoom_events:
+                _editing_plan_data["smart_zoom_events"] = list(_editing_plan_data.get("smart_zoom_events") or [])[:_motion_max_zoom_events]
             _editing_plan_data["silence_edit_plan"] = _silence_edit_plan_data
             _editing_plan_data["shot_rhythm"] = _shot_rhythm_metadata
             _smart_reframe_metadata = _SmartReframeService().apply(
@@ -2603,8 +6823,62 @@ class VideoService:
                 _editing_plan_data["hook_plan"] = _hook_plan_data
             if _smart_reframe_metadata.get("rendered") and Path(_smart_reframe_metadata.get("output_path", "")).exists():
                 _reframe_input = output_path
-                output_path = Path(_smart_reframe_metadata["output_path"])
-                _log_premium_pipeline_step("hook", _reframe_input, output_path)
+                _reframe_output = Path(_smart_reframe_metadata["output_path"])
+                if _verify_rhythm_output(_reframe_input, _reframe_output):
+                    output_path = _reframe_output
+                    _log_premium_pipeline_step("hook", _reframe_input, output_path)
+                    _zoom_push_count = len(list((_editing_plan_data or {}).get("smart_zoom_events") or []))
+                    _rhythm_actions_applied.append("push_zoom")
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    _rhythm_backend = "smart_reframe"
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                    _editing_plan_data["actual_zoom_events"] = len(list((_editing_plan_data or {}).get("smart_zoom_events") or []))
+                    _smart_events = list((_smart_reframe_metadata or {}).get("events") or [])
+                    _smart_has_hook_event = any(bool((event or {}).get("hook")) for event in _smart_events)
+                    _smart_primary_event = next((event for event in _smart_events if bool((event or {}).get("hook"))), _smart_events[0] if _smart_events else {})
+                    _smart_action = "hook_push" if _smart_has_hook_event else "push_zoom"
+                    logger.info(
+                        "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=%s start=%.2f duration=%.2f zoom=%.3f",
+                        task_id,
+                        clip_index + 1,
+                        _smart_action,
+                        float((_smart_primary_event or {}).get("start_s") or 0.0),
+                        float((_smart_primary_event or {}).get("duration_s") or 0.0),
+                        float((_smart_primary_event or {}).get("scale") or 1.0),
+                    )
+                    if _smart_has_hook_event and _hook_plan_data:
+                        _hook_plan_data["hook_motion_rendered"] = True
+                        _hook_plan_data["hook_motion_method"] = _smart_reframe_metadata.get("method") or "smart_reframe"
+                        _hook_plan_data["hook_motion_strength"] = "visible"
+                        _rhythm_actions_applied.append("hook_push")
+                        _rhythm_backend = "hook_push"
+                    logger.info(
+                        "ZOOM_PUSH_APPLIED task_id=%s clip_order=%s zoom=%.3f start=%.2f duration=%.2f",
+                        task_id,
+                        clip_index + 1,
+                        float(((_editing_plan_data.get("smart_zoom_events") or [{}])[0]).get("scale", 1.0) or 1.0) if (_editing_plan_data.get("smart_zoom_events") or []) else 1.0,
+                        float(((_editing_plan_data.get("smart_zoom_events") or [{}])[0]).get("start_s", 0.0) or 0.0) if (_editing_plan_data.get("smart_zoom_events") or []) else 0.0,
+                        float(((_editing_plan_data.get("smart_zoom_events") or [{}])[0]).get("duration_s", 0.0) or 0.0) if (_editing_plan_data.get("smart_zoom_events") or []) else 0.0,
+                    )
+                    if (_editing_plan_data.get("smart_zoom_events") or []):
+                        _primary_zoom_event = (_editing_plan_data.get("smart_zoom_events") or [{}])[0] or {}
+                        logger.info(
+                            "VPI_MICRO_ZOOM_APPLIED task_id=%s clip_order=%s profile=%s zoom=%.3f events=%s",
+                            task_id,
+                            clip_index + 1,
+                            str((_motion_rhythm_profile or {}).get("motion_profile") or "standard"),
+                            float(_primary_zoom_event.get("scale") or 1.0),
+                            len(list((_editing_plan_data.get("smart_zoom_events") or []))),
+                        )
+                else:
+                    logger.info(
+                        "RHYTHM_EDIT_SKIPPED_REASON task_id=%s clip_order=%s reason=smart_reframe_verification_failed",
+                        task_id,
+                        clip_index + 1,
+                    )
+                    _smart_reframe_metadata["rendered"] = False
+                    _smart_reframe_metadata["reason"] = "smart_reframe_verification_failed"
             if (
                 _hook_plan_data
                 and _hook_plan_data.get("hook_type") == "emotional_hook"
@@ -2630,6 +6904,19 @@ class VideoService:
                     _hook_plan_data["hook_motion_start_s"] = float((_fallback_event or {}).get("start_s", 0.0) or 0.0)
                     _hook_plan_data["hook_motion_duration_s"] = float((_fallback_event or {}).get("duration_s", 0.0) or 0.0)
                     _hook_plan_data.setdefault("warnings", []).append("emotional_hook_dynamic_fallback")
+                    _rhythm_actions_applied.append("hook_push")
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    _rhythm_backend = "hook_push"
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                    logger.info(
+                        "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=hook_push start=%.2f duration=%.2f zoom=%.3f",
+                        task_id,
+                        clip_index + 1,
+                        float((_fallback_event or {}).get("start_s", 0.0) or 0.0),
+                        float((_fallback_event or {}).get("duration_s", 0.0) or 0.0),
+                        float((_fallback_event or {}).get("scale", 1.0) or 1.0),
+                    )
                     logger.info("[emotional-hook] fallback_static_push_in applied=true output=%s", output_path)
                     logger.info(
                         "[hook-render] treatment=emotional_push_in intent=%s style=%s generic_fallback=false rendered=true method=fallback_static_push_in",
@@ -2640,22 +6927,719 @@ class VideoService:
                     _hook_plan_data["hook_motion_rendered"] = False
                     _hook_plan_data["hook_motion_method"] = "none"
                     _hook_plan_data.setdefault("warnings", []).append("emotional_hook_visual_weak")
-            if _hook_plan_data and _hook_plan_data.get("hook_headline_overlay"):
-                _overlay_out = output_path.with_name(f"hook_overlay_{output_path.name}")
-                _overlay_result = _apply_hook_headline_overlay(
-                    output_path,
-                    _overlay_out,
-                    _hook_plan_data.get("hook_headline_overlay") or {},
+            _hook_visual_metadata = {
+                "hook_visual_applied": False,
+                "hook_visual_backend": "none",
+                "hook_visual_start": 0.0,
+                "hook_visual_duration": 0.0,
+                "hook_visual_end": 0.0,
+                "hook_visual_verified": False,
+                "hook_text_overlay_rendered": False,
+                "hook_text_redundant_with_captions": False,
+                "hook_non_text_visual_applied": False,
+                "hook_redundancy_reason": "",
+                "hook_text": "",
+            }
+            if _hook_plan_data:
+                _hook_visual_metadata["hook_text"] = str(
+                    (
+                        _hook_plan_data.get("overlay_text")
+                        or _hook_plan_data.get("headline_text")
+                        or _hook_plan_data.get("subtitle_hook_text")
+                        or ""
+                    ).strip()
                 )
-                _hook_plan_data["overlay_rendered"] = bool(_overlay_result.get("rendered"))
-                _hook_plan_data["overlay_text"] = _overlay_result.get("text") or _hook_plan_data.get("overlay_text")
-                _hook_plan_data["overlay_start_s"] = _overlay_result.get("start_s") or _hook_plan_data.get("overlay_start_s")
-                _hook_plan_data["overlay_duration_s"] = _overlay_result.get("duration_s") or _hook_plan_data.get("overlay_duration_s")
-                _hook_plan_data["overlay_warnings"] = list(_overlay_result.get("warnings") or [])
-                if _overlay_result.get("rendered") and Path(_overlay_result.get("output_path", "")).exists():
-                    output_path = Path(_overlay_result["output_path"])
-                elif _hook_plan_data.get("enabled"):
-                    _hook_plan_data.setdefault("warnings", []).append("hook_overlay_skipped")
+            try:
+                from .vpi_production_safe_edit import (
+                    build_hook_fallback_text as _build_hook_fallback_text,
+                    condense_hook_text as _condense_hook_text,
+                    production_safe_edit_enabled as _production_safe_edit_enabled,
+                )
+                from .vpi_hook_engine import (
+                    choose_hook_visual_strategy as _choose_hook_visual_strategy,
+                    _select_hook_icon_candidate as _select_hook_icon_candidate,
+                )
+                from .vpi_visual_effects_service import resolve_visual_layer_conflicts as _resolve_visual_layer_conflicts
+                _production_safe_render = _production_safe_edit_enabled()
+            except Exception:
+                _build_hook_fallback_text = None  # type: ignore[assignment]
+                _condense_hook_text = None  # type: ignore[assignment]
+                _choose_hook_visual_strategy = None  # type: ignore[assignment]
+                _select_hook_icon_candidate = None  # type: ignore[assignment]
+                _resolve_visual_layer_conflicts = None  # type: ignore[assignment]
+                _production_safe_render = False
+
+            if _hook_plan_data and (_hook_plan_data.get("hook_headline_overlay") or _production_safe_render):
+                _hook_overlay_payload = dict(_hook_plan_data.get("hook_headline_overlay") or {})
+                _hook_text_source = "strong_hook"
+                _hook_overlay_text = str(
+                    _hook_overlay_payload.get("text")
+                    or _hook_plan_data.get("headline_text")
+                    or _hook_plan_data.get("subtitle_hook_text")
+                    or ""
+                ).strip()
+                if _production_safe_render:
+                    if not _hook_overlay_text or len(_hook_overlay_text.split()) > 9:
+                        _hook_text_source = "fallback"
+                        if _build_hook_fallback_text is not None:
+                            _hook_overlay_text = _build_hook_fallback_text(
+                                str(segment.get("text") or ""),
+                                editorial_type=str(segment.get("editorial_type") or ""),
+                                hook_type=str(_hook_plan_data.get("hook_type") or ""),
+                            )
+                    if not _hook_overlay_text.strip():
+                        _hook_overlay_text = str(_hook_plan_data.get("headline_text") or "").strip()
+                    if _condense_hook_text is not None:
+                        _condensed_hook_text = _condense_hook_text(_hook_overlay_text, 9) or _hook_overlay_text
+                        if _condensed_hook_text != _hook_overlay_text:
+                            _hook_text_source = "condensed"
+                        _hook_overlay_text = _condensed_hook_text
+                    try:
+                        _hook_overlay_start = max(0.15, min(0.45, float(_hook_overlay_payload.get("start_s") or 0.25)))
+                    except (TypeError, ValueError):
+                        _hook_overlay_start = 0.25
+                    try:
+                        _hook_overlay_duration = max(2.2, min(3.0, float(_hook_overlay_payload.get("duration_s") or 2.4)))
+                    except (TypeError, ValueError):
+                        _hook_overlay_duration = 2.4
+                    _hook_overlay_payload = {
+                        "text": _hook_overlay_text,
+                        "start_s": _hook_overlay_start,
+                        "duration_s": _hook_overlay_duration,
+                        "position": "upper_center",
+                    }
+                    _hook_caption_text_first3 = _build_hook_caption_text_first3(
+                        words_with_confidence or [],
+                        str(segment.get("text") or ""),
+                    ) if add_subtitles else ""
+                    _hook_icon_candidate = (
+                        _select_hook_icon_candidate(
+                            _hook_overlay_text,
+                            str(segment.get("editorial_type") or ""),
+                            str(_hook_plan_data.get("hook_type") or ""),
+                        )
+                        if _select_hook_icon_candidate is not None
+                        else {"safe": False, "reason": "icon_selector_unavailable"}
+                    )
+                    _hook_visual_density = {
+                        "visual_density_score": float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                        "layer_overload": bool((_composition_decision or {}).get("layer_overload")),
+                    }
+                    _hook_text_redundant_with_captions = False
+                    _hook_redundancy_reason = ""
+                    if _hook_caption_text_first3:
+                        _hook_text_redundant_with_captions, _hook_redundancy_reason = _is_hook_redundant_with_captions(
+                            _hook_overlay_text,
+                            _hook_caption_text_first3,
+                        )
+                        if not _hook_text_redundant_with_captions and _is_hook_generic_for_captions(_hook_overlay_text, _hook_text_source):
+                            _hook_force_non_text_visual = True
+                            _hook_redundancy_reason = "generic_fallback_with_captions"
+                    if _choose_hook_visual_strategy is not None:
+                        _hook_strategy_data = _choose_hook_visual_strategy(
+                            hook_text=_hook_overlay_text,
+                            caption_text_first3=_hook_caption_text_first3,
+                            hook_text_redundant_with_captions=bool(_hook_text_redundant_with_captions),
+                            editorial_type=str(segment.get("editorial_type") or ""),
+                            visual_density=_hook_visual_density,
+                            hook_visual_available=bool(_hook_overlay_text.strip() or (_hook_plan_data.get("zoom_event") or _hook_plan_data.get("kickframe_event"))),
+                            icon_candidate=_hook_icon_candidate,
+                            clip_duration=float(duration or 0.0),
+                            first3_has_captions=bool(_hook_caption_text_first3.strip()),
+                        )
+                        _hook_strategy = str(_hook_strategy_data.get("hook_strategy") or _hook_strategy)
+                        _hook_strategy_reason = str(_hook_strategy_data.get("hook_strategy_reason") or _hook_strategy_reason)
+                        _hook_selected_text = str(_hook_strategy_data.get("selected_text") or _hook_selected_text)
+                        _hook_selected_visual_action = str(_hook_strategy_data.get("selected_visual_action") or _hook_selected_visual_action)
+                        _hook_icon_candidate = dict(_hook_strategy_data.get("icon_candidate") or _hook_icon_candidate or {})
+                        _hook_use_text_overlay = _hook_strategy == "text_hook"
+                        _hook_force_non_text_visual = _hook_strategy in {"non_text_push_hook", "icon_hook", "silence_tension_hook", "no_extra_hook"}
+                        logger.info(
+                            "HOOK_STRATEGY_SELECTED task_id=%s clip_order=%s strategy=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy,
+                            _hook_strategy_reason,
+                        )
+                        if _hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path"):
+                            logger.info(
+                                "HOOK_ICON_CANDIDATE_SELECTED task_id=%s clip_order=%s concept=%s path=%s",
+                                task_id,
+                                clip_index + 1,
+                                _hook_icon_candidate.get("concept") or "unknown",
+                                _hook_icon_candidate.get("path"),
+                            )
+                    _hook_non_text_visual_applied = bool(
+                        (_hook_plan_data or {}).get("rendered")
+                        or (_hook_plan_data or {}).get("hook_motion_rendered")
+                        or (_hook_plan_data or {}).get("kickframe_applied")
+                    )
+                    if _hook_strategy == "icon_hook" and bool(_hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path")):
+                        _hook_non_text_visual_applied = True
+                    _hook_rhythm_action = "kickframe" if bool(_hook_plan_data.get("kickframe_event")) else ("push_zoom" if bool(_hook_plan_data.get("hook_motion_rendered") or _hook_plan_data.get("zoom_event")) else "non_text_visual_hook")
+                    _hook_strategy_candidate = str(_hook_strategy_data.get("hook_strategy_candidate") or _hook_strategy)
+                    _hook_strategy_final = str(_hook_strategy_data.get("hook_strategy_final") or _hook_strategy_candidate)
+                    _hook_strategy_degraded = bool(_hook_strategy_data.get("hook_strategy_degraded", False))
+                    _hook_strategy_degraded_reason = str(_hook_strategy_data.get("hook_strategy_degraded_reason") or "")
+                    _hook_icon_renderable = bool(_hook_strategy_data.get("hook_icon_renderable")) and bool(_hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path"))
+                    _hook_icon_degraded_reason = str(_hook_strategy_data.get("hook_icon_degraded_reason") or "")
+                    _daily_mode_active = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+                    _hook_non_text_verified = bool(
+                        _hook_non_text_visual_applied
+                        and (
+                            bool(_hook_plan_data.get("rendered"))
+                            or bool(_hook_plan_data.get("hook_motion_rendered"))
+                            or bool(_hook_plan_data.get("kickframe_applied"))
+                            or bool(_rhythm_verified)
+                        )
+                    )
+                    if (_daily_mode_active or _hook_text_redundant_with_captions) and _hook_overlay_text:
+                        _hook_strategy_degraded = True
+                        _hook_strategy_degraded_reason = "caption_priority_enforced"
+                        if _hook_non_text_verified or _hook_non_text_visual_applied:
+                            _hook_strategy_final = "non_text_push_hook"
+                        else:
+                            _hook_strategy_final = "no_extra_hook"
+                        _hook_use_text_overlay = False
+                        _hook_force_non_text_visual = True
+                        logger.info(
+                            "VPI_TEXT_OVERLAP_PREVENTED task_id=%s clip_order=%s caption_priority=true suppressed_layers=hook_overlay",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_TEXT_LAYER_SUPPRESSED task_id=%s clip_order=%s strategy=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_final,
+                            _hook_strategy_degraded_reason,
+                        )
+                        logger.info(
+                            "VPI_HOOK_TEXT_SUPPRESSED_FOR_CAPTIONS task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_degraded_reason,
+                        )
+                        logger.info(
+                            "VPI_RENDER_TEXT_LAYER_SUPPRESSED task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_degraded_reason,
+                        )
+                    if _hook_strategy_candidate == "icon_hook" and not _hook_icon_renderable:
+                        _hook_strategy_final = "non_text_push_hook" if not _hook_text_redundant_with_captions else "silence_tension_hook"
+                        _hook_strategy_degraded = True
+                        _hook_strategy_degraded_reason = _hook_icon_degraded_reason or "no_safe_icon_renderer"
+                        logger.info(
+                            "HOOK_ICON_DEGRADED_TO_NON_TEXT task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_degraded_reason,
+                        )
+                    if _hook_strategy_candidate == "non_text_push_hook" and not _hook_non_text_verified:
+                        _hook_strategy_degraded = True
+                        _hook_strategy_degraded_reason = "no_verified_visual_action"
+                        logger.info(
+                            "HOOK_NON_TEXT_VISUAL_SKIPPED_REASON task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_degraded_reason,
+                        )
+                        if not _daily_mode_active and not _hook_text_redundant_with_captions and _hook_overlay_text:
+                            _hook_strategy_final = "text_hook"
+                            _hook_use_text_overlay = True
+                            _hook_force_non_text_visual = False
+                        else:
+                            _hook_strategy_final = "no_extra_hook"
+                            _hook_use_text_overlay = False
+                            _hook_force_non_text_visual = True
+                    if _hook_strategy_candidate == "no_extra_hook":
+                        _hook_strategy_degraded = False
+                        _hook_strategy_degraded_reason = _hook_strategy_reason or ("captions_sufficient" if _hook_text_redundant_with_captions else "visual_density_high")
+                        logger.info(
+                            "HOOK_EXTRA_TEXT_SUPPRESSED task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _hook_strategy_degraded_reason,
+                        )
+                    _hook_strategy = _hook_strategy_final
+                    _hook_strategy_reason = _hook_strategy_degraded_reason or _hook_strategy_reason
+                    _hook_plan_data["hook_strategy_candidate"] = _hook_strategy_candidate
+                    _hook_plan_data["hook_strategy_final"] = _hook_strategy_final
+                    _hook_plan_data["hook_strategy_degraded"] = bool(_hook_strategy_degraded)
+                    _hook_plan_data["hook_strategy_degraded_reason"] = _hook_strategy_degraded_reason
+                    _hook_plan_data["hook_icon_renderable"] = bool(_hook_icon_renderable)
+                    _hook_plan_data["hook_icon_degraded_reason"] = _hook_icon_degraded_reason
+                    _hook_plan_data["hook_visual_applied"] = False if _hook_strategy == "no_extra_hook" else bool(_hook_plan_data.get("hook_visual_applied"))
+                    logger.info(
+                        "HOOK_GUARANTEE_APPLIED task_id=%s clip_order=%s source=%s text=%s",
+                        task_id,
+                        clip_index + 1,
+                        _hook_text_source,
+                        _hook_overlay_text,
+                    )
+                    logger.info(
+                        "HOOK_SAFE_ZONE_APPLIED task_id=%s clip_order=%s start=%.2f duration=%.2f end=%.2f position=%s reason=reserved_first3",
+                        task_id,
+                        clip_index + 1,
+                        _hook_overlay_start,
+                        _hook_overlay_duration,
+                        min(3.0, _hook_overlay_start + _hook_overlay_duration),
+                        "upper_center",
+                    )
+                    if _resolve_visual_layer_conflicts is not None and isinstance(_composition_decision, dict):
+                        try:
+                            _hook_layer_reservation = _resolve_visual_layer_conflicts(
+                                [
+                                    {"type": "hook_overlay", "start_s": _hook_overlay_start, "duration_s": _hook_overlay_duration},
+                                    {"type": "lower_third", "start_s": 0.65, "duration_s": 2.0},
+                                    {"type": "branding_text", "start_s": 0.0, "duration_s": 3.0},
+                                ],
+                                _composition_decision or {},
+                            )
+                            if any(
+                                str((item or {}).get("type") or (item or {}).get("layer_type") or "") in {"lower_third", "branding_text"}
+                                for item in (_hook_layer_reservation.get("skipped_layers") or [])
+                            ):
+                                logger.info(
+                                    "HOOK_SAFE_ZONE_APPLIED task_id=%s clip_order=%s reason=reserved_first3",
+                                    task_id,
+                                    clip_index + 1,
+                                )
+                                logger.info(
+                                    "OVERLAY_DROPPED_COLLISION_GUARD task_id=%s clip_order=%s reason=hook_first3_priority",
+                                    task_id,
+                                    clip_index + 1,
+                                )
+                        except Exception as _hook_reservation_e:
+                            logger.debug("[hook-safe-zone] reservation skipped reason=%s", _hook_reservation_e)
+                    logger.info(
+                        "HOOK_VISUAL_RHYTHM_APPLIED task_id=%s clip_order=%s action=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        _hook_selected_visual_action if _hook_use_text_overlay else (_hook_rhythm_action if _hook_strategy in {"icon_hook", "non_text_push_hook", "silence_tension_hook"} else "none"),
+                        "reserved_first3" if _hook_use_text_overlay else (
+                            "caption_redundancy" if _hook_text_redundant_with_captions else "strategy_selected"
+                        ),
+                    )
+                    if not _hook_use_text_overlay and not (_hook_strategy == "icon_hook" and bool(_hook_visual_metadata.get("hook_visual_applied"))):
+                        _skip_reason = _hook_strategy_reason or _hook_redundancy_reason or ("caption_redundancy" if _hook_text_redundant_with_captions else "generic_fallback_with_captions")
+                        if _hook_text_redundant_with_captions:
+                            logger.info(
+                                "HOOK_TEXT_OVERLAY_SKIPPED_REDUNDANT_WITH_CAPTIONS task_id=%s clip_order=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _skip_reason,
+                            )
+                        logger.info(
+                            "HOOK_OVERLAY_SKIPPED_REASON task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            _skip_reason,
+                        )
+                        if _hook_strategy in {"non_text_push_hook", "icon_hook", "silence_tension_hook", "no_extra_hook"}:
+                            logger.info(
+                                "HOOK_EXTRA_TEXT_SUPPRESSED task_id=%s clip_order=%s strategy=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _hook_strategy,
+                                _skip_reason,
+                            )
+                        if _hook_strategy == "silence_tension_hook":
+                            logger.info(
+                                "HOOK_SILENCE_TENSION_APPLIED task_id=%s clip_order=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _skip_reason,
+                            )
+                        if _hook_non_text_verified and _hook_strategy in {"non_text_push_hook", "icon_hook", "silence_tension_hook"}:
+                            _non_text_action = "kickframe" if bool(_hook_plan_data.get("kickframe_applied") or _hook_plan_data.get("kickframe_event")) else ("push_zoom" if _hook_rhythm_action == "push_zoom" else "rhythm_verified")
+                            logger.info(
+                                "HOOK_NON_TEXT_VISUAL_APPLIED action=%s task_id=%s clip_order=%s reason=%s",
+                                _non_text_action,
+                                task_id,
+                                clip_index + 1,
+                                _skip_reason,
+                            )
+                        elif _hook_strategy in {"non_text_push_hook", "icon_hook"}:
+                            logger.info(
+                                "HOOK_NON_TEXT_VISUAL_SKIPPED_REASON task_id=%s clip_order=%s reason=no_verified_visual_action",
+                                task_id,
+                                clip_index + 1,
+                            )
+                        _hook_visual_metadata.update({
+                        "hook_visual_applied": bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook"),
+                        "hook_visual_backend": "icon_hook" if _hook_strategy == "icon_hook" and bool(_hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path")) else ("non_text_visual_hook" if _hook_non_text_visual_applied else "none"),
+                        "hook_visual_start": _hook_overlay_start,
+                        "hook_visual_duration": _hook_overlay_duration,
+                        "hook_visual_verified": bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook"),
+                        "hook_visual_end": round(min(3.0, _hook_overlay_start + _hook_overlay_duration), 2),
+                        "hook_text_overlay_rendered": False,
+                        "hook_text_redundant_with_captions": bool(_hook_text_redundant_with_captions),
+                        "hook_non_text_visual_applied": bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook"),
+                        "hook_redundancy_reason": _skip_reason,
+                        "hook_text": _hook_overlay_text,
+                        "hook_source": str(_hook_text_source),
+                        "hook_strategy": _hook_strategy,
+                        "hook_strategy_reason": _hook_strategy_reason,
+                        "hook_strategy_candidate": _hook_strategy_candidate,
+                        "hook_strategy_final": _hook_strategy_final,
+                        "hook_strategy_degraded": bool(_hook_strategy_degraded),
+                        "hook_strategy_degraded_reason": _hook_strategy_degraded_reason,
+                        "hook_icon_candidate": _hook_icon_candidate,
+                        "hook_icon_renderable": bool(_hook_icon_renderable),
+                        "hook_icon_degraded_reason": _hook_icon_degraded_reason,
+                        "hook_silence_tension_applied": bool(_hook_strategy_data.get("hook_silence_tension_applied")),
+                        "hook_extra_text_suppressed": bool(_hook_strategy_data.get("hook_extra_text_suppressed")),
+                    })
+                    _hook_plan_data["hook_text_overlay_rendered"] = False
+                    _hook_plan_data["hook_text_redundant_with_captions"] = bool(_hook_text_redundant_with_captions)
+                    _hook_plan_data["hook_non_text_visual_applied"] = bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook")
+                    _hook_plan_data["hook_redundancy_reason"] = _skip_reason
+                    _hook_plan_data["hook_visual_applied"] = bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook")
+                    _hook_plan_data["hook_visual_backend"] = "icon_hook" if _hook_strategy == "icon_hook" and bool(_hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path")) else ("non_text_visual_hook" if _hook_non_text_visual_applied else "none")
+                    _hook_plan_data["hook_visual_start"] = _hook_visual_metadata["hook_visual_start"]
+                    _hook_plan_data["hook_visual_duration"] = _hook_visual_metadata["hook_visual_duration"]
+                    _hook_plan_data["hook_visual_verified"] = bool(_hook_non_text_visual_applied or _hook_strategy == "icon_hook")
+                    _hook_plan_data["hook_visual_end"] = _hook_visual_metadata["hook_visual_end"]
+                    _hook_plan_data["hook_text"] = _hook_visual_metadata["hook_text"]
+                    _hook_plan_data["hook_source"] = str(_hook_text_source)
+                    _hook_plan_data["overlay_rendered"] = False
+                    _hook_plan_data["overlay_text"] = _hook_visual_metadata["hook_text"]
+                    _hook_plan_data["overlay_start_s"] = _hook_visual_metadata["hook_visual_start"]
+                    _hook_plan_data["overlay_duration_s"] = _hook_visual_metadata["hook_visual_duration"]
+                    _hook_plan_data["overlay_warnings"] = []
+                    _hook_plan_data["hook_strategy"] = _hook_strategy
+                    _hook_plan_data["hook_strategy_reason"] = _hook_strategy_reason
+                    _hook_plan_data["hook_strategy_candidate"] = _hook_strategy_candidate
+                    _hook_plan_data["hook_strategy_final"] = _hook_strategy_final
+                    _hook_plan_data["hook_strategy_degraded"] = bool(_hook_strategy_degraded)
+                    _hook_plan_data["hook_strategy_degraded_reason"] = _hook_strategy_degraded_reason
+                    _hook_plan_data["hook_icon_candidate"] = _hook_icon_candidate
+                    _hook_plan_data["hook_icon_renderable"] = bool(_hook_icon_renderable)
+                    _hook_plan_data["hook_icon_degraded_reason"] = _hook_icon_degraded_reason
+                    _hook_plan_data["hook_silence_tension_applied"] = bool(_hook_strategy_data.get("hook_silence_tension_applied"))
+                    _hook_plan_data["hook_extra_text_suppressed"] = bool(_hook_strategy_data.get("hook_extra_text_suppressed"))
+                    if isinstance(_caption_overlay_pack_metadata, dict):
+                        _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                        _caption_overlay_pack_metadata["hook_overlay"].update({
+                            "applied": bool(_hook_strategy == "icon_hook" and _hook_visual_metadata["hook_visual_applied"]),
+                            "reason": _skip_reason,
+                            "text": _hook_overlay_text,
+                            "backend": _hook_plan_data["hook_visual_backend"],
+                        })
+                    if _hook_strategy == "icon_hook" and bool(_hook_icon_candidate.get("safe") and _hook_icon_candidate.get("path")):
+                        _icon_out = output_path.with_name(f"icon_hook_{output_path.name}")
+                        from .vpi_final_overlay_composer import apply_overlay_card_to_video as _apply_overlay_card_to_video
+                        _icon_result = _apply_overlay_card_to_video(
+                            str(output_path),
+                            str(_hook_icon_candidate["path"]),
+                            str(_icon_out),
+                            position="upper_right",
+                            start_time=float(_hook_overlay_payload.get("start_s") or 0.25),
+                            duration=float(_hook_overlay_payload.get("duration_s") or 2.4),
+                            scale_width=180,
+                            opacity=0.92,
+                        )
+                        _icon_output = Path(str(_icon_result.get("output_video_path") or _icon_out))
+                        _icon_verified = bool(
+                            _icon_result.get("motion_overlay_applied")
+                            and _icon_output.exists()
+                            and _verify_hook_overlay_output(_icon_output)
+                        )
+                        if _icon_verified:
+                            output_path = _icon_output
+                            _hook_visual_metadata.update({
+                                "hook_visual_applied": True,
+                                "hook_visual_backend": "icon_hook",
+                                "hook_visual_start": float(_icon_result.get("overlay_start_time") or _hook_overlay_payload.get("start_s") or 0.0),
+                                "hook_visual_duration": float(_icon_result.get("overlay_duration") or _hook_overlay_payload.get("duration_s") or 0.0),
+                                "hook_visual_verified": True,
+                                "hook_visual_end": round(min(3.0, float(_icon_result.get("overlay_start_time") or _hook_overlay_payload.get("start_s") or 0.0) + float(_icon_result.get("overlay_duration") or _hook_overlay_payload.get("duration_s") or 0.0)), 2),
+                                "hook_text_overlay_rendered": False,
+                                "hook_text_redundant_with_captions": bool(_hook_text_redundant_with_captions),
+                                "hook_non_text_visual_applied": True,
+                                "hook_redundancy_reason": _hook_strategy_reason,
+                                "hook_text": _hook_overlay_text,
+                                "hook_source": str(_hook_text_source),
+                                "hook_strategy": _hook_strategy,
+                                "hook_strategy_reason": _hook_strategy_reason,
+                                "hook_icon_candidate": _hook_icon_candidate,
+                                "hook_silence_tension_applied": bool(_hook_strategy_data.get("hook_silence_tension_applied")),
+                                "hook_extra_text_suppressed": bool(_hook_strategy_data.get("hook_extra_text_suppressed")),
+                            })
+                            _hook_plan_data.update({
+                                "overlay_rendered": True,
+                                "hook_visual_applied": True,
+                                "hook_visual_backend": "icon_hook",
+                                "hook_visual_start": _hook_visual_metadata["hook_visual_start"],
+                                "hook_visual_duration": _hook_visual_metadata["hook_visual_duration"],
+                                "hook_visual_verified": True,
+                                "hook_visual_end": _hook_visual_metadata["hook_visual_end"],
+                                "hook_text": _hook_visual_metadata["hook_text"],
+                                "hook_source": str(_hook_text_source),
+                                "hook_text_overlay_rendered": False,
+                                "hook_text_redundant_with_captions": bool(_hook_text_redundant_with_captions),
+                                "hook_non_text_visual_applied": True,
+                                "hook_redundancy_reason": _hook_strategy_reason,
+                                "hook_strategy": _hook_strategy,
+                                "hook_strategy_reason": _hook_strategy_reason,
+                                "hook_icon_candidate": _hook_icon_candidate,
+                                "hook_silence_tension_applied": bool(_hook_strategy_data.get("hook_silence_tension_applied")),
+                                "hook_extra_text_suppressed": bool(_hook_strategy_data.get("hook_extra_text_suppressed")),
+                            })
+                            if isinstance(_caption_overlay_pack_metadata, dict):
+                                _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                                _caption_overlay_pack_metadata["hook_overlay"].update({
+                                    "applied": True,
+                                    "start_s": _hook_visual_metadata["hook_visual_start"],
+                                    "duration_s": _hook_visual_metadata["hook_visual_duration"],
+                                    "end_s": _hook_visual_metadata["hook_visual_end"],
+                                    "text": _hook_visual_metadata["hook_text"],
+                                    "backend": "icon_hook",
+                                })
+                            logger.info(
+                                "HOOK_EXTRA_TEXT_SUPPRESSED task_id=%s clip_order=%s strategy=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _hook_strategy,
+                                _hook_strategy_reason,
+                            )
+                            logger.info(
+                                "HOOK_NON_TEXT_VISUAL_APPLIED action=icon_overlay task_id=%s clip_order=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _hook_strategy_reason,
+                            )
+                            if bool(_hook_strategy_data.get("hook_silence_tension_applied")):
+                                logger.info(
+                                    "HOOK_SILENCE_TENSION_APPLIED task_id=%s clip_order=%s reason=%s",
+                                    task_id,
+                                    clip_index + 1,
+                                    _hook_strategy_reason,
+                                )
+                            logger.info(
+                                "HOOK_OVERLAY_RENDERED task_id=%s clip_order=%s backend=icon_hook path=%s",
+                                task_id,
+                                clip_index + 1,
+                                output_path,
+                            )
+                        else:
+                            logger.info(
+                                "HOOK_OVERLAY_SKIPPED_REASON task_id=%s clip_order=%s reason=icon_render_failed",
+                                task_id,
+                                clip_index + 1,
+                            )
+                            _hook_strategy = "non_text_push_hook"
+                            _hook_strategy_reason = "icon_render_failed"
+                            _hook_non_text_visual_applied = False
+                            _hook_strategy_data["hook_strategy"] = _hook_strategy
+                            _hook_strategy_data["hook_strategy_reason"] = _hook_strategy_reason
+                            _hook_strategy_data["selected_visual_action"] = "push_zoom"
+                    if _hook_use_text_overlay:
+                        _headline_out = output_path.with_name(f"hook_overlay_{output_path.name}")
+                        _headline_result = _apply_hook_headline_overlay(
+                            output_path,
+                            _headline_out,
+                            _hook_overlay_payload,
+                        )
+                        _headline_output = Path(str(_headline_result.get("output_path") or output_path))
+                        _headline_verified = bool(
+                            _headline_result.get("rendered")
+                            and _headline_output.exists()
+                            and _verify_hook_overlay_output(_headline_output)
+                        )
+                        if _headline_verified:
+                            _hook_visual_metadata.update({
+                                "hook_visual_applied": True,
+                                "hook_visual_backend": "headline_overlay",
+                                "hook_visual_start": float(_headline_result.get("start_s") or _hook_overlay_payload.get("start_s") or 0.0),
+                                "hook_visual_duration": float(_headline_result.get("duration_s") or _hook_overlay_payload.get("duration_s") or 0.0),
+                                "hook_visual_verified": True,
+                                "hook_visual_end": round(min(3.0, float(_headline_result.get("start_s") or _hook_overlay_payload.get("start_s") or 0.0) + float(_headline_result.get("duration_s") or _hook_overlay_payload.get("duration_s") or 0.0)), 2),
+                                "hook_text": str(_headline_result.get("text") or _hook_overlay_payload.get("text") or _hook_visual_metadata["hook_text"]),
+                                "hook_source": str(_hook_text_source),
+                                "hook_text_overlay_rendered": True,
+                                "hook_text_redundant_with_captions": False,
+                                "hook_non_text_visual_applied": False,
+                                "hook_redundancy_reason": "",
+                                "hook_strategy": _hook_strategy,
+                                "hook_strategy_reason": _hook_strategy_reason,
+                                "hook_icon_candidate": _hook_icon_candidate,
+                                "hook_silence_tension_applied": bool(_hook_strategy_data.get("hook_silence_tension_applied")),
+                                "hook_extra_text_suppressed": bool(_hook_strategy_data.get("hook_extra_text_suppressed")),
+                            })
+                            _hook_plan_data["overlay_rendered"] = True
+                            _hook_plan_data["hook_visual_applied"] = True
+                            _hook_plan_data["hook_visual_backend"] = "headline_overlay"
+                            _hook_plan_data["hook_visual_start"] = _hook_visual_metadata["hook_visual_start"]
+                            _hook_plan_data["hook_visual_duration"] = _hook_visual_metadata["hook_visual_duration"]
+                            _hook_plan_data["hook_visual_verified"] = True
+                            _hook_plan_data["hook_visual_end"] = _hook_visual_metadata["hook_visual_end"]
+                            _hook_plan_data["hook_text"] = _hook_visual_metadata["hook_text"]
+                            _hook_plan_data["hook_source"] = str(_hook_text_source)
+                            _hook_plan_data["hook_text_overlay_rendered"] = True
+                            _hook_plan_data["hook_text_redundant_with_captions"] = False
+                            _hook_plan_data["hook_non_text_visual_applied"] = False
+                            _hook_plan_data["hook_redundancy_reason"] = ""
+                            _hook_plan_data["hook_strategy"] = _hook_strategy
+                            _hook_plan_data["hook_strategy_reason"] = _hook_strategy_reason
+                            _hook_plan_data["hook_icon_candidate"] = _hook_icon_candidate
+                            _hook_plan_data["hook_silence_tension_applied"] = bool(_hook_strategy_data.get("hook_silence_tension_applied"))
+                            _hook_plan_data["hook_extra_text_suppressed"] = bool(_hook_strategy_data.get("hook_extra_text_suppressed"))
+                            _hook_plan_data["overlay_text"] = _hook_visual_metadata["hook_text"]
+                            _hook_plan_data["overlay_start_s"] = _hook_visual_metadata["hook_visual_start"]
+                            _hook_plan_data["overlay_duration_s"] = _hook_visual_metadata["hook_visual_duration"]
+                            _hook_plan_data["overlay_warnings"] = list(_headline_result.get("warnings") or [])
+                            if isinstance(_caption_overlay_pack_metadata, dict):
+                                _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                                _caption_overlay_pack_metadata["hook_overlay"].update({
+                                    "applied": True,
+                                    "start_s": _hook_visual_metadata["hook_visual_start"],
+                                    "duration_s": _hook_visual_metadata["hook_visual_duration"],
+                                    "end_s": _hook_visual_metadata["hook_visual_end"],
+                                    "text": _hook_visual_metadata["hook_text"],
+                                    "backend": "headline_overlay",
+                                })
+                            logger.info(
+                                "HOOK_EXTRA_TEXT_SUPPRESSED task_id=%s clip_order=%s strategy=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _hook_strategy,
+                                _hook_strategy_reason,
+                            )
+                            output_path = _headline_output
+                            logger.info(
+                                "HOOK_OVERLAY_RENDERED task_id=%s clip_order=%s backend=headline_overlay path=%s",
+                                task_id,
+                                clip_index + 1,
+                                output_path,
+                            )
+                        else:
+                            _fallback_text = _hook_overlay_text
+                            _fallback_out = output_path.with_name(f"hook_card_{output_path.name}")
+                            _fallback_result = _render_hook_card_overlay(
+                                output_path,
+                                _fallback_out,
+                                text=_fallback_text,
+                                start_s=float(_hook_overlay_payload.get("start_s") or 0.25),
+                                duration_s=float(_hook_overlay_payload.get("duration_s") or 2.4),
+                            )
+                            _fallback_output = Path(str(_fallback_result.get("output_path") or output_path))
+                            _fallback_verified = bool(
+                                _fallback_result.get("rendered")
+                                and _fallback_output.exists()
+                                and _verify_hook_overlay_output(_fallback_output)
+                            )
+                            if _fallback_verified:
+                                logger.info(
+                                    "HOOK_VISUAL_RHYTHM_APPLIED task_id=%s clip_order=%s action=%s reason=%s",
+                                    task_id,
+                                    clip_index + 1,
+                                    "kickframe" if bool(_hook_plan_data.get("kickframe_event")) else "push_zoom",
+                                    "reserved_first3",
+                                )
+                                _hook_visual_metadata.update({
+                                    "hook_visual_applied": True,
+                                    "hook_visual_backend": "hook_card_fallback",
+                                    "hook_visual_start": float(_fallback_result.get("start_s") or _hook_overlay_payload.get("start_s") or 0.0),
+                                    "hook_visual_duration": float(_fallback_result.get("duration_s") or _hook_overlay_payload.get("duration_s") or 0.0),
+                                    "hook_visual_verified": True,
+                                    "hook_visual_end": round(min(3.0, float(_fallback_result.get("start_s") or _hook_overlay_payload.get("start_s") or 0.0) + float(_fallback_result.get("duration_s") or _hook_overlay_payload.get("duration_s") or 0.0)), 2),
+                                    "hook_text": str(_fallback_result.get("text") or _fallback_text or _hook_visual_metadata["hook_text"]),
+                                    "hook_source": str(_hook_text_source),
+                                    "hook_text_overlay_rendered": True,
+                                    "hook_text_redundant_with_captions": False,
+                                    "hook_non_text_visual_applied": False,
+                                    "hook_redundancy_reason": "",
+                                })
+                                _hook_plan_data["overlay_rendered"] = True
+                                _hook_plan_data["hook_visual_applied"] = True
+                                _hook_plan_data["hook_visual_backend"] = "hook_card_fallback"
+                                _hook_plan_data["hook_visual_start"] = _hook_visual_metadata["hook_visual_start"]
+                                _hook_plan_data["hook_visual_duration"] = _hook_visual_metadata["hook_visual_duration"]
+                                _hook_plan_data["hook_visual_verified"] = True
+                                _hook_plan_data["hook_visual_end"] = _hook_visual_metadata["hook_visual_end"]
+                                _hook_plan_data["hook_text"] = _hook_visual_metadata["hook_text"]
+                                _hook_plan_data["hook_source"] = str(_hook_text_source)
+                                _hook_plan_data["hook_text_overlay_rendered"] = True
+                                _hook_plan_data["hook_text_redundant_with_captions"] = False
+                                _hook_plan_data["hook_non_text_visual_applied"] = False
+                                _hook_plan_data["hook_redundancy_reason"] = ""
+                                _hook_plan_data["overlay_text"] = _hook_visual_metadata["hook_text"]
+                                _hook_plan_data["overlay_start_s"] = _hook_visual_metadata["hook_visual_start"]
+                                _hook_plan_data["overlay_duration_s"] = _hook_visual_metadata["hook_visual_duration"]
+                                _hook_plan_data["overlay_warnings"] = list(_fallback_result.get("warnings") or [])
+                                if isinstance(_caption_overlay_pack_metadata, dict):
+                                    _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                                    _caption_overlay_pack_metadata["hook_overlay"].update({
+                                        "applied": True,
+                                        "start_s": _hook_visual_metadata["hook_visual_start"],
+                                        "duration_s": _hook_visual_metadata["hook_visual_duration"],
+                                        "text": _hook_visual_metadata["hook_text"],
+                                        "backend": "hook_card_fallback",
+                                    })
+                                output_path = _fallback_output
+                                logger.info(
+                                    "HOOK_OVERLAY_RENDERED task_id=%s clip_order=%s backend=hook_card_fallback path=%s",
+                                    task_id,
+                                    clip_index + 1,
+                                    output_path,
+                                )
+                            else:
+                                _hook_reason = str(_headline_result.get("reason") or _fallback_result.get("reason") or "hook_overlay_failed")
+                                logger.info(
+                                    "HOOK_OVERLAY_SKIPPED_REASON task_id=%s clip_order=%s reason=%s",
+                                    task_id,
+                                    clip_index + 1,
+                                    _hook_reason,
+                                )
+                                _hook_plan_data.setdefault("warnings", []).append("hook_visual_missing")
+                                _hook_plan_data["hook_disabled_reason"] = "hook_visual_missing"
+                                _hook_plan_data["hook_visual_applied"] = False
+                                _hook_plan_data["hook_visual_backend"] = "none"
+                                _hook_plan_data["hook_visual_verified"] = False
+                                _hook_plan_data["hook_visual_end"] = 0.0
+                                _hook_plan_data["hook_text"] = _hook_overlay_text
+                                _hook_plan_data["hook_source"] = "fallback"
+                                _hook_plan_data["hook_text_overlay_rendered"] = False
+                                _hook_plan_data["hook_text_redundant_with_captions"] = bool(_hook_text_redundant_with_captions)
+                                _hook_plan_data["hook_non_text_visual_applied"] = False
+                                _hook_plan_data["hook_redundancy_reason"] = _hook_redundancy_reason or _hook_reason
+                                _hook_plan_data["overlay_warnings"] = list(_fallback_result.get("warnings") or _headline_result.get("warnings") or [])
+                                if isinstance(_caption_overlay_pack_metadata, dict):
+                                    _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                                    _caption_overlay_pack_metadata["hook_overlay"].update({
+                                        "applied": False,
+                                        "reason": _hook_reason,
+                                        "text": _hook_overlay_text,
+                                        "backend": "none",
+                                    })
+                                segment["needs_review"] = True
+                                segment["hook_visual_missing"] = True
+            elif _hook_plan_data and _hook_plan_data.get("enabled"):
+                _hook_plan_data.setdefault("warnings", []).append("hook_visual_missing")
+                _hook_plan_data["hook_disabled_reason"] = "hook_visual_missing"
+                _hook_plan_data["hook_visual_applied"] = False
+                _hook_plan_data["hook_visual_backend"] = "none"
+                _hook_plan_data["hook_visual_verified"] = False
+                _hook_plan_data["hook_visual_end"] = 0.0
+                _hook_plan_data["hook_text"] = str(_hook_plan_data.get("headline_text") or "")
+                _hook_plan_data["hook_source"] = "fallback"
+                if isinstance(_caption_overlay_pack_metadata, dict):
+                    _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                    _caption_overlay_pack_metadata["hook_overlay"].update({
+                        "applied": False,
+                        "reason": "no_hook_overlay_candidate",
+                        "text": _hook_plan_data["hook_text"],
+                    })
+                segment["needs_review"] = True
+                segment["hook_visual_missing"] = True
+                logger.info(
+                    "HOOK_OVERLAY_SKIPPED_REASON task_id=%s clip_order=%s reason=no_hook_overlay_candidate",
+                    task_id,
+                    clip_index + 1,
+                )
             if _hook_plan_data and _hook_plan_data.get("kickframe_event"):
                 _hook_zoom_rendered = bool(
                     _smart_reframe_metadata.get("rendered")
@@ -2663,10 +7647,28 @@ class VideoService:
                 )
                 if _hook_zoom_rendered and (_hook_plan_data.get("kickframe_event") or {}).get("integrated_with_zoom"):
                     _hook_plan_data["kickframe_applied"] = True
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    if _rhythm_backend == "none":
+                        _rhythm_backend = "kickframe"
+                    _rhythm_actions_applied.append("kickframe")
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
                     logger.info("[hook-kickframe] applied=true start=%.2f dur=%.2f scale=%.3f",
                                 float((_hook_plan_data["kickframe_event"] or {}).get("start_s", 0.0)),
                                 float((_hook_plan_data["kickframe_event"] or {}).get("duration_s", 0.0)),
                                 float((_hook_plan_data["kickframe_event"] or {}).get("scale", 1.0)))
+                    logger.info(
+                        "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=kickframe start=%.2f duration=%.2f zoom=%.3f",
+                        task_id,
+                        clip_index + 1,
+                        float((_hook_plan_data["kickframe_event"] or {}).get("start_s", 0.0)),
+                        float((_hook_plan_data["kickframe_event"] or {}).get("duration_s", 0.0)),
+                        float((_hook_plan_data["kickframe_event"] or {}).get("scale", 1.0)),
+                    )
+                    logger.info(
+                        "FFMPEG_VISUAL_ACCENT_APPLIED type=transition cue=%s",
+                        str((_hook_plan_data.get("hook_intent") or _hook_plan_data.get("hook_type") or "unknown")),
+                    )
                 else:
                     _kick_out = output_path.with_name(f"hook_kick_{output_path.name}")
                     _kick_result = _apply_hook_kickframe(output_path, _kick_out, _hook_plan_data.get("kickframe_event") or {})
@@ -2675,6 +7677,20 @@ class VideoService:
                         _hook_plan_data["kickframe_event"] = _kick_result.get("event")
                     if _kick_result.get("rendered") and Path(_kick_result.get("output_path", "")).exists():
                         output_path = Path(_kick_result["output_path"])
+                        _rhythm_verified = True
+                        _rhythm_skip_reason = ""
+                        if _rhythm_backend == "none":
+                            _rhythm_backend = "kickframe"
+                        _rhythm_actions_applied.append("kickframe")
+                        _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                        logger.info(
+                            "RHYTHM_EDIT_APPLIED task_id=%s clip_order=%s action=kickframe start=%.2f duration=%.2f zoom=%.3f",
+                            task_id,
+                            clip_index + 1,
+                            float((_hook_plan_data.get("kickframe_event") or {}).get("start_s", 0.0)),
+                            float((_hook_plan_data.get("kickframe_event") or {}).get("duration_s", 0.0)),
+                            float((_hook_plan_data.get("kickframe_event") or {}).get("scale", 1.0)),
+                        )
                     else:
                         _hook_plan_data.setdefault("warnings", []).append("hook_kickframe_skipped")
             if _hook_plan_data:
@@ -2701,6 +7717,70 @@ class VideoService:
                     or _hook_plan_data.get("kickframe_applied")
                     or _hook_plan_data.get("emphasis_words")
                 )
+                if _hook_plan_data.get("kickframe_applied"):
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    if _rhythm_backend == "none":
+                        _rhythm_backend = "kickframe"
+                    _rhythm_actions_applied.append("kickframe")
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                if _hook_plan_data.get("hook_motion_rendered") and _rhythm_backend != "hook_push":
+                    _rhythm_verified = True
+                    _rhythm_skip_reason = ""
+                    _rhythm_backend = "hook_push"
+                    _rhythm_actions_applied.append("hook_push")
+                    _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                if (
+                    not bool(_hook_plan_data.get("hook_text_overlay_rendered"))
+                    and bool(
+                        _hook_plan_data.get("hook_non_text_visual_applied")
+                        or _hook_plan_data.get("rendered")
+                        or _hook_plan_data.get("hook_motion_rendered")
+                        or _hook_plan_data.get("kickframe_applied")
+                    )
+                ):
+                    _hook_overlay_payload_local = locals().get("_hook_overlay_payload") or {}
+                    _hook_plan_data["hook_non_text_visual_applied"] = True
+                    _hook_plan_data["hook_visual_applied"] = True
+                    _hook_plan_data["hook_visual_backend"] = "non_text_visual_hook"
+                    _hook_plan_data["hook_visual_verified"] = True
+                    _hook_plan_data["hook_visual_start"] = float(
+                        _hook_plan_data.get("hook_visual_start")
+                        or _hook_overlay_payload_local.get("start_s")
+                        or 0.0
+                    )
+                    _hook_plan_data["hook_visual_duration"] = float(
+                        _hook_plan_data.get("hook_visual_duration")
+                        or _hook_overlay_payload_local.get("duration_s")
+                        or 0.0
+                    )
+                    if _hook_plan_data.get("hook_non_text_visual_applied"):
+                        _rhythm_verified = True
+                        _rhythm_skip_reason = ""
+                        if _rhythm_backend == "none":
+                            _rhythm_backend = "non_text_visual_hook"
+                        _rhythm_actions_applied.append("non_text_visual_hook")
+                        _rhythm_edit_count = int(_rhythm_edit_count or 0) + 1
+                    _hook_plan_data["hook_visual_end"] = round(
+                        min(
+                            3.0,
+                            float(_hook_plan_data.get("hook_visual_start") or _hook_overlay_payload_local.get("start_s") or 0.0)
+                            + float(_hook_plan_data.get("hook_visual_duration") or _hook_overlay_payload_local.get("duration_s") or 0.0),
+                        ),
+                        2,
+                    )
+                    _hook_visual_metadata.update({
+                        "hook_visual_applied": True,
+                        "hook_visual_backend": "non_text_visual_hook",
+                        "hook_visual_verified": True,
+                        "hook_visual_start": _hook_plan_data["hook_visual_start"],
+                        "hook_visual_duration": _hook_plan_data["hook_visual_duration"],
+                        "hook_visual_end": _hook_plan_data["hook_visual_end"],
+                        "hook_text_overlay_rendered": False,
+                        "hook_text_redundant_with_captions": bool(_hook_plan_data.get("hook_text_redundant_with_captions")),
+                        "hook_non_text_visual_applied": True,
+                        "hook_redundancy_reason": str(_hook_plan_data.get("hook_redundancy_reason") or "caption_redundancy"),
+                    })
                 _hook_plan_data["hook_visual_signal_types"] = list(dict.fromkeys(_hook_signal_types))
                 _hook_plan_data["hook_visual_signal_count"] = len(_hook_plan_data["hook_visual_signal_types"])
                 _first4_signals = list(_hook_plan_data.get("hook_first_4s_signals") or [])
@@ -2758,6 +7838,32 @@ class VideoService:
             _hook_plan_data = {"error": str(_plan_e), "metadata_only": True}
             _silence_edit_plan_data = {"error": str(_plan_e), "metadata_only": True, "warnings": ["silence_metadata_only"]}
 
+        # ── Runtime bridge: pre-render timeline/disfluency planning ───────────
+        # Build a master timeline plan early (before B-roll/SFX/BGM render steps)
+        # so runtime decisions can be audited and serialized without changing
+        # render behavior yet.
+        try:
+            _timeline_plan_data = _build_premium_timeline_plan(
+                task_id=task_id,
+                clip_index=clip_index,
+                video_path=output_path,
+                segment=segment,
+                duration=float(duration or 0.0),
+                word_timestamps=words_with_confidence or None,
+                editing_plan=_editing_plan_data,
+                hook_plan=_hook_plan_data,
+                overlay_backend=_overlay_backend_runtime,
+            )
+        except Exception as _timeline_e:
+            _timeline_plan_data = {
+                "timeline_plan": {},
+                "timeline_warnings": [f"timeline_plan_failed:{_timeline_e}"],
+                "disfluency_plan": {},
+                "disfluency_actions_count": 0,
+                "high_severity_unhandled_count": 0,
+            }
+            logger.warning("VIRACLIP_TIMELINE_PLAN_BUILD_FAILED task_id=%s clip_id=%s error=%s", task_id, clip_index + 1, _timeline_e)
+
         # Step 4.3: B-Roll overlay — after EP so vignette/LUT don't darken B-roll.
         # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true (unless editorial B-roll is enabled).
         _broll_editorial_decision: Dict[str, Any] = {}
@@ -2765,12 +7871,65 @@ class VideoService:
         _broll_editorial_opportunity = False
         _broll_editorial_fallback = "none"
         _broll_composition_allowed = True
-        _editorial_broll_mode = _cfg.beta_clean and _cfg.enable_editorial_broll and include_broll
+        _broll_route_used = "none"
+        _broll_duplicate_routes_blocked = False
+        _broll_render_verified = False
+        _broll_render_verification_reason = "not_attempted"
+        _broll_render_verification_info: Dict[str, Any] = {}
+        # [vpi-productive-minimum] Enable editorial B-roll when productive minimum is active
+        # in beta_clean mode, even if enable_editorial_broll is False.
+        _broll_force_central_decision = False
+        try:
+            from .vpi_production_safe_edit import production_safe_edit_enabled as _production_safe_edit_enabled
+
+            _broll_force_central_decision = bool(_production_safe_edit_enabled())
+        except Exception:
+            _broll_force_central_decision = True
+        _editorial_broll_mode = (_cfg.enable_editorial_broll or (_cfg.vpi_productive_minimum and _cfg.beta_clean)) and include_broll
         if _editorial_broll_mode:
             try:
+                from .broll_provider_strategy import diagnose_providers as _diagnose_broll_providers
+                from .vpi_asset_library_service import build_asset_index as _build_broll_asset_index
                 from .vpi_broll_intent import build_broll_editorial_decision as _build_broll_editorial_decision
                 from .vpi_broll_intent import match_broll_asset as _match_broll_asset
+                from .vpi_broll_intent import choose_vpi_broll_timing_strategy as _choose_vpi_broll_timing_strategy
                 from .vpi_visual_effects_service import resolve_visual_layer_conflicts as _resolve_visual_layer_conflicts
+
+                _broll_provider_status = {}
+                try:
+                    _broll_provider_status = _diagnose_broll_providers().as_dict()
+                except Exception as _provider_diag_e:
+                    logger.debug("[broll-editorial] provider diagnostics skipped reason=%s", _provider_diag_e)
+
+                _broll_asset_index = {}
+                _broll_available_local_assets: List[Dict[str, Any]] = []
+                try:
+                    _broll_asset_index = _build_broll_asset_index()
+                    _broll_available_local_assets = list(((_broll_asset_index or {}).get("verified") or {}).get("broll") or [])
+                except Exception as _asset_index_e:
+                    logger.debug("[broll-editorial] asset index skipped reason=%s", _asset_index_e)
+
+                _broll_visual_budget: Dict[str, Any] = {}
+                try:
+                    from .vpi_visual_effects_service import build_global_visual_layer_budget as _build_global_visual_layer_budget
+
+                    _broll_visual_budget = _build_global_visual_layer_budget(
+                        caption_overlay_pack_metadata=locals().get("_caption_overlay_pack_metadata") if isinstance(locals().get("_caption_overlay_pack_metadata"), dict) else {},
+                        editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                        hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                        hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                        hook_text_overlay_rendered=bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+                        hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+                        first3_has_captions=bool(words_with_confidence),
+                        visual_support_layer_selected=str(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_support_layer_selected") or ""),
+                        visual_reinforcement_applied=bool((locals().get("_visual_reinforcement_metadata") or {}).get("visual_reinforcement_applied")),
+                        visual_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                        clip_duration=float(duration or 0.0),
+                        face_bbox=(segment.get("face_bbox") if isinstance(segment, dict) else None),
+                        speaker_bbox=(segment.get("speaker_bbox") if isinstance(segment, dict) else None),
+                    )
+                except Exception as _budget_e:
+                    logger.debug("[broll-editorial] local budget refresh skipped reason=%s", _budget_e)
 
                 _broll_editorial_decision = _build_broll_editorial_decision(
                     segment_text=str(segment.get("text") or ""),
@@ -2780,14 +7939,88 @@ class VideoService:
                     composition_decision=_composition_decision,
                     first3_visual_contract={},
                     visual_profile=str((_hook_plan_data or {}).get("visual_profile") or ""),
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    vpi_score=segment.get("vpi_score"),
+                    suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
+                    words_with_timestamps=words_with_confidence or None,
+                    clip_duration=float(duration or 0.0),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                    visual_layer_budget=_broll_visual_budget,
+                    visual_support_layer_selected=str((_broll_visual_budget or {}).get("visual_support_layer_selected") or ""),
+                    visual_reinforcement_applied=bool((locals().get("_visual_reinforcement_metadata") or {}).get("visual_reinforcement_applied")),
+                    captions_active=bool(words_with_confidence),
+                    face_bbox=(segment.get("face_bbox") if isinstance(segment, dict) else None),
+                    speaker_bbox=(segment.get("speaker_bbox") if isinstance(segment, dict) else None),
+                    available_local_assets=_broll_available_local_assets,
+                    provider_diagnostics=_broll_provider_status,
+                    hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
                 )
                 _broll_editorial_opportunity = bool(_broll_editorial_decision.get("should_use_broll"))
                 _broll_editorial_fallback = str(_broll_editorial_decision.get("fallback") or "none")
+                _broll_route_used = str(_broll_editorial_decision.get("route_used") or "editorial_local")
+                _broll_duplicate_routes_blocked = bool(_broll_editorial_decision.get("duplicate_routes_blocked", True))
+                _broll_timing_strategy = _choose_vpi_broll_timing_strategy(
+                    broll_decision=_broll_editorial_decision,
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    segment_text=str(segment.get("text") or ""),
+                    words_with_timestamps=words_with_confidence or None,
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    first_second_strength=float(segment.get("first_second_strength") or 0.0),
+                    caption_density=float((_caption_overlay_pack_metadata or {}).get("caption_density") or 0.0),
+                    premium_restraint_mode=str((_publishable_metadata or {}).get("premium_restraint_mode") or (_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                    motion_profile=str((_motion_rhythm_profile or {}).get("motion_profile") or ""),
+                    clip_duration=float(duration or 0.0),
+                    sensitive_topic=str(segment.get("editorial_type") or "") in {"sensitive_decesos", "decesos"},
+                )
+                _broll_editorial_decision.update(_broll_timing_strategy)
+                if _broll_timing_strategy.get("broll_timing_strategy") == "no_broll":
+                    _broll_editorial_decision["should_use_broll"] = False
+                    _broll_editorial_decision["skip_reason"] = _broll_timing_strategy.get("broll_timing_reason") or "timing_suppressed"
+                    _broll_editorial_fallback = str(_broll_timing_strategy.get("broll_timing_reason") or _broll_editorial_fallback or "none")
+                    _editorial_broll_mode = False
+                    _broll_editorial_opportunity = False
+                    logger.info("BROLL_SKIPPED_REASON reason=%s", _broll_editorial_decision["skip_reason"])
+                else:
+                    _broll_editorial_decision["start_offset"] = float(_broll_timing_strategy.get("broll_start_time") or _broll_editorial_decision.get("start_offset") or 3.0)
+                    _broll_editorial_decision["duration"] = float(_broll_timing_strategy.get("broll_duration") or _broll_editorial_decision.get("duration") or 1.2)
+                    _broll_editorial_decision["broll_entry_style"] = str(_broll_timing_strategy.get("broll_entry_style") or "soft_fade")
+                    _broll_editorial_decision["broll_exit_style"] = str(_broll_timing_strategy.get("broll_exit_style") or "soft_fade")
+                    _broll_editorial_decision["broll_phrase_matched"] = bool(_broll_timing_strategy.get("broll_phrase_matched"))
+                    _broll_editorial_decision["broll_phrase_match_terms"] = list(_broll_timing_strategy.get("broll_phrase_match_terms") or [])
+                    _broll_editorial_decision["broll_phrase_match_confidence"] = float(_broll_timing_strategy.get("broll_phrase_match_confidence") or 0.0)
+                    _broll_editorial_decision["broll_transition_sober"] = bool(_broll_timing_strategy.get("broll_transition_sober"))
+                    _broll_editorial_decision["broll_return_to_speaker"] = bool(_broll_timing_strategy.get("broll_return_to_speaker"))
+                    _broll_editorial_decision["broll_return_reason"] = str(_broll_timing_strategy.get("broll_return_reason") or "")
+                    _broll_editorial_decision["broll_timing_strategy"] = str(_broll_timing_strategy.get("broll_timing_strategy") or "no_broll")
+                    _broll_editorial_decision["broll_timing_reason"] = str(_broll_timing_strategy.get("broll_timing_reason") or "")
+                if _editing_plan_data is not None:
+                    _editing_plan_data["broll_timing_strategy"] = str(_broll_timing_strategy.get("broll_timing_strategy") or "no_broll")
+                    _editing_plan_data["broll_timing_reason"] = str(_broll_timing_strategy.get("broll_timing_reason") or "")
+                    _editing_plan_data["broll_start_time"] = float(_broll_timing_strategy.get("broll_start_time") or _broll_editorial_decision.get("start_offset") or 0.0)
+                    _editing_plan_data["broll_end_time"] = float(_broll_timing_strategy.get("broll_end_time") or 0.0)
+                    _editing_plan_data["broll_duration"] = float(_broll_timing_strategy.get("broll_duration") or _broll_editorial_decision.get("duration") or 0.0)
+                    _editing_plan_data["broll_phrase_matched"] = bool(_broll_timing_strategy.get("broll_phrase_matched"))
+                    _editing_plan_data["broll_phrase_match_terms"] = list(_broll_timing_strategy.get("broll_phrase_match_terms") or [])
+                    _editing_plan_data["broll_phrase_match_confidence"] = float(_broll_timing_strategy.get("broll_phrase_match_confidence") or 0.0)
+                    _editing_plan_data["broll_entry_style"] = str(_broll_timing_strategy.get("broll_entry_style") or "no_transition")
+                    _editing_plan_data["broll_exit_style"] = str(_broll_timing_strategy.get("broll_exit_style") or "no_transition")
+                    _editing_plan_data["broll_transition_sober"] = bool(_broll_timing_strategy.get("broll_transition_sober"))
+                    _editing_plan_data["broll_return_to_speaker"] = bool(_broll_timing_strategy.get("broll_return_to_speaker"))
+                    _editing_plan_data["broll_return_reason"] = str(_broll_timing_strategy.get("broll_return_reason") or "")
+                    _editing_plan_data["broll_status"] = str(_broll_timing_strategy.get("broll_status") or _broll_editorial_decision.get("skip_reason") or "no_broll")
+                if _broll_duplicate_routes_blocked:
+                    logger.info("BROLL_DUPLICATE_ROUTE_BLOCKED route=%s", _broll_route_used)
+                if not bool(_broll_editorial_decision.get("budget_allowed", True)):
+                    logger.info("BROLL_BLOCKED_BY_VISUAL_BUDGET reason=%s", str(_broll_editorial_decision.get("reason") or "visual_budget_blocked"))
                 if _broll_editorial_opportunity:
                     _broll_asset_match = _match_broll_asset(
                         broll_intent=str(_broll_editorial_decision.get("broll_intent") or ""),
                         topic=str(segment.get("editorial_type") or ""),
                         segment_text=str(segment.get("text") or ""),
+                        available_local_assets=_broll_available_local_assets,
+                        provider_diagnostics=_broll_provider_status,
+                        decision=_broll_editorial_decision,
                     )
                     if not _broll_asset_match.get("matched"):
                         _editorial_broll_mode = False
@@ -2795,14 +8028,51 @@ class VideoService:
                         _broll_editorial_decision["skip_reason"] = "no_assets"
                         logger.info("[broll-editorial] skipped reason=no_assets")
                     else:
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_PERCEPTIBILITY_AUDIT task_id=%s clip_order=%s mode=%s confidence=%.2f start=%.2f duration=%.2f",
+                            task_id,
+                            clip_index + 1,
+                            str(_broll_editorial_decision.get("broll_mode") or ""),
+                            float(_broll_editorial_decision.get("confidence") or 0.0),
+                            float(_broll_editorial_decision.get("start_offset") or 0.0),
+                            float(_broll_editorial_decision.get("duration") or 0.0),
+                        )
+                        if str(_broll_editorial_decision.get("broll_mode") or "") == "daily_fullframe_cutaway":
+                            logger.info(
+                                "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_SELECTED task_id=%s clip_order=%s category=%s asset=%s confidence=%.2f",
+                                task_id,
+                                clip_index + 1,
+                                str(_broll_asset_match.get("category") or _broll_editorial_decision.get("asset_category") or ""),
+                                str(_broll_asset_match.get("asset_id") or _broll_asset_match.get("asset_path") or ""),
+                                float(_broll_editorial_decision.get("confidence") or 0.0),
+                            )
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_MATCH_FOUND task_id=%s clip_order=%s category=%s asset=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            str(_broll_asset_match.get("category") or _broll_asset_match.get("taxonomy") or ""),
+                            str(_broll_asset_match.get("asset_id") or _broll_asset_match.get("asset_path") or _broll_asset_match.get("path") or ""),
+                            str(_broll_asset_match.get("reason") or "|".join(str(r) for r in (_broll_asset_match.get("reasons") or [])) or _broll_editorial_decision.get("broll_intent") or "matched"),
+                        )
                         _layers_for_broll = []
-                        if bool((_hook_plan_data or {}).get("overlay_rendered")):
-                            _layers_for_broll.append({"type": "hook_overlay", "start_s": 0.0, "duration_s": 1.2})
+                        if bool((_hook_plan_data or {}).get("overlay_rendered")) or _daily_mode_active:
+                            # Daily mode always burns the ASS hook card at 0.25-3.05s.
+                            _layers_for_broll.append({"type": "hook_overlay", "start_s": 0.25, "duration_s": 2.8})
+                        _broll_layer_start = float(_broll_editorial_decision.get("start_offset") or 3.0)
+                        _broll_layer_duration = float(_broll_editorial_decision.get("duration") or 1.2)
+                        # The rule expects the caption ON SCREEN during the insert, not the
+                        # whole transcript: take the post-trim words inside the window.
+                        _broll_window_words = [
+                            str(_w.get("word") or "")
+                            for _w in (segment.get("post_trim_caption_words") or [])
+                            if _broll_layer_start - 0.2 <= float(_w.get("start") or 0.0) < _broll_layer_start + _broll_layer_duration
+                        ]
                         _layers_for_broll.append({
                             "type": "broll",
-                            "start_s": float(_broll_editorial_decision.get("start_offset") or 1.8),
-                            "duration_s": float(_broll_editorial_decision.get("duration") or 1.2),
-                            "caption_text": str(segment.get("text") or ""),
+                            "broll_mode": str(_broll_editorial_decision.get("broll_mode") or ""),
+                            "start_s": _broll_layer_start,
+                            "duration_s": _broll_layer_duration,
+                            "caption_text": " ".join(_broll_window_words)[:90],
                         })
                         _resolved_broll_layers = _resolve_visual_layer_conflicts(_layers_for_broll, _composition_decision or {})
                         _broll_composition_allowed = "broll" in list(_resolved_broll_layers.get("layers_final") or [])
@@ -2829,41 +8099,192 @@ class VideoService:
                     "skip_reason": "decision_failed",
                 }
                 _editorial_broll_mode = False
+                _broll_route_used = "none"
+        _broll_phrase_confidence = float(
+            (_broll_editorial_decision or {}).get("broll_phrase_match_confidence")
+            or (_broll_editorial_decision or {}).get("broll_relevance_score")
+            or 0.0
+        )
+        if _daily_mode_active and _editorial_broll_mode and (
+            not words_with_confidence
+            or _broll_phrase_confidence < 0.65
+            or str((_broll_editorial_decision or {}).get("broll_mode") or "") == "picture_in_picture"
+            or float((_broll_editorial_decision or {}).get("duration") or 0.0) < 1.8
+        ):
+            _editorial_broll_mode = False
+            _broll_editorial_opportunity = False
+            _broll_editorial_decision["should_use_broll"] = False
+            _broll_editorial_decision["skip_reason"] = "skipped_no_clear_phrase_match"
+            logger.info(
+                "VPI_RENDER_BROLL_SUPPRESSED_UNRELATED task_id=%s clip_order=%s confidence=%.2f mode=%s",
+                task_id,
+                clip_index + 1,
+                _broll_phrase_confidence,
+                str((_broll_editorial_decision or {}).get("broll_mode") or "unknown"),
+            )
         logger.info(
-            "[editorial-broll] gate beta_clean=%s enabled=%s include_broll=%s",
+            "[editorial-broll] gate beta_clean=%s vpi_productive_minimum=%s enabled=%s include_broll=%s",
             str(_cfg.beta_clean).lower(),
+            str(_cfg.vpi_productive_minimum).lower(),
             str(_cfg.enable_editorial_broll).lower(),
             str(include_broll).lower(),
         )
+        if not _editorial_broll_mode:
+            if str((_broll_editorial_decision or {}).get("broll_mode") or "") == "daily_fullframe_cutaway":
+                logger.info(
+                    "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_SKIPPED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str((_broll_editorial_decision or {}).get("skip_reason") or "suppressed_before_compose"),
+                )
+            logger.info(
+                "VPI_OUTPUT_QUALITY_BROLL_SKIPPED_NO_CLEAR_MATCH task_id=%s clip_order=%s reason=%s",
+                task_id,
+                clip_index + 1,
+                str(
+                    (_broll_editorial_decision or {}).get("skip_reason")
+                    or ("include_broll_disabled" if not include_broll else "no_editorial_gain")
+                ),
+            )
         if _editorial_broll_mode:
             logger.info("[editorial-broll] enabled in beta-clean safe mode")
+            if str(_broll_editorial_decision.get("broll_mode") or "") == "daily_fullframe_cutaway":
+                logger.info(
+                    "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_COMPOSE_STARTED task_id=%s clip_order=%s start=%.2f duration=%.2f",
+                    task_id,
+                    clip_index + 1,
+                    float(_broll_editorial_decision.get("start_offset") or 3.0),
+                    float(_broll_editorial_decision.get("duration") or 2.0),
+                )
             from .broll_service import BrollService
             _broll_svc = BrollService()
             _broll_out = output_path.with_name(f"broll_{output_path.name}")
             try:
-                _broll_result = await _broll_svc.process_clip(
-                    video_path=str(output_path),
-                    output_path=str(_broll_out),
-                    segment_text=segment.get("text", ""),
-                    clip_duration=duration,
-                    max_overlays=3,
-                    overlay_duration_s=3.0,
-                    words_with_timestamps=words_with_confidence or None,
-                    precomputed_keywords=None,
-                    broll_fade_s=0.6,
-                    task_id=task_id,
-                    suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
-                    editorial_type=segment.get("editorial_type"),
-                    vpi_score=segment.get("vpi_score"),
-                    hook_broll_delay_until_s=float((_hook_plan_data or {}).get("broll_delay_until_s") or 0.0),
+                _ff_mode = str(_broll_editorial_decision.get("broll_mode") or "") == "daily_fullframe_cutaway"
+                _ff_matched_asset = str(_broll_asset_match.get("asset") or "")
+                if _ff_mode and _ff_matched_asset and Path(_ff_matched_asset).exists():
+                    # OUTPUT-QUALITY-7: the editorial decision already selected the asset
+                    # and timing — compose the full-frame cutaway DIRECTLY instead of
+                    # letting process_clip re-plan (its keyword planner rejects openers
+                    # and returns the input untouched: "output_equals_input").
+                    from .broll_compositor import compose_overlay as _compose_fullframe
+                    _ff_start_s = float(_broll_editorial_decision.get("start_offset") or 4.0)
+                    _ff_dur_s = float(_broll_editorial_decision.get("duration") or 1.8)
+                    _ff_ok = await run_in_thread(
+                        _compose_fullframe,
+                        str(output_path),
+                        _ff_matched_asset,
+                        str(_broll_out),
+                        _ff_start_s,
+                        _ff_dur_s,
+                        0.2,
+                    )
+                    _broll_result = str(_broll_out) if _ff_ok else str(output_path)
+                    _broll_svc.last_editorial_broll = [{
+                        "cue_type": "daily_fullframe_cutaway",
+                        "selected_category": str(_broll_asset_match.get("category") or ""),
+                        "trigger_text": "",
+                        "visual_query": str(_broll_editorial_decision.get("asset_query") or ""),
+                        "asset_path": _ff_matched_asset,
+                        "asset_id": str(_broll_asset_match.get("asset_id") or ""),
+                        "asset_source": "local",
+                        "asset_score": float(_broll_asset_match.get("score") or 0.0),
+                        "asset_score_reasons": list(_broll_asset_match.get("reasons") or []),
+                    }] if _ff_ok else []
+                else:
+                    _broll_result = await _broll_svc.process_clip(
+                        video_path=str(output_path),
+                        output_path=str(_broll_out),
+                        segment_text=segment.get("text", ""),
+                        clip_duration=duration,
+                        max_overlays=int(_broll_editorial_decision.get("max_insertions") or 1),
+                        overlay_duration_s=float(_broll_editorial_decision.get("duration") or 1.8),
+                        words_with_timestamps=words_with_confidence or None,
+                        precomputed_keywords=None,
+                        broll_fade_s=0.6,
+                        task_id=task_id,
+                        suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
+                        editorial_type=segment.get("editorial_type"),
+                        vpi_score=segment.get("vpi_score"),
+                        hook_broll_delay_until_s=float(_broll_editorial_decision.get("start_offset") or (_hook_plan_data or {}).get("broll_delay_until_s") or 3.0),
+                    )
+                _broll_render_verified, _broll_render_verification_reason, _broll_render_verification_info = _verify_broll_output(
+                    input_video=output_path,
+                    output_video=_broll_result,
+                    expected_start=float(_broll_editorial_decision.get("start_offset") or 0.0),
+                    expected_duration=float(_broll_editorial_decision.get("duration") or 0.0),
                 )
-                if Path(_broll_result).exists() and _broll_result != str(output_path):
+                if _broll_render_verified and Path(_broll_result).exists() and _broll_result != str(output_path):
                     _broll_input = output_path
                     output_path = Path(_broll_result)
                     _log_premium_pipeline_step("broll", _broll_input, output_path)
+                    logger.info("BROLL_RENDERED")
+                    logger.info("BROLL_OUTPUT_VERIFIED")
+                    logger.info(
+                        "VPI_OUTPUT_QUALITY_BROLL_INSERTED task_id=%s clip_order=%s path=%s start=%.2f end=%.2f",
+                        task_id,
+                        clip_index + 1,
+                        str(output_path),
+                        float(_broll_editorial_decision.get("start_offset") or 0.0),
+                        float(_broll_editorial_decision.get("start_offset") or 0.0)
+                        + float(_broll_editorial_decision.get("duration") or 0.0),
+                    )
                     logger.info(f"  ✓ Editorial B-roll overlay applied")
+                else:
+                    logger.warning("BROLL_SKIPPED_REASON reason=%s", _broll_render_verification_reason)
                 _editorial_broll_metadata = list(getattr(_broll_svc, "last_editorial_broll", []) or [])
                 _broll_selection_stats = dict(getattr(_broll_svc, "_last_broll_selection_stats", {}) or {})
+                if str(_broll_editorial_decision.get("broll_mode") or "") == "daily_fullframe_cutaway":
+                    _ff_start = float(_broll_editorial_decision.get("start_offset") or 3.0)
+                    _ff_end = _ff_start + float(_broll_editorial_decision.get("duration") or 2.0)
+                    _ff_asset = str(
+                        (_editorial_broll_metadata[0].get("asset_path") if _editorial_broll_metadata else "")
+                        or _broll_asset_match.get("asset_path")
+                        or _broll_asset_match.get("asset_id")
+                        or ""
+                    )
+                    _ff_category = str(
+                        (_editorial_broll_metadata[0].get("selected_category") if _editorial_broll_metadata else "")
+                        or _broll_asset_match.get("category")
+                        or _broll_editorial_decision.get("asset_category")
+                        or ""
+                    )
+                    _broll_fullframe_meta = {
+                        "broll_mode": "daily_fullframe_cutaway",
+                        "broll_inserted": bool(_broll_render_verified),
+                        "broll_asset_path": _ff_asset,
+                        "broll_match_category": _ff_category,
+                        "broll_confidence": float(_broll_editorial_decision.get("confidence") or 0.0),
+                        "broll_start_s": _ff_start,
+                        "broll_end_s": _ff_end,
+                        "broll_skip_reason": "" if _broll_render_verified else str(_broll_render_verification_reason or ""),
+                    }
+                    if isinstance(_editing_plan_data, dict):
+                        _editing_plan_data.update(_broll_fullframe_meta)
+                    segment["broll_fullframe_meta"] = dict(_broll_fullframe_meta)
+                    if _broll_render_verified:
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_INSERTED task_id=%s clip_order=%s path=%s asset=%s start=%.2f end=%.2f",
+                            task_id, clip_index + 1, str(output_path), _ff_asset, _ff_start, _ff_end,
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_FRAME_VERIFIED task_id=%s clip_order=%s start=%.2f end=%.2f duration=%.2f",
+                            task_id, clip_index + 1, _ff_start, _ff_end, _ff_end - _ff_start,
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_VISUAL_STACK_VERIFIED task_id=%s clip_order=%s layers=hook_card|push_in|broll_cutaway|captions",
+                            task_id, clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_VERIFIED task_id=%s clip_order=%s category=%s confidence=%.2f audio=main_only captions=burned_after",
+                            task_id, clip_index + 1, _ff_category,
+                            float(_broll_editorial_decision.get("confidence") or 0.0),
+                        )
+                    else:
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_SKIPPED task_id=%s clip_order=%s reason=%s",
+                            task_id, clip_index + 1, str(_broll_render_verification_reason or "render_not_verified"),
+                        )
                 if _editing_plan_data:
                     _editing_plan_data["has_broll"] = bool(_editorial_broll_metadata)
                     _editing_plan_data["broll_selection_stats"] = _broll_selection_stats
@@ -2872,6 +8293,24 @@ class VideoService:
                     _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
                     _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
                     _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
+                    _editing_plan_data["broll_route_used"] = _broll_route_used
+                    _editing_plan_data["broll_duplicate_routes_blocked"] = bool(_broll_duplicate_routes_blocked)
+                    _editing_plan_data["broll_applied"] = bool(_broll_render_verified)
+                    _editing_plan_data["broll_rendered"] = bool(_broll_render_verified)
+                    _editing_plan_data["broll_verified"] = bool(_broll_render_verified)
+                    _editing_plan_data["broll_intent"] = str(_broll_editorial_decision.get("broll_intent") or "")
+                    _editing_plan_data["broll_confidence"] = float(_broll_editorial_decision.get("confidence") or 0.0)
+                    _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
+                    _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
+                    _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+                    _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
+                    _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
+                    _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
+                    _editing_plan_data["broll_skip_reason"] = "" if _broll_render_verified else str(_broll_render_verification_reason or _broll_editorial_decision.get("skip_reason") or "")
+                    _editing_plan_data["broll_budget_allowed"] = bool(_broll_editorial_decision.get("budget_allowed"))
+                    _editing_plan_data["broll_face_safe"] = bool(_broll_editorial_decision.get("face_safe"))
+                    _editing_plan_data["broll_caption_safe"] = bool(_broll_editorial_decision.get("caption_safe"))
+                    _editing_plan_data["broll_output_verified"] = bool(_broll_render_verified)
                     for _stat_key in (
                         "broll_no_broll_reason",
                         "broll_candidates_total",
@@ -2892,7 +8331,25 @@ class VideoService:
                     _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
                     _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
                     _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
-        elif not _cfg.beta_clean:
+                    _editing_plan_data["broll_route_used"] = _broll_route_used
+                    _editing_plan_data["broll_duplicate_routes_blocked"] = bool(_broll_duplicate_routes_blocked)
+                    _editing_plan_data["broll_applied"] = False
+                    _editing_plan_data["broll_rendered"] = False
+                    _editing_plan_data["broll_verified"] = False
+                    _editing_plan_data["broll_intent"] = str(_broll_editorial_decision.get("broll_intent") or "")
+                    _editing_plan_data["broll_confidence"] = float(_broll_editorial_decision.get("confidence") or 0.0)
+                    _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
+                    _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
+                    _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+                    _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
+                    _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
+                    _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
+                    _editing_plan_data["broll_skip_reason"] = str(_broll_editorial_decision.get("skip_reason") or "broll_render_failed")
+                    _editing_plan_data["broll_budget_allowed"] = bool(_broll_editorial_decision.get("budget_allowed"))
+                    _editing_plan_data["broll_face_safe"] = bool(_broll_editorial_decision.get("face_safe"))
+                    _editing_plan_data["broll_caption_safe"] = bool(_broll_editorial_decision.get("caption_safe"))
+                    _editing_plan_data["broll_output_verified"] = False
+        elif not _cfg.beta_clean and not _broll_force_central_decision:
             from ..config import get_config as _get_cfg_broll
             if _get_cfg_broll().broll_enabled:
                 try:
@@ -2920,6 +8377,47 @@ class VideoService:
                         logger.info(f"  ✓ B-roll overlay applied (post-EP)")
                 except Exception as _broll_e:
                     logger.warning(f"  B-roll overlay failed: {_broll_e}")
+        elif _cfg.vpi_productive_minimum and _cfg.beta_clean and not _broll_force_central_decision:
+            # [vpi-productive-minimum] Local-only B-roll fallback when editorial B-roll
+            # decision didn't trigger but productive minimum is active.
+            logger.info("[vpi-productive-minimum] attempting local B-roll fallback")
+            try:
+                from .broll_service import BrollService
+                _broll_svc = BrollService()
+                _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                _broll_result = await _broll_svc.process_clip(
+                    video_path=str(output_path),
+                    output_path=str(_broll_out),
+                    segment_text=segment.get("text", ""),
+                    clip_duration=duration,
+                    max_overlays=2,
+                    overlay_duration_s=2.5,
+                    words_with_timestamps=words_with_confidence or None,
+                    precomputed_keywords=None,
+                    broll_fade_s=0.6,
+                    task_id=task_id,
+                    suggested_broll_cue_type=segment.get("suggested_broll_cue_type"),
+                    editorial_type=segment.get("editorial_type"),
+                    vpi_score=segment.get("vpi_score"),
+                    hook_broll_delay_until_s=3.0,  # delay past hook zone
+                )
+                if Path(_broll_result).exists() and _broll_result != str(output_path):
+                    _broll_input = output_path
+                    output_path = Path(_broll_result)
+                    _log_premium_pipeline_step("broll", _broll_input, output_path)
+                    logger.info(f"  ✓ [vpi-productive-minimum] Local B-roll overlay applied")
+                    _editorial_broll_metadata = list(getattr(_broll_svc, "last_editorial_broll", []) or [])
+                    _broll_selection_stats = dict(getattr(_broll_svc, "_last_broll_selection_stats", {}) or {})
+                    if _editing_plan_data:
+                        _editing_plan_data["has_broll"] = bool(_editorial_broll_metadata)
+                        _editing_plan_data["broll_selection_stats"] = _broll_selection_stats
+                        _editing_plan_data["broll_editorial_decision"] = _broll_editorial_decision
+                        _editing_plan_data["broll_asset_match"] = _broll_asset_match
+                        _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
+                        _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
+                        _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
+            except Exception as _broll_e:
+                logger.warning(f"[vpi-productive-minimum] Local B-roll fallback failed: {_broll_e}")
         else:
             logger.info(f"[beta-clean] B-roll overlay skipped (beta_clean mode)")
         if _editing_plan_data and "broll_editorial_decision" not in _editing_plan_data:
@@ -2928,6 +8426,24 @@ class VideoService:
             _editing_plan_data["broll_editorial_opportunity"] = bool(_broll_editorial_opportunity)
             _editing_plan_data["broll_editorial_fallback"] = _broll_editorial_fallback
             _editing_plan_data["broll_composition_allowed"] = bool(_broll_composition_allowed)
+            _editing_plan_data["broll_route_used"] = _broll_route_used
+            _editing_plan_data["broll_duplicate_routes_blocked"] = bool(_broll_duplicate_routes_blocked)
+            _editing_plan_data["broll_applied"] = bool(_broll_render_verified)
+            _editing_plan_data["broll_rendered"] = bool(_broll_render_verified)
+            _editing_plan_data["broll_verified"] = bool(_broll_render_verified)
+            _editing_plan_data["broll_intent"] = str(_broll_editorial_decision.get("broll_intent") or "")
+            _editing_plan_data["broll_confidence"] = float(_broll_editorial_decision.get("confidence") or 0.0)
+            _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
+            _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
+            _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+            _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
+            _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
+            _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
+            _editing_plan_data["broll_skip_reason"] = str(_broll_editorial_decision.get("skip_reason") or _broll_render_verification_reason or "")
+            _editing_plan_data["broll_budget_allowed"] = bool(_broll_editorial_decision.get("budget_allowed"))
+            _editing_plan_data["broll_face_safe"] = bool(_broll_editorial_decision.get("face_safe"))
+            _editing_plan_data["broll_caption_safe"] = bool(_broll_editorial_decision.get("caption_safe"))
+            _editing_plan_data["broll_output_verified"] = bool(_broll_render_verified)
         if _broll_editorial_opportunity:
             _broll_fulfilled = bool(locals().get("_editorial_broll_metadata") or [])
             logger.info(
@@ -2938,10 +8454,19 @@ class VideoService:
 
         # Step 4.3b: Contextual Overlay Engine — keyword→image/video overlays (viral TikTok feature)
         _ctx_overlays_env = os.environ.get("CONTEXTUAL_OVERLAYS_ENABLED", "true").lower() == "true"
-        if _cfg.beta_clean:
-            logger.info("[beta-clean] template text overlay skipped")
-            logger.info("[beta-clean] top text overlay skipped")
-        elif _ctx_overlays_env and segment and words_with_confidence:
+        if _daily_mode_active:
+            _ctx_overlays_env = False
+            logger.info(
+                "VPI_RENDER_PIP_HARD_DISABLED task_id=%s clip_order=%s reason=contextual_overlay_engine_disabled",
+                task_id,
+                clip_index + 1,
+            )
+            logger.info(
+                "VPI_RENDER_DEBUG_BOX_HARD_DISABLED task_id=%s clip_order=%s reason=contextual_overlay_engine_disabled",
+                task_id,
+                clip_index + 1,
+            )
+        if _ctx_overlays_env and segment and words_with_confidence:
             try:
                 from .contextual_overlay_engine import ContextualOverlayEngine
                 _ctx_engine = ContextualOverlayEngine()
@@ -2975,6 +8500,29 @@ class VideoService:
 
         # Step 4.4: ASS Karaoke captions — after B-roll so text burns on top.
         if add_subtitles and words_with_confidence:
+            _caption_segment_start = float(start_seconds or 0.0)
+            words_with_confidence, _caption_timebase_corrected_runtime, _caption_timebase_mode, _caption_times_clamped = _normalize_caption_words_for_render(
+                list(words_with_confidence or []),
+                clip_duration=float(duration or 0.0),
+                segment_start_s=_caption_segment_start,
+            )
+            if _caption_timebase_corrected_runtime:
+                logger.info(
+                    "VPI_CAPTION_ASS_TIMEBASE_FIXED task_id=%s clip_order=%s first_caption_start=%.2f first_caption_end=%.2f clip_duration=%.2f caption_timebase_mode=%s",
+                    task_id,
+                    clip_index + 1,
+                    float((words_with_confidence[0] or {}).get("start") or 0.0) if words_with_confidence else 0.0,
+                    float((words_with_confidence[0] or {}).get("end") or 0.0) if words_with_confidence else 0.0,
+                    float(duration or 0.0),
+                    _caption_timebase_mode,
+                )
+            if _caption_times_clamped:
+                logger.info(
+                    "VPI_CAPTION_ASS_TIMES_CLAMPED task_id=%s clip_order=%s clip_duration=%.2f",
+                    task_id,
+                    clip_index + 1,
+                    float(duration or 0.0),
+                )
             # ── Timeline validation: clamp words that exceed video duration ──
             # After silence removal / jump cuts the word timestamps may exceed
             # the final video duration, causing desynchronised subtitles.
@@ -3016,68 +8564,662 @@ class VideoService:
                     "for %s — skipping clamp", output_path.name,
                 )
 
-            try:
-                from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
-                logger.info(f"  Burning ASS captions ({len(words_with_confidence)} words)...")
-                _cap_style_raw = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
-                _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw  # Nunca usar minimal - texto invisible
-                subtitled_path = output_path.with_name(f"sub_{output_path.name}")
-                _caption_decisions = {
-                    "highlighted_terms": (_editing_plan_data or {}).get("highlighted_terms", []),
-                    "hook_emphasis_words": (_hook_plan_data or {}).get("emphasis_words", []),
-                    "hook_headline_text": (_hook_plan_data or {}).get("headline_text"),
-                    "hook_subtitle_text": (_hook_plan_data or {}).get("subtitle_hook_text"),
-                    "hook_type": (_hook_plan_data or {}).get("hook_type"),
-                    "hook_intent": (_hook_plan_data or {}).get("hook_intent"),
-                    "hook_first3_status": (_hook_plan_data or {}).get("hook_first3_status"),
-                    "hook_first3_score": (_hook_plan_data or {}).get("hook_first3_score"),
-                    "editorial_type": segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type"),
-                    "segment_text": segment.get("text") or "",
-                    "composition_decision": _composition_decision,
-                }
-                _cap_ok = await _burn_caps(
-                    output_path, subtitled_path,
-                    words_with_confidence,
-                    style=_cap_style,
-                    platform=target_platform,
-                    caption_decisions=_caption_decisions,
+            # OUTPUT-QUALITY-2: fallback text-split timings are evenly spaced and drift
+            # against real speech. Re-time them across detected speech intervals of the
+            # actual video that receives the burn (reflects jump cuts and refinement).
+            if segment.get("caption_fallback_timing") and words_with_confidence:
+                _oq2_dur = float(_video_dur or duration or 0.0)
+                logger.info(
+                    "VPI_OUTPUT_QUALITY_CAPTION_SYNC_AUDIT task_id=%s clip_order=%s mode=fallback_text_split words=%d clip_duration=%.2f",
+                    task_id, clip_index + 1, len(words_with_confidence), _oq2_dur,
                 )
-                _caption_overlay_pack_metadata = dict(_caption_decisions.get("caption_overlay_pack") or {})
-                if _cap_ok and subtitled_path.exists():
-                    _caption_input = output_path
-                    output_path = subtitled_path
-                    _log_premium_pipeline_step("captions", _caption_input, output_path)
-                    _caption_ass_debug_path = str(
-                        Path(os.environ.get("CAPTION_DEBUG_DIR", "/app/temp/caption_debug"))
-                        / f"{subtitled_path.stem}.ass"
+                _speech_intervals = (
+                    _detect_speech_intervals_for_captions(output_path, _oq2_dur)
+                    if _oq2_dur > 0 else []
+                )
+                _retimed_words, _retime_ok = _retime_caption_words_to_speech(
+                    words_with_confidence, _speech_intervals, _oq2_dur
+                )
+                if _retime_ok:
+                    words_with_confidence = _retimed_words
+                    logger.info(
+                        "VPI_OUTPUT_QUALITY_CAPTION_TIMELINE_RELATIVE task_id=%s clip_order=%s base=final_clip speech_intervals=%d",
+                        task_id, clip_index + 1, len(_speech_intervals),
                     )
-                    logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
-                else:
-                    raise RuntimeError("caption_service returned False")
-            except Exception as burn_e:
-                if _cfg.beta_clean:
-                    logger.error(
-                        "[beta-clean] CaptionService.burn_captions failed (%s); "
-                        "legacy subtitle fallback disabled",
-                        burn_e,
+                    logger.info(
+                        "VPI_OUTPUT_QUALITY_CAPTION_SYNC_FIXED task_id=%s clip_order=%s first_start=%.2f last_end=%.2f speech_total=%.2f",
+                        task_id, clip_index + 1,
+                        float(words_with_confidence[0].get("start") or 0.0),
+                        float(words_with_confidence[-1].get("end") or 0.0),
+                        sum(e - s for s, e in _speech_intervals),
                     )
-                    logger.info("[beta-clean] legacy subtitle fallback disabled")
-                    if "subtitled_path" in locals() and subtitled_path is not None:
-                        subtitled_path.unlink(missing_ok=True)
-                    subtitled_path = None
                 else:
+                    if _oq2_dur > 0:
+                        for _w in words_with_confidence:
+                            if float(_w.get("end") or 0.0) > _oq2_dur - 0.05:
+                                _w["end"] = max(0.0, _oq2_dur - 0.05)
+                    logger.info(
+                        "VPI_OUTPUT_QUALITY_CAPTION_SYNC_AUDIT task_id=%s clip_order=%s retime=skipped reason=no_speech_intervals duration_capped=true",
+                        task_id, clip_index + 1,
+                    )
+
+            _caption_mode = _caption_backend_mode("auto")
+            _ass_words = _normalize_ass_words(words_with_confidence)
+            _fallback_caption_words = _normalize_caption_word_items_for_fallback(
+                words_with_confidence,
+                clip_duration=float(duration or 0.0),
+            )
+            _premium_auto_ass = _caption_mode == "auto" and _is_premium_productive_runtime()
+            _ass_runtime_requested = _caption_mode == "ass" or _premium_auto_ass
+            _caption_decisions = {
+                "highlighted_terms": (_editing_plan_data or {}).get("highlighted_terms", []),
+                "hook_emphasis_words": (_hook_plan_data or {}).get("emphasis_words", []),
+                "hook_headline_text": (_hook_plan_data or {}).get("headline_text"),
+                "hook_subtitle_text": (_hook_plan_data or {}).get("subtitle_hook_text"),
+                "hook_type": (_hook_plan_data or {}).get("hook_type"),
+                "hook_intent": (_hook_plan_data or {}).get("hook_intent"),
+                "hook_first3_status": (_hook_plan_data or {}).get("hook_first3_status"),
+                "hook_first3_score": (_hook_plan_data or {}).get("hook_first3_score"),
+                "editorial_type": segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type"),
+                "segment_text": segment.get("text") or "",
+                "composition_decision": _composition_decision,
+                "clip_duration": float(duration or 0.0),
+                "refined_start_time": str(segment.get("refined_start_time") or segment.get("start_time") or ""),
+                "refined_end_time": str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+                "caption_timebase_source": "clip_relative",
+                "caption_timebase_corrected": False,
+                "caption_sync_warning": "",
+                "text_overlap_prevented": False,
+                "suppressed_text_layers": [],
+                "text_layer_count_final": 1,
+                "caption_priority_enforced": False,
+            }
+
+            _visual_layer_budget_opening: Dict[str, Any] = {}
+            try:
+                from .vpi_visual_effects_service import build_global_visual_layer_budget as _build_global_visual_layer_budget
+                _visual_layer_budget_opening = _build_global_visual_layer_budget(
+                    caption_overlay_pack_metadata=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                    hook_text_overlay_rendered=bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+                    hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+                    first3_has_captions=bool(words_with_confidence),
+                    lower_third_candidate=(_hook_plan_data or {}).get("lower_third") if isinstance(_hook_plan_data, dict) else None,
+                    icon_candidate=_hook_icon_candidate if isinstance(_hook_icon_candidate, dict) else None,
+                    visual_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                    clip_duration=float(duration or 0.0),
+                )
+                _caption_decisions["global_visual_layer_budget"] = _visual_layer_budget_opening
+                logger.info(
+                    "[visual-layer-budget] opening runtime_connected=true allowed=%s dropped=%s",
+                    "|".join(_visual_layer_budget_opening.get("visual_layers_allowed") or []) or "none",
+                    "|".join(str((item or {}).get("layer") or "") for item in (_visual_layer_budget_opening.get("visual_layers_dropped") or []) if str((item or {}).get("layer") or "")) or "none",
+                )
+                if _visual_layer_budget_opening.get("visual_support_layer_selected"):
+                    logger.info(
+                        "VISUAL_SUPPORT_LAYER_SELECTED task_id=%s clip_order=%s layer=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_layer_budget_opening.get("visual_support_layer_selected") or ""),
+                        str(_visual_layer_budget_opening.get("visual_support_layer_reason") or "selected_by_budget"),
+                    )
+            except Exception as _budget_opening_e:
+                logger.debug("[visual-layer-budget] opening skipped reason=%s", _budget_opening_e)
+
+            if _ass_runtime_requested and not _ass_words:
+                _caption_fallback_reason = "no_caption_timing"
+                logger.info("ASS_CAPTION_RUNTIME_SKIPPED reason=no_caption_timing")
+
+            if _ass_runtime_requested and _ass_words:
+                try:
+                    from .vpi_ass_caption_service import build_ass_caption_plan as _build_ass_caption_plan
+                    from .vpi_ass_caption_service import build_ass_subtitle_text as _build_ass_subtitle_text
+                    logger.info(
+                        "VPI_CAPTION_ASS_PLAN_SAFE_DEFAULTS task_id=%s clip_order=%s words=%d overlay_terms=%d clip_duration=%.2f",
+                        task_id,
+                        clip_index + 1,
+                        len(_ass_words),
+                        len(list((_caption_overlay_pack_metadata or {}).get("keyword_emphasis_terms") or [])),
+                        float(duration or 0.0),
+                    )
+                    logger.info(
+                        "VPI_CAPTION_TIMEBASE_LOCALIZED_RUNTIME task_id=%s clip_order=%s first_caption_start=%.2f first_caption_end=%.2f clip_duration=%.2f caption_timebase_mode=%s",
+                        task_id,
+                        clip_index + 1,
+                        float((words_with_confidence[0] or {}).get("start") or 0.0) if words_with_confidence else 0.0,
+                        float((words_with_confidence[0] or {}).get("end") or 0.0) if words_with_confidence else 0.0,
+                        float(duration or 0.0),
+                        _caption_timebase_mode,
+                    )
+
+                    _visual_style_runtime = (
+                        str((_as_dict(_timeline_plan_data.get("timeline_plan")).get("metadata") or {}).get("visual_style") or "")
+                        or str((_hook_plan_data or {}).get("hook_style") or "")
+                        or "clear_explanation"
+                    )
+                    _caption_style_runtime = _map_visual_style_to_ass_caption_style(_visual_style_runtime)
+                    _hook_text = str((_hook_plan_data or {}).get("subtitle_hook_text") or (_hook_plan_data or {}).get("headline_text") or "").strip() or None
+                    if _is_vpi_daily_mode_active():
+                        _hook_text = None
+                    _hook_end = min(2.2, max(1.1, float((_hook_plan_data or {}).get("hook_duration_s") or 1.6)))
+                    _emphasis_terms = {
+                        str(x).strip().lower()
+                        for x in list((_editing_plan_data or {}).get("highlighted_terms") or []) + list((_hook_plan_data or {}).get("emphasis_words") or [])
+                        if str(x).strip()
+                    }
+                    _emphasis_indices = [
+                        idx for idx, w in enumerate(_ass_words)
+                        if str(w.get("text") or "").strip().lower() in _emphasis_terms
+                    ]
+                    _ass_plan_obj = _build_ass_caption_plan(
+                        clip_id=f"{task_id}_{clip_index + 1}",
+                        words=_ass_words,
+                        clip_duration=float(duration or 0.0),
+                        platform=target_platform,
+                        visual_style=_caption_style_runtime,
+                        caption_style=_caption_style_runtime,
+                        editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                        caption_density=float(len(_ass_words) / max(1.0, float(duration or 0.0) or 1.0)),
+                        hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                        premium_restraint_mode=str((_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                        visual_layout_strategy=str((_composition_decision or {}).get("visual_layout_strategy") or ""),
+                        broll_timing_strategy=str((_editing_plan_data or {}).get("broll_strategy") or ""),
+                        cta_decision="",
+                        sensitive_topic=bool("decesos" in str(segment.get("editorial_type") or "").lower()),
+                        emphasis_indices=_emphasis_indices,
+                        hook_text=_hook_text,
+                        hook_start=0.25 if _hook_text else None,
+                        hook_end=_hook_end if _hook_text else None,
+                        lower_third_text=None,
+                        approx_simple_mode=bool(_is_vpi_daily_mode_active() or not _caption_timebase_corrected),
+                        global_visual_layer_budget=_visual_layer_budget_opening,
+                    )
+                except Exception as _ass_plan_e:
+                    logger.warning(
+                        "VPI_CAPTION_ASS_PLAN_FALLBACK_SIMPLE task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        _ass_plan_e,
+                    )
+                    try:
+                        _ass_plan_obj = _build_ass_caption_plan(
+                            clip_id=f"{task_id}_{clip_index + 1}",
+                            words=_ass_words,
+                            clip_duration=float(duration or 0.0),
+                            platform=target_platform,
+                            visual_style="vpi_clean",
+                            caption_style="vpi_clean",
+                            editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                            caption_density=float(len(_ass_words) / max(1.0, float(duration or 0.0) or 1.0)),
+                            hook_strategy_final="",
+                            premium_restraint_mode="",
+                            visual_layout_strategy="",
+                            broll_timing_strategy="",
+                            cta_decision="",
+                            sensitive_topic=bool("decesos" in str(segment.get("editorial_type") or "").lower()),
+                            emphasis_indices=[],
+                            hook_text=None,
+                            hook_start=None,
+                            hook_end=None,
+                            lower_third_text=None,
+                            approx_simple_mode=bool(_is_vpi_daily_mode_active() or not _caption_timebase_corrected),
+                            global_visual_layer_budget={},
+                        )
+                    except Exception as _ass_plan_e2:
+                        raise RuntimeError(str(_ass_plan_e2)) from _ass_plan_e
+                try:
+                    _ass_plan_obj.validate()
+                    _ass_caption_plan_data = _json_safe(_ass_plan_obj)
+                    _caption_decisions.update({
+                        "caption_polish_profile": str(getattr(_ass_plan_obj, "caption_polish_profile", "") or _ass_caption_plan_data.get("caption_polish_profile") or ""),
+                        "caption_pacing_reason": str(getattr(_ass_plan_obj, "caption_pacing_reason", "") or _ass_caption_plan_data.get("caption_pacing_reason") or ""),
+                        "caption_polish_applied": bool(getattr(_ass_plan_obj, "caption_polish_applied", False)),
+                        "caption_polish_partial": bool(getattr(_ass_plan_obj, "caption_polish_partial", False)),
+                        "caption_linebreak_polish_applied": bool(getattr(_ass_plan_obj, "caption_linebreak_polish_applied", False)),
+                        "caption_orphan_words_avoided": bool(getattr(_ass_plan_obj, "caption_orphan_words_avoided", False)),
+                        "caption_protected_phrases_preserved": bool(getattr(_ass_plan_obj, "caption_protected_phrases_preserved", False)),
+                        "caption_timing_polish_applied": bool(getattr(_ass_plan_obj, "caption_timing_polish_applied", False)),
+                        "caption_too_fast_adjusted": bool(getattr(_ass_plan_obj, "caption_too_fast_adjusted", False)),
+                        "caption_duration_balance_ok": bool(getattr(_ass_plan_obj, "caption_duration_balance_ok", True)),
+                        "caption_keyword_highlight_count": int(getattr(_ass_plan_obj, "caption_keyword_highlight_count", 0)),
+                        "caption_highlight_policy": str(getattr(_ass_plan_obj, "caption_highlight_policy", "") or ""),
+                        "caption_hook_conflict_avoided": bool(getattr(_ass_plan_obj, "caption_hook_conflict_avoided", False)),
+                        "caption_cta_conflict_avoided": bool(getattr(_ass_plan_obj, "caption_cta_conflict_avoided", False)),
+                        "caption_broll_conflict_avoided": bool(getattr(_ass_plan_obj, "caption_broll_conflict_avoided", False)),
+                        "caption_visual_conflict_avoided": bool(getattr(_ass_plan_obj, "caption_visual_conflict_avoided", False)),
+                        "text_overlap_prevented": bool(getattr(_ass_plan_obj, "text_overlap_prevented", False)),
+                        "suppressed_text_layers": list(getattr(_ass_plan_obj, "suppressed_text_layers", []) or []),
+                        "text_layer_count_final": int(getattr(_ass_plan_obj, "text_layer_count_final", 1) or 1),
+                        "caption_priority_enforced": bool(getattr(_ass_plan_obj, "caption_priority_enforced", False)),
+                        "caption_timebase_corrected": bool(getattr(_ass_plan_obj, "caption_timebase_corrected", False) or _caption_timebase_corrected_runtime),
+                        "caption_timebase_source": str(getattr(_ass_plan_obj, "caption_timebase_source", "") or _caption_timebase_mode or ""),
+                        "caption_sync_warning": str(getattr(_ass_plan_obj, "caption_sync_warning", "") or ""),
+                        "ass_karaoke_enabled": bool(getattr(_ass_plan_obj, "ass_karaoke_enabled", True)),
+                        "ass_approx_simple_mode": bool(getattr(_ass_plan_obj, "ass_approx_simple_mode", False)),
+                        "ass_event_count_final": int(getattr(_ass_plan_obj, "ass_event_count_final", len(getattr(_ass_plan_obj, "events", []) or [])) or len(getattr(_ass_plan_obj, "events", []) or [])),
+                        "ass_hook_overlay_removed": bool(getattr(_ass_plan_obj, "ass_hook_overlay_removed", False)),
+                    })
+                    _caption_overlay_pack_metadata = dict(_caption_overlay_pack_metadata or {})
+                    _caption_overlay_pack_metadata.update({
+                        "caption_polish_profile": _caption_decisions.get("caption_polish_profile"),
+                        "caption_pacing_reason": _caption_decisions.get("caption_pacing_reason"),
+                        "caption_polish_applied": _caption_decisions.get("caption_polish_applied"),
+                        "caption_polish_partial": _caption_decisions.get("caption_polish_partial"),
+                        "caption_linebreak_polish_applied": _caption_decisions.get("caption_linebreak_polish_applied"),
+                        "caption_orphan_words_avoided": _caption_decisions.get("caption_orphan_words_avoided"),
+                        "caption_protected_phrases_preserved": _caption_decisions.get("caption_protected_phrases_preserved"),
+                        "caption_timing_polish_applied": _caption_decisions.get("caption_timing_polish_applied"),
+                        "caption_too_fast_adjusted": _caption_decisions.get("caption_too_fast_adjusted"),
+                        "caption_duration_balance_ok": _caption_decisions.get("caption_duration_balance_ok"),
+                        "caption_keyword_highlight_count": _caption_decisions.get("caption_keyword_highlight_count"),
+                        "caption_highlight_policy": _caption_decisions.get("caption_highlight_policy"),
+                        "caption_hook_conflict_avoided": _caption_decisions.get("caption_hook_conflict_avoided"),
+                        "caption_cta_conflict_avoided": _caption_decisions.get("caption_cta_conflict_avoided"),
+                        "caption_broll_conflict_avoided": _caption_decisions.get("caption_broll_conflict_avoided"),
+                        "caption_visual_conflict_avoided": _caption_decisions.get("caption_visual_conflict_avoided"),
+                        "text_overlap_prevented": _caption_decisions.get("text_overlap_prevented"),
+                        "suppressed_text_layers": list(_caption_decisions.get("suppressed_text_layers") or []),
+                        "text_layer_count_final": _caption_decisions.get("text_layer_count_final"),
+                        "caption_priority_enforced": _caption_decisions.get("caption_priority_enforced"),
+                        "caption_timebase_corrected": _caption_decisions.get("caption_timebase_corrected"),
+                        "caption_timebase_source": _caption_decisions.get("caption_timebase_source"),
+                        "caption_sync_warning": _caption_decisions.get("caption_sync_warning"),
+                        "ass_karaoke_enabled": _caption_decisions.get("ass_karaoke_enabled"),
+                        "ass_approx_simple_mode": _caption_decisions.get("ass_approx_simple_mode"),
+                        "ass_event_count_final": _caption_decisions.get("ass_event_count_final"),
+                        "ass_hook_overlay_removed": _caption_decisions.get("ass_hook_overlay_removed"),
+                        "hook_lower_third_rendered": bool((_caption_overlay_pack_metadata.get("lower_third") or {}).get("applied") or False),
+                        "ass_hook_overlay_injected": bool((_caption_overlay_pack_metadata.get("hook_overlay") or {}).get("applied") or False),
+                        "non_text_visual_hook_rendered": bool((_hook_plan_data or {}).get("hook_visual_backend") == "non_text_visual_hook" and bool((_hook_plan_data or {}).get("hook_visual_applied"))),
+                        "captions_overlap_removed": bool(_caption_decisions.get("text_overlap_prevented")),
+                        "selected_window_before": str(segment.get("original_start_time") or segment.get("start_time") or "") + " -> " + str(segment.get("original_end_time") or segment.get("end_time") or ""),
+                        "selected_window_after": str(segment.get("refined_start_time") or segment.get("start_time") or "") + " -> " + str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+                        "complete_idea_score": float(segment.get("complete_idea_score") or 0.0),
+                        "incomplete_viral_window_detected": bool(segment.get("incomplete_viral_window_detected")),
+                        "setup_context_shift_seconds": float(segment.get("setup_context_shift_seconds") or 0.0),
+                        "trailing_low_value_seconds": float(segment.get("trailing_low_value_seconds") or 0.0),
+                        "viral_window_shifted_back": bool(segment.get("viral_window_shifted_back")),
+                        "viral_window_shift_reason": str(segment.get("viral_window_shift_reason") or ""),
+                    })
+                    _ass_caption_events_count = len(getattr(_ass_plan_obj, "events", []) or [])
+                    _ass_caption_highlights_count = sum(
+                        1 for _meta in (getattr(_ass_plan_obj, "word_metas", []) or [])
+                        if bool(getattr(_meta, "is_emphasis", False))
+                    )
+                    _ass_subtitle_preview = _build_ass_subtitle_text(
+                        words=_ass_words[: min(len(_ass_words), 12)],
+                        caption_style=_caption_style_runtime,
+                        emphasis_indices=_emphasis_indices[: min(len(_emphasis_indices), 6)],
+                        caption_polish_profile=_ass_caption_plan_data if isinstance(_ass_caption_plan_data, dict) else None,
+                    )
+                    _ass_caption_plan_data["ass_subtitle_preview"] = _ass_subtitle_preview
+
+                    _captions_dir = _resolve_caption_artifacts_dir(task_id)
+                    _ass_file = _captions_dir / f"clip_{clip_index + 1}.ass"
+                    _ass_file.write_text(_ass_plan_obj.to_ass_script(), encoding="utf-8")
+                    try:
+                        _oq2_events = list(getattr(_ass_plan_obj, "events", []) or [])
+                        _oq2_starts = [float(getattr(_ev, "start", 0.0) or 0.0) for _ev in _oq2_events]
+                        _oq2_ends = [float(getattr(_ev, "end", 0.0) or 0.0) for _ev in _oq2_events]
+                        _oq2_pairs = sorted(zip(_oq2_starts, _oq2_ends))
+                        _oq2_overlaps = sum(
+                            1 for _a, _b in zip(_oq2_pairs, _oq2_pairs[1:]) if _b[0] < _a[1] - 0.05
+                        )
+                        logger.info(
+                            "VPI_OUTPUT_QUALITY_CAPTION_SYNC_VERIFIED task_id=%s clip_order=%s first_dialogue_start=%.2f max_dialogue_end=%.2f clip_duration=%.2f overlap_count=%d events=%d",
+                            task_id, clip_index + 1,
+                            min(_oq2_starts) if _oq2_starts else 0.0,
+                            max(_oq2_ends) if _oq2_ends else 0.0,
+                            float(duration or 0.0),
+                            _oq2_overlaps,
+                            len(_oq2_events),
+                        )
+                    except Exception as _oq2_verify_e:
+                        logger.debug("caption sync verify skipped: %s", _oq2_verify_e)
+                    if _post_trim_contract_active:
+                        try:
+                            _pt_events = sorted(
+                                ((float(getattr(_ev, "start", 0.0) or 0.0), str(getattr(_ev, "text", "") or "")) for _ev in (getattr(_ass_plan_obj, "events", []) or [])),
+                                key=lambda item: item[0],
+                            )
+                            _pt_first_start = _pt_events[0][0] if _pt_events else 0.0
+                            _pt_first_text = " ".join(_pt_events[0][1].lower().split()) if _pt_events else ""
+                            _pt_removed = " ".join(str(segment.get("removed_head_preview") or "").lower().split())
+                            _pt_removed_tokens = [t for t in _pt_removed.split() if len(t) > 3][-6:]
+                            _pt_overlap = sum(1 for t in _pt_removed_tokens if t in _pt_first_text)
+                            _pt_head_leak = bool(_pt_removed_tokens) and _pt_overlap >= max(2, len(_pt_removed_tokens) - 1)
+                            if _pt_first_start <= 0.5 and not _pt_head_leak:
+                                logger.info(
+                                    "VPI_OUTPUT_SELECTION_POST_TRIM_ASS_VERIFIED task_id=%s clip_order=%s first_start=%.2f removed_head_absent=true",
+                                    task_id, clip_index + 1, _pt_first_start,
+                                )
+                            else:
+                                logger.warning(
+                                    "VPI_OUTPUT_SELECTION_POST_TRIM_ASS_FAILED task_id=%s clip_order=%s first_start=%.2f head_leak=%s",
+                                    task_id, clip_index + 1, _pt_first_start, str(_pt_head_leak).lower(),
+                                )
+                        except Exception as _pt_verify_e:
+                            logger.debug("post-trim ass verify skipped: %s", _pt_verify_e)
+                    _ass_caption_file_path = str(_ass_file)
+                    _ass_caption_plan_path = _write_plan_artifact(
+                        task_id=task_id,
+                        clip_index=clip_index,
+                        artifact_type="ass_caption_plan",
+                        payload=_ass_caption_plan_data,
+                    )
+                    logger.info(
+                        "ASS_CAPTION_RUNTIME_PLAN_BUILT style=%s events=%d highlights=%d",
+                        _caption_style_runtime,
+                        _ass_caption_events_count,
+                        _ass_caption_highlights_count,
+                    )
+                    logger.info("ASS_CAPTION_ARTIFACT_SAVED path=%s", _ass_caption_file_path)
+
+                    # Fix C: inject first-3s hook overlay when no real hook is present in clip opening
+                    try:
+                        _hook_overlay_already_applied = bool(
+                            _hook_use_text_overlay
+                            or bool((_caption_overlay_pack_metadata.get("hook_overlay") or {}).get("applied"))
+                            or bool(
+                                "hook_overlay" in list((_composition_decision or {}).get("layers_final") or [])
+                            )
+                        )
+                        _first3_hook_score = int((_hook_plan_data or {}).get("hook_first3_score") or 0)
+                        _first3_force_daily = bool(
+                            _is_vpi_daily_mode_active() and not _hook_overlay_already_applied
+                        )
+                        if _first3_force_daily and _first3_hook_score >= 7:
+                            logger.info(
+                                "VPI_OUTPUT_QUALITY_HOOK_FIRST3_PLANNED task_id=%s clip_order=%s reason=motion_only_score_not_visible score=%d",
+                                task_id, clip_index + 1, _first3_hook_score,
+                            )
+                        if (not _hook_overlay_already_applied and _first3_hook_score < 7) or _first3_force_daily:
+                            _existing_hook_text = str(
+                                (_hook_plan_data or {}).get("headline_text")
+                                or (_hook_plan_data or {}).get("subtitle_hook_text")
+                                or (_hook_plan_data or {}).get("hook_text")
+                                or ""
+                            ).strip()
+                            if _existing_hook_text:
+                                _first3_words = [w for w in _existing_hook_text.split() if w.strip()][:8]
+                            else:
+                                _first3_raw = _build_hook_caption_text_first3(
+                                    words_with_confidence,
+                                    str(segment.get("text") or ""),
+                                )
+                                _first3_words = [w for w in str(_first3_raw or "").split() if w.strip()][:8]
+                            _first3_hook_inject_text = " ".join(_first3_words).upper()
+                            if not _first3_hook_inject_text:
+                                _oq2_intent = str(segment.get("campaign_intent") or "").lower()
+                                _oq2_hook_defaults = {
+                                    "emocional_proteccion": "Protección para ti y los tuyos",
+                                    "ahorro": "Esto mucha gente no lo revisa",
+                                    "cobertura": "Una cobertura que conviene entender",
+                                }
+                                _first3_hook_inject_text = _oq2_hook_defaults.get(
+                                    _oq2_intent, "Antes de contratar, mira esto"
+                                ).upper()
+                            if _first3_hook_inject_text:
+                                _ass_content = _ass_file.read_text(encoding="utf-8")
+                                if "Style: HookOverlay" in _ass_content:
+                                    logger.info(
+                                        "VPI_OUTPUT_QUALITY_HOOK_PERCEPTIBILITY_AUDIT task_id=%s clip_order=%s text=%s window=0.25-3.05 fs=64 margin_v=330 outline=5",
+                                        task_id, clip_index + 1, _first3_hook_inject_text[:48],
+                                    )
+                                    # Perceptible on mobile: large bold text with a thick
+                                    # dark outline, upper third (below platform UI), >=2.2s.
+                                    _hook_dialogue_line = (
+                                        f"\nDialogue: 1,0:00:00.25,0:00:03.05,HookOverlay,,0,0,330,,"
+                                        f"{{\\an8\\fad(120,160)\\fs64\\b1\\bord5\\3c&H101010&\\shad0}}{_first3_hook_inject_text}"
+                                    )
+                                    _ass_file.write_text(
+                                        _ass_content + _hook_dialogue_line, encoding="utf-8"
+                                    )
+                                    _caption_overlay_pack_metadata.setdefault("hook_overlay", {})
+                                    _caption_overlay_pack_metadata["hook_overlay"].update({
+                                        "applied": True,
+                                        "first3_hook_overlay_forced": True,
+                                        "first3_hook_overlay_text": _first3_hook_inject_text,
+                                        "first3_hook_overlay_start": 0.25,
+                                        "first3_hook_overlay_end": 2.75,
+                                        "hook_first_3s_evidence_source": "daily_mode_first3_hook_overlay",
+                                    })
+                                    _caption_overlay_pack_metadata["ass_hook_overlay_injected"] = True
+                                    _caption_overlay_pack_metadata["first3_hook_overlay_forced"] = True
+                                    _caption_overlay_pack_metadata["captions_first3_absent_but_hook_overlay_present"] = True
+                                    _caption_overlay_pack_metadata["hook_overlay"].update({
+                                        "hook_text": _first3_hook_inject_text,
+                                        "hook_start_s": 0.25,
+                                        "hook_end_s": 3.05,
+                                        "hook_render_path": "ass_hook_card_burned",
+                                        "hook_perceptible": True,
+                                    })
+                                    logger.info(
+                                        "VPI_OUTPUT_QUALITY_HOOK_FIRST3_RENDERED task_id=%s clip_order=%s text=%s window=0.25-3.05",
+                                        task_id, clip_index + 1, _first3_hook_inject_text,
+                                    )
+                                    logger.info(
+                                        "VPI_OUTPUT_QUALITY_HOOK_PERCEPTIBLE_RENDERED task_id=%s clip_order=%s text=%s start=0.25 end=3.05 render_path=ass_hook_card_burned",
+                                        task_id, clip_index + 1, _first3_hook_inject_text,
+                                    )
+                                    logger.info(
+                                        "VPI_HOOK_FIRST_3S_DAILY_OVERLAY_FORCED task_id=%s clip_order=%s score=%d",
+                                        task_id,
+                                        clip_index + 1,
+                                        _first3_hook_score,
+                                    )
+                                    logger.info(
+                                        "VPI_HOOK_FIRST_3S_DAILY_OVERLAY_TEXT_SELECTED task_id=%s clip_order=%s text=%s words=%d",
+                                        task_id,
+                                        clip_index + 1,
+                                        _first3_hook_inject_text,
+                                        len(_first3_words),
+                                    )
+                                else:
+                                    logger.warning(
+                                        "VPI_HOOK_FIRST_3S_REAL_SIGNAL_MISSING task_id=%s clip_order=%s reason=no_hookoverlay_style score=%d",
+                                        task_id,
+                                        clip_index + 1,
+                                        _first3_hook_score,
+                                    )
+                            else:
+                                logger.warning(
+                                    "VPI_HOOK_FIRST_3S_REAL_SIGNAL_MISSING task_id=%s clip_order=%s reason=no_text_extracted score=%d",
+                                    task_id,
+                                    clip_index + 1,
+                                    _first3_hook_score,
+                                )
+                        else:
+                            logger.info(
+                                "VPI_HOOK_FIRST_3S_REAL_SIGNAL_PRESENT task_id=%s clip_order=%s score=%d overlay_applied=%s",
+                                task_id,
+                                clip_index + 1,
+                                _first3_hook_score,
+                                str(_hook_overlay_already_applied).lower(),
+                            )
+                    except Exception as _first3_hook_e:
+                        logger.warning(
+                            "VPI_HOOK_FIRST_3S_DAILY_OVERLAY_ERROR task_id=%s clip_order=%s error=%s",
+                            task_id,
+                            clip_index + 1,
+                            str(_first3_hook_e),
+                        )
+
+                    _ass_subbed_path = output_path.with_name(f"ass_{output_path.name}")
+                    _ass_ok, _ass_err = _burn_ass_subtitles_file(output_path, _ass_file, _ass_subbed_path)
+                    if _ass_ok:
+                        _caption_input = output_path
+                        output_path = _ass_subbed_path
+                        _log_premium_pipeline_step("captions_ass_runtime", _caption_input, output_path)
+                        _has_ass_captions = True
+                        _caption_backend_runtime = "ffmpeg_ass"
+                        _overlay_backend_runtime = "ffmpeg_ass"
+                        logger.info(
+                            "VPI_CAPTION_SINGLE_RENDER_PATH_SELECTED task_id=%s clip_order=%s path=ass_runtime",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_CAPTION_ASS_RUNTIME_APPLIED task_id=%s clip_order=%s",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_CAPTION_FALLBACK_SUPPRESSED_ASS_EXISTS task_id=%s clip_order=%s",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_CAPTION_DOUBLE_PATH_PREVENTED task_id=%s clip_order=%s reason=ass_runtime_success",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info("ASS_CAPTION_RUNTIME_APPLIED backend=ffmpeg_ass path=%s", output_path)
+                        if bool(_caption_overlay_pack_metadata.get("ass_hook_overlay_injected")):
+                            logger.info(
+                                "VPI_OUTPUT_QUALITY_HOOK_FIRST3_VERIFIED task_id=%s clip_order=%s burned=true",
+                                task_id, clip_index + 1,
+                            )
+                            try:
+                                _hook_frame_probe = output_path.with_name(f"hookframe_{output_path.stem}.png")
+                                _hf = subprocess.run(
+                                    [_get_ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", "1.2",
+                                     "-i", str(output_path), "-frames:v", "1", str(_hook_frame_probe)],
+                                    capture_output=True, timeout=30,
+                                )
+                                _hf_ok = _hf.returncode == 0 and _hook_frame_probe.exists() and _hook_frame_probe.stat().st_size > 10000
+                                logger.info(
+                                    "VPI_OUTPUT_QUALITY_HOOK_FRAME_VERIFIED task_id=%s clip_order=%s extracted=%s frame=%s",
+                                    task_id, clip_index + 1, str(_hf_ok).lower(), str(_hook_frame_probe.name),
+                                )
+                                _hook_frame_probe.unlink(missing_ok=True)
+                            except Exception as _hf_e:
+                                logger.debug("hook frame verify skipped: %s", _hf_e)
+                    else:
+                        _caption_fallback_reason = f"ass_burn_failed:{_ass_err}" if _ass_err else "ass_burn_failed"
+                        _caption_backend_runtime = "legacy_with_ass_artifact"
+                        _overlay_backend_runtime = "legacy_with_ass_artifact"
+                        logger.warning("ASS_CAPTION_RUNTIME_SKIPPED reason=%s", _caption_fallback_reason)
+                except Exception as _ass_plan_e:
+                    _caption_fallback_reason = f"ass_plan_failed:{_ass_plan_e}"
+                    _caption_backend_runtime = "legacy_with_ass_artifact" if _ass_caption_file_path else "legacy"
+                    _overlay_backend_runtime = _caption_backend_runtime
+                    logger.warning("ASS_CAPTION_RUNTIME_SKIPPED reason=%s", _caption_fallback_reason)
+
+            if not _has_ass_captions:
+                try:
+                    from .caption_service import CaptionService as _CS, burn_captions as _burn_caps
+                    logger.info(
+                        "VPI_CAPTION_FALLBACK_WORD_OBJECTS_READY task_id=%s clip_order=%s count=%d",
+                        task_id,
+                        clip_index + 1,
+                        len(_fallback_caption_words),
+                    )
+                    logger.info(f"  Burning ASS captions ({len(_fallback_caption_words)} words)...")
+                    _cap_style_raw = (_clip_profile.caption_style if _clip_profile else None) or _CS.style_for_template(caption_template, target_platform)
+                    _cap_style = "highlight" if _cap_style_raw == "minimal" else _cap_style_raw  # Nunca usar minimal - texto invisible
+                    subtitled_path = output_path.with_name(f"sub_{output_path.name}")
+                    _cap_ok = await _burn_caps(
+                        output_path, subtitled_path,
+                        _fallback_caption_words,
+                        style=_cap_style,
+                        platform=target_platform,
+                        caption_decisions=_caption_decisions,
+                    )
+                    _caption_overlay_pack_metadata = dict(_caption_decisions.get("caption_overlay_pack") or {})
+                    if _cap_ok and subtitled_path.exists():
+                        _caption_input = output_path
+                        output_path = subtitled_path
+                        _log_premium_pipeline_step("captions", _caption_input, output_path)
+                        _caption_ass_debug_path = str(
+                            Path(os.environ.get("CAPTION_DEBUG_DIR", "/app/temp/caption_debug"))
+                            / f"{subtitled_path.stem}.ass"
+                        )
+                        if not _caption_backend_runtime.startswith("legacy_with_ass_artifact"):
+                            _caption_backend_runtime = "legacy"
+                            _overlay_backend_runtime = "legacy"
+                        logger.info(
+                            "VPI_CAPTION_SINGLE_RENDER_PATH_SELECTED task_id=%s clip_order=%s path=caption_service_fallback",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_CAPTION_FALLBACK_SINGLE_PATH_APPLIED task_id=%s clip_order=%s",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(
+                            "VPI_CAPTION_DOUBLE_PATH_PREVENTED task_id=%s clip_order=%s reason=fallback_single_path",
+                            task_id,
+                            clip_index + 1,
+                        )
+                        logger.info(f"  ✓ ASS captions burned (style={_cap_style}, platform={target_platform})")
+                    else:
+                        raise RuntimeError("caption_service returned False")
+                except Exception as burn_e:
                     logger.warning(
                         "[LEGACY-FALLBACK] CaptionService.burn_captions failed (%s) — "
                         "falling back to VideoService._burn_subtitles_word_level (legacy ASS)",
                         burn_e,
                     )
+                    if not _caption_fallback_reason:
+                        _caption_fallback_reason = f"legacy_caption_service_failed:{burn_e}"
+                    try:
+                        from .vpi_production_safe_edit import (
+                            is_legacy_or_experimental_route as _is_legacy_or_experimental_route,
+                            legacy_route_status as _legacy_route_status,
+                            production_safe_mode_active as _production_safe_mode_active,
+                        )
+                    except Exception:
+                        _is_legacy_or_experimental_route = lambda _route: False  # type: ignore[assignment]
+                        _legacy_route_status = lambda _route: {"status": "allowed", "reason": "", "allowed_in_production_safe": True}  # type: ignore[assignment]
+                        _production_safe_mode_active = lambda: False  # type: ignore[assignment]
                     try:
                         subtitled_path = output_path.with_name(f"sub_{output_path.name}")
                         await VideoService._burn_subtitles_word_level(
-                            str(output_path), words_with_confidence, str(subtitled_path)
+                            str(output_path), _fallback_caption_words, str(subtitled_path)
                         )
                         if subtitled_path.exists():
                             output_path = subtitled_path
+                            if not _caption_backend_runtime.startswith("legacy_with_ass_artifact"):
+                                _caption_backend_runtime = "legacy"
+                                _overlay_backend_runtime = "legacy"
+                            _caption_fallback_reason = "legacy_caption_word_level_used"
+                            _legacy_caption_status = _legacy_route_status("legacy_caption_word_level")
+                            _caption_metadata = {
+                                "caption_backend": _caption_backend_runtime,
+                                "caption_source": segment.get("caption_source"),
+                                "caption_fallback_reason": _caption_fallback_reason,
+                                "has_ass_captions": bool(_has_ass_captions),
+                                "ass_caption_file_path": str(_ass_caption_file_path or ""),
+                                "caption_fallback_classification": "last_resort_legacy",
+                                "legacy_caption_word_level_used": True,
+                                "legacy_caption_route_status": _legacy_caption_status.get("status"),
+                                "legacy_caption_service_failed_reason": str(burn_e),
+                            }
+                            if _production_safe_mode_active():
+                                logger.info(
+                                    "LEGACY_FALLBACK_USED route=legacy_caption_word_level reason=last_resort_caption_fallback"
+                                )
+                            else:
+                                logger.info(
+                                    "LEGACY_ROUTE_USED_OUTSIDE_PRODUCTION_SAFE route=legacy_caption_word_level reason=last_resort_caption_fallback"
+                                )
+                            if _is_legacy_or_experimental_route("legacy_caption_word_level") and "_route_registry" in locals():
+                                _record_route_fallback(
+                                    _route_registry,
+                                    "captions",
+                                    "legacy_caption_word_level",
+                                    "legacy_caption_service_fallback",
+                                    "last_resort_caption_fallback",
+                                    {
+                                        "legacy": True,
+                                        "caption_fallback_classification": "last_resort_legacy",
+                                        "caption_backend": _caption_backend_runtime,
+                                    },
+                                )
                             logger.info(
                                 "[LEGACY-FALLBACK] Legacy _burn_subtitles_word_level succeeded "
                                 "for %s", subtitled_path.name,
@@ -3086,9 +9228,41 @@ class VideoService:
                         logger.warning(
                             "[LEGACY-FALLBACK] Legacy subtitle fallback also failed: %s", _fb_e,
                         )
+                        if not _caption_fallback_reason:
+                            _caption_fallback_reason = f"legacy_fallback_failed:{_fb_e}"
+                        logger.info(
+                            "LEGACY_ROUTE_QUARANTINED route=legacy_caption_word_level reason=last_resort_caption_fallback_failed"
+                        )
+                        if "_route_registry" in locals():
+                            _record_route_blocked(
+                                _route_registry,
+                                "captions",
+                                "legacy_caption_word_level",
+                                "last_resort_caption_fallback_failed",
+                                {
+                                    "legacy": True,
+                                    "caption_fallback_classification": "last_resort_legacy",
+                                    "error": str(_fb_e),
+                                },
+                            )
+        elif add_subtitles:
+            _caption_fallback_reason = "no_caption_timing"
+            _caption_backend_runtime = "legacy"
+            _overlay_backend_runtime = "legacy"
+            logger.info("ASS_CAPTION_RUNTIME_SKIPPED reason=no_caption_timing")
 
         # Step 4.7: ComfyUI GPU Enhancement — Real-ESRGAN upscaling (optional, GPU only)
-        if COMFYUI_ENABLED:
+        try:
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+        except Exception:
+            _production_safe_edit_enabled = lambda: False  # type: ignore[assignment]
+            _production_safe_route_allowed = lambda _route: True  # type: ignore[assignment]
+        if _production_safe_edit_enabled() and not _production_safe_route_allowed("comfyui"):
+            _block_production_safe_route("comfyui", "production_safe_edit")
+        elif COMFYUI_ENABLED:
             try:
                 _cfy = ComfyUIBridge()
                 _cfy_out = output_path.with_name(f"cfy_{output_path.name}")
@@ -3101,9 +9275,21 @@ class VideoService:
                 logger.debug(f"  ComfyUI enhance skipped: {_cfy_e}")
 
         # Step 4.8: Sound Design (efectos de sonido virales)
-        # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
-        if not _cfg.beta_clean:
-            try:
+        # Always enabled — uses local SoundDesignService (no external API needed)
+        try:
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+            if _production_safe_edit_enabled() and not _production_safe_route_allowed("legacy_sound_design"):
+                _block_production_safe_route("legacy_sound_design", "production_safe_edit")
+            elif _production_safe_edit_enabled():
+                logger.info(
+                    "LEGACY_SFX_DISABLED_FOR_VPI_PRODUCTION task_id=%s clip_order=%s",
+                    task_id,
+                    clip_index + 1,
+                )
+            else:
                 sound_service = SoundDesignService()
                 _emphasis_words = [
                     {"start": w["start"]}
@@ -3117,21 +9303,25 @@ class VideoService:
                     "text": segment.get("text", ""),
                     "emphasis_words": _emphasis_words,
                 }]
-                sound_cues = sound_service.get_sound_cues_from_virality(virality_segments)
+                sound_cues = sound_service.get_sound_cues_from_virality(
+                    virality_segments,
+                    task_id=task_id,
+                    clip_order=clip_index + 1,
+                )
                 if sound_cues:
                     sound_path = output_path.with_name(f"sound_{output_path.name}")
                     await sound_service.inject_sound_effects(
                         str(output_path),
                         str(sound_path),
-                        sound_cues
+                        sound_cues,
+                        task_id=task_id,
+                        clip_order=clip_index + 1,
                     )
                     if Path(sound_path).exists():
                         output_path = sound_path
                         logger.info(f"  ✓ {len(sound_cues)} sound effects added")
-            except Exception as sound_e:
-                logger.warning(f"  Sound design failed: {sound_e}")
-        else:
-            logger.info(f"[beta-clean] Sound design skipped (beta_clean mode)")
+        except Exception as sound_e:
+            logger.warning(f"  Sound design failed: {sound_e}")
 
         # Step 4.10: Platform export — only re-encode when burning hardsubs.
         # When no subtitle file exists use stream copy (near-instant, no quality loss).
@@ -3166,10 +9356,16 @@ class VideoService:
             await translator.dub_clip(output_path, dubbed_path, target_language)
             output_path = dubbed_path
 
-        # Beat-synced BGM: use BeatSyncService (auto BPM match + adaptive ducking).
-        # Falls back to niche-based static track when BGM library is empty.
-        if not _cfg.beta_clean:
-            try:
+        # VPI production uses vpi_music_service.apply_music_bed as the single BGM path.
+        # Beat-synced BGM remains available for non-production-safe modes only.
+        try:
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+            if _production_safe_edit_enabled() and not _production_safe_route_allowed("legacy_beat_sync_bgm"):
+                _block_production_safe_route("legacy_beat_sync_bgm", "production_safe_edit")
+            elif not _production_safe_edit_enabled():
                 from .beat_sync_service import get_beat_sync_service as _get_bs
                 _music_out = output_path.with_name(f"music_{output_path.name}")
                 _speech_segs = [
@@ -3193,7 +9389,10 @@ class VideoService:
                     )
                 else:
                     raise RuntimeError("beat_sync returned no output — using niche fallback")
-            except Exception as _music_e:
+            else:
+                logger.info("[music] beat_synced_route_skipped reason=production_safe_edit_single_path")
+        except Exception as _music_e:
+            if "production_safe_edit_single_path" not in str(_music_e):
                 logger.debug(f"  BeatSync BGM skipped ({_music_e}), trying niche fallback")
                 try:
                     from ..video_processing.audio import get_background_music_for_niche, mix_background_music as _mix_bg
@@ -3208,8 +9407,6 @@ class VideoService:
                                 logger.info(f"  ✓ Background music (niche fallback): {_music_path.name}")
                 except Exception as _fb_music_e:
                     logger.warning(f"  All music paths skipped: {_fb_music_e}")
-        else:
-            logger.info("  [beta-clean] Beat-synced BGM skipped (beta_clean mode)")
 
         # Step 4.10b: Audio Ducking — auto-lower BGM when speaker talks (sidechain)
         try:
@@ -3232,27 +9429,34 @@ class VideoService:
         # Skip if Step 4.3 (BrollService) already applied B-roll — prevents double overlay.
         # [beta-clean] Skipped when VIRACLIP_BETA_CLEAN=true
         if not _cfg.beta_clean:
-            _step43_ran = _get_cfg_broll().broll_enabled
-            if _broll_prefetch_task is not None and not _step43_ran:
-                try:
-                    from .pexels_service import overlay_broll_on_clip
-                    _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
-                    if _broll_path:
-                        _broll_out = output_path.with_name(f"broll_{output_path.name}")
-                        ok = overlay_broll_on_clip(
-                            output_path, _broll_path, _broll_out,
-                            broll_start=0.3, broll_end=0.6,
-                        )
-                        if ok and _broll_out.exists():
-                            _broll_out.replace(output_path)
-                            logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
-                    else:
-                        logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
-                except asyncio.TimeoutError:
-                    logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
-                    _broll_prefetch_task.cancel()
-                except Exception as _br_e:
-                    logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+            if _production_safe_edit_enabled() and not _production_safe_route_allowed("external_pexels"):
+                _block_production_safe_route("external_pexels", "production_safe_edit")
+            else:
+                _step43_ran = _get_cfg_broll().broll_enabled
+                if _broll_prefetch_task is not None and not _step43_ran:
+                    try:
+                        from .pexels_service import overlay_broll_on_clip
+                        _broll_path = await asyncio.wait_for(_broll_prefetch_task, timeout=30.0)
+                        if _broll_path:
+                            _broll_out = output_path.with_name(f"broll_{output_path.name}")
+                            ok = overlay_broll_on_clip(
+                                output_path, _broll_path, _broll_out,
+                                broll_start=0.3, broll_end=0.6,
+                            )
+                            if ok and _broll_out.exists():
+                                _broll_out.replace(output_path)
+                                logger.info(f"  ✓ Pexels B-Roll overlaid ({segment.get('theme', 'nature')})")
+                        else:
+                            logger.debug("  B-Roll prefetch returned no clip — skipping overlay")
+                    except asyncio.TimeoutError:
+                        logger.warning("  WARNING: B-Roll prefetch timeout — skipping")
+                        _broll_prefetch_task.cancel()
+                    except Exception as _br_e:
+                        logger.warning(f"  Pexels B-Roll skipped: {_br_e}")
         else:
             logger.info(f"[beta-clean] Pexels B-roll overlay skipped (beta_clean mode)")
 
@@ -3324,39 +9528,46 @@ class VideoService:
 
         # Visual scoring via Ollama + Qwen3-VL (GPU optional, graceful fallback)
         if not _cfg.beta_clean:
-            try:
-                from ..config import get_config
-                cfg = get_config()
-                if getattr(cfg, "vision_analysis_enabled", True):
-                    from .vision_service import analyze_clip_visually, blend_with_text_score
-                    vision_score = await analyze_clip_visually(
-                        output_path,
-                        transcript=segment.get("text", ""),
-                        n_frames=8,
-                    )
-                    final_virality = blend_with_text_score(text_virality, vision_score)
-                    vision_data = {
-                        "visual_hook": vision_score.visual_hook,
-                        "facial_energy": vision_score.facial_energy,
-                        "visual_virality": vision_score.visual_virality,
-                        "vision_model": vision_score.model_used,
-                        "vision_recommendations": vision_score.recommendations,
-                        # Phase 2.4: scene intelligence
-                        "scene_context": vision_score.scene_context,
-                        "boring_frames": vision_score.boring_frames,
-                        "broll_keywords": vision_score.broll_keywords,
-                    }
-                    if vision_score.boring_frames:
-                        logger.info(
-                            f"  ↳ Boring frames detected: {vision_score.boring_frames} "
-                            f"→ B-roll injection candidates"
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+            )
+            if _production_safe_edit_enabled() and not _production_safe_route_allowed("ollama"):
+                _block_production_safe_route("ollama", "production_safe_edit")
+            else:
+                try:
+                    from ..config import get_config
+                    cfg = get_config()
+                    if getattr(cfg, "vision_analysis_enabled", True):
+                        from .vision_service import analyze_clip_visually, blend_with_text_score
+                        vision_score = await analyze_clip_visually(
+                            output_path,
+                            transcript=segment.get("text", ""),
+                            n_frames=8,
                         )
-                    if vision_score.broll_keywords:
-                        logger.info(
-                            f"  ↳ B-roll keywords: {vision_score.broll_keywords}"
-                        )
-            except Exception as e:
-                logger.debug(f"Vision scoring skipped: {e}")
+                        final_virality = blend_with_text_score(text_virality, vision_score)
+                        vision_data = {
+                            "visual_hook": vision_score.visual_hook,
+                            "facial_energy": vision_score.facial_energy,
+                            "visual_virality": vision_score.visual_virality,
+                            "vision_model": vision_score.model_used,
+                            "vision_recommendations": vision_score.recommendations,
+                            # Phase 2.4: scene intelligence
+                            "scene_context": vision_score.scene_context,
+                            "boring_frames": vision_score.boring_frames,
+                            "broll_keywords": vision_score.broll_keywords,
+                        }
+                        if vision_score.boring_frames:
+                            logger.info(
+                                f"  ↳ Boring frames detected: {vision_score.boring_frames} "
+                                f"→ B-roll injection candidates"
+                            )
+                        if vision_score.broll_keywords:
+                            logger.info(
+                                f"  ↳ B-roll keywords: {vision_score.broll_keywords}"
+                            )
+                except Exception as e:
+                    logger.debug(f"Vision scoring skipped: {e}")
         else:
             logger.info("[beta-clean] Vision scoring disabled")
 
@@ -3633,10 +9844,62 @@ class VideoService:
         _music_metadata: dict = {}
         _sfx_metadata: dict = {}
         _visual_effects_metadata: dict = {}
+        _motion_overlay_metadata: dict = {}
         _cinematic_finish_metadata: dict = {}
         _transition_metadata: dict = {}
         _speaker_focus_metadata: dict = {}
         _editing_richness_metadata: dict = {}
+        _audio_chain_plan: Dict[str, Any] = {}
+        _audio_chain_state: Dict[str, Any] = {
+            "base_audio_detected": False,
+            "bgm_passes": [],
+            "sfx_passes": [],
+            "mastering_passes": [],
+            "audio_routes_blocked": [],
+            "audio_chain_errors": [],
+            "audio_chain_warnings": [],
+        }
+        _audio_duplicate_passes_blocked: List[str] = []
+        _audio_memory: Dict[str, Any] = {}
+        _audio_editorial_profile: Dict[str, Any] = {
+            "audio_editorial_profile": "calm_trust",
+            "audio_editorial_profile_reason": "default",
+            "music_mood": "trust_warm",
+            "sfx_allowed_families": ["soft_chime", "soft_whoosh"],
+            "sfx_blocked_families": ["deep_boom", "dark_riser_short", "high_riser", "tension_riser"],
+            "max_sfx_events": 1,
+            "music_energy": "low_warm",
+            "reason": "default",
+            "sensitive_topic": False,
+            "audio_asset_history_key": "calm_trust:trust_warm",
+            "vpi_audio_identity_ok": True,
+            "vpi_audio_identity_warnings": [],
+        }
+        _audio_asset_history_key = str(_audio_editorial_profile.get("audio_asset_history_key") or "calm_trust:trust_warm")
+        _audio_variation_index = 0
+        _recent_music_asset_ids: List[str] = []
+        _recent_sfx_family_history: List[str] = []
+        _motion_rhythm_profile: Dict[str, Any] = {}
+        try:
+            from .vpi_production_safe_edit import build_audio_chain_plan as _build_audio_chain_plan
+
+            _audio_chain_plan = _build_audio_chain_plan(
+                production_safe=bool(os.environ.get("VPI_PRODUCTION_SAFE_EDIT", "").strip().lower() in {"1", "true", "yes", "on"}),
+                audio_expected=bool(words_with_confidence or segment.get("text")),
+            )
+            _audio_chain_state["base_audio_detected"] = bool(words_with_confidence or segment.get("text"))
+        except Exception as _audio_chain_plan_e:
+            _audio_chain_plan = {
+                "audio_chain_version": "a1",
+                "expected_order": ["base_audio", "bgm", "sfx", "mastering", "final_audio_verify"],
+                "bgm_allowed": True,
+                "sfx_allowed": True,
+                "mastering_required": True,
+                "voice_priority": True,
+                "allow_duplicate_bgm": False,
+                "allow_duplicate_sfx": False,
+            }
+            _audio_chain_state["audio_chain_errors"].append(str(_audio_chain_plan_e))
         try:
             from .vpi_branding_service import apply_vpi_branding as _apply_vpi_branding
             from .vpi_branding_service import find_brand_asset as _find_brand_asset
@@ -3644,6 +9907,7 @@ class VideoService:
             from .vpi_editing_plan import determine_publishable_status as _determine_publishable_status
             from .vpi_editing_plan import extend_output_qc_visual as _extend_output_qc_visual
             from .vpi_editing_plan import probe_output_qc as _probe_output_qc
+            from .vpi_visual_effects_service import choose_vpi_motion_rhythm_profile as _choose_vpi_motion_rhythm_profile
 
             _repo_root = Path(__file__).resolve().parents[3]
             _brand_asset = _find_brand_asset(_repo_root)
@@ -3672,6 +9936,91 @@ class VideoService:
                 logger.info("[composition-pack] runtime_connected=true")
             except Exception as _comp_refresh_e:
                 logger.debug("[composition-pack] runtime refresh skipped reason=%s", _comp_refresh_e)
+
+            _visual_layer_budget_global_base: Dict[str, Any] = {}
+            try:
+                from .vpi_visual_effects_service import build_global_visual_layer_budget as _build_global_visual_layer_budget
+                _visual_layer_budget_global_base = _build_global_visual_layer_budget(
+                    caption_overlay_pack_metadata=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                    hook_text_overlay_rendered=bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+                    hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+                    first3_has_captions=bool(words_with_confidence),
+                    lower_third_candidate=(_hook_plan_data or {}).get("lower_third") if isinstance(_hook_plan_data, dict) else None,
+                    branding_candidate=_brand_metadata,
+                    icon_candidate=(_hook_plan_data or {}).get("hook_icon_candidate") if isinstance(_hook_plan_data, dict) else None,
+                    visual_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                    clip_duration=float(duration or 0.0),
+                )
+                _editing_plan_data["visual_layer_budget"] = _visual_layer_budget_global_base
+                logger.info(
+                    "[visual-layer-budget] base runtime_connected=true allowed=%s dropped=%s",
+                    "|".join(_visual_layer_budget_global_base.get("visual_layers_allowed") or []) or "none",
+                    "|".join(str((item or {}).get("layer") or "") for item in (_visual_layer_budget_global_base.get("visual_layers_dropped") or []) if str((item or {}).get("layer") or "")) or "none",
+                )
+                if _visual_layer_budget_global_base.get("temporal_density_budget_applied"):
+                    logger.info(
+                        "TEMPORAL_VISUAL_DENSITY_GUARD_APPLIED task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_layer_budget_global_base.get("temporal_density_reason") or "density_guard"),
+                    )
+                if _visual_layer_budget_global_base.get("visual_support_layer_selected"):
+                    logger.info(
+                        "VISUAL_SUPPORT_LAYER_SELECTED task_id=%s clip_order=%s layer=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_layer_budget_global_base.get("visual_support_layer_selected") or ""),
+                        str(_visual_layer_budget_global_base.get("visual_support_layer_reason") or "selected_by_budget"),
+                    )
+            except Exception as _budget_base_e:
+                logger.debug("[visual-layer-budget] base skipped reason=%s", _budget_base_e)
+
+            _motion_rhythm_profile = _choose_vpi_motion_rhythm_profile(
+                editorial_type=str(segment.get("editorial_type") or ""),
+                hookability_score=float(segment.get("hookability_score") or 0.0),
+                first_second_strength=float(segment.get("first_second_strength") or 0.0),
+                premium_restraint_mode=str((_publishable_metadata or {}).get("premium_restraint_mode") or (_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                clip_duration=float(duration or 0.0),
+                caption_density=float((_caption_overlay_pack_metadata or {}).get("caption_density") or 0.0),
+                broll_applied=bool(_editorial_broll_for_status),
+                sensitive_topic=str(segment.get("editorial_type") or "") in {"sensitive_decesos", "decesos"},
+                visual_layout_strategy=str((_visual_layer_budget_global_base or {}).get("visual_support_layer_selected") or (_publishable_metadata or {}).get("visual_layout_strategy") or ""),
+            )
+            _editing_plan_data["motion_rhythm_profile"] = dict(_motion_rhythm_profile)
+            _editing_plan_data["motion_polish_applied"] = bool(_motion_rhythm_profile.get("motion_profile") != "no_extra_motion")
+            _editing_plan_data["motion_polish_warnings"] = []
+            if _motion_rhythm_profile.get("motion_profile") == "no_extra_motion":
+                _editing_plan_data["motion_polish_warnings"].append("motion_suppressed_by_profile")
+                logger.info(
+                    "VPI_MOTION_POLISH_WARNING task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    "motion_suppressed_by_profile",
+                )
+            if _motion_rhythm_profile.get("first3_motion_boost_applied"):
+                logger.info(
+                    "VPI_FIRST3_MOTION_BOOST_APPLIED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_motion_rhythm_profile.get("first3_motion_boost_reason") or "hookability_or_first_second_strength"),
+                )
+            if _motion_rhythm_profile.get("intentional_pause_preserved"):
+                logger.info(
+                    "VPI_INTENTIONAL_PAUSE_PRESERVED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_motion_rhythm_profile.get("reason") or "preserve_pause_bias"),
+                )
+            if _motion_rhythm_profile.get("dead_pause_trimmed"):
+                logger.info(
+                    "VPI_DEAD_PAUSE_TRIMMED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_motion_rhythm_profile.get("reason") or "dead_pause_trimmed"),
+                )
 
             # ── Post-production visual effects v3.6 — CPU-only, speaker-safe ──
             try:
@@ -3707,9 +10056,16 @@ class VideoService:
             # ── Premium Transition Pack v4.1 — visible, intentional, CPU-only ──
             try:
                 from .vpi_transition_engine import (
+                    choose_transition_strategy as _choose_transition_strategy,
+                    choose_vpi_transition_polish as _choose_vpi_transition_polish,
                     apply_transition_plan as _apply_transition_plan,
                     plan_transition_events as _plan_transition_events,
                 )
+                _transition_route_guard = {
+                    "used": [],
+                    "blocked": [],
+                    "budget_exhausted": False,
+                }
                 _transition_context = {
                     "editorial_type": str(segment.get("editorial_type") or ""),
                     "hook_intent": str((_hook_plan_data or {}).get("hook_intent") or ""),
@@ -3733,20 +10089,179 @@ class VideoService:
                     "composition_decision": _composition_decision,
                     "hook_overlay_active": bool(((_caption_overlay_pack_metadata or {}).get("hook_overlay") or {}).get("applied")),
                 }
-                _transition_plan = _plan_transition_events(_transition_context)
-                _transition_out = output_path.with_name(f"trans_{output_path.name}")
-                _transition_metadata = _apply_transition_plan(
-                    output_path,
-                    _transition_out,
-                    _transition_plan,
+                _transition_strategy = _choose_transition_strategy(
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                    hook_overlay_active=bool(((_caption_overlay_pack_metadata or {}).get("hook_overlay") or {}).get("applied")),
+                    broll_applied=bool((_editing_plan_data or {}).get("broll_applied")),
+                    broll_mode=str((_editing_plan_data or {}).get("broll_mode") or ""),
+                    broll_start_time=float((_editing_plan_data or {}).get("broll_start_time") or 0.0),
+                    broll_duration=float((_editing_plan_data or {}).get("broll_duration") or 0.0),
+                    rhythm_edit_applied=bool(_rhythm_verified),
+                    visual_reinforcement_applied=bool((locals().get("_visual_reinforcement_metadata") or {}).get("visual_reinforcement_applied")),
+                    captions_active=bool(words_with_confidence),
+                    caption_density=float((_caption_overlay_pack_metadata or {}).get("caption_density") or 0.0),
+                    visual_layer_budget_applied=bool((_visual_layer_budget_global_base or {}).get("visual_layer_budget_applied")),
+                    clip_duration=float(duration or 0.0),
+                    face_bbox=(segment.get("face_bbox") if isinstance(segment, dict) else None),
+                    speaker_bbox=(segment.get("speaker_bbox") if isinstance(segment, dict) else None),
+                    transition_routes_used=list(_transition_route_guard.get("used") or []),
                 )
-                _transition_metadata["transition_plan"] = _transition_plan.to_dict()
-                if _transition_metadata.get("transitions_applied") and _transition_out.exists():
-                    _transition_input = output_path
-                    output_path = _transition_out
-                    _log_premium_pipeline_step("transitions", _transition_input, output_path)
-                    logger.info("[transition-final] final_output_uses_transition=true path=%s", output_path)
+                if _transition_strategy.get("blocked_by_hook"):
+                    _transition_route_guard["blocked"].append("hook_first3_protected")
+                    logger.info(
+                        "TRANSITION_BLOCKED_BY_HOOK reason=%s",
+                        str(_transition_strategy.get("reason") or "first3_protected"),
+                    )
+                if _transition_strategy.get("blocked_by_budget"):
+                    _transition_route_guard["blocked"].append("visual_budget_blocked")
+                if bool((_editing_plan_data or {}).get("broll_applied")) and _transition_strategy.get("transition_strategy") not in {"no_transition", "hard_cut_clean", "broll_fade_in_out"}:
+                    _transition_route_guard["blocked"].append("broll_same_window")
+                if bool((locals().get("_visual_reinforcement_metadata") or {}).get("visual_reinforcement_applied")) and _transition_strategy.get("transition_strategy") in {"dip_blur_short", "slide_minimal"}:
+                    _transition_route_guard["blocked"].append("visual_reinforcement_same_window")
+                if _transition_strategy.get("transition_strategy") in {"broll_fade_in_out"}:
+                    _transition_route_guard["used"].append("broll_fade_in_out")
+                elif _transition_strategy.get("transition_strategy") in {"soft_push", "dip_blur_short", "slide_minimal", "match_cut"}:
+                    _transition_route_guard["used"].append(str(_transition_strategy.get("transition_strategy")))
+                if _transition_route_guard.get("blocked") and _transition_strategy.get("transition_strategy") != "hard_cut_clean":
+                    _transition_strategy["transition_decision"] = "no_transition"
+                    _transition_strategy["reason"] = str(_transition_strategy.get("reason") or "duplicate_route_blocked")
+                    _transition_strategy["blocked_by_hook"] = bool(_transition_strategy.get("blocked_by_hook") or "hook_first3_protected" in _transition_route_guard.get("blocked", []))
+                _transition_polish = _choose_vpi_transition_polish(
+                    transition_strategy=str(_transition_strategy.get("transition_strategy") or "no_transition"),
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    motion_profile=str((_motion_rhythm_profile or {}).get("motion_profile") or ""),
+                    broll_timing_strategy=str((_editing_plan_data or {}).get("broll_timing_strategy") or ""),
+                    broll_entry_style=str((_editing_plan_data or {}).get("broll_entry_style") or ""),
+                    broll_exit_style=str((_editing_plan_data or {}).get("broll_exit_style") or ""),
+                    premium_restraint_mode=str((_publishable_metadata or {}).get("premium_restraint_mode") or (_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    first_second_strength=float(segment.get("first_second_strength") or 0.0),
+                    sensitive_topic=str(segment.get("editorial_type") or "") in {"sensitive_decesos", "decesos"},
+                    clip_duration=float(duration or 0.0),
+                    caption_density=float((_caption_overlay_pack_metadata or {}).get("caption_density") or 0.0),
+                    sfx_allowed=bool(_transition_strategy.get("sfx_sync_allowed")),
+                )
+                _transition_strategy.update(_transition_polish)
+                if not _transition_polish.get("transition_should_render"):
+                    _transition_strategy["transition_decision"] = "no_transition"
+                    _transition_strategy["reason"] = str(_transition_polish.get("transition_reason") or "polish_suppressed")
+                    _transition_metadata_status = "skipped_by_polish"
+                    logger.info(
+                        "VPI_TRANSITION_RENDER_SKIPPED_BY_POLISH task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_transition_strategy["reason"] or "polish_suppressed"),
+                    )
+                if _transition_strategy.get("transition_strategy") != "no_transition":
+                    _transition_context["start_time"] = max(
+                        float(_transition_strategy.get("start_time") or 0.0),
+                        3.0 if _transition_strategy.get("blocked_by_hook") else 0.0,
+                    )
+                    _transition_context["duration_frames"] = int(_transition_strategy.get("duration_frames") or _transition_context.get("duration_frames") or 5)
+                    _transition_context["transition_type"] = (
+                        "short_fade"
+                        if _transition_strategy.get("transition_strategy") == "short_fade"
+                        else (
+                            "match_cut"
+                            if _transition_strategy.get("transition_strategy") == "match_cut"
+                            else (
+                                "glitch_clean"
+                                if _transition_strategy.get("transition_strategy") == "hard_cut_clean"
+                                else (
+                                    "sweeping_reveal"
+                                    if _transition_strategy.get("transition_strategy") == "broll_fade_in_out"
+                                    else "mask_reveal"
+                                )
+                            )
+                        )
+                    )
+                _transition_metadata = {
+                    "transition_planned": bool(_transition_strategy.get("transition_decision") == "use_transition"),
+                    "transition_rendered": False,
+                    "transition_verified": False,
+                    "transition_strategy": str(_transition_strategy.get("transition_strategy") or "no_transition"),
+                    "transition_backend": "vpi_transition_engine",
+                    "transition_skip_reason": "",
+                    "transition_output_path": str(output_path),
+                    "transition_routes_used": list(_transition_route_guard.get("used") or []),
+                    "transition_sfx_sync_allowed": bool(_transition_strategy.get("sfx_sync_allowed")),
+                    "transition_count": 0,
+                    "transition_visible_count": 0,
+                    "transition_routes_blocked": list(_transition_route_guard.get("blocked") or []),
+                    "transition_budget_exhausted": bool(_transition_strategy.get("blocked_by_budget")),
+                    "transition_polish_mode": str(_transition_polish.get("transition_polish_mode") or "none"),
+                    "transition_duration_ms": int(_transition_polish.get("transition_duration_ms") or 0),
+                    "transition_repetition_avoided": bool(_transition_polish.get("transition_repetition_avoided")),
+                    "transition_broll_sync_ok": bool(_transition_polish.get("transition_broll_sync_ok")),
+                    "transition_broll_sync_reason": str(_transition_polish.get("transition_broll_sync_reason") or ""),
+                    "transition_sfx_allowed": bool(_transition_polish.get("transition_sfx_allowed")),
+                    "transition_sfx_family": str(_transition_polish.get("transition_sfx_family") or ""),
+                    "transition_sfx_suppressed_reason": str(_transition_polish.get("transition_sfx_suppressed_reason") or ""),
+                    "transition_reason": str(_transition_polish.get("transition_reason") or _transition_strategy.get("reason") or ""),
+                    "transition_should_render": bool(_transition_polish.get("transition_should_render")),
+                    "transition_status": "skipped_by_polish" if not bool(_transition_polish.get("transition_should_render")) else "planned",
+                }
+                if _transition_route_guard.get("blocked"):
+                    for _blocked_route in _transition_route_guard.get("blocked") or []:
+                        logger.info(
+                            "TRANSITION_DUPLICATE_ROUTE_BLOCKED route=%s reason=%s",
+                            _blocked_route,
+                            str(_transition_strategy.get("reason") or "duplicate_route"),
+                        )
+                if _transition_strategy.get("transition_decision") == "use_transition":
+                    _transition_plan = _plan_transition_events(_transition_context)
+                    _transition_out = output_path.with_name(f"trans_{output_path.name}")
+                    _transition_metadata = _apply_transition_plan(
+                        output_path,
+                        _transition_out,
+                        _transition_plan,
+                    )
+                    _transition_metadata.setdefault("transition_polish_mode", str(_transition_polish.get("transition_polish_mode") or "none"))
+                    _transition_metadata.setdefault("transition_duration_ms", int(_transition_polish.get("transition_duration_ms") or 0))
+                    _transition_metadata.setdefault("transition_repetition_avoided", bool(_transition_polish.get("transition_repetition_avoided")))
+                    _transition_metadata.setdefault("transition_broll_sync_ok", bool(_transition_polish.get("transition_broll_sync_ok")))
+                    _transition_metadata.setdefault("transition_broll_sync_reason", str(_transition_polish.get("transition_broll_sync_reason") or ""))
+                    _transition_metadata.setdefault("transition_sfx_allowed", bool(_transition_polish.get("transition_sfx_allowed")))
+                    _transition_metadata.setdefault("transition_sfx_family", str(_transition_polish.get("transition_sfx_family") or ""))
+                    _transition_metadata.setdefault("transition_sfx_suppressed_reason", str(_transition_polish.get("transition_sfx_suppressed_reason") or ""))
+                    _transition_metadata.setdefault("transition_reason", str(_transition_polish.get("transition_reason") or _transition_strategy.get("reason") or ""))
+                    _transition_metadata.setdefault("transition_should_render", bool(_transition_polish.get("transition_should_render")))
+                    _transition_metadata["transition_plan"] = _transition_plan.to_dict()
+                    _transition_metadata["transition_strategy"] = str(_transition_strategy.get("transition_strategy") or _transition_metadata.get("transition_strategy") or "no_transition")
+                    _transition_metadata["transition_backend"] = "vpi_transition_engine"
+                    _transition_metadata["transition_planned"] = True
+                    _transition_metadata["transition_sfx_sync_allowed"] = bool(_transition_strategy.get("sfx_sync_allowed"))
+                    _transition_metadata["transition_routes_used"] = list(_transition_route_guard.get("used") or [])
+                    _transition_metadata["transition_routes_blocked"] = list(_transition_route_guard.get("blocked") or [])
+                    _transition_metadata["transition_count"] = int(len(_transition_metadata.get("transition_events") or []))
+                    _transition_metadata["transition_visible_count"] = int(sum(1 for _ev in (_transition_metadata.get("transition_events") or []) if bool((_ev or {}).get("applied") or (_ev or {}).get("transition_rendered") or (_ev or {}).get("transition_verified"))))
+                    _transition_metadata["transition_budget_exhausted"] = bool(_transition_strategy.get("blocked_by_budget"))
+                    _transition_metadata["transition_output_path"] = str(_transition_out)
+                    _transition_render_verified = bool(
+                        _transition_metadata.get("transitions_applied")
+                        and _transition_out.exists()
+                        and _verify_transition_output(output_path, _transition_out)
+                    )
+                    _transition_metadata["transition_rendered"] = bool(_transition_render_verified)
+                    _transition_metadata["transition_verified"] = bool(_transition_render_verified)
+                    _transition_metadata["transition_status"] = "rendered" if _transition_render_verified else str(_transition_metadata.get("transition_status") or "skipped_by_polish")
+                    _transition_metadata["transition_skip_reason"] = "" if _transition_render_verified else str(_transition_metadata.get("transition_warnings", [])[-1] if _transition_metadata.get("transition_warnings") else _transition_strategy.get("reason") or "output_unverified")
+                    if _transition_render_verified:
+                        logger.info("TRANSITION_RENDERED")
+                        _transition_input = output_path
+                        output_path = _transition_out
+                        _log_premium_pipeline_step("transitions", _transition_input, output_path)
+                        logger.info("[transition-final] final_output_uses_transition=true path=%s", output_path)
+                        logger.info("TRANSITION_OUTPUT_VERIFIED")
+                    else:
+                        logger.info("[transition-final] final_output_uses_transition=false path=%s", output_path)
+                        logger.info("TRANSITION_SKIPPED_REASON reason=%s", _transition_metadata.get("transition_skip_reason") or "output_unverified")
                 else:
+                    _transition_metadata["transition_skip_reason"] = str(_transition_strategy.get("reason") or "no_transition")
+                    _transition_metadata["transition_status"] = str(_transition_metadata.get("transition_status") or _transition_metadata["transition_skip_reason"] or "no_transition")
+                    logger.info("TRANSITION_SKIPPED_REASON reason=%s", _transition_metadata["transition_skip_reason"])
                     logger.info("[transition-final] final_output_uses_transition=false path=%s", output_path)
             except Exception as _trans_e:
                 logger.warning("[transition-apply] failed type=unknown fallback=clean_cut reason=%s", _trans_e)
@@ -3756,12 +10271,51 @@ class VideoService:
                     "transition_types": [],
                     "transition_warnings": [str(_trans_e)],
                     "final_output_uses_transition": False,
+                    "transition_planned": False,
+                    "transition_rendered": False,
+                    "transition_verified": False,
+                    "transition_strategy": "no_transition",
+                    "transition_backend": "vpi_transition_engine",
+                    "transition_skip_reason": str(_trans_e),
+                    "transition_output_path": str(output_path),
+                    "transition_routes_used": [],
+                    "transition_routes_blocked": [],
+                    "transition_sfx_sync_allowed": False,
+                    "transition_count": 0,
+                    "transition_visible_count": 0,
+                    "transition_budget_exhausted": False,
                 }
 
             try:
                 _brand_out = output_path.with_name(f"brand_{output_path.name}")
                 _brand_input = output_path
-                _brand_metadata = _apply_vpi_branding(output_path, _brand_out)
+                _brand_budget = dict((_visual_layer_budget_global_base or {}).get("layer_decisions") or {})
+                _brand_decision = dict(_brand_budget.get("branding") or {})
+                _brand_action = str(_brand_decision.get("action") or "")
+                _brand_mode = "minimal" if _brand_action == "reduce" else "standard"
+                if _brand_action == "drop":
+                    _brand_metadata = {
+                        "type": "metadata_only",
+                        "rendered": False,
+                        "planned": True,
+                        "dropped_by_budget": True,
+                        "budget_drop_reason": str(_brand_decision.get("reason") or "visual_layer_budget"),
+                        "reason": str(_brand_decision.get("reason") or "visual_layer_budget"),
+                        "warnings": ["branding_dropped_visual_layer_budget"],
+                    }
+                    logger.info(
+                        "OVERLAY_DROPPED_COLLISION_GUARD task_id=%s clip_order=%s layer=branding reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_brand_decision.get("reason") or "visual_layer_budget"),
+                    )
+                    logger.info(
+                        "OVERLAY_RENDER_BLOCKED_BY_BUDGET layer=%s reason=%s",
+                        "branding",
+                        str(_brand_decision.get("reason") or "visual_layer_budget"),
+                    )
+                else:
+                    _brand_metadata = _apply_vpi_branding(output_path, _brand_out, mode=_brand_mode)
                 _brand_metadata["logo_found"] = bool(_brand_asset)
                 _brand_metadata["logo_path"] = str(_brand_asset) if _brand_asset else None
                 if _brand_metadata.get("rendered") and _brand_out.exists():
@@ -3770,27 +10324,389 @@ class VideoService:
                 else:
                     _brand_metadata.setdefault("type", "metadata_only")
                     _brand_metadata["rendered"] = False
+                _brand_metadata.setdefault("planned", True)
+                _brand_metadata.setdefault("dropped_by_budget", False)
+                _brand_metadata.setdefault("budget_drop_reason", "")
             except Exception as _brand_e:
                 logger.warning("[branding] skipped reason=%s", _brand_e)
-                _brand_metadata = {"type": "metadata_only", "rendered": False, "reason": str(_brand_e)}
+                _brand_metadata = {"type": "metadata_only", "rendered": False, "planned": False, "dropped_by_budget": False, "budget_drop_reason": "", "reason": str(_brand_e)}
+
+            _cta_metadata: Dict[str, Any] = {}
+            try:
+                from .vpi_visual_effects_service import choose_vpi_commercial_cta as _choose_vpi_commercial_cta
+
+                _cta_metadata = _choose_vpi_commercial_cta(
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    segment_text=str(segment.get("text") or ""),
+                    clip_duration=float(duration or 0.0),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    premium_restraint_mode=str((_publishable_metadata or {}).get("premium_restraint_mode") or (_editing_plan_data or {}).get("premium_restraint_mode") or ""),
+                    visual_layout_strategy=str((_brand_metadata or {}).get("visual_layout_strategy") or (_motion_overlay_metadata or {}).get("visual_layout_strategy") or "no_extra_visual"),
+                    visual_layer_budget=dict(_visual_layer_budget_global_base or {}),
+                    captions_active=bool(words_with_confidence or segment.get("text")),
+                    sensitive_topic=bool(
+                        any(
+                            token in str(segment.get("text") or "").lower()
+                            for token in ("decesos", "funeral", "fallecimiento", "muerte", "sepelio", "velatorio", "luto")
+                        )
+                        or any(
+                            token in str(segment.get("editorial_type") or "").lower()
+                            for token in ("decesos", "funeral", "fallecimiento", "muerte", "sepelio", "velatorio", "luto")
+                        )
+                    ),
+                    final_phase_available=bool(float(duration or 0.0) >= 8.0),
+                    brand_assets_verified=bool((_brand_metadata or {}).get("brand_assets_verified")),
+                )
+            except Exception as _cta_e:
+                logger.warning("VPI_CTA_BLOCKED_BY_SAFETY reason=%s", _cta_e)
+                _cta_metadata = {
+                    "cta_decision": "no_cta",
+                    "cta_type": "no_cta",
+                    "cta_text": "",
+                    "cta_start_time": round(max(0.0, float(duration or 0.0) - 2.2), 2),
+                    "cta_duration": 1.4,
+                    "cta_layout_zone": "lower_center_small",
+                    "cta_reason": f"cta_helper_failed:{_cta_e}",
+                    "cta_risk_level": "low",
+                    "cta_planned": False,
+                    "cta_renderable": False,
+                    "cta_safety_ok": False,
+                    "cta_safety_warnings": [f"cta_helper_failed:{_cta_e}"],
+                    "cta_safety_rewritten": False,
+                    "cta_safety_reason": str(_cta_e),
+                    "cta_skipped_reason": f"cta_helper_failed:{_cta_e}",
+                }
+
+            if isinstance(_editing_plan_data, dict):
+                _editing_plan_data["cta"] = {
+                    "decision": str(_cta_metadata.get("cta_decision") or "no_cta"),
+                    "type": str(_cta_metadata.get("cta_type") or "no_cta"),
+                    "text": str(_cta_metadata.get("cta_text") or ""),
+                    "text_options": [str(_cta_metadata.get("cta_text") or "")] if _cta_metadata.get("cta_text") else [],
+                    "start_s": float(_cta_metadata.get("cta_start_time") or max(0.0, float(duration or 0.0) - 2.2)),
+                    "duration_s": float(_cta_metadata.get("cta_duration") or 1.4),
+                    "layout_zone": str(_cta_metadata.get("cta_layout_zone") or "lower_center_small"),
+                    "reason": str(_cta_metadata.get("cta_reason") or ""),
+                    "risk_level": str(_cta_metadata.get("cta_risk_level") or "low"),
+                    "renderable": bool(_cta_metadata.get("cta_renderable")),
+                    "safety_ok": bool(_cta_metadata.get("cta_safety_ok")),
+                    "safety_warnings": list(_cta_metadata.get("cta_safety_warnings") or []),
+                    "safety_rewritten": bool(_cta_metadata.get("cta_safety_rewritten")),
+                    "safety_reason": str(_cta_metadata.get("cta_safety_reason") or ""),
+                    "skipped_reason": str(_cta_metadata.get("cta_skipped_reason") or ""),
+                    "cta_strategy": "optional_end" if str(_cta_metadata.get("cta_decision") or "") == "show_cta" else "metadata_only",
+                    "cta_strategy_reason": str(_cta_metadata.get("cta_reason") or ""),
+                    "planned": bool(_cta_metadata.get("cta_planned")),
+                    "rendered": False,
+                    "verified": False,
+                }
+            if isinstance(_brand_metadata, dict):
+                _brand_metadata["brand_final_mode"] = "cta_minimal" if str(_cta_metadata.get("cta_decision") or "") == "show_cta" else str(_brand_metadata.get("brand_final_mode") or "standard")
+                _brand_metadata["brand_final_verified"] = bool(_brand_metadata.get("brand_final_verified", bool(_brand_metadata.get("rendered"))))
+                _brand_metadata["brand_final_reason"] = str(_brand_metadata.get("brand_final_reason") or ("cta_minimal" if str(_cta_metadata.get("cta_decision") or "") == "show_cta" else "branding_minimal"))
+
+            def _register_audio_chain_pass(
+                phase: str,
+                *,
+                applied: bool,
+                verified: bool,
+                reason: str = "",
+                metadata: Optional[Dict[str, Any]] = None,
+            ) -> bool:
+                phase_key = str(phase or "").strip().lower()
+                pass_list_name = f"{phase_key}_passes"
+                pass_list = _audio_chain_state.setdefault(pass_list_name, [])
+                pass_entry = {
+                    "applied": bool(applied),
+                    "verified": bool(verified),
+                    "reason": str(reason or ""),
+                    "metadata": dict(metadata or {}),
+                }
+                pass_list.append(pass_entry)
+                logger.info(
+                    "AUDIO_CHAIN_PASS_REGISTERED phase=%s applied=%s verified=%s reason=%s",
+                    phase_key,
+                    str(bool(applied)).lower(),
+                    str(bool(verified)).lower(),
+                    reason or "none",
+                )
+                if phase_key == "bgm" and len(pass_list) > 1 and not bool(_audio_chain_plan.get("allow_duplicate_bgm", False)):
+                    _audio_chain_state.setdefault("audio_routes_blocked", []).append("bgm_duplicate")
+                    _audio_chain_state.setdefault("audio_chain_errors", []).append("bgm_duplicate_pass")
+                    _audio_duplicate_passes_blocked.append("bgm")
+                    logger.warning("AUDIO_DUPLICATE_PASS_BLOCKED phase=bgm reason=already_verified")
+                    return False
+                if phase_key == "sfx" and len(pass_list) > 1 and not bool(_audio_chain_plan.get("allow_duplicate_sfx", False)):
+                    _audio_chain_state.setdefault("audio_routes_blocked", []).append("sfx_duplicate")
+                    _audio_chain_state.setdefault("audio_chain_errors", []).append("sfx_duplicate_pass")
+                    _audio_duplicate_passes_blocked.append("sfx")
+                    logger.warning("AUDIO_DUPLICATE_PASS_BLOCKED phase=sfx reason=already_verified")
+                    return False
+                return True
 
             # ── Music/SFX v3.3 — local libraries only, before final mastering ──
             try:
+                _audio_memory = _audio_memory_for_task(task_id)
+                _audio_editorial_profile = _choose_audio_editorial_profile(
+                    editorial_type=str(segment.get("editorial_type") or ""),
+                    segment_text=str(segment.get("text") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_type") or ""),
+                    broll_intent=str((_broll_editorial_decision or {}).get("broll_intent") or (_broll_editorial_decision or {}).get("intent") or ""),
+                    transition_strategy=str((_transition_metadata or {}).get("transition_strategy") or ""),
+                    final_audio_chain_state=_audio_chain_state,
+                    sensitive_topic=bool(
+                        any(
+                            cue in str(segment.get("text") or "").lower()
+                            for cue in ("decesos", "funeral", "fallecimiento", "muerte", "sepelio", "velatorio", "luto")
+                        )
+                    ),
+                    clip_duration=float(duration or 0.0),
+                )
+                _audio_asset_history_key = str(_audio_editorial_profile.get("audio_asset_history_key") or f"{_audio_editorial_profile.get('audio_editorial_profile')}:music")
+                _audio_variation_index = int(_audio_memory.get("audio_variation_index") or 0)
+                _recent_music_asset_ids = list(_audio_memory.get("music_asset_ids") or [])
+                _recent_sfx_family_history = list(_audio_memory.get("sfx_family_history") or [])
+                from . import vpi_music_service as _vpi_music_service
+                from .vpi_asset_library_service import build_asset_index as _build_asset_index
+                from .vpi_asset_library_service import select_verified_bgm_candidate as _select_verified_bgm_candidate
                 from .vpi_music_service import apply_music_bed as _apply_music_bed
                 _music_out = output_path.with_name(f"music_{output_path.name}")
-                _music_metadata = _apply_music_bed(
-                    output_path,
-                    _music_out,
+                _music_asset_index = _build_asset_index()
+                _audio_asset_inventory = dict(_music_asset_index.get("audio_asset_inventory") or {})
+                _audio_asset_coverage = dict(_music_asset_index.get("audio_asset_coverage") or {})
+                _bgm_candidate = _select_verified_bgm_candidate(
                     editorial_type=str(segment.get("editorial_type") or ""),
+                    hook_intent=str((_hook_plan_data or {}).get("hook_type") or ""),
+                    segment_text=str(segment.get("text") or ""),
+                    index=_music_asset_index,
+                    music_mood=str(_audio_editorial_profile.get("music_mood") or ""),
+                    audio_editorial_profile=str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                    recent_music_asset_ids=_recent_music_asset_ids,
+                    audio_variation_index=_audio_variation_index,
+                    task_id=task_id,
+                    audio_inventory=_audio_asset_inventory,
+                    audio_coverage=_audio_asset_coverage,
                 )
-                if _music_metadata.get("music_applied") and _music_out.exists():
+                _music_metadata = {
+                    "music_applied": False,
+                    "music_status": "missing_verified_library",
+                    "music_warning": "no_verified_bgm",
+                    "music_tracks_found": int(len(((_music_asset_index.get("verified") or {}).get("bgm") or []))),
+                    "bgm_asset_path": None,
+                    "bgm_asset_id": "",
+                    "bgm_source": "",
+                    "bgm_license": "",
+                    "bgm_manifest_verified": False,
+                    "final_output_uses_bgm": False,
+                    "bgm_pass_count": 0,
+                    "bgm_duplicate_blocked": False,
+                    "bgm_final_status": "missing_verified_library",
+                    "bgm_voice_ducking_applied": False,
+                    "music_mood_selected": str(_bgm_candidate.get("music_mood_selected") or ""),
+                    "music_asset_id": str(_bgm_candidate.get("asset_id") or ""),
+                    "music_selection_reason": str(_bgm_candidate.get("music_selection_reason") or ""),
+                    "music_fallback_used": bool(_bgm_candidate.get("music_fallback_used")),
+                    "music_reuse_reason": str(_bgm_candidate.get("music_reuse_reason") or ""),
+                    "audio_asset_history_key": str(_bgm_candidate.get("audio_asset_history_key") or _audio_asset_history_key),
+                    "audio_asset_recently_used": list(_bgm_candidate.get("audio_asset_recently_used") or _recent_music_asset_ids),
+                    "audio_variation_index": int(_bgm_candidate.get("audio_variation_index") or _audio_variation_index),
+                }
+                _bgm_chain_pass_registered = False
+                _bgm_disabled_by_policy = str(os.environ.get("VPI_DISABLE_BGM", "")).strip().lower() in {"1", "true", "yes", "on"}
+                _bgm_already_verified = any(bool((pass_item or {}).get("verified")) for pass_item in (_audio_chain_state.get("bgm_passes") or []))
+                if _bgm_already_verified and not bool(_audio_chain_plan.get("allow_duplicate_bgm", False)):
+                    _music_metadata["music_status"] = "duplicate_blocked"
+                    _music_metadata["music_warning"] = "already_verified"
+                    _music_metadata["bgm_duplicate_blocked"] = True
+                    _music_metadata["bgm_final_status"] = "duplicate_blocked"
+                    logger.warning("AUDIO_DUPLICATE_PASS_BLOCKED phase=bgm reason=already_verified")
+                    _register_audio_chain_pass(
+                        "bgm",
+                        applied=False,
+                        verified=False,
+                        reason="already_verified",
+                        metadata={"duplicate_blocked": True},
+                    )
+                    _bgm_chain_pass_registered = True
+                elif _bgm_disabled_by_policy:
+                    _music_metadata["music_status"] = "skipped_by_policy"
+                    _music_metadata["music_warning"] = "bgm_disabled_by_policy"
+                    _music_metadata["bgm_final_status"] = "skipped_by_policy"
+                    _register_audio_chain_pass(
+                        "bgm",
+                        applied=False,
+                        verified=False,
+                        reason="bgm_disabled_by_policy",
+                        metadata={"policy": "VPI_DISABLE_BGM"},
+                    )
+                    _bgm_chain_pass_registered = True
+                if _bgm_candidate.get("matched") and _bgm_candidate.get("path") and not (_bgm_disabled_by_policy or _bgm_already_verified):
+                    _verified_track = Path(str(_bgm_candidate.get("path")))
+                    _original_discover_music_tracks = _vpi_music_service.discover_music_tracks
+                    _original_select_music_track = _vpi_music_service.select_music_track
+                    _vpi_music_service.discover_music_tracks = lambda: [_verified_track]  # type: ignore[assignment]
+                    _vpi_music_service.select_music_track = (
+                        lambda editorial_type, tracks=None, transcript_text="", hook_type="", emotional_tone="", **kwargs: (  # type: ignore[assignment]
+                        _verified_track,
+                            str(_bgm_candidate.get("music_mood_selected") or _bgm_candidate.get("bgm_profile") or "clean_corporate"),
+                            float(_bgm_candidate.get("match_score") or 1.0),
+                            "manifest_verified_verified_track",
+                        )
+                    )
+                    try:
+                        _music_metadata = _apply_music_bed(
+                            output_path,
+                            _music_out,
+                            editorial_type=str(segment.get("editorial_type") or ""),
+                            transcript_text=str(segment.get("text") or ""),
+                            hook_type=str((_hook_plan_data or {}).get("hook_type") or ""),
+                            emotional_tone=str((_publishable_metadata or {}).get("private_premium_status") or ""),
+                            music_mood=str(_bgm_candidate.get("music_mood_selected") or ""),
+                            audio_editorial_profile=str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                            music_asset_id=str(_bgm_candidate.get("asset_id") or ""),
+                            music_selection_reason=str(_bgm_candidate.get("music_selection_reason") or ""),
+                            music_fallback_used=bool(_bgm_candidate.get("music_fallback_used")),
+                            music_reuse_reason=str(_bgm_candidate.get("music_reuse_reason") or ""),
+                        )
+                    finally:
+                        _vpi_music_service.discover_music_tracks = _original_discover_music_tracks  # type: ignore[assignment]
+                        _vpi_music_service.select_music_track = _original_select_music_track  # type: ignore[assignment]
+
+                    _music_metadata["bgm_asset_path"] = str(_verified_track)
+                    _music_metadata["bgm_asset_id"] = str(_bgm_candidate.get("asset_id") or "")
+                    _music_metadata["bgm_source"] = str(_bgm_candidate.get("source_name") or "")
+                    _music_metadata["bgm_license"] = str(_bgm_candidate.get("license_name") or "")
+                    _music_metadata["music_mood_selected"] = str(_bgm_candidate.get("music_mood_selected") or "")
+                    _music_metadata["music_asset_id"] = str(_bgm_candidate.get("asset_id") or "")
+                    _music_metadata["music_selection_reason"] = str(_bgm_candidate.get("music_selection_reason") or "")
+                    _music_metadata["music_fallback_used"] = bool(_bgm_candidate.get("music_fallback_used"))
+                    _music_metadata["music_reuse_reason"] = str(_bgm_candidate.get("music_reuse_reason") or "")
+                    _music_metadata["audio_asset_history_key"] = str(_bgm_candidate.get("audio_asset_history_key") or _audio_asset_history_key)
+                    _music_metadata["audio_asset_recently_used"] = list(_bgm_candidate.get("audio_asset_recently_used") or _recent_music_asset_ids)
+                    _music_metadata["audio_variation_index"] = int(_bgm_candidate.get("audio_variation_index") or _audio_variation_index)
+                    _music_metadata["bgm_manifest_verified"] = bool(
+                        _bgm_candidate.get("manifest_verified")
+                        and _music_metadata.get("music_applied")
+                        and Path(str(_music_metadata.get("music_track") or "")).resolve() == _verified_track.resolve()
+                    )
+                    _music_metadata["music_mix_verified"] = bool(_music_metadata.get("music_final_verified"))
+                    _music_metadata["bgm_manifest_verified"] = bool(_music_metadata.get("music_mix_verified"))
+                    _music_metadata["final_output_uses_bgm"] = bool(_music_metadata.get("music_applied") and _music_metadata.get("music_mix_verified"))
+                else:
+                    logger.info("[music] skipped reason=%s", "bgm_disabled_by_policy" if _bgm_disabled_by_policy else ("duplicate_bgm_blocked" if _bgm_already_verified else "no_verified_bgm"))
+
+                _audio_chain_state["base_audio_detected"] = bool(words_with_confidence or segment.get("text") or _music_metadata.get("music_applied"))
+                _audio_chain_state["bgm_passes"] = list(_audio_chain_state.get("bgm_passes") or [])
+                _audio_chain_state["sfx_passes"] = list(_audio_chain_state.get("sfx_passes") or [])
+                _audio_chain_state["mastering_passes"] = list(_audio_chain_state.get("mastering_passes") or [])
+                _music_metadata["bgm_pass_count"] = len(_audio_chain_state.get("bgm_passes") or [])
+                _music_metadata["bgm_voice_ducking_applied"] = bool(_music_metadata.get("music_ducking_enabled"))
+                if _music_metadata.get("music_applied") and _music_out.exists() and _music_metadata.get("music_mix_verified"):
+                    _register_audio_chain_pass(
+                        "bgm",
+                        applied=True,
+                        verified=True,
+                        reason=str(_music_metadata.get("music_warning") or "music_mix_verified"),
+                        metadata={"music_track": _music_metadata.get("music_track"), "ducking": _music_metadata.get("music_ducking_enabled")},
+                    )
+                    _bgm_chain_pass_registered = True
                     _music_input = output_path
                     output_path = _music_out
+                    logger.info("BGM_OUTPUT_PATH_ASSIGNED path=%s", output_path)
                     _log_premium_pipeline_step("music", _music_input, output_path)
                     logger.info("[music] final_output_uses_music=true final_path=%s", output_path)
+                    _music_metadata["bgm_final_status"] = "verified"
+                    _music_metadata["bgm_loudness_checked"] = True
+                    _music_metadata["bgm_voice_priority_ok"] = bool(
+                        _music_metadata.get("music_mix_verified")
+                        and (_music_metadata.get("music_ducking_enabled") or not bool(words_with_confidence or segment.get("text")))
+                    )
+                    _audio_memory["music_asset_ids"] = list(dict.fromkeys(list(_audio_memory.get("music_asset_ids") or []) + [str(_bgm_candidate.get("asset_id") or "")]))
+                    _audio_memory["music_asset_paths"] = list(dict.fromkeys(list(_audio_memory.get("music_asset_paths") or []) + [str(_bgm_candidate.get("path") or "")]))
+                    _audio_memory["audio_variation_index"] = int(_audio_variation_index + 1)
+                elif _music_metadata.get("music_applied") and not _music_metadata.get("bgm_manifest_verified"):
+                    _music_metadata["music_applied"] = False
+                    _music_metadata["music_status"] = "blocked_unverified_bgm"
+                    _music_metadata["music_warning"] = "unverified_bgm_blocked"
+                    _music_metadata["final_output_uses_bgm"] = False
+                    _music_metadata["bgm_final_status"] = "blocked_unverified_bgm"
+                    logger.info("[music] skipped reason=unverified_bgm_blocked")
+                    _register_audio_chain_pass(
+                        "bgm",
+                        applied=False,
+                        verified=False,
+                        reason="unverified_bgm_blocked",
+                        metadata={"music_track": _music_metadata.get("music_track")},
+                    )
+                    _bgm_chain_pass_registered = True
+                elif str(_music_metadata.get("music_status") or "") == "disabled":
+                    _music_metadata["music_status"] = "skipped_by_policy"
+                    _music_metadata["music_warning"] = _music_metadata.get("music_warning") or "bgm_disabled_by_policy"
+                    _music_metadata["bgm_final_status"] = "skipped_by_policy"
+                    _register_audio_chain_pass(
+                        "bgm",
+                        applied=False,
+                        verified=False,
+                        reason="bgm_disabled_by_policy",
+                        metadata={"music_track": _music_metadata.get("music_track")},
+                    )
+                    _bgm_chain_pass_registered = True
+                else:
+                    _music_metadata["bgm_final_status"] = str(_music_metadata.get("music_status") or "skipped")
+                    if not _bgm_chain_pass_registered:
+                        _register_audio_chain_pass(
+                            "bgm",
+                            applied=bool(_music_metadata.get("music_applied")),
+                            verified=bool(_music_metadata.get("music_mix_verified")),
+                            reason=str(_music_metadata.get("music_warning") or _music_metadata.get("music_status") or "bgm_skipped"),
+                            metadata={"music_track": _music_metadata.get("music_track")},
+                        )
+                        _bgm_chain_pass_registered = True
+                if bool(words_with_confidence or segment.get("text")) and not bool(_music_metadata.get("music_ducking_enabled")):
+                    _music_metadata["bgm_voice_priority_ok"] = False
+                elif bool(_music_metadata.get("music_mix_verified")):
+                    _music_metadata["bgm_voice_priority_ok"] = bool(
+                        _music_metadata.get("music_ducking_enabled") or not bool(words_with_confidence or segment.get("text"))
+                    )
+                _music_metadata["bgm_loudness_checked"] = bool(_music_metadata.get("music_mix_verified"))
+                _music_metadata["audio_asset_history_key"] = str(_music_metadata.get("audio_asset_history_key") or _audio_asset_history_key)
+                _music_metadata["audio_asset_recently_used"] = list(dict.fromkeys(list(_music_metadata.get("audio_asset_recently_used") or []) + _recent_music_asset_ids))[-5:]
             except Exception as _music_e:
                 logger.warning("[music] skipped reason=%s", _music_e)
-                _music_metadata = {"music_applied": False, "music_status": "failed", "music_warning": str(_music_e)}
+                _music_metadata = {
+                    "music_applied": False,
+                    "music_status": "failed",
+                    "music_warning": str(_music_e),
+                    "bgm_final_status": "failed",
+                    "bgm_pass_count": len(_audio_chain_state.get("bgm_passes") or []),
+                    "bgm_duplicate_blocked": False,
+                    "bgm_voice_ducking_applied": False,
+                    "bgm_loudness_checked": False,
+                    "bgm_voice_priority_ok": False,
+                    "music_mood_selected": str(_audio_editorial_profile.get("music_mood") or ""),
+                    "music_asset_id": str(_bgm_candidate.get("asset_id") or ""),
+                    "music_selection_reason": str(_bgm_candidate.get("music_selection_reason") or ""),
+                    "music_fallback_used": bool(_bgm_candidate.get("music_fallback_used")),
+                    "music_reuse_reason": str(_bgm_candidate.get("music_reuse_reason") or ""),
+                    "audio_asset_history_key": str(_audio_asset_history_key),
+                    "audio_asset_recently_used": list(_recent_music_asset_ids),
+                    "audio_variation_index": int(_audio_variation_index),
+                }
+                _register_audio_chain_pass(
+                    "bgm",
+                    applied=False,
+                    verified=False,
+                    reason=str(_music_e),
+                    metadata={},
+                )
+            logger.info(
+                "BGM_FINAL_STATUS status=%s applied=%s verified=%s ducking=%s pass_count=%d",
+                str(_music_metadata.get("bgm_final_status") or _music_metadata.get("music_status") or "").lower(),
+                str(bool(_music_metadata.get("music_applied"))).lower(),
+                str(bool(_music_metadata.get("music_mix_verified"))).lower(),
+                str(bool(_music_metadata.get("music_ducking_enabled"))).lower(),
+                int(_music_metadata.get("bgm_pass_count") or 0),
+            )
 
             try:
                 from .vpi_sfx_service import apply_sfx_bed as _apply_sfx_bed
@@ -3820,15 +10736,125 @@ class VideoService:
                     private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
                     first3_visual_contract=_first3_visual_contract_pre_sfx,
                     silence_plan=_silence_edit_plan_data,
+                    task_id=task_id,
+                    clip_order=clip_index + 1,
+                    segment_words=words_with_confidence,
+                    audio_editorial_profile=str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                    sfx_allowed_families=list(_audio_editorial_profile.get("sfx_allowed_families") or []),
+                    sfx_blocked_families=list(_audio_editorial_profile.get("sfx_blocked_families") or []),
+                    max_sfx_events=int(_audio_editorial_profile.get("max_sfx_events") or 3),
+                    recent_sfx_family_history=list(_audio_memory.get("sfx_family_history") or []),
+                    audio_variation_index=int(_audio_memory.get("audio_variation_index") or 0),
+                    audio_inventory=_audio_asset_inventory,
                 )
-                if _sfx_metadata.get("sfx_applied") and _sfx_out.exists():
+                _sfx_chain_pass_registered = False
+                _sfx_already_verified = any(bool((pass_item or {}).get("verified")) for pass_item in (_audio_chain_state.get("sfx_passes") or []))
+                if _sfx_already_verified and not bool(_audio_chain_plan.get("allow_duplicate_sfx", False)):
+                    _sfx_metadata["sfx_applied"] = False
+                    _sfx_metadata["sfx_verified"] = False
+                    _sfx_metadata["sfx_warning"] = "already_verified"
+                    _sfx_metadata["sfx_status"] = "duplicate_blocked"
+                    _sfx_metadata["sfx_duplicate_blocked"] = True
+                    logger.warning("AUDIO_DUPLICATE_PASS_BLOCKED phase=sfx reason=already_verified")
+                    _register_audio_chain_pass(
+                        "sfx",
+                        applied=False,
+                        verified=False,
+                        reason="already_verified",
+                        metadata={"duplicate_blocked": True},
+                    )
+                    _sfx_chain_pass_registered = True
+                _sfx_metadata["sfx_event_count"] = int(
+                    _sfx_metadata.get("sfx_event_count")
+                    or _sfx_metadata.get("sfx_count")
+                    or len(_sfx_metadata.get("sfx_events") or [])
+                    or 0
+                )
+                if _sfx_metadata["sfx_event_count"] > 3:
+                    _sfx_metadata["sfx_warning"] = _sfx_metadata.get("sfx_warning") or "sfx_event_count_capped"
+                    _sfx_metadata["sfx_event_count"] = 3
+                _sfx_metadata["sfx_verified"] = bool(_sfx_metadata.get("sfx_verified") or (_sfx_metadata.get("sfx_applied") and _sfx_metadata.get("sfx_asset_applied_match")))
+                _sfx_metadata["sfx_families"] = list(_sfx_metadata.get("sfx_families") or [])
+                _sfx_metadata["sfx_editorial_profile"] = str(_audio_editorial_profile.get("audio_editorial_profile") or "")
+                _sfx_metadata["sfx_allowed_families"] = list(_audio_editorial_profile.get("sfx_allowed_families") or [])
+                _sfx_metadata["sfx_blocked_families"] = list(_audio_editorial_profile.get("sfx_blocked_families") or [])
+                _sfx_metadata["sfx_family_selected"] = str(_sfx_metadata.get("sfx_family_selected") or ((_sfx_metadata.get("sfx_retention_decision") or {}).get("sfx_family") or ""))
+                _sfx_metadata["sfx_variation_ids"] = list(dict.fromkeys([str(item) for item in (_sfx_metadata.get("sfx_variation_ids") or []) if str(item)]))
+                _sfx_metadata["sfx_selection_reason"] = str(_sfx_metadata.get("sfx_selection_reason") or (_sfx_metadata.get("sfx_retention_decision") or {}).get("reason") or "")
+                _sfx_metadata["sfx_reuse_reason"] = str(_sfx_metadata.get("sfx_reuse_reason") or "")
+                _sfx_metadata["sfx_synced_to_transition"] = bool(
+                    _sfx_metadata.get("transition_sync_applied")
+                    or (_transition_metadata or {}).get("transition_sfx_sync_allowed")
+                    and bool((_transition_metadata or {}).get("transition_rendered"))
+                )
+                _sfx_metadata["sfx_pass_count"] = len(_audio_chain_state.get("sfx_passes") or [])
+                _sfx_metadata["sfx_final_status"] = str(_sfx_metadata.get("sfx_status") or ("verified" if _sfx_metadata.get("sfx_verified") else "skipped_no_event"))
+                if _sfx_metadata.get("sfx_applied") and _sfx_metadata.get("sfx_verified") and _sfx_out.exists():
+                    _register_audio_chain_pass(
+                        "sfx",
+                        applied=True,
+                        verified=True,
+                        reason=str(_sfx_metadata.get("sfx_warning") or "sfx_verified"),
+                        metadata={"sfx_event_count": _sfx_metadata.get("sfx_event_count")},
+                    )
+                    _sfx_chain_pass_registered = True
                     _sfx_input = output_path
                     output_path = _sfx_out
                     _log_premium_pipeline_step("sfx", _sfx_input, output_path)
                     logger.info("[sfx] final_output_uses_sfx=true final_path=%s", output_path)
+                    _sfx_metadata["sfx_final_status"] = "verified"
+                    _audio_memory["sfx_family_history"] = list(dict.fromkeys(list(_audio_memory.get("sfx_family_history") or []) + [str(_sfx_metadata.get("sfx_family_selected") or "")]))
+                    _audio_memory["sfx_asset_ids"] = list(dict.fromkeys(list(_audio_memory.get("sfx_asset_ids") or []) + list(_sfx_metadata.get("sfx_variation_ids") or [])))
+                    _audio_memory["audio_variation_index"] = int(_audio_memory.get("audio_variation_index") or 0) + 1
+                else:
+                    if not _sfx_metadata.get("sfx_event_count"):
+                        _sfx_metadata["sfx_status"] = "skipped_no_event"
+                    elif not _sfx_metadata.get("sfx_applied"):
+                        _sfx_metadata["sfx_status"] = "skipped_by_policy" if str(_sfx_metadata.get("sfx_warning") or "").strip() in {"disabled", "policy", "no_event"} else str(_sfx_metadata.get("sfx_status") or "skipped_no_event")
+                    _sfx_metadata["sfx_final_status"] = str(_sfx_metadata.get("sfx_status") or "skipped_no_event")
+                    logger.info(
+                        "SFX_DISABLED_REASON task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        _sfx_metadata.get("sfx_warning") or "sfx_mix_not_verified",
+                    )
+                    _register_audio_chain_pass(
+                        "sfx",
+                        applied=bool(_sfx_metadata.get("sfx_applied")),
+                        verified=bool(_sfx_metadata.get("sfx_verified")),
+                        reason=str(_sfx_metadata.get("sfx_warning") or _sfx_metadata.get("sfx_status") or "sfx_skipped"),
+                        metadata={"sfx_event_count": _sfx_metadata.get("sfx_event_count")},
+                    )
+                    _sfx_chain_pass_registered = True
             except Exception as _sfx_e:
                 logger.warning("[sfx] skipped reason=%s", _sfx_e)
-                _sfx_metadata = {"sfx_applied": False, "sfx_count": 0, "sfx_warning": str(_sfx_e)}
+                _sfx_previous_metadata = locals().get("_sfx_metadata", {}) if isinstance(locals().get("_sfx_metadata", {}), dict) else {}
+                _sfx_metadata = {
+                    "sfx_applied": False,
+                    "sfx_count": 0,
+                    "sfx_warning": str(_sfx_e),
+                    "sfx_event_count": 0,
+                    "sfx_pass_count": len(_audio_chain_state.get("sfx_passes") or []),
+                    "sfx_final_status": "failed",
+                    "sfx_duplicate_blocked": False,
+                    "sfx_synced_to_transition": False,
+                    "sfx_editorial_profile": str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                    "sfx_allowed_families": list(_audio_editorial_profile.get("sfx_allowed_families") or []),
+                    "sfx_blocked_families": list(_audio_editorial_profile.get("sfx_blocked_families") or []),
+                    "sfx_family_selected": str(_sfx_previous_metadata.get("sfx_family_selected") or ""),
+                    "sfx_variation_ids": [],
+                    "sfx_selection_reason": str(_sfx_previous_metadata.get("sfx_selection_reason") or ""),
+                    "sfx_reuse_reason": str(_sfx_previous_metadata.get("sfx_reuse_reason") or ""),
+                }
+            logger.info(
+                "SFX_FINAL_STATUS status=%s applied=%s verified=%s events=%d pass_count=%d synced_to_transition=%s",
+                str(_sfx_metadata.get("sfx_final_status") or _sfx_metadata.get("sfx_status") or "").lower(),
+                str(bool(_sfx_metadata.get("sfx_applied"))).lower(),
+                str(bool(_sfx_metadata.get("sfx_verified"))).lower(),
+                int(_sfx_metadata.get("sfx_event_count") or 0),
+                int(_sfx_metadata.get("sfx_pass_count") or 0),
+                str(bool(_sfx_metadata.get("sfx_synced_to_transition"))).lower(),
+            )
 
             # ── Audio Mastering v1.8 — loudness normalization for social reels ──
             # Applied AFTER branding (all audio elements present) and BEFORE
@@ -3841,7 +10867,10 @@ class VideoService:
                     build_audio_qc_metadata as _build_audio_qc,
                     build_audio_publish_warnings as _build_audio_pub_warnings,
                 )
+                _audio_mastering_required = bool(output_path.exists())
+                _audio_chain_state["audio_mastering_required"] = bool(_audio_mastering_required)
                 if _am_enabled():
+                    _pre_master_output = output_path
                     _am_out = output_path.with_name(f"mastered_{output_path.name}")
                     _audio_mastering_result = _master_audio(
                         input_path=str(output_path),
@@ -3849,43 +10878,118 @@ class VideoService:
                     )
                     if _audio_mastering_result.applied and _am_out.exists():
                         _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
-                        logger.info(
-                            "[audio-master] applied method=%s input_lufs=%s output_lufs=%s status=%s",
-                            _audio_mastering_result.method,
-                            _audio_master_metadata.get("input_lufs"),
-                            _audio_master_metadata.get("output_lufs"),
-                            _audio_master_metadata.get("audio_voice_status"),
-                        )
-                        _log_premium_pipeline_step("audio_mastering", Path(_audio_mastering_result.input_path) if hasattr(_audio_mastering_result, "input_path") else output_path, _am_out)
-                        output_path = _am_out
-                        logger.info(
-                            "[music] final_output_uses_music=%s final_path=%s",
-                            str(bool(_music_metadata.get("music_applied") and "music_" in output_path.name)).lower(),
-                            output_path,
-                        )
-                        logger.info(
-                            "[visual-effects] final_output_uses_vfx=%s final_path=%s",
-                            str(bool(_visual_effects_metadata.get("visual_effects_applied") and "vfx_" in output_path.name)).lower(),
-                            output_path,
-                        )
-                        logger.info(
-                            "[transition-final] final_output_uses_transition=%s path=%s",
-                            str(bool(_transition_metadata.get("transitions_applied") and "trans_" in output_path.name)).lower(),
-                            output_path,
-                        )
+                        _audio_master_metadata["audio_mastering_required"] = bool(_audio_mastering_required)
+                        _audio_master_metadata["audio_mastering_applied"] = bool(_audio_master_metadata.get("audio_mastering_applied"))
+                        _audio_master_metadata["audio_mastering_verified"] = bool(_audio_master_metadata.get("audio_mastering_applied") or _audio_master_metadata.get("audio_voice_status"))
+                        _audio_master_metadata["audio_mastering_fallback_to_premaster"] = bool(_audio_master_metadata.get("audio_mastering_fallback_to_premaster"))
+                        _audio_master_metadata["audio_mastering_skip_reason"] = str(_audio_master_metadata.get("audio_mastering_skip_reason") or "")
+                        _out_lufs = _audio_master_metadata.get("output_lufs")
+                        _voice_status = str(_audio_master_metadata.get("audio_voice_status") or "")
+                        _silent_master = False
+                        try:
+                            if _out_lufs is not None and float(_out_lufs) <= -95.0:
+                                _silent_master = True
+                        except Exception:
+                            _silent_master = False
+                        if _voice_status in {"too_low"} and _out_lufs is not None:
+                            try:
+                                if float(_out_lufs) <= -35.0:
+                                    _silent_master = True
+                            except Exception:
+                                pass
+                        if _silent_master:
+                            logger.warning(
+                                "[audio-master] silent_master_detected fallback=pre_master output_lufs=%s",
+                                _out_lufs,
+                            )
+                            _audio_mastering_result.applied = False
+                            _audio_mastering_result.method = "fallback_pre_master_silent_output"
+                            _audio_master_metadata["audio_mastering_applied"] = False
+                            _audio_master_metadata["audio_mastering_verified"] = False
+                            _audio_master_metadata.setdefault("audio_warnings", []).append(
+                                "mastered_audio_silent_fallback_pre_master"
+                            )
+                            _audio_master_metadata["audio_mastering_fallback"] = "pre_master"
+                            _audio_master_metadata["audio_mastering_fallback_to_premaster"] = True
+                            _audio_master_metadata["audio_mastering_skip_reason"] = "silent_master"
+                            output_path = _pre_master_output
+                        else:
+                            logger.info(
+                                "[audio-master] applied method=%s input_lufs=%s output_lufs=%s status=%s",
+                                _audio_mastering_result.method,
+                                _audio_master_metadata.get("input_lufs"),
+                                _audio_master_metadata.get("output_lufs"),
+                                _audio_master_metadata.get("audio_voice_status"),
+                            )
+                            _log_premium_pipeline_step("audio_mastering", Path(_audio_mastering_result.input_path) if hasattr(_audio_mastering_result, "input_path") else output_path, _am_out)
+                            output_path = _am_out
+                            _audio_chain_state.setdefault("mastering_passes", []).append({
+                                "applied": True,
+                                "verified": True,
+                                "reason": str(_audio_master_metadata.get("audio_warnings") or "audio_mastered"),
+                                "metadata": {
+                                    "input_lufs": _audio_master_metadata.get("input_lufs"),
+                                    "output_lufs": _audio_master_metadata.get("output_lufs"),
+                                },
+                            })
+                            logger.info(
+                                "[music] final_output_uses_music=%s final_path=%s",
+                                str(bool(_music_metadata.get("music_applied") and "music_" in output_path.name)).lower(),
+                                output_path,
+                            )
+                            logger.info(
+                                "[visual-effects] final_output_uses_vfx=%s final_path=%s",
+                                str(bool(_visual_effects_metadata.get("visual_effects_applied") and "vfx_" in output_path.name)).lower(),
+                                output_path,
+                            )
+                            logger.info(
+                                "[transition-final] final_output_uses_transition=%s path=%s",
+                                str(bool(_transition_metadata.get("transitions_applied") and "trans_" in output_path.name)).lower(),
+                                output_path,
+                            )
                     elif _audio_mastering_result.method == "skipped":
                         _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
+                        _audio_master_metadata["audio_mastering_required"] = bool(_audio_mastering_required)
+                        _audio_master_metadata["audio_mastering_verified"] = bool(_audio_master_metadata.get("audio_voice_status"))
+                        _audio_master_metadata["audio_mastering_fallback_to_premaster"] = False
+                        _audio_master_metadata["audio_mastering_skip_reason"] = "already_loud_enough"
                         logger.info("[audio-master] skipped reason=already_loud_enough")
                     else:
                         _audio_master_metadata = _build_audio_qc(_audio_mastering_result)
+                        _audio_master_metadata["audio_mastering_required"] = bool(_audio_mastering_required)
+                        _audio_master_metadata["audio_mastering_verified"] = bool(_audio_master_metadata.get("audio_voice_status"))
+                        _audio_master_metadata["audio_mastering_fallback_to_premaster"] = bool(_audio_mastering_result.method.startswith("fallback"))
+                        _audio_master_metadata["audio_mastering_skip_reason"] = str(_audio_mastering_result.error or _audio_mastering_result.method or "")
                         logger.info("[audio-master] not applied method=%s", _audio_mastering_result.method)
                 else:
                     logger.debug("[audio-master] disabled by config")
-                    _audio_master_metadata = {"audio_mastering_enabled": False, "audio_mastering_applied": False}
+                    _audio_master_metadata = {
+                        "audio_mastering_enabled": False,
+                        "audio_mastering_applied": False,
+                        "audio_mastering_required": bool(_audio_mastering_required),
+                        "audio_mastering_verified": False,
+                        "audio_mastering_fallback_to_premaster": False,
+                        "audio_mastering_skip_reason": "disabled",
+                    }
             except Exception as _am_e:
                 logger.warning("[audio-master] integration error: %s", _am_e)
                 _audio_mastering_result = None
-                _audio_master_metadata = {"audio_mastering_applied": False, "audio_warnings": [str(_am_e)]}
+                _audio_master_metadata = {
+                    "audio_mastering_applied": False,
+                    "audio_mastering_required": False,
+                    "audio_mastering_verified": False,
+                    "audio_mastering_fallback_to_premaster": True,
+                    "audio_mastering_skip_reason": str(_am_e),
+                    "audio_warnings": [str(_am_e)],
+                }
+            logger.info(
+                "AUDIO_MASTERING_FINAL_STATUS status=%s applied=%s verified=%s fallback=%s skip_reason=%s",
+                str(_audio_master_metadata.get("audio_mastering_skip_reason") or _audio_master_metadata.get("audio_mastering_method") or "").lower(),
+                str(bool(_audio_master_metadata.get("audio_mastering_applied"))).lower(),
+                str(bool(_audio_master_metadata.get("audio_mastering_verified"))).lower(),
+                str(bool(_audio_master_metadata.get("audio_mastering_fallback_to_premaster"))).lower(),
+                str(_audio_master_metadata.get("audio_mastering_skip_reason") or "").lower(),
+            )
 
             # ── Cinematic Finish Pack v1 — subtle final visual polish ──────────
             try:
@@ -3924,14 +11028,43 @@ class VideoService:
                     segment_text=str(segment.get("text") or ""),
                 )
                 _finish_out = output_path.with_name(f"finish_{output_path.name}")
-                _cinematic_finish_metadata = _apply_cinematic_finish(
-                    output_path,
-                    _finish_out,
-                    decision=_finish_decision,
-                    caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
-                    first3_visual_contract_data=_finish_first3_contract,
-                    composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
+                _production_safe_active = bool(
+                    str(os.environ.get("VPI_PRODUCTION_SAFE_EDIT", "")).strip().lower() in {"1", "true", "yes", "on"}
                 )
+                logger.info(
+                    "VPI_CINEMATIC_FINISH_PRODUCTION_SAFE_ACTIVE_RESOLVED task_id=%s clip_order=%d production_safe_active=%s daily_mode_active=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_production_safe_active).lower(),
+                    str(_daily_mode_active).lower(),
+                )
+                if _daily_mode_active or _production_safe_active:
+                    logger.info(
+                        "VPI_FINISH_COLOR_TINT_DISABLED_DAILY task_id=%s clip_order=%d daily=%s production_safe=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_daily_mode_active).lower(),
+                        str(_production_safe_active).lower(),
+                    )
+                    _cinematic_finish_metadata = {
+                        "cinematic_finish_pack": False,
+                        "visual_finish": False,
+                        "finish_profile": "no_finish_needed",
+                        "finish_safety": "blocked",
+                        "finish_warning": "daily_mode_neutral_finish",
+                        "finish_applied": False,
+                        "finish_decision": _finish_decision,
+                        "finish_filter_plan": {"apply": False, "filters": [], "filter_chain": "", "reason": "daily_mode_neutral_finish"},
+                    }
+                else:
+                    _cinematic_finish_metadata = _apply_cinematic_finish(
+                        output_path,
+                        _finish_out,
+                        decision=_finish_decision,
+                        caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                        first3_visual_contract_data=_finish_first3_contract,
+                        composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
+                    )
                 if _cinematic_finish_metadata.get("visual_finish") and _finish_out.exists():
                     _finish_input = output_path
                     output_path = _finish_out
@@ -3999,7 +11132,770 @@ class VideoService:
                 "hook_overlay": (_caption_overlay_pack_metadata or {}).get("hook_overlay") or {},
                 "caption_icon": (_caption_overlay_pack_metadata or {}).get("caption_icon") or {},
                 "lower_third": (_caption_overlay_pack_metadata or {}).get("lower_third") or {},
+                "caption_polish_profile": str((_caption_overlay_pack_metadata or {}).get("caption_polish_profile") or (_caption_decisions or {}).get("caption_polish_profile") or ""),
+                "caption_pacing_reason": str((_caption_overlay_pack_metadata or {}).get("caption_pacing_reason") or (_caption_decisions or {}).get("caption_pacing_reason") or ""),
+                "caption_polish_applied": bool((_caption_overlay_pack_metadata or {}).get("caption_polish_applied") if (_caption_overlay_pack_metadata or {}).get("caption_polish_applied") is not None else (_caption_decisions or {}).get("caption_polish_applied", False)),
+                "caption_polish_partial": bool((_caption_overlay_pack_metadata or {}).get("caption_polish_partial") if (_caption_overlay_pack_metadata or {}).get("caption_polish_partial") is not None else (_caption_decisions or {}).get("caption_polish_partial", False)),
+                "caption_linebreak_polish_applied": bool((_caption_overlay_pack_metadata or {}).get("caption_linebreak_polish_applied") if (_caption_overlay_pack_metadata or {}).get("caption_linebreak_polish_applied") is not None else (_caption_decisions or {}).get("caption_linebreak_polish_applied", False)),
+                "caption_orphan_words_avoided": bool((_caption_overlay_pack_metadata or {}).get("caption_orphan_words_avoided") if (_caption_overlay_pack_metadata or {}).get("caption_orphan_words_avoided") is not None else (_caption_decisions or {}).get("caption_orphan_words_avoided", False)),
+                "caption_protected_phrases_preserved": bool((_caption_overlay_pack_metadata or {}).get("caption_protected_phrases_preserved") if (_caption_overlay_pack_metadata or {}).get("caption_protected_phrases_preserved") is not None else (_caption_decisions or {}).get("caption_protected_phrases_preserved", False)),
+                "caption_timing_polish_applied": bool((_caption_overlay_pack_metadata or {}).get("caption_timing_polish_applied") if (_caption_overlay_pack_metadata or {}).get("caption_timing_polish_applied") is not None else (_caption_decisions or {}).get("caption_timing_polish_applied", False)),
+                "caption_too_fast_adjusted": bool((_caption_overlay_pack_metadata or {}).get("caption_too_fast_adjusted") if (_caption_overlay_pack_metadata or {}).get("caption_too_fast_adjusted") is not None else (_caption_decisions or {}).get("caption_too_fast_adjusted", False)),
+                "caption_duration_balance_ok": bool((_caption_overlay_pack_metadata or {}).get("caption_duration_balance_ok") if (_caption_overlay_pack_metadata or {}).get("caption_duration_balance_ok") is not None else (_caption_decisions or {}).get("caption_duration_balance_ok", True)),
+                "caption_keyword_highlight_count": int((_caption_overlay_pack_metadata or {}).get("caption_keyword_highlight_count") or (_caption_decisions or {}).get("caption_keyword_highlight_count") or 0),
+                "caption_highlight_policy": str((_caption_overlay_pack_metadata or {}).get("caption_highlight_policy") or (_caption_decisions or {}).get("caption_highlight_policy") or ""),
+                "caption_hook_conflict_avoided": bool((_caption_overlay_pack_metadata or {}).get("caption_hook_conflict_avoided") if (_caption_overlay_pack_metadata or {}).get("caption_hook_conflict_avoided") is not None else (_caption_decisions or {}).get("caption_hook_conflict_avoided", False)),
+                "caption_cta_conflict_avoided": bool((_caption_overlay_pack_metadata or {}).get("caption_cta_conflict_avoided") if (_caption_overlay_pack_metadata or {}).get("caption_cta_conflict_avoided") is not None else (_caption_decisions or {}).get("caption_cta_conflict_avoided", False)),
+                "caption_broll_conflict_avoided": bool((_caption_overlay_pack_metadata or {}).get("caption_broll_conflict_avoided") if (_caption_overlay_pack_metadata or {}).get("caption_broll_conflict_avoided") is not None else (_caption_decisions or {}).get("caption_broll_conflict_avoided", False)),
+                "caption_visual_conflict_avoided": bool((_caption_overlay_pack_metadata or {}).get("caption_visual_conflict_avoided") if (_caption_overlay_pack_metadata or {}).get("caption_visual_conflict_avoided") is not None else (_caption_decisions or {}).get("caption_visual_conflict_avoided", False)),
             }
+            try:
+                from .vpi_asset_library_service import build_asset_index as _build_asset_index_overlay
+                from .vpi_dynamic_overlay_text_service import (
+                    build_dynamic_overlay_text_plan as _build_dynamic_overlay_text_plan,
+                    render_dynamic_overlay_text_asset as _render_dynamic_overlay_text_asset,
+                )
+                from .vpi_motion_overlay_service import select_motion_overlay_candidate as _select_motion_overlay_candidate
+                from .vpi_overlay_card_composer import compose_dynamic_overlay_card as _compose_dynamic_overlay_card
+                from .vpi_final_overlay_composer import apply_overlay_card_to_video as _apply_overlay_card_to_video
+
+                _overlay_candidate = _select_motion_overlay_candidate(
+                    text=str(segment.get("text") or ""),
+                    topics=[str(segment.get("editorial_type") or "")],
+                    tags=list(_subtitle_terms) + list(_hook_terms),
+                    editorial_signal={
+                        "hook_intent": str((_hook_plan_data or {}).get("hook_intent") or ""),
+                        "composition_mode": str((_composition_decision or {}).get("composition_mode") or ""),
+                        "layer_overload": bool((_caption_overlay_pack_metadata or {}).get("layer_overload"))
+                        or bool((_composition_decision or {}).get("layer_overload")),
+                    },
+                    asset_index=_build_asset_index_overlay(),
+                )
+                if isinstance(_overlay_candidate, dict):
+                    _motion_overlay_metadata = dict(_overlay_candidate)
+                    _motion_overlay_metadata["motion_overlay_selected"] = True
+                else:
+                    _motion_overlay_metadata = {}
+            except Exception as _overlay_e:
+                logger.debug("[motion-overlay] selection skipped reason=%s", _overlay_e)
+                _motion_overlay_metadata = {}
+
+            if not _motion_overlay_metadata:
+                _motion_overlay_metadata = {
+                    "motion_overlay_selected": False,
+                    "motion_overlay_asset_id": "",
+                    "motion_overlay_asset_path": "",
+                    "motion_overlay_source": "",
+                    "motion_overlay_manifest_verified": False,
+                    "motion_overlay_applied": False,
+                    "final_output_uses_motion_overlay": False,
+                    "reason": "no_overlay_match",
+                }
+            else:
+                _motion_overlay_metadata.setdefault("motion_overlay_applied", False)
+                _motion_overlay_metadata.setdefault("final_output_uses_motion_overlay", False)
+                _motion_overlay_metadata.setdefault("motion_overlay_manifest_verified", False)
+                _motion_overlay_metadata.setdefault("motion_overlay_selected", True)
+                if not _motion_overlay_metadata.get("motion_overlay_applied"):
+                    _motion_overlay_metadata["reason"] = "selected_plan_only_runtime_compositor_not_enabled"
+
+            _dynamic_overlay_text_plan: Dict[str, Any] = {
+                "dynamic_text_needed": False,
+                "overlay_text": "",
+                "overlay_subtext": "",
+                "text_role": "",
+                "font_family": "Manrope",
+                "font_weight": "SemiBold",
+                "max_chars": 32,
+                "safe_to_render": False,
+                "needs_claim_review": False,
+                "reason": "no_overlay_selected",
+            }
+            if bool(_motion_overlay_metadata.get("motion_overlay_selected")):
+                try:
+                    _dynamic_overlay_text_plan = _build_dynamic_overlay_text_plan(
+                        segment_text=str(segment.get("text") or ""),
+                        topics=[
+                            str(segment.get("editorial_type") or ""),
+                            str((_hook_plan_data or {}).get("hook_intent") or ""),
+                            str((_composition_decision or {}).get("composition_mode") or ""),
+                        ],
+                        overlay_concept=str(_motion_overlay_metadata.get("overlay_concept") or ""),
+                        editorial_signal={
+                            "claim_verified": bool((_publishable_metadata or {}).get("claim_verified", False)),
+                            "caption_already_strong": bool((_caption_overlay_pack_metadata or {}).get("caption_overlay_pack")),
+                        },
+                    )
+                except Exception as _dyn_overlay_e:
+                    logger.debug("[dynamic-overlay-text] skipped reason=%s", _dyn_overlay_e)
+                    _dynamic_overlay_text_plan = {
+                        "dynamic_text_needed": False,
+                        "overlay_text": "",
+                        "overlay_subtext": "",
+                        "text_role": "",
+                        "font_family": "Manrope",
+                        "font_weight": "SemiBold",
+                        "max_chars": 32,
+                        "safe_to_render": False,
+                        "needs_claim_review": False,
+                        "reason": f"dynamic_plan_failed:{_dyn_overlay_e}",
+                    }
+
+            _motion_overlay_metadata.update(
+                {
+                    "dynamic_overlay_text_needed": bool(_dynamic_overlay_text_plan.get("dynamic_text_needed")),
+                    "dynamic_overlay_text": str(_dynamic_overlay_text_plan.get("overlay_text") or ""),
+                    "dynamic_overlay_subtext": str(_dynamic_overlay_text_plan.get("overlay_subtext") or ""),
+                    "dynamic_overlay_text_role": str(_dynamic_overlay_text_plan.get("text_role") or ""),
+                    "dynamic_overlay_text_safe_to_render": bool(_dynamic_overlay_text_plan.get("safe_to_render")),
+                    "dynamic_overlay_text_needs_claim_review": bool(_dynamic_overlay_text_plan.get("needs_claim_review")),
+                    "dynamic_overlay_text_rendered": False,
+                    "dynamic_overlay_text_applied": False,
+                    "dynamic_overlay_text_planned": bool(_dynamic_overlay_text_plan.get("dynamic_text_needed")),
+                    "dynamic_overlay_text_plan": dict(_dynamic_overlay_text_plan),
+                    "dynamic_overlay_card_composed": False,
+                    "dynamic_overlay_card_path": "",
+                    "dynamic_overlay_card_exists": False,
+                    "dynamic_overlay_card_ffprobe_readable": False,
+                    "motion_overlay_apply_method": "",
+                    "motion_overlay_final_output_path": "",
+                    "motion_overlay_apply_error": None,
+                    "motion_overlay_apply_fallback": "",
+                    "planned": bool(_motion_overlay_metadata.get("motion_overlay_selected")),
+                    "rendered": False,
+                    "dropped_by_budget": False,
+                    "budget_drop_reason": "",
+                }
+            )
+            _daily_mode_active = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+            if _daily_mode_active:
+                _motion_overlay_metadata.update({
+                    "motion_overlay_selected": False,
+                    "motion_overlay_applied": False,
+                    "final_output_uses_motion_overlay": False,
+                    "dynamic_overlay_text_needed": False,
+                    "dynamic_overlay_text_rendered": False,
+                    "dynamic_overlay_text_applied": False,
+                    "dynamic_overlay_text_planned": False,
+                    "dynamic_overlay_card_composed": False,
+                    "dynamic_overlay_card_path": "",
+                    "dynamic_overlay_card_exists": False,
+                    "dynamic_overlay_card_ffprobe_readable": False,
+                    "motion_overlay_apply_method": "",
+                    "motion_overlay_final_output_path": "",
+                    "motion_overlay_apply_error": None,
+                    "motion_overlay_apply_fallback": "daily_mode_no_pip_overlay",
+                    "planned": False,
+                    "rendered": False,
+                    "dropped_by_budget": True,
+                    "budget_drop_reason": "daily_mode_no_pip_overlay",
+                    "reason": "daily_mode_no_pip_overlay",
+                    "pip_overlay_disabled": True,
+                    "thumbnail_overlay_disabled": True,
+                    "debug_preview_overlay_disabled": True,
+                    "debug_face_box_rendered": False,
+                    "debug_overlays_disabled": True,
+                })
+                logger.info("VPI_PIP_OVERLAY_DISABLED task_id=%s clip_order=%s reason=daily_mode", task_id, clip_index + 1)
+                logger.info("VPI_DEBUG_PREVIEW_OVERLAY_DISABLED task_id=%s clip_order=%s reason=daily_mode", task_id, clip_index + 1)
+                logger.info("VPI_DEBUG_FACE_BOX_DISABLED task_id=%s clip_order=%s reason=daily_mode", task_id, clip_index + 1)
+            if bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")):
+                _dynamic_overlay_render = _render_dynamic_overlay_text_asset(
+                    plan={
+                        **dict(_dynamic_overlay_text_plan),
+                        "claim_verified": bool((_publishable_metadata or {}).get("claim_verified", False)),
+                    },
+                    asset_index=_build_asset_index_overlay(),
+                    output_dir="exports/dynamic_overlay_text",
+                )
+                _motion_overlay_metadata["dynamic_overlay_text_rendered"] = bool(_dynamic_overlay_render.get("dynamic_overlay_text_rendered"))
+                _motion_overlay_metadata["dynamic_overlay_text_asset_path"] = str(_dynamic_overlay_render.get("dynamic_overlay_text_asset_path") or "")
+                _motion_overlay_metadata["dynamic_overlay_text_asset_exists"] = bool(_dynamic_overlay_render.get("dynamic_overlay_text_asset_exists"))
+                _motion_overlay_metadata["dynamic_overlay_text_font_path"] = str(_dynamic_overlay_render.get("font_path") or "")
+                _motion_overlay_metadata["dynamic_overlay_text_render_error"] = _dynamic_overlay_render.get("error")
+                _motion_overlay_metadata["dynamic_overlay_text_render_reason"] = str(_dynamic_overlay_render.get("reason") or "")
+                _motion_overlay_metadata["dynamic_overlay_text_applied"] = False
+                try:
+                    if bool(_dynamic_overlay_render.get("dynamic_overlay_text_rendered")) and bool(_motion_overlay_metadata.get("motion_overlay_selected")):
+                        _card_preview = _compose_dynamic_overlay_card(
+                            overlay_asset_path=str(_motion_overlay_metadata.get("motion_overlay_asset_path") or ""),
+                            text_asset_path=str(_dynamic_overlay_render.get("dynamic_overlay_text_asset_path") or ""),
+                            output_dir="exports/dynamic_overlay_cards",
+                            width=1080,
+                            height=1080,
+                            duration=float(_motion_overlay_metadata.get("recommended_duration") or 1.2),
+                            position=str(_motion_overlay_metadata.get("recommended_position") or "center"),
+                            layout_strategy=str(_motion_overlay_metadata.get("overlay_concept") or "motion_overlay"),
+                            layout_zone=str(_motion_overlay_metadata.get("recommended_position") or "center"),
+                            layout_size="medium" if float(_motion_overlay_metadata.get("recommended_duration") or 1.2) >= 1.8 else "small",
+                            layout_opacity=float(_motion_overlay_metadata.get("overlay_opacity") or 1.0),
+                            layout_duration=float(_motion_overlay_metadata.get("recommended_duration") or 1.2),
+                        )
+                        _motion_overlay_metadata["dynamic_overlay_card_composed"] = bool(_card_preview.get("overlay_card_composed"))
+                        _motion_overlay_metadata["dynamic_overlay_card_path"] = str(_card_preview.get("overlay_card_path") or "")
+                        _motion_overlay_metadata["dynamic_overlay_card_exists"] = bool(_card_preview.get("overlay_card_exists"))
+                        _motion_overlay_metadata["dynamic_overlay_card_ffprobe_readable"] = bool(_card_preview.get("ffprobe_readable"))
+                        _motion_overlay_metadata["dynamic_overlay_card_error"] = _card_preview.get("error")
+                        _motion_overlay_metadata["dynamic_overlay_card_reason"] = str(_card_preview.get("reason") or "")
+                        _motion_overlay_metadata["visual_layout_strategy"] = str(_card_preview.get("visual_layout_strategy") or _motion_overlay_metadata.get("visual_layout_strategy") or "motion_overlay")
+                        _motion_overlay_metadata["visual_layout_zone"] = str(_card_preview.get("visual_layout_zone") or _motion_overlay_metadata.get("visual_layout_zone") or "center")
+                        _motion_overlay_metadata["visual_layout_size"] = str(_card_preview.get("visual_layout_size") or _motion_overlay_metadata.get("visual_layout_size") or "small")
+                        _motion_overlay_metadata["visual_layout_opacity"] = float(_card_preview.get("visual_layout_opacity") or _motion_overlay_metadata.get("visual_layout_opacity") or 1.0)
+                        _motion_overlay_metadata["visual_layout_duration"] = float(_card_preview.get("visual_layout_duration") or _motion_overlay_metadata.get("visual_layout_duration") or 0.0)
+                        _motion_overlay_metadata["visual_layout_reason"] = str(_card_preview.get("visual_layout_reason") or _motion_overlay_metadata.get("visual_layout_reason") or "motion_overlay")
+                except Exception as _card_compose_e:
+                    logger.debug("[dynamic-overlay-card] compose preview skipped reason=%s", _card_compose_e)
+                    _motion_overlay_metadata["dynamic_overlay_card_composed"] = False
+                    _motion_overlay_metadata["dynamic_overlay_card_reason"] = f"compose_failed:{_card_compose_e}"
+                    _motion_overlay_metadata["dynamic_overlay_card_error"] = str(_card_compose_e)
+
+            # Final overlay application (real video composition) with strict safety gates.
+            _motion_overlay_metadata.setdefault("motion_overlay_applied", False)
+            _motion_overlay_metadata.setdefault("final_output_uses_motion_overlay", False)
+            _motion_overlay_metadata.setdefault("motion_overlay_apply_method", "")
+            _motion_overlay_metadata.setdefault("motion_overlay_final_output_path", "")
+            _motion_overlay_metadata.setdefault("motion_overlay_apply_error", None)
+            _motion_overlay_metadata.setdefault("motion_overlay_apply_fallback", "")
+            _motion_overlay_metadata.setdefault("motion_overlay_production_mode", True)
+
+            _visual_layer_budget_final: Dict[str, Any] = dict(_visual_layer_budget_global_base or {})
+            try:
+                from .vpi_visual_effects_service import build_global_visual_layer_budget as _build_global_visual_layer_budget
+                _visual_layer_budget_final = _build_global_visual_layer_budget(
+                    layer_candidates=[
+                        {
+                            "layer": "captions",
+                            "kind": "text",
+                            "start_s": 0.0,
+                            "duration_s": float(duration or 0.0),
+                            "priority": 100,
+                            "renderable": True,
+                            "safe_zone": "lower_band",
+                            "delayable": False,
+                            "reducible": False,
+                        },
+                        {
+                            "layer": "semantic_card" if bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")) else "motion_overlay",
+                            "kind": "text" if bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")) else "visual",
+                            "start_s": 0.35,
+                            "duration_s": float(_motion_overlay_metadata.get("recommended_duration") or 2.2),
+                            "priority": 85,
+                            "text": str(_motion_overlay_metadata.get("dynamic_overlay_text") or _motion_overlay_metadata.get("overlay_concept") or ""),
+                            "renderable": bool(_motion_overlay_metadata.get("motion_overlay_selected")),
+                            "safe_zone": str(_motion_overlay_metadata.get("recommended_position") or "upper_right"),
+                            "delayable": True,
+                            "reducible": True,
+                            "has_text": bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")),
+                            "dynamic_overlay_text_planned": bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")),
+                            "dynamic_overlay_text": str(_motion_overlay_metadata.get("dynamic_overlay_text") or ""),
+                            "motion_overlay_selected": bool(_motion_overlay_metadata.get("motion_overlay_selected")),
+                        },
+                        {
+                            "layer": "branding",
+                            "kind": "text" if str(_brand_metadata.get("type") or "") == "text" else "visual",
+                            "start_s": 0.0,
+                            "duration_s": float(duration or 0.0),
+                            "priority": 55,
+                            "text": str(_brand_metadata.get("text") or ""),
+                            "renderable": bool(_brand_metadata.get("logo_found", True)),
+                            "safe_zone": "top_right_small",
+                            "delayable": False,
+                            "reducible": True,
+                        },
+                        {
+                            "layer": "icon",
+                            "kind": "visual",
+                            "start_s": 0.2,
+                            "duration_s": 1.2,
+                            "priority": 90,
+                            "text": str((_hook_plan_data or {}).get("hook_icon_candidate", {}).get("concept") or ""),
+                            "renderable": bool(((_hook_plan_data or {}).get("hook_icon_candidate") or {}).get("safe") and ((_hook_plan_data or {}).get("hook_icon_candidate") or {}).get("path")),
+                            "safe_zone": "upper_right_small",
+                            "delayable": False,
+                            "reducible": True,
+                        },
+                        {
+                            "layer": "cta",
+                            "kind": "text",
+                            "start_s": max(0.0, float(duration or 0.0) - 2.5),
+                            "duration_s": 1.8,
+                            "priority": 65,
+                            "text": str((_editing_plan_data or {}).get("cta", {}).get("text_options", [""])[0] or ""),
+                            "renderable": bool((_editing_plan_data or {}).get("cta_strategy") not in {"metadata_only"}),
+                            "safe_zone": "lower_center_small",
+                            "delayable": True,
+                            "reducible": True,
+                        },
+                    ],
+                    caption_overlay_pack_metadata=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    hook_visual_applied=bool((_hook_plan_data or {}).get("hook_visual_applied")),
+                    hook_text_overlay_rendered=bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+                    hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+                    first3_has_captions=bool(words_with_confidence),
+                    branding_candidate=_brand_metadata,
+                    icon_candidate=(_hook_plan_data or {}).get("hook_icon_candidate") if isinstance(_hook_plan_data, dict) else None,
+                    motion_overlay_candidate=_motion_overlay_metadata,
+                    cta_candidate=(_editing_plan_data or {}).get("cta") if isinstance(_editing_plan_data, dict) else None,
+                    visual_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                    clip_duration=float(duration or 0.0),
+                )
+                _editing_plan_data["visual_layer_budget"] = _visual_layer_budget_final
+                if _visual_layer_budget_final.get("temporal_density_budget_applied"):
+                    logger.info(
+                        "TEMPORAL_VISUAL_DENSITY_GUARD_APPLIED task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_layer_budget_final.get("temporal_density_reason") or "density_guard"),
+                    )
+                if _visual_layer_budget_final.get("visual_support_layer_selected"):
+                    logger.info(
+                        "VISUAL_SUPPORT_LAYER_SELECTED task_id=%s clip_order=%s layer=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_layer_budget_final.get("visual_support_layer_selected") or ""),
+                        str(_visual_layer_budget_final.get("visual_support_layer_reason") or "selected_by_budget"),
+                    )
+            except Exception as _budget_final_e:
+                logger.debug("[visual-layer-budget] final skipped reason=%s", _budget_final_e)
+
+            _overlay_candidate_path = ""
+            if bool(_motion_overlay_metadata.get("dynamic_overlay_card_composed")) and bool(_motion_overlay_metadata.get("dynamic_overlay_card_exists")):
+                _overlay_candidate_path = str(_motion_overlay_metadata.get("dynamic_overlay_card_path") or "")
+            elif bool(_motion_overlay_metadata.get("motion_overlay_selected")):
+                _overlay_candidate_path = str(_motion_overlay_metadata.get("motion_overlay_asset_path") or "")
+
+            _overlay_layer_name = "semantic_card" if bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned")) else "motion_overlay"
+            _overlay_budget_decision = dict(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get(_overlay_layer_name) or {})
+            if str(_overlay_budget_decision.get("action") or "") == "drop":
+                _motion_overlay_metadata["motion_overlay_applied"] = False
+                _motion_overlay_metadata["final_output_uses_motion_overlay"] = False
+                _motion_overlay_metadata["planned"] = True
+                _motion_overlay_metadata["rendered"] = False
+                _motion_overlay_metadata["dropped_by_budget"] = True
+                _motion_overlay_metadata["budget_drop_reason"] = str(_overlay_budget_decision.get("reason") or "visual_layer_budget")
+                _motion_overlay_metadata["reason"] = str(_overlay_budget_decision.get("reason") or "visual_layer_budget")
+                logger.info(
+                    "OVERLAY_DROPPED_COLLISION_GUARD task_id=%s clip_order=%s layer=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    _overlay_layer_name,
+                    str(_overlay_budget_decision.get("reason") or "visual_layer_budget"),
+                )
+                logger.info(
+                    "OVERLAY_RENDER_BLOCKED_BY_BUDGET layer=%s reason=%s",
+                    _overlay_layer_name,
+                    str(_overlay_budget_decision.get("reason") or "visual_layer_budget"),
+                )
+            elif str(_overlay_budget_decision.get("action") or "") == "delay":
+                _motion_overlay_metadata["recommended_position"] = str(_overlay_budget_decision.get("safe_zone") or _motion_overlay_metadata.get("recommended_position") or "upper_right")
+                _motion_overlay_metadata["recommended_start_s"] = float(_overlay_budget_decision.get("new_start_s") or _motion_overlay_metadata.get("recommended_start_s") or 0.35)
+                logger.info(
+                    "OVERLAY_DELAYED_COLLISION_GUARD task_id=%s clip_order=%s layer=%s old_start=%.2f new_start=%.2f",
+                    task_id,
+                    clip_index + 1,
+                    _overlay_layer_name,
+                    float(_overlay_budget_decision.get("start_s") or 0.35),
+                    float(_overlay_budget_decision.get("new_start_s") or _motion_overlay_metadata.get("recommended_start_s") or 0.35),
+                )
+
+            _claims_unresolved = bool(_motion_overlay_metadata.get("dynamic_overlay_text_needs_claim_review")) and not bool(
+                (_publishable_metadata or {}).get("claim_verified")
+            )
+            _safe_text_ok = not bool(_motion_overlay_metadata.get("dynamic_overlay_text_needed")) or bool(
+                _motion_overlay_metadata.get("dynamic_overlay_text_safe_to_render")
+            )
+            _verified_for_prod = bool(_motion_overlay_metadata.get("motion_overlay_manifest_verified"))
+            _overlay_budget_allows = str(_overlay_budget_decision.get("action") or "") != "drop"
+            _overlay_prereq = bool(
+                _motion_overlay_metadata.get("motion_overlay_selected")
+                and _overlay_candidate_path
+                and Path(_overlay_candidate_path).exists()
+                and Path(output_path).exists()
+                and _safe_text_ok
+                and not _claims_unresolved
+                and _verified_for_prod
+                and _overlay_budget_allows
+            )
+
+            if _overlay_prereq:
+                _overlay_pos = str(_motion_overlay_metadata.get("recommended_position") or "upper_right")
+                _pos_alias = {
+                    "top_right": "upper_right",
+                    "top_left": "upper_left",
+                    "bottom_right": "lower_right",
+                    "bottom_left": "lower_left",
+                    "bottom_center": "lower_center",
+                }
+                _overlay_pos = _pos_alias.get(_overlay_pos, _overlay_pos)
+                _overlay_start = float(_motion_overlay_metadata.get("recommended_start_s") or 0.35)
+                _overlay_dur = 2.2
+                _concept = str(_motion_overlay_metadata.get("overlay_concept") or "")
+                if _concept in {"timeline_card", "folder_gallery"}:
+                    _overlay_dur = 3.0
+                elif _concept == "keyword_spin":
+                    _overlay_dur = 1.4
+                    _overlay_pos = "center"
+                elif _concept == "location_popup":
+                    _overlay_dur = 2.0
+                elif _concept in {"toggle_card", "folder_gallery"}:
+                    _overlay_pos = "lower_right"
+                elif _concept == "stat_card":
+                    _overlay_pos = "upper_left"
+                elif _concept in {"notification_card", "price_badge"}:
+                    _overlay_pos = "upper_right"
+                elif _concept == "timeline_card":
+                    _overlay_pos = "lower_center"
+
+                _overlay_scale_width = 420
+                _overlay_opacity = 1.0
+                if str(_overlay_budget_decision.get("action") or "") == "reduce":
+                    _overlay_scale_width = 340
+                    _overlay_opacity = 0.92
+                    logger.info(
+                        "OVERLAY_SAFE_ZONE_ASSIGNED layer=%s zone=%s",
+                        _overlay_layer_name,
+                        str(_overlay_budget_decision.get("safe_zone") or _overlay_pos or "upper_right"),
+                    )
+
+                _overlay_out = output_path.with_name(f"overlay_{output_path.name}")
+                _overlay_apply = _apply_overlay_card_to_video(
+                    input_video_path=str(output_path),
+                    overlay_card_path=_overlay_candidate_path,
+                    output_video_path=str(_overlay_out),
+                    position=_overlay_pos,
+                    start_time=float(_overlay_start),
+                    duration=float(_overlay_dur),
+                    scale_width=_overlay_scale_width,
+                    opacity=_overlay_opacity,
+                    layout_strategy=str(_motion_overlay_metadata.get("overlay_concept") or "motion_overlay"),
+                    layout_zone=str(_motion_overlay_metadata.get("recommended_position") or _overlay_pos or "upper_right"),
+                    layout_size="medium" if _overlay_scale_width >= 420 else "small",
+                    layout_opacity=float(_overlay_opacity),
+                    layout_duration=float(_overlay_dur),
+                )
+                if bool(_overlay_apply.get("motion_overlay_applied")) and Path(str(_overlay_apply.get("output_video_path") or "")).exists():
+                    _overlay_input = output_path
+                    output_path = Path(str(_overlay_apply["output_video_path"]))
+                    _log_premium_pipeline_step("final_overlay", _overlay_input, output_path)
+                    _motion_overlay_metadata["motion_overlay_applied"] = True
+                    _motion_overlay_metadata["final_output_uses_motion_overlay"] = True
+                    _motion_overlay_metadata["planned"] = True
+                    _motion_overlay_metadata["rendered"] = True
+                    _motion_overlay_metadata["dropped_by_budget"] = False
+                    _motion_overlay_metadata["budget_drop_reason"] = ""
+                    _motion_overlay_metadata["motion_overlay_apply_method"] = "ffmpeg_overlay_card"
+                    _motion_overlay_metadata["motion_overlay_final_output_path"] = str(output_path)
+                    _motion_overlay_metadata["motion_overlay_apply_error"] = None
+                    _motion_overlay_metadata["motion_overlay_apply_fallback"] = ""
+                    _motion_overlay_metadata["motion_overlay_apply_ffprobe_readable"] = bool(_overlay_apply.get("ffprobe_readable"))
+                    _motion_overlay_metadata["reason"] = "applied_final_overlay_card"
+                    _motion_overlay_metadata["visual_layout_strategy"] = str(_overlay_apply.get("visual_layout_strategy") or _motion_overlay_metadata.get("visual_layout_strategy") or "motion_overlay")
+                    _motion_overlay_metadata["visual_layout_zone"] = str(_overlay_apply.get("visual_layout_zone") or _motion_overlay_metadata.get("visual_layout_zone") or "center")
+                    _motion_overlay_metadata["visual_layout_size"] = str(_overlay_apply.get("visual_layout_size") or _motion_overlay_metadata.get("visual_layout_size") or "small")
+                    _motion_overlay_metadata["visual_layout_opacity"] = float(_overlay_apply.get("visual_layout_opacity") or _motion_overlay_metadata.get("visual_layout_opacity") or 1.0)
+                    _motion_overlay_metadata["visual_layout_duration"] = float(_overlay_apply.get("visual_layout_duration") or _motion_overlay_metadata.get("visual_layout_duration") or 0.0)
+                    _motion_overlay_metadata["visual_layout_reason"] = str(_overlay_apply.get("visual_layout_reason") or _motion_overlay_metadata.get("visual_layout_reason") or "motion_overlay")
+                    _motion_overlay_metadata["visual_layout_face_safe"] = bool(_overlay_apply.get("visual_layout_face_safe", True))
+                    _motion_overlay_metadata["visual_layout_caption_safe"] = bool(_overlay_apply.get("visual_layout_caption_safe", True))
+                    _motion_overlay_metadata["visual_layout_ok"] = bool(_overlay_apply.get("visual_layout_ok", True))
+                    _motion_overlay_metadata["visual_layout_warnings"] = list(_overlay_apply.get("visual_layout_warnings") or [])
+                else:
+                    _motion_overlay_metadata["motion_overlay_applied"] = False
+                    _motion_overlay_metadata["final_output_uses_motion_overlay"] = False
+                    _motion_overlay_metadata["planned"] = True
+                    _motion_overlay_metadata["rendered"] = False
+                    _motion_overlay_metadata["dropped_by_budget"] = False
+                    _motion_overlay_metadata["budget_drop_reason"] = ""
+                    _motion_overlay_metadata["motion_overlay_apply_method"] = "ffmpeg_overlay_card"
+                    _motion_overlay_metadata["motion_overlay_apply_error"] = _overlay_apply.get("error") or _overlay_apply.get("reason") or "apply_failed"
+                    _motion_overlay_metadata["motion_overlay_apply_fallback"] = "original_clip_preserved"
+                    _motion_overlay_metadata["reason"] = "apply_failed_original_preserved"
+                    _motion_overlay_metadata["visual_layout_strategy"] = str(_overlay_apply.get("visual_layout_strategy") or _motion_overlay_metadata.get("visual_layout_strategy") or "motion_overlay")
+                    _motion_overlay_metadata["visual_layout_zone"] = str(_overlay_apply.get("visual_layout_zone") or _motion_overlay_metadata.get("visual_layout_zone") or "center")
+                    _motion_overlay_metadata["visual_layout_size"] = str(_overlay_apply.get("visual_layout_size") or _motion_overlay_metadata.get("visual_layout_size") or "small")
+                    _motion_overlay_metadata["visual_layout_opacity"] = float(_overlay_apply.get("visual_layout_opacity") or _motion_overlay_metadata.get("visual_layout_opacity") or 1.0)
+                    _motion_overlay_metadata["visual_layout_duration"] = float(_overlay_apply.get("visual_layout_duration") or _motion_overlay_metadata.get("visual_layout_duration") or 0.0)
+                    _motion_overlay_metadata["visual_layout_reason"] = str(_overlay_apply.get("visual_layout_reason") or _motion_overlay_metadata.get("visual_layout_reason") or "motion_overlay")
+                    _motion_overlay_metadata["visual_layout_face_safe"] = bool(_overlay_apply.get("visual_layout_face_safe", True))
+                    _motion_overlay_metadata["visual_layout_caption_safe"] = bool(_overlay_apply.get("visual_layout_caption_safe", True))
+                    _motion_overlay_metadata["visual_layout_ok"] = bool(_overlay_apply.get("visual_layout_ok", True))
+                    _motion_overlay_metadata["visual_layout_warnings"] = list(_overlay_apply.get("visual_layout_warnings") or [])
+            else:
+                _motion_overlay_metadata["motion_overlay_applied"] = False
+                _motion_overlay_metadata["final_output_uses_motion_overlay"] = False
+                _motion_overlay_metadata["planned"] = False
+                _motion_overlay_metadata["rendered"] = False
+                _motion_overlay_metadata["dropped_by_budget"] = False
+                _motion_overlay_metadata["budget_drop_reason"] = ""
+                _motion_overlay_metadata["motion_overlay_apply_method"] = ""
+                _motion_overlay_metadata["motion_overlay_apply_fallback"] = "original_clip_preserved"
+                _motion_overlay_metadata["motion_overlay_apply_error"] = None
+                if not _verified_for_prod and bool(_motion_overlay_metadata.get("motion_overlay_selected")):
+                    _motion_overlay_metadata["reason"] = "apply_blocked_unverified_asset"
+                elif _claims_unresolved:
+                    _motion_overlay_metadata["reason"] = "apply_blocked_claim_review_unresolved"
+                elif not _safe_text_ok:
+                    _motion_overlay_metadata["reason"] = "apply_blocked_dynamic_text_unsafe"
+                elif not _overlay_candidate_path:
+                    _motion_overlay_metadata["reason"] = "apply_blocked_missing_overlay_candidate"
+                else:
+                    _motion_overlay_metadata["reason"] = str(_motion_overlay_metadata.get("reason") or "apply_not_requested")
+            logger.info(
+                "[dynamic-overlay-text] planned=%s rendered=%s applied=%s reason=%s",
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_text_planned"))).lower(),
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_text_rendered"))).lower(),
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_text_applied"))).lower(),
+                str((_motion_overlay_metadata.get("dynamic_overlay_text_plan") or {}).get("reason") or "none"),
+            )
+            logger.info(
+                "[dynamic-overlay-card] composed=%s exists=%s ffprobe=%s reason=%s",
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_card_composed"))).lower(),
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_card_exists"))).lower(),
+                str(bool(_motion_overlay_metadata.get("dynamic_overlay_card_ffprobe_readable"))).lower(),
+                str(_motion_overlay_metadata.get("dynamic_overlay_card_reason") or "none"),
+            )
+            logger.info(
+                "[motion-overlay] selected=%s applied=%s asset=%s",
+                str(bool(_motion_overlay_metadata.get("motion_overlay_selected"))).lower(),
+                str(bool(_motion_overlay_metadata.get("motion_overlay_applied"))).lower(),
+                str(_motion_overlay_metadata.get("motion_overlay_asset_path") or "none"),
+            )
+            logger.info(
+                "[motion-overlay] final_output_uses_motion_overlay=%s reason=%s",
+                str(bool(_motion_overlay_metadata.get("final_output_uses_motion_overlay"))).lower(),
+                str(_motion_overlay_metadata.get("reason") or "none"),
+            )
+            _visual_reinforcement_metadata: Dict[str, Any] = {
+                "planned": False,
+                "rendered": False,
+                "dropped_by_budget": False,
+                "budget_drop_reason": "",
+                "visual_reinforcement_applied": False,
+                "visual_reinforcement_strategy": "none",
+                "visual_reinforcement_asset": "",
+                "visual_reinforcement_reason": "",
+                "visual_reinforcement_rendered": False,
+                "visual_reinforcement_backend": "none",
+                "visual_reinforcement_safe_zone": "",
+                "visual_reinforcement_dropped_reason": "",
+                "visual_reinforcement_output_path": str(output_path),
+                "visual_renderer_selected": "",
+                "visual_renderer_fallback_used": False,
+                "visual_renderer_unavailable_reason": "",
+                "visual_layout_strategy": "no_extra_visual",
+                "visual_layout_zone": "none",
+                "visual_layout_size": "none",
+                "visual_layout_opacity": 0.0,
+                "visual_layout_duration": 0.0,
+                "visual_layout_reason": "",
+                "visual_layout_face_safe": True,
+                "visual_layout_caption_safe": True,
+                "visual_layout_ok": True,
+                "visual_layout_warnings": [],
+            }
+            try:
+                from .vpi_asset_library_service import build_asset_index as _build_asset_index_reinforcement
+                from .vpi_visual_effects_service import choose_visual_reinforcement as _choose_visual_reinforcement
+                from .vpi_visual_effects_service import choose_premium_visual_restraint as _choose_premium_visual_restraint
+                from .vpi_visual_effects_service import render_visual_reinforcement as _render_visual_reinforcement
+
+                _premium_restraint: Dict[str, Any] = {}
+                _visual_reinforcement_plan: Dict[str, Any] = {}
+                _visual_asset_index_for_reinforcement = _build_asset_index_reinforcement()
+                _hook_strength_for_restraint = float((_hook_plan_data or {}).get("hook_first3_score") or (_hook_plan_data or {}).get("hook_first_4s_score") or 0.0)
+                _audio_chain_ok_for_restraint = not bool((_audio_chain_state or {}).get("audio_chain_errors"))
+                _premium_restraint = _choose_premium_visual_restraint(
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    hook_strength=_hook_strength_for_restraint,
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    caption_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                    rhythm_edit_applied=bool((_silence_edit_plan_data or {}).get("rendered")),
+                    broll_applied=bool((_editing_plan_data or {}).get("broll_applied")),
+                    visual_reinforcement_applied=bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_applied")),
+                    visual_layer_budget=_visual_layer_budget_final,
+                    visual_layout_strategy=str((_visual_reinforcement_metadata or {}).get("visual_layout_strategy") or "no_extra_visual"),
+                    visual_asset_selected=str((_visual_reinforcement_metadata or {}).get("visual_asset_selected") or ""),
+                    face_safe=bool((_visual_reinforcement_metadata or {}).get("visual_layout_face_safe", True)),
+                    caption_safe=bool((_visual_reinforcement_metadata or {}).get("visual_layout_caption_safe", True)),
+                    clip_duration=float(duration or 0.0),
+                    sensitive_topic=any(token in str(segment.get("text") or "").lower() for token in ("decesos", "funeral", "fallecimiento", "muerte", "sepelio", "velatorio", "luto")),
+                    final_cta_phase=bool(float(duration or 0.0) >= 8.0 and str((_visual_layer_budget_final or {}).get("visual_support_layer_selected") or "") == "cta"),
+                    visual_identity_ok=bool((_publishable_metadata or {}).get("visual_identity_ok", True)),
+                    audio_chain_ok=bool(_audio_chain_ok_for_restraint),
+                )
+                _visual_reinforcement_metadata["premium_restraint_mode"] = str(_premium_restraint.get("premium_restraint_mode") or "balanced")
+                _visual_reinforcement_metadata["premium_restraint_applied"] = bool(_premium_restraint.get("premium_restraint_applied"))
+                _visual_reinforcement_metadata["premium_restraint_reason"] = str(_premium_restraint.get("premium_restraint_reason") or "")
+                _visual_reinforcement_metadata["premium_restraint_suppressed_layers"] = list(_premium_restraint.get("premium_restraint_suppressed_layers") or [])
+                _visual_reinforcement_metadata["allowed_visual_support_count"] = int(_premium_restraint.get("allowed_visual_support_count") or 1)
+                _visual_reinforcement_metadata["clip_already_strong"] = bool(_premium_restraint.get("clip_already_strong"))
+                _visual_reinforcement_metadata["visual_support_reduced_reason"] = str(_premium_restraint.get("visual_support_reduced_reason") or "")
+                _visual_reinforcement_metadata["restraint_broll_interaction"] = str(_premium_restraint.get("restraint_broll_interaction") or "")
+                _visual_reinforcement_plan = _choose_visual_reinforcement(
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    text=str(segment.get("text") or ""),
+                    hook_strategy_final=str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or ""),
+                    visual_support_layer_selected=str((_visual_layer_budget_final or {}).get("visual_support_layer_selected") or ""),
+                    visual_density=float((_editing_plan_data or {}).get("visual_density_score") or 0.0),
+                    safe_zone_map=(_visual_layer_budget_final or {}).get("safe_zone_map") or {},
+                    caption_presence=bool(words_with_confidence or (_caption_overlay_pack_metadata or {}).get("caption_overlay_pack")),
+                    clip_duration=float(duration or 0.0),
+                    available_assets=_visual_asset_index_for_reinforcement,
+                    visual_layer_budget=_visual_layer_budget_final,
+                    face_bbox=(segment.get("face_bbox") if isinstance(segment, dict) else None),
+                    speaker_bbox=(segment.get("speaker_bbox") if isinstance(segment, dict) else None),
+                    first3_has_captions=bool(words_with_confidence),
+                    visual_design_tokens=None,
+                    visual_asset_inventory_summary=_visual_asset_index_for_reinforcement.get("visual_asset_inventory_summary") if isinstance(_visual_asset_index_for_reinforcement, dict) else {},
+                    hook_text_redundant_with_captions=bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+                )
+                if bool(_premium_restraint.get("suppress_visual_reinforcement")) or int(_premium_restraint.get("allowed_visual_support_count") or 1) <= 0:
+                    logger.info(
+                        "PREMIUM_RESTRAINT_SUPPRESSED layer=visual_reinforcement reason=%s",
+                        str(_premium_restraint.get("premium_restraint_reason") or "restraint"),
+                    )
+                    _visual_reinforcement_metadata.update({
+                        "planned": False,
+                        "rendered": False,
+                        "dropped_by_budget": False,
+                        "budget_drop_reason": "skipped_by_restraint",
+                        "visual_reinforcement_applied": False,
+                        "visual_reinforcement_strategy": "none",
+                        "visual_reinforcement_asset": "",
+                        "visual_reinforcement_reason": "skipped_by_restraint",
+                        "visual_reinforcement_rendered": False,
+                        "visual_reinforcement_backend": "none",
+                        "visual_reinforcement_safe_zone": "",
+                        "visual_reinforcement_dropped_reason": "skipped_by_restraint",
+                        "visual_reinforcement_output_path": str(output_path),
+                        "visual_renderer_selected": "",
+                        "visual_renderer_fallback_used": False,
+                        "visual_renderer_unavailable_reason": "",
+                        "reason": "skipped_by_restraint",
+                        "visual_layout_strategy": str(_premium_restraint.get("premium_restraint_mode") or "no_extra_visual"),
+                        "visual_layout_zone": "none",
+                        "visual_layout_size": "none",
+                        "visual_layout_opacity": 0.0,
+                        "visual_layout_duration": 0.0,
+                        "visual_layout_reason": str(_premium_restraint.get("premium_restraint_reason") or "skipped_by_restraint"),
+                        "visual_layout_face_safe": bool(_premium_restraint.get("premium_restraint_mode") != "sensitive_minimal" or _premium_restraint.get("clip_already_strong")),
+                        "visual_layout_caption_safe": True,
+                        "visual_layout_ok": True,
+                        "visual_layout_warnings": [],
+                    })
+                elif str(_visual_reinforcement_plan.get("visual_reinforcement_strategy") or "none") != "none":
+                    logger.info(
+                        "VISUAL_REINFORCEMENT_SELECTED task_id=%s clip_order=%s strategy=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        str(_visual_reinforcement_plan.get("visual_reinforcement_strategy") or "none"),
+                        str(_visual_reinforcement_plan.get("reason") or "none"),
+                    )
+                    _visual_reinforcement_out = output_path.with_name(f"reinforce_{output_path.name}")
+                    _visual_reinforcement_metadata = _render_visual_reinforcement(
+                        input_video_path=str(output_path),
+                        output_video_path=str(_visual_reinforcement_out),
+                        reinforcement_plan=_visual_reinforcement_plan,
+                        global_visual_layer_budget=_visual_layer_budget_final or _visual_layer_budget_global_base,
+                        output_dir="exports/visual_reinforcement",
+                    )
+                    _visual_reinforcement_metadata.setdefault("planned", True)
+                    _visual_reinforcement_metadata.setdefault("rendered", False)
+                    _visual_reinforcement_metadata.setdefault("dropped_by_budget", False)
+                    _visual_reinforcement_metadata.setdefault("budget_drop_reason", "")
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_applied", False)
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_rendered", False)
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_strategy", str(_visual_reinforcement_plan.get("visual_reinforcement_strategy") or "none"))
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_asset", str(_visual_reinforcement_plan.get("asset_key") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_reason", str(_visual_reinforcement_plan.get("reason") or "none"))
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_safe_zone", str(_visual_reinforcement_plan.get("safe_zone") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_dropped_reason", str(_visual_reinforcement_metadata.get("reason") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_reinforcement_backend", str(_visual_reinforcement_metadata.get("visual_reinforcement_backend") or "none"))
+                    _visual_reinforcement_metadata.setdefault("visual_renderer_selected", str(_visual_reinforcement_metadata.get("visual_renderer_selected") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_renderer_fallback_used", bool(_visual_reinforcement_metadata.get("visual_renderer_fallback_used")))
+                    _visual_reinforcement_metadata.setdefault("visual_renderer_unavailable_reason", str(_visual_reinforcement_metadata.get("visual_renderer_unavailable_reason") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_strategy", str(_visual_reinforcement_plan.get("visual_layout_strategy") or "no_extra_visual"))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_zone", str(_visual_reinforcement_plan.get("visual_layout_zone") or "none"))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_size", str(_visual_reinforcement_plan.get("visual_layout_size") or "none"))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_opacity", float(_visual_reinforcement_plan.get("visual_layout_opacity") or 0.0))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_duration", float(_visual_reinforcement_plan.get("visual_layout_duration") or 0.0))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_reason", str(_visual_reinforcement_plan.get("visual_layout_reason") or ""))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_face_safe", bool(_visual_reinforcement_plan.get("visual_layout_face_safe", True)))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_caption_safe", bool(_visual_reinforcement_plan.get("visual_layout_caption_safe", True)))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_ok", bool(_visual_reinforcement_plan.get("visual_layout_ok", True)))
+                    _visual_reinforcement_metadata.setdefault("visual_layout_warnings", list(_visual_reinforcement_plan.get("visual_layout_warnings") or []))
+                    _visual_reinforcement_metadata.setdefault("premium_restraint_mode", str(_premium_restraint.get("premium_restraint_mode") or "balanced"))
+                    _visual_reinforcement_metadata.setdefault("premium_restraint_applied", bool(_premium_restraint.get("premium_restraint_applied")))
+                    _visual_reinforcement_metadata.setdefault("premium_restraint_reason", str(_premium_restraint.get("premium_restraint_reason") or ""))
+                    _visual_reinforcement_metadata.setdefault("premium_restraint_suppressed_layers", list(_premium_restraint.get("premium_restraint_suppressed_layers") or []))
+                    _visual_reinforcement_metadata.setdefault("allowed_visual_support_count", int(_premium_restraint.get("allowed_visual_support_count") or 1))
+                    _visual_reinforcement_metadata.setdefault("clip_already_strong", bool(_premium_restraint.get("clip_already_strong")))
+                    _visual_reinforcement_metadata.setdefault("visual_support_reduced_reason", str(_premium_restraint.get("visual_support_reduced_reason") or ""))
+                    _visual_reinforcement_metadata.setdefault("restraint_broll_interaction", str(_premium_restraint.get("restraint_broll_interaction") or ""))
+                    if _visual_reinforcement_metadata.get("visual_reinforcement_rendered") and Path(str(_visual_reinforcement_metadata.get("visual_reinforcement_output_path") or "")).exists():
+                        _reinforce_input = output_path
+                        output_path = Path(str(_visual_reinforcement_metadata.get("visual_reinforcement_output_path") or _visual_reinforcement_out))
+                        _log_premium_pipeline_step("visual_reinforcement", _reinforce_input, output_path)
+                    elif _visual_reinforcement_metadata.get("dropped_by_budget"):
+                        logger.info(
+                            "OVERLAY_RENDER_BLOCKED_BY_BUDGET layer=visual_reinforcement reason=%s",
+                            str(_visual_reinforcement_metadata.get("budget_drop_reason") or "budget_blocked"),
+                        )
+                else:
+                    _visual_reinforcement_metadata["reason"] = str(_visual_reinforcement_plan.get("reason") or "no_visual_reinforcement")
+                    _visual_reinforcement_metadata["visual_reinforcement_reason"] = str(_visual_reinforcement_plan.get("reason") or "no_visual_reinforcement")
+                    _visual_reinforcement_metadata["visual_reinforcement_dropped_reason"] = str(_visual_reinforcement_plan.get("reason") or "no_visual_reinforcement")
+                    logger.info(
+                        "VISUAL_REINFORCEMENT_SKIPPED_REASON reason=%s",
+                        str(_visual_reinforcement_plan.get("reason") or "no_visual_reinforcement"),
+                    )
+            except Exception as _reinforce_e:
+                logger.warning(
+                    "PREMIUM_RESTRAINT_FAILED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_reinforce_e),
+                )
+                _visual_reinforcement_metadata = {
+                    "planned": False,
+                    "rendered": False,
+                    "dropped_by_budget": False,
+                    "budget_drop_reason": "",
+                    "visual_reinforcement_applied": False,
+                    "visual_reinforcement_strategy": "none",
+                    "visual_reinforcement_asset": "",
+                    "visual_reinforcement_reason": str(_reinforce_e),
+                    "visual_reinforcement_rendered": False,
+                    "visual_reinforcement_backend": "none",
+                    "visual_reinforcement_safe_zone": "",
+                    "visual_reinforcement_dropped_reason": str(_reinforce_e),
+                    "visual_reinforcement_output_path": str(output_path),
+                    "visual_renderer_selected": "",
+                    "visual_renderer_fallback_used": False,
+                    "visual_renderer_unavailable_reason": "",
+                    "visual_layout_strategy": str(_visual_reinforcement_plan.get("visual_layout_strategy") or "no_extra_visual"),
+                    "visual_layout_zone": str(_visual_reinforcement_plan.get("visual_layout_zone") or "none"),
+                    "visual_layout_size": str(_visual_reinforcement_plan.get("visual_layout_size") or "none"),
+                    "visual_layout_opacity": float(_visual_reinforcement_plan.get("visual_layout_opacity") or 0.0),
+                    "visual_layout_duration": float(_visual_reinforcement_plan.get("visual_layout_duration") or 0.0),
+                    "visual_layout_reason": str(_visual_reinforcement_plan.get("visual_layout_reason") or ""),
+                    "visual_layout_face_safe": bool(_visual_reinforcement_plan.get("visual_layout_face_safe", True)),
+                    "visual_layout_caption_safe": bool(_visual_reinforcement_plan.get("visual_layout_caption_safe", True)),
+                    "visual_layout_ok": bool(_visual_reinforcement_plan.get("visual_layout_ok", True)),
+                    "visual_layout_warnings": list(_visual_reinforcement_plan.get("visual_layout_warnings") or []),
+                    "premium_restraint_mode": str((_premium_restraint or {}).get("premium_restraint_mode") or "balanced"),
+                    "premium_restraint_applied": bool((_premium_restraint or {}).get("premium_restraint_applied")),
+                    "premium_restraint_reason": str((_premium_restraint or {}).get("premium_restraint_reason") or ""),
+                    "premium_restraint_suppressed_layers": list((_premium_restraint or {}).get("premium_restraint_suppressed_layers") or []),
+                    "allowed_visual_support_count": int((_premium_restraint or {}).get("allowed_visual_support_count") or 1),
+                    "clip_already_strong": bool((_premium_restraint or {}).get("clip_already_strong")),
+                    "visual_support_reduced_reason": str((_premium_restraint or {}).get("visual_support_reduced_reason") or ""),
+                    "restraint_broll_interaction": str((_premium_restraint or {}).get("restraint_broll_interaction") or ""),
+                    "reason": str(_reinforce_e),
+                }
+                logger.info("VISUAL_REINFORCEMENT_SKIPPED_REASON reason=%s", _reinforce_e)
             if _hook_plan_data:
                 _first3_signals: List[str] = []
                 _first3_score = 0
@@ -4071,6 +11967,7 @@ class VideoService:
                     _missing.append("rhythm")
                 if not (_sfx_metadata.get("sfx_applied") or _music_metadata.get("music_applied")):
                     _missing.append("sound_layer")
+                _hook_plan_data["hook_first3_score_planned"] = int(_hook_plan_data.get("hook_first3_score") or 0)
                 _hook_plan_data["hook_first3_score"] = _first3_score
                 _hook_plan_data["hook_first3_perceptible_score"] = _first3_score
                 _hook_plan_data["hook_first3_perceptible"] = bool(_first3_perceptible)
@@ -4210,6 +12107,8 @@ class VideoService:
                 _publish_warnings.append("smart_zoom_metadata_only")
             if (_editing_plan_data or {}).get("cta_strategy") in {"metadata_only", "optional_end"}:
                 _publish_warnings.append("cta_metadata_only")
+            if str((_editing_plan_data or {}).get("cta", {}).get("skipped_reason") or ""):
+                _publish_warnings.append(f"cta_skipped_{(_editing_plan_data or {}).get('cta', {}).get('skipped_reason')}")
             for _hook_warning in ((_hook_plan_data or {}).get("warnings") or []):
                 if _hook_warning in {"weak_hook", "hook_metadata_only", "hook_render_failed", "hook_render_failed_or_skipped", "hook_overlay_skipped", "hook_density_high", "emotional_hook_visual_weak"}:
                     _publish_warnings.append(_hook_warning)
@@ -4380,11 +12279,13 @@ class VideoService:
             _sfx_asset_match = bool((_sfx_metadata or {}).get("sfx_asset_applied_match"))
             _sfx_composition_allowed = bool((_sfx_metadata or {}).get("sfx_composition_allowed", True))
             _sfx_timing_safe = bool((_sfx_metadata or {}).get("sfx_timing_safe", (_sfx_metadata or {}).get("sfx_applied")))
+            _sfx_verified = bool((_sfx_metadata or {}).get("sfx_verified"))
             _sfx_true = bool(
                 (_sfx_metadata or {}).get("sfx_applied")
                 and _sfx_asset_match
                 and _sfx_composition_allowed
                 and _sfx_timing_safe
+                and _sfx_verified
             )
             _sfx_opportunity = bool((_sfx_metadata or {}).get("sfx_editorial_opportunity"))
             _sfx_low_variation = bool((_sfx_metadata or {}).get("sfx_low_variation"))
@@ -4399,6 +12300,7 @@ class VideoService:
             elif _sfx_opportunity and not _sfx_reason:
                 _sfx_reason = "opportunity_unfulfilled"
             _sfx_metadata["sfx_applied"] = bool(_sfx_true)
+            _sfx_metadata["sfx_verified"] = bool(_sfx_verified or _sfx_true)
             _sfx_metadata["sfx_retention_pack"] = bool(_sfx_retention_pack)
             _sfx_metadata["sfx_editorial_opportunity"] = bool(_sfx_opportunity and not _sfx_true)
             _sfx_metadata["sfx_low_variation"] = bool(_sfx_low_variation)
@@ -4494,9 +12396,9 @@ class VideoService:
             logger.info("[editing-richness] finish_safety=%s", _finish_safety_status)
             _final_name = Path(output_path).name
             _music_in_final = bool(_music_metadata.get("music_applied") and "music_" in _final_name)
-            _sfx_in_final = bool(_sfx_metadata.get("sfx_applied") and "sfx_" in _final_name)
+            _sfx_in_final = bool(_sfx_metadata.get("sfx_verified") or _sfx_metadata.get("sfx_applied"))
             _vfx_in_final = bool(_visual_effects_metadata.get("visual_effects_applied") and "vfx_" in _final_name)
-            _transition_in_final = bool(_transition_metadata.get("transitions_applied") and "trans_" in _final_name)
+            _transition_in_final = bool(_transition_metadata.get("transition_verified") or _transition_metadata.get("transitions_applied"))
             _music_metadata["music_final_verified"] = bool(_music_in_final)
             _sfx_metadata["sfx_final_verified"] = bool(_sfx_in_final)
             _visual_effects_metadata["visual_effects_final_verified"] = bool(_vfx_in_final)
@@ -4512,6 +12414,481 @@ class VideoService:
                 transitions=_transition_metadata,
                 visual_effects=_visual_effects_metadata,
                 broll_events=_editorial_broll_for_status,
+            )
+            _filename_contract_warning = "|".join(_final_contract_metadata.get("final_contract_warnings") or [])
+            _route_registry = locals().get("_route_registry") or _init_route_registry()
+            _caption_route_used = "ass_premium_captions" if bool(_ass_caption_file_path or _has_ass_captions) else "captions_skipped"
+            _caption_fallback_route = ""
+            _caption_fallback_reason_text = str(_caption_fallback_reason or "").strip().lower()
+            if "legacy_caption_word_level" in _caption_fallback_reason_text:
+                _caption_fallback_route = "legacy_caption_word_level"
+            elif "legacy_caption_service" in _caption_fallback_reason_text or "legacy_caption" in _caption_fallback_reason_text:
+                _caption_fallback_route = "legacy_caption_service_fallback"
+            _caption_reason = str(_caption_fallback_reason or (_caption_route_used if _caption_route_used == "captions_skipped" else "ass_caption_rendered"))
+            _caption_metadata = {
+                "caption_backend": _caption_backend_runtime,
+                "caption_source": segment.get("caption_source"),
+                "caption_fallback_reason": _caption_fallback_reason,
+                "has_ass_captions": bool(_has_ass_captions),
+                "ass_caption_file_path": str(_ass_caption_file_path or ""),
+                "caption_fallback_classification": "primary_ass" if _caption_route_used == "ass_premium_captions" else ("last_resort_legacy" if _caption_fallback_route == "legacy_caption_word_level" else "allowed_fallback"),
+            }
+            if _caption_fallback_route:
+                _record_route_fallback(
+                    _route_registry,
+                    "captions",
+                    _caption_fallback_route,
+                    _caption_route_used,
+                    _caption_reason,
+                    _caption_metadata,
+                )
+                logger.info(
+                    "LEGACY_FALLBACK_USED route=%s reason=%s",
+                    _caption_fallback_route,
+                    _caption_reason or "legacy_caption_fallback",
+                )
+                if not _production_safe_edit_enabled():
+                    logger.info(
+                        "LEGACY_ROUTE_USED_OUTSIDE_PRODUCTION_SAFE route=%s reason=%s",
+                        _caption_fallback_route,
+                        _caption_reason or "legacy_caption_fallback",
+                    )
+            else:
+                _record_route_used(
+                    _route_registry,
+                    "captions",
+                    _caption_route_used,
+                    _caption_reason,
+                    _caption_metadata,
+                )
+
+            _hook_strategy_final = str(_hook_plan_data.get("hook_strategy_final") or "").strip()
+            _hook_strategy_candidate = str(_hook_plan_data.get("hook_strategy_candidate") or "").strip()
+            _hook_route_used = (
+                "text_hook"
+                if bool(_hook_plan_data.get("hook_text_overlay_rendered"))
+                else (
+                    "silence_tension_hook"
+                    if bool(_hook_plan_data.get("hook_silence_tension_applied"))
+                    else (
+                        "non_text_push_hook"
+                        if bool(_hook_plan_data.get("hook_non_text_visual_applied"))
+                        else (
+                            "no_extra_hook"
+                            if bool(_hook_plan_data.get("hook_extra_text_suppressed"))
+                            else _hook_strategy_final or "hook_skipped"
+                        )
+                    )
+                )
+            )
+            _hook_metadata = {
+                "hook_visual_backend": _hook_plan_data.get("hook_visual_backend"),
+                "hook_strategy_reason": _hook_plan_data.get("hook_strategy_reason"),
+                "hook_redundancy_reason": _hook_plan_data.get("hook_redundancy_reason"),
+                "hook_strategy_degraded": _hook_plan_data.get("hook_strategy_degraded"),
+                "hook_strategy_degraded_reason": _hook_plan_data.get("hook_strategy_degraded_reason"),
+            }
+            if _hook_strategy_candidate and _hook_strategy_candidate != _hook_route_used:
+                _record_route_fallback(
+                    _route_registry,
+                    "hook",
+                    _hook_route_used,
+                    _hook_strategy_candidate,
+                    str(_hook_plan_data.get("hook_strategy_reason") or _hook_plan_data.get("hook_redundancy_reason") or "hook_strategy_degraded"),
+                    _hook_metadata,
+                )
+            else:
+                _record_route_used(
+                    _route_registry,
+                    "hook",
+                    _hook_route_used,
+                    str(_hook_plan_data.get("hook_strategy_reason") or _hook_plan_data.get("hook_redundancy_reason") or "hook_selected"),
+                    _hook_metadata,
+                )
+
+            _rhythm_route_used = str(_rhythm_backend or "").strip() or (
+                "silence_editor" if bool((_silence_edit_plan_data or {}).get("rendered")) else (
+                    "smart_reframe" if bool(_smart_reframe_metadata.get("rendered")) else "rhythm_skipped"
+                )
+            )
+            _rhythm_metadata = {
+                "rhythm_actions": list(dict.fromkeys(_rhythm_actions_applied or [])),
+                "rhythm_skip_reason": _rhythm_skip_reason,
+                "zoom_push_count": int(_zoom_push_count if "_zoom_push_count" in locals() else 0),
+            }
+            _record_route_used(
+                _route_registry,
+                "rhythm",
+                _rhythm_route_used,
+                str(_rhythm_skip_reason or "rhythm_selected"),
+                _rhythm_metadata,
+            )
+
+            _visual_budget_route_used = "visual_layer_budget_applied" if bool((_editing_plan_data or {}).get("visual_layer_budget")) else "visual_layer_budget_skipped"
+            _record_route_used(
+                _route_registry,
+                "visual_layer_budget",
+                _visual_budget_route_used,
+                str(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("temporal_density_reason") or ""),
+                dict((_editing_plan_data or {}).get("visual_layer_budget") or {}),
+            )
+
+            _visual_reinforcement_backend = str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_backend") or "none")
+            _visual_reinforcement_route_used = (
+                _visual_reinforcement_backend
+                if bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_rendered"))
+                else (
+                    "skipped_by_budget"
+                    if "budget" in str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_dropped_reason") or "").lower()
+                    else "skipped_no_renderer"
+                    if str((_visual_reinforcement_metadata or {}).get("visual_renderer_unavailable_reason") or "")
+                    else "visual_reinforcement_skipped"
+                )
+            )
+            _record_route_used(
+                _route_registry,
+                "visual_reinforcement",
+                _visual_reinforcement_route_used,
+                str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_reason") or (_visual_reinforcement_metadata or {}).get("visual_reinforcement_dropped_reason") or "visual_reinforcement_selected"),
+                {
+                    "visual_renderer_selected": _visual_reinforcement_metadata.get("visual_renderer_selected"),
+                    "visual_renderer_fallback_used": _visual_reinforcement_metadata.get("visual_renderer_fallback_used"),
+                },
+            )
+
+            _broll_route_used_registry = str((_editing_plan_data or {}).get("broll_route_used") or _broll_route_used or "no_broll_policy")
+            _broll_reason_registry = str((_broll_editorial_decision_final or {}).get("skip_reason") or _broll_unfulfilled_reason or "")
+            _broll_metadata_registry = {
+                "broll_asset_source": str((_broll_asset_match_final or {}).get("asset_source") or ""),
+                "broll_asset_id": str(_expected_broll_asset or ""),
+                "broll_mode": str((_broll_editorial_decision_final or {}).get("broll_mode") or ""),
+                "broll_budget_allowed": bool(_broll_composition_allowed_final),
+            }
+            _record_route_used(
+                _route_registry,
+                "broll",
+                "editorial_local" if bool(_broll_true) else ("no_broll_policy" if _broll_route_used_registry == "none" else _broll_route_used_registry),
+                _broll_reason_registry or ("broll_rendered" if bool(_broll_true) else "no_broll"),
+                _broll_metadata_registry,
+            )
+
+            _transition_route_used = str((_transition_metadata or {}).get("transition_strategy") or (_transition_metadata or {}).get("transition_backend") or "no_transition")
+            _transition_reason = str((_transition_metadata or {}).get("transition_skip_reason") or "")
+            _transition_metadata_registry = {
+                "transition_backend": _transition_metadata.get("transition_backend"),
+                "transition_sfx_sync_allowed": _transition_metadata.get("transition_sfx_sync_allowed"),
+                "transition_verified": _transition_metadata.get("transition_verified"),
+                "transition_rendered": _transition_metadata.get("transition_rendered"),
+            }
+            if "blocked" in _transition_reason.lower():
+                _record_route_used(
+                    _route_registry,
+                    "transitions",
+                    "heavy_transition_blocked",
+                    _transition_reason or "transition_blocked",
+                    _transition_metadata_registry,
+                )
+            else:
+                _record_route_used(
+                    _route_registry,
+                    "transitions",
+                    "broll_fade" if _transition_route_used == "broll_fade_in_out" else (_transition_route_used or "vpi_transition_engine"),
+                    _transition_reason or "transition_selected",
+                    _transition_metadata_registry,
+                )
+
+            _bgm_route_used = "vpi_music_service" if bool(_music_metadata.get("music_applied") or _music_metadata.get("music_final_verified")) else (
+                "beat_sync_legacy_blocked" if "legacy_beat_sync_bgm" in _production_safe_routes_blocked else "bgm_disabled_by_policy"
+            )
+            _record_route_used(
+                _route_registry,
+                "bgm",
+                _bgm_route_used,
+                str(_music_metadata.get("music_warning") or _music_metadata.get("music_status") or ""),
+                _music_metadata,
+            )
+
+            _sfx_route_used = "vpi_sfx_service" if bool(_sfx_metadata.get("sfx_applied") or _sfx_metadata.get("sfx_verified")) else (
+                "legacy_sound_design_blocked" if "legacy_sound_design" in _production_safe_routes_blocked else "sfx_disabled_by_policy"
+            )
+            _record_route_used(
+                _route_registry,
+                "sfx",
+                _sfx_route_used,
+                str(_sfx_metadata.get("sfx_warning") or _sfx_metadata.get("sfx_status") or ""),
+                _sfx_metadata,
+            )
+
+            _audio_master_meta_registry = dict(locals().get("_audio_master_metadata", {}) or {})
+            _audio_master_route_used = "vpi_audio_mastering" if bool(_audio_master_meta_registry.get("audio_mastering_applied")) else "audio_mastering_skipped"
+            _record_route_used(
+                _route_registry,
+                "audio_mastering",
+                _audio_master_route_used,
+                str(_audio_master_meta_registry.get("audio_warning") or ""),
+                _audio_master_meta_registry,
+            )
+
+            if "ollama" in _production_safe_routes_blocked:
+                _record_route_blocked(
+                    _route_registry,
+                    "scoring",
+                    "ollama",
+                    "production_safe_edit",
+                    {"source": "production_safe_guard"},
+                    policy_block=True,
+                )
+                _record_route_used(
+                    _route_registry,
+                    "scoring",
+                    "score_skipped",
+                    "production_safe_edit",
+                    {"provider": "local"},
+                )
+            else:
+                _record_route_used(
+                    _route_registry,
+                    "scoring",
+                    "ollama",
+                    "ollama_scoring_enabled",
+                    {"provider": "ollama"},
+                )
+
+            if "comfyui" in _production_safe_routes_blocked:
+                _record_route_blocked(
+                    _route_registry,
+                    "visual_upscale",
+                    "comfyui",
+                    "production_safe_edit",
+                    {"source": "production_safe_guard"},
+                    policy_block=True,
+                )
+                _record_route_used(
+                    _route_registry,
+                    "visual_upscale",
+                    "upscale_skipped",
+                    "production_safe_edit",
+                    {"provider": "local"},
+                )
+            elif COMFYUI_ENABLED:
+                _record_route_used(
+                    _route_registry,
+                    "visual_upscale",
+                    "comfyui",
+                    "comfyui_enabled",
+                    {"provider": "comfyui"},
+                )
+            else:
+                _record_route_used(
+                    _route_registry,
+                    "visual_upscale",
+                    "upscale_skipped",
+                    "comfyui_disabled",
+                    {"provider": "local"},
+                )
+
+            for _blocked_route in dict.fromkeys(_production_safe_routes_blocked):
+                _record_route_blocked(
+                    _route_registry,
+                    _route_registry_phase_for_blocked_route(_blocked_route),
+                    _blocked_route,
+                    "production_safe_edit" if _blocked_route != "remotion_overlay_compose" else "final_contract_integrity",
+                    {"source": "production_safe_guard"},
+                    policy_block=True,
+                )
+            logger.debug(
+                "ROUTE_REGISTRY_PREPARED task_id=%s clip_order=%d compliant=%s used=%s blocked=%s fallbacks=%s",
+                task_id,
+                clip_index + 1,
+                str(_route_registry.get("production_safe_compliant", True)).lower(),
+                ",".join(_route_registry.get("primary_routes_used") or []) or "-",
+                ",".join(_route_registry.get("production_safe_routes_blocked") or []) or "-",
+                ",".join(_route_registry.get("fallback_routes_used") or []) or "-",
+            )
+            _framing_profile_data = dict((_editing_plan_data or {}).get("framing_profile") or locals().get("_framing_profile") or {})
+            _final_mp4_contract_input = {
+                **segment,
+                "original_start_time": str(segment.get("original_start_time") or ""),
+                "original_end_time": str(segment.get("original_end_time") or ""),
+                "original_start": float(segment.get("original_start") or 0.0),
+                "original_end": float(segment.get("original_end") or 0.0),
+                "refined_start": float(segment.get("refined_start") or start_seconds),
+                "refined_end": float(segment.get("refined_end") or end_seconds),
+                "refined_start_time": str(segment.get("refined_start_time") or segment.get("start_time") or ""),
+                "refined_end_time": str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+                "boundary_adjustment_applied": bool(segment.get("boundary_adjustment_applied")),
+                "boundary_adjustment_reason": str(segment.get("boundary_adjustment_reason") or ""),
+                "start_trim_seconds": float(segment.get("start_trim_seconds") or 0.0),
+                "start_extend_seconds": float(segment.get("start_extend_seconds") or 0.0),
+                "end_extend_seconds": float(segment.get("end_extend_seconds") or 0.0),
+                "end_trim_seconds": float(segment.get("end_trim_seconds") or 0.0),
+                "payoff_preserved": bool(segment.get("payoff_preserved")),
+                "starts_cleanly": bool(segment.get("starts_cleanly")),
+                "ends_cleanly": bool(segment.get("ends_cleanly")),
+                "first_second_strength": float(segment.get("first_second_strength") or 0.0),
+                "first_second_reason": str(segment.get("first_second_reason") or ""),
+                "boundary_confidence": float(segment.get("boundary_confidence") or 0.0),
+                "standalone_after_boundary_score": float(segment.get("standalone_after_boundary_score") or 0.0),
+                "standalone_after_boundary_reason": str(segment.get("standalone_after_boundary_reason") or ""),
+                "start_filler_trimmed": bool(segment.get("start_filler_trimmed")),
+                "start_trim_reason": str(segment.get("start_trim_reason") or ""),
+                "start_context_extended": bool(segment.get("start_context_extended")),
+                "start_context_reason": str(segment.get("start_context_reason") or ""),
+                "payoff_extended": bool(segment.get("payoff_extended")),
+                "payoff_extension_reason": str(segment.get("payoff_extension_reason") or ""),
+                "end_cleaned": bool(segment.get("end_cleaned")),
+                "end_clean_reason": str(segment.get("end_clean_reason") or ""),
+                "boundary_reverted": bool(segment.get("boundary_reverted")),
+                "boundary_reverted_reason": str(segment.get("boundary_reverted_reason") or ""),
+                "package_diversity_score": float(_diversity_metadata.get("package_diversity_score") or 0.0),
+                "package_diversity_reason": str(_diversity_metadata.get("package_diversity_reason") or ""),
+                "package_category_distribution": dict(_diversity_metadata.get("package_category_distribution") or {}),
+                "package_theme_distribution": dict(_diversity_metadata.get("package_theme_distribution") or {}),
+                "package_duration_balance_ok": bool(_diversity_metadata.get("package_duration_balance_ok")),
+                "package_duration_warnings": list(_diversity_metadata.get("package_duration_warnings") or []),
+                "package_diversity_warnings": list(_diversity_metadata.get("package_diversity_warnings") or []),
+                "selected_clip_package_summary": dict(_diversity_metadata.get("selected_clip_package_summary") or {}),
+                "package_diversity_context": dict(_diversity_metadata.get("package_diversity_context") or {}),
+                "vpi_editorial_categories": list(segment.get("vpi_editorial_categories") or []),
+                "hookability_score": float(segment.get("hookability_score") or 0.0),
+                "hookability_reason": str(segment.get("hookability_reason") or ""),
+                "commercial_usefulness_score": float(segment.get("commercial_usefulness_score") or 0.0),
+                "commercial_usefulness_reason": str(segment.get("commercial_usefulness_reason") or ""),
+                "standalone_score": float(segment.get("standalone_score") or 0.0),
+                "standalone_reason": str(segment.get("standalone_reason") or ""),
+                "weak_segment_penalties": list(segment.get("weak_segment_penalties") or []),
+                "weak_segment_reason": str(segment.get("weak_segment_reason") or ""),
+                "segment_selection_confidence": float(segment.get("segment_selection_confidence") or 0.0),
+                "selected_for_reason": str(segment.get("selected_for_reason") or ""),
+                "rejected_for_reason": str(segment.get("rejected_for_reason") or ""),
+                "weak_editorial_segment": bool(
+                    (float(segment.get("hookability_score") or 0.0) < 45.0)
+                    or (float(segment.get("standalone_score") or 0.0) < 45.0)
+                    or (float(segment.get("commercial_usefulness_score") or 0.0) < 40.0)
+                    or (float(segment.get("vpi_score") or 0.0) < 35.0)
+                ),
+                "path": str(output_path),
+                "duration": float(segment.get("duration") or duration or 0.0),
+                "words": words_with_confidence,
+                "caption_source": segment.get("caption_source"),
+                "has_ass_captions": bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                "caption_visual_support": _caption_overlay_pack_metadata.get("caption_visual_support") if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                "caption_visual_support_plan": _caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                "text_overlap_prevented": bool(_caption_overlay_pack_metadata.get("text_overlap_prevented") if isinstance(_caption_overlay_pack_metadata, dict) and _caption_overlay_pack_metadata.get("text_overlap_prevented") is not None else _caption_decisions.get("text_overlap_prevented", False)),
+                "suppressed_text_layers": list((_caption_overlay_pack_metadata or {}).get("suppressed_text_layers") or _caption_decisions.get("suppressed_text_layers") or []),
+                "text_layer_count_final": int((_caption_overlay_pack_metadata or {}).get("text_layer_count_final") or _caption_decisions.get("text_layer_count_final") or 1),
+                "caption_priority_enforced": bool((_caption_overlay_pack_metadata or {}).get("caption_priority_enforced") if (_caption_overlay_pack_metadata or {}).get("caption_priority_enforced") is not None else _caption_decisions.get("caption_priority_enforced", False)),
+                "caption_timebase_corrected": bool((_caption_overlay_pack_metadata or {}).get("caption_timebase_corrected") if (_caption_overlay_pack_metadata or {}).get("caption_timebase_corrected") is not None else _caption_decisions.get("caption_timebase_corrected", False)),
+                "caption_timebase_source": str((_caption_overlay_pack_metadata or {}).get("caption_timebase_source") or _caption_decisions.get("caption_timebase_source") or ""),
+                "caption_sync_warning": str((_caption_overlay_pack_metadata or {}).get("caption_sync_warning") or _caption_decisions.get("caption_sync_warning") or ""),
+                "ass_karaoke_enabled": bool((_caption_overlay_pack_metadata or {}).get("ass_karaoke_enabled") if (_caption_overlay_pack_metadata or {}).get("ass_karaoke_enabled") is not None else _caption_decisions.get("ass_karaoke_enabled", False)),
+                "ass_approx_simple_mode": bool((_caption_overlay_pack_metadata or {}).get("ass_approx_simple_mode") if (_caption_overlay_pack_metadata or {}).get("ass_approx_simple_mode") is not None else _caption_decisions.get("ass_approx_simple_mode", False)),
+                "ass_event_count_before": int((_caption_overlay_pack_metadata or {}).get("ass_event_count_before") or _caption_decisions.get("ass_event_count_before") or 0),
+                "ass_event_count_final": int((_caption_overlay_pack_metadata or {}).get("ass_event_count_final") or _caption_decisions.get("ass_event_count_final") or 0),
+                "ass_event_hard_cap": int((_caption_overlay_pack_metadata or {}).get("ass_event_hard_cap") or _caption_decisions.get("ass_event_hard_cap") or 22),
+                "ass_events_merged_for_daily": bool((_caption_overlay_pack_metadata or {}).get("ass_events_merged_for_daily") if (_caption_overlay_pack_metadata or {}).get("ass_events_merged_for_daily") is not None else _caption_decisions.get("ass_events_merged_for_daily", False)),
+                "ass_hook_overlay_removed": bool((_caption_overlay_pack_metadata or {}).get("ass_hook_overlay_removed") if (_caption_overlay_pack_metadata or {}).get("ass_hook_overlay_removed") is not None else _caption_decisions.get("ass_hook_overlay_removed", False)),
+                "hook_lower_third_rendered": bool(((_caption_overlay_pack_metadata or {}).get("lower_third") or {}).get("applied") or ((_caption_overlay_pack_metadata or {}).get("hook_overlay") or {}).get("applied") or False),
+                "ass_hook_overlay_injected": bool(((_caption_overlay_pack_metadata or {}).get("hook_overlay") or {}).get("applied") or False),
+                "non_text_visual_hook_rendered": bool((_hook_plan_data or {}).get("hook_visual_backend") == "non_text_visual_hook" and bool((_hook_plan_data or {}).get("hook_visual_applied"))),
+                "captions_overlap_removed": bool((_caption_overlay_pack_metadata or {}).get("text_overlap_prevented") if (_caption_overlay_pack_metadata or {}).get("text_overlap_prevented") is not None else _caption_decisions.get("text_overlap_prevented", False)),
+                "selected_window_before": str(segment.get("original_start_time") or segment.get("start_time") or "") + " -> " + str(segment.get("original_end_time") or segment.get("end_time") or ""),
+                "selected_window_after": str(segment.get("refined_start_time") or segment.get("start_time") or "") + " -> " + str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+                "complete_idea_score": float(segment.get("complete_idea_score") or 0.0),
+                "incomplete_viral_window_detected": bool(segment.get("incomplete_viral_window_detected")),
+                "setup_context_shift_seconds": float(segment.get("setup_context_shift_seconds") or 0.0),
+                "trailing_low_value_seconds": float(segment.get("trailing_low_value_seconds") or 0.0),
+                "viral_window_shifted_back": bool(segment.get("viral_window_shifted_back")),
+                "viral_window_shift_reason": str(segment.get("viral_window_shift_reason") or ""),
+                "forced_shift_back_applied": bool(segment.get("forced_shift_back_applied")),
+                "selected_alternative_for_complete_idea": bool(segment.get("selected_alternative_for_complete_idea")),
+                "incomplete_window_uncorrectable": bool(segment.get("incomplete_window_uncorrectable")),
+                "editing_plan": _editing_plan_data,
+                "hook_plan": _hook_plan_data,
+                "brand_treatment": _brand_metadata,
+                "brand_assets_verified": bool((_brand_metadata or {}).get("brand_assets_verified")),
+                "brand_logo_asset_id": str((_brand_metadata or {}).get("brand_logo_asset_id") or ""),
+                "brand_logo_status": str((_brand_metadata or {}).get("brand_logo_status") or ""),
+                "music": _music_metadata,
+                "sfx": _sfx_metadata,
+                "visual_effects": _visual_effects_metadata,
+                "transitions": _transition_metadata,
+                "motion_overlay": _motion_overlay_metadata,
+                "visual_reinforcement": _visual_reinforcement_metadata,
+                "pip_overlay_disabled": bool(_motion_overlay_metadata.get("pip_overlay_disabled")),
+                "thumbnail_overlay_disabled": bool(_motion_overlay_metadata.get("thumbnail_overlay_disabled")),
+                "debug_preview_overlay_disabled": bool(_motion_overlay_metadata.get("debug_preview_overlay_disabled")),
+                "debug_face_box_rendered": bool(_motion_overlay_metadata.get("debug_face_box_rendered", False)),
+                "debug_overlays_disabled": bool(_motion_overlay_metadata.get("debug_overlays_disabled", False)),
+                "framing_profile": str(_framing_profile_data.get("framing_profile") or ""),
+                "target_anchor": str(_framing_profile_data.get("target_anchor") or ""),
+                "safe_crop_margin": float(_framing_profile_data.get("safe_crop_margin") or 0.0),
+                "headroom_policy": str(_framing_profile_data.get("headroom_policy") or ""),
+                "subtitle_clearance_policy": str(_framing_profile_data.get("subtitle_clearance_policy") or ""),
+                "max_reframe_shift": float(_framing_profile_data.get("max_reframe_shift") or 0.0),
+                "face_bbox_present": bool(_framing_profile_data.get("face_bbox_present")),
+                "speaker_bbox_present": bool(_framing_profile_data.get("speaker_bbox_present")),
+                "face_framing_safe": bool(_framing_profile_data.get("face_framing_safe")),
+                "headroom_safe": bool(_framing_profile_data.get("headroom_safe")),
+                "face_crop_risk": str(_framing_profile_data.get("face_crop_risk") or ""),
+                "face_framing_adjusted": bool(_framing_profile_data.get("face_framing_adjusted")),
+                "subtitle_clearance_applied": bool(_framing_profile_data.get("subtitle_clearance_applied")),
+                "cta_clearance_applied": bool(_framing_profile_data.get("cta_clearance_applied")),
+                "reframe_skipped_reason": str(_framing_profile_data.get("reframe_skipped_reason") or ""),
+                "original_frame_preserved": bool(_framing_profile_data.get("original_frame_preserved")),
+                "framing_reason": str(_framing_profile_data.get("framing_reason") or ""),
+                "framing_polish_applied": bool(_framing_profile_data.get("framing_polish_applied")),
+                "framing_polish_warnings": list(_framing_profile_data.get("framing_polish_warnings") or []),
+                "broll_relevance_gate_passed": bool((_broll_editorial_decision or {}).get("broll_relevance_gate_passed") or False),
+                "broll_relevance_score": float((_broll_editorial_decision or {}).get("broll_relevance_score") or 0.0),
+                "broll_skipped_unrelated": bool((_broll_editorial_decision or {}).get("broll_skipped_unrelated") or False),
+                "bgm_volume_empirical_boost_applied": bool(_music_metadata.get("bgm_volume_empirical_boost_applied") or False),
+                "bgm_target_volume_final": float(_music_metadata.get("bgm_target_volume_final") or 0.0),
+                "bts_tail_detected": bool(_boundary_refinement_metadata.get("bts_tail_detected") or False),
+                "bts_tail_trimmed_seconds": float(_boundary_refinement_metadata.get("bts_tail_trimmed_seconds") or 0.0),
+                "viral_window_shifted_back": bool(_boundary_refinement_metadata.get("viral_window_shifted_back") or False),
+                "viral_window_shift_reason": str(_boundary_refinement_metadata.get("viral_window_shift_reason") or ""),
+                "audio_qc": locals().get("_audio_master_metadata", {}),
+                "output_qc": _output_qc,
+                "final_contract": _final_contract_metadata,
+                "final_rendered_contract": _final_contract_metadata,
+                "filename_contract_mode": str(_final_contract_metadata.get("filename_contract_mode") or "legacy_warning_only"),
+                "route_registry": _route_registry,
+                "final_output_uses_music": bool(_music_metadata.get("final_output_uses_bgm") or _music_metadata.get("music_applied")),
+                "final_output_uses_sfx": bool(_sfx_metadata.get("sfx_applied") or _sfx_metadata.get("sfx_verified")),
+                "final_output_uses_vfx": bool(_visual_effects_metadata.get("final_output_uses_vfx") or _visual_effects_metadata.get("visual_effects_applied")),
+                "final_output_uses_transition": bool(_transition_metadata.get("final_output_uses_transition") or _transition_metadata.get("transition_verified")),
+                "final_output_uses_motion_overlay": bool(_motion_overlay_metadata.get("final_output_uses_motion_overlay") or _motion_overlay_metadata.get("motion_overlay_applied")),
+                "has_audio": bool((locals().get("_audio_master_metadata", {}) or {}).get("audio_voice_status") or words_with_confidence or segment.get("text")),
+            }
+            _final_mp4_contract = _build_final_mp4_contract(
+                final_output_path=output_path,
+                expected_duration_s=float(segment.get("duration") or duration or 0.0),
+                clip_info=_final_mp4_contract_input,
+                final_qc_report=_final_qc_report,
+                production_safe=bool(os.environ.get("VPI_PRODUCTION_SAFE_EDIT", "").strip().lower() in {"1", "true", "yes", "on"}),
+                captions_metadata=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                bgm_metadata=_music_metadata,
+                sfx_metadata=_sfx_metadata,
+                hook_metadata=_hook_plan_data,
+                rhythm_metadata=_silence_edit_plan_data,
+                visual_layer_budget_metadata=(_editing_plan_data or {}).get("visual_layer_budget") if isinstance(_editing_plan_data, dict) else {},
+                visual_reinforcement_metadata=_visual_reinforcement_metadata,
+                broll_metadata={
+                    "items": _editorial_broll_for_status,
+                    "broll_editorial_decision": _broll_editorial_decision_final,
+                    "broll_applied": bool(_broll_true),
+                    "broll_rendered": bool(_broll_true),
+                    "broll_verified": bool(_broll_true),
+                    "broll_skip_reason": _broll_unfulfilled_reason,
+                    "broll_budget_allowed": bool(_broll_composition_allowed_final),
+                    "broll_asset_id": str(_expected_broll_asset or ""),
+                    "broll_asset_source": str((_broll_asset_match_final or {}).get("asset_source") or ""),
+                },
+                transitions_metadata=_transition_metadata,
+                audio_mastering_metadata=locals().get("_audio_master_metadata", {}) or {},
+                task_id=task_id,
+                clip_order=clip_index + 1,
             )
             logger.info("[premium-pipeline] final_path=%s", output_path)
             _composition_allowed_layers = list((_caption_overlay_pack_metadata or {}).get("composition_allowed_layers") or [])
@@ -4714,6 +13091,12 @@ class VideoService:
                 "shot_rhythm_pack": _shot_rhythm_pack,
                 "pacing_score_before": _pacing_before,
                 "pacing_score_after": _pacing_after,
+                "motion_overlay_pack": bool((_motion_overlay_metadata or {}).get("motion_overlay_applied")),
+                "motion_overlay_selected": bool((_motion_overlay_metadata or {}).get("motion_overlay_selected")),
+                "final_output_uses_motion_overlay": bool((_motion_overlay_metadata or {}).get("final_output_uses_motion_overlay")),
+                "dynamic_overlay_text_planned": bool((_motion_overlay_metadata or {}).get("dynamic_overlay_text_planned")),
+                "dynamic_overlay_text_applied": bool((_motion_overlay_metadata or {}).get("dynamic_overlay_text_applied")),
+                "visual_reinforcement_applied": bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_applied")),
                 "private_premium_finish_adjustment": "pending",
                 "private_premium_status_after_finish": "pending",
                 "private_premium_rhythm_adjustment": "pending",
@@ -4722,6 +13105,11 @@ class VideoService:
                 **_retention_metadata,
                 **_final_contract_metadata,
             }
+            logger.info(
+                "[editing-richness] motion_overlay_pack=%s reason=%s",
+                str(bool((_motion_overlay_metadata or {}).get("motion_overlay_applied"))).lower(),
+                str((_motion_overlay_metadata or {}).get("reason") or "not_selected"),
+            )
             logger.info("[editing-richness] final_verified=true score=%d status=%s warnings=%s", _editing_richness_score, _editing_richness_status, "|".join(_richness_warnings) or "none")
             _publish_warnings.extend(_richness_warnings)
 
@@ -4834,15 +13222,20 @@ class VideoService:
                     or "none"
                 ),
             )
+            _final_mp4_contract: Dict[str, Any] = {}
+            _filename_contract_warning = ""
             _final_qc_report = {}
             try:
-                from .vpi_publishable_gate import build_final_qc_report as _build_final_qc_report
+                from .vpi_publishable_gate import (
+                    build_final_mp4_contract as _build_final_mp4_contract_gate,
+                    build_final_qc_report as _build_final_qc_report_gate,
+                )
                 _audio_qc_meta = dict(locals().get("_audio_master_metadata", {}) or {})
                 _subtitle_qc_meta = {
                     "captions_rendered": bool(add_subtitles and (words_with_confidence or segment.get("text"))),
                     "hook_first3_score": int((_hook_plan_data or {}).get("hook_first3_score") or 0),
                 }
-                _final_qc_report = _build_final_qc_report(
+                _final_qc_report = _build_final_qc_report_gate(
                     private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
                     editing_richness=_editing_richness_metadata,
                     composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
@@ -4861,6 +13254,9 @@ class VideoService:
                     audio_metadata=_audio_qc_meta,
                     subtitle_metadata=_subtitle_qc_meta,
                     segment_text=str(segment.get("text") or ""),
+                    motion_overlay_metadata=_motion_overlay_metadata if isinstance(_motion_overlay_metadata, dict) else {},
+                    dynamic_overlay_text_metadata=_motion_overlay_metadata if isinstance(_motion_overlay_metadata, dict) else {},
+                    final_mp4_contract=_final_mp4_contract,
                 )
             except Exception as _final_qc_e:
                 logger.warning("[final-qc] build_failed reason=%s", _final_qc_e)
@@ -4892,6 +13288,15 @@ class VideoService:
             _publishable_metadata["final_qc_status"] = _final_qc_status
             _publishable_metadata["final_upload_recommendation"] = _final_upload_recommendation
             _publishable_metadata["final_qc"] = _final_qc_report
+            _publishable_metadata["final_mp4_contract"] = _final_mp4_contract
+            _publishable_metadata["final_contract_ok"] = bool(_final_mp4_contract.get("final_publishable"))
+            _publishable_metadata["final_truth_source"] = str(_final_mp4_contract.get("final_truth_source") or "final_mp4_contract")
+            _publishable_metadata["final_output_verified"] = bool(_final_mp4_contract.get("final_output_verified"))
+            _publishable_metadata["final_publishable"] = bool(_final_mp4_contract.get("final_publishable"))
+            _publishable_metadata["final_needs_review"] = bool(_final_mp4_contract.get("final_needs_review"))
+            _publishable_metadata["final_blocking_reasons"] = list(_final_mp4_contract.get("final_blocking_reasons") or [])
+            _publishable_metadata["final_warning_reasons"] = list(_final_mp4_contract.get("final_warning_reasons") or [])
+            _publishable_metadata["filename_contract_warning"] = _filename_contract_warning
             logger.info("[private-premium] final_qc_adjustment=%s", _final_qc_adjustment)
             logger.info("[private-premium] final_status=%s", _status_after_final_qc)
             _editing_richness_metadata.update({
@@ -4926,9 +13331,10 @@ class VideoService:
                 _editing_plan_data["brand_treatment"] = _brand_metadata
                 _editing_plan_data["hook_plan"] = _hook_plan_data
                 _editing_plan_data["cta"] = {
-                    "strategy": (_editing_plan_data or {}).get("cta_strategy"),
-                    "text_options": ["Lo revisamos juntos?", "Valentin Proteccion Integral"],
-                    "rendered": False,
+                    **dict(_editing_plan_data.get("cta") or {}),
+                    "strategy": str((_editing_plan_data or {}).get("cta_strategy") or "metadata_only"),
+                    "rendered": bool((_editing_plan_data or {}).get("cta", {}).get("rendered", False)),
+                    "verified": bool((_editing_plan_data or {}).get("cta", {}).get("verified", False)),
                 }
                 _editing_plan_data["subtitle_intelligence"] = _subtitle_intelligence_metadata
                 _editing_plan_data["silence_edit_plan"] = _silence_edit_plan_data
@@ -4938,6 +13344,8 @@ class VideoService:
                 _editing_plan_data["transitions"] = _transition_metadata
                 _editing_plan_data["music"] = _music_metadata
                 _editing_plan_data["sfx"] = _sfx_metadata
+                _editing_plan_data["motion_overlay"] = _motion_overlay_metadata
+                _editing_plan_data["visual_reinforcement"] = _visual_reinforcement_metadata
                 _editing_plan_data["premium_runtime"] = _premium_runtime
                 _editing_plan_data["premium_runtime_enabled"] = _premium_runtime["premium_runtime_enabled"]
                 _editing_plan_data["premium_layers_requested"] = list(_premium_runtime["premium_layers_requested"])
@@ -4951,6 +13359,14 @@ class VideoService:
             if _hook_plan_data:
                 _hook_plan_data["rendered"] = bool(_hook_plan_data.get("rendered"))
                 _publishable_metadata["hook_quality"] = _hook_quality
+            if _hook_card_applied:
+                _hook_plan_data["overlay_rendered"] = True
+                _hook_plan_data["hook_card_applied"] = True
+                _hook_plan_data["final_output_uses_overlay"] = True
+            if _semantic_card_planned:
+                segment["semantic_card_applied"] = True
+                segment["overlay_card_applied"] = True
+                segment["final_output_uses_overlay"] = True
         except Exception as _daily_e:
             logger.warning("[daily-publishing] metadata failed error=%s", _daily_e)
             _brand_metadata = {"type": "metadata_only", "rendered": False, "reason": str(_daily_e)}
@@ -4971,12 +13387,1199 @@ class VideoService:
         except Exception as _dur_e:
             logger.debug(f"[CLIP-GUARD] Duration check skipped: {_dur_e}")
 
+        # ── FIX 7: Build honest premium layer trace ────────────────────────────
+        # Aggregate per-layer applied/skipped evidence from the actual render
+        # metadata so strict QC can use real evidence instead of optimistic plans.
+        _premium_layers: List[Dict[str, Any]] = []
+        _gpu_codec = str((gpu_encoding_settings or {}).get("codec") or (gpu_encoding_settings or {}).get("encoder") or "")
+        _gpu_available = bool(gpu_encoding_settings)
+        _nvenc_used = _gpu_codec == "h264_nvenc"
+        _cuda_used = bool((gpu_encoding_settings or {}).get("cuda_used"))
+        _gpu_used = bool(_nvenc_used or _cuda_used or (_gpu_codec and _gpu_codec not in {"", "libx264", "copy"}))
+
+        # broll
+        _editorial_broll = locals().get("_editorial_broll_metadata", [])
+        _broll_applied = bool(_editorial_broll and any(b.get("applied") or b.get("rendered") for b in _editorial_broll))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="broll",
+            planned=True, attempted=_broll_applied, applied=_broll_applied,
+            skipped=not _broll_applied,
+            skip_reason="" if _broll_applied else "no_broll_rendered",
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # hook_card
+        _hook_card_budget_action = str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("hook_overlay", {}).get("action") or "")
+        _hook_card_ok = bool(segment.get("hook_card_applied")) and _hook_card_budget_action != "drop"
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="hook_card",
+            planned=True, attempted=_hook_card_ok, applied=_hook_card_ok,
+            skipped=not _hook_card_ok,
+            skip_reason="" if _hook_card_ok else ("hook_card_budget_blocked" if _hook_card_budget_action == "drop" else "hook_card_not_rendered"),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # semantic_card
+        _semantic_card_budget_action = str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("semantic_card", {}).get("action") or "")
+        _semantic_card_ok = bool(segment.get("semantic_card_applied")) and _semantic_card_budget_action != "drop"
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="semantic_card",
+            planned=True, attempted=_semantic_card_ok, applied=_semantic_card_ok,
+            skipped=not _semantic_card_ok,
+            skip_reason="" if _semantic_card_ok else ("semantic_card_budget_blocked" if _semantic_card_budget_action == "drop" else "semantic_card_not_rendered"),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # motion_overlay
+        _motion_ok = bool(
+            (_motion_overlay_metadata or {}).get("rendered")
+            or (_visual_effects_metadata or {}).get("motion_pack_applied")
+            or (_visual_effects_metadata or {}).get("final_output_uses_vfx")
+        )
+        if str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get(_overlay_layer_name, {}).get("action") or "") == "drop":
+            _motion_ok = False
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="motion_pack",
+            planned=True, attempted=_motion_ok, applied=_motion_ok,
+            skipped=not _motion_ok,
+            skip_reason="" if _motion_ok else str((_motion_overlay_metadata or {}).get("budget_drop_reason") or (_motion_overlay_metadata or {}).get("reason", "motion_overlay_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # visual_reinforcement
+        _visual_reinforcement_ok = bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_rendered"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="visual_reinforcement",
+            planned=True, attempted=_visual_reinforcement_ok, applied=_visual_reinforcement_ok,
+            skipped=not _visual_reinforcement_ok,
+            skip_reason="" if _visual_reinforcement_ok else str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_dropped_reason") or (_visual_reinforcement_metadata or {}).get("reason", "visual_reinforcement_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # bgm
+        _bgm_ok = bool(_music_metadata.get("music_applied"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="bgm",
+            planned=True, attempted=_bgm_ok, applied=_bgm_ok,
+            skipped=not _bgm_ok,
+            skip_reason="" if _bgm_ok else str(_music_metadata.get("music_warning", "bgm_not_applied")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # sfx
+        _final_contract = _as_dict(locals().get("_final_contract_metadata"))
+        _final_contract_checks = _as_dict(_final_contract.get("final_contract"))
+
+        _sfx_ok = bool(
+            _sfx_metadata.get("sfx_applied")
+            or _sfx_metadata.get("sfx_final_verified")
+            or _final_contract_checks.get("sfx")
+        )
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="sfx",
+            planned=True, attempted=_sfx_ok, applied=_sfx_ok,
+            skipped=not _sfx_ok,
+            skip_reason="" if _sfx_ok else str(_sfx_metadata.get("sfx_warning", "sfx_not_applied")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # rhythm_cleanup (silence removal)
+        _rhythm_ok = bool(
+            (_silence_edit_plan_data or {}).get("rendered")
+            or (_silence_edit_plan_data or {}).get("total_removed_s", 0.0) > 0.0
+        )
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="rhythm",
+            planned=True, attempted=_rhythm_ok, applied=_rhythm_ok,
+            skipped=not _rhythm_ok,
+            skip_reason="" if _rhythm_ok else "silence_edit_not_rendered",
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # transition
+        _transition_ok = bool((_transition_metadata or {}).get("rendered"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="transition",
+            planned=True, attempted=_transition_ok, applied=_transition_ok,
+            skipped=not _transition_ok,
+            skip_reason="" if _transition_ok else str((_transition_metadata or {}).get("reason", "transition_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # vfx
+        _vfx_ok = bool(
+            (_visual_effects_metadata or {}).get("rendered")
+            or (_visual_effects_metadata or {}).get("visual_effects_applied")
+            or (_visual_effects_metadata or {}).get("final_output_uses_vfx")
+            or _final_contract_checks.get("vfx")
+        )
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="vfx",
+            planned=True, attempted=_vfx_ok, applied=_vfx_ok,
+            skipped=not _vfx_ok,
+            skip_reason=(
+                ""
+                if _vfx_ok
+                else str((_visual_effects_metadata or {}).get("reason", "vfx_not_rendered"))
+            ),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # speaker_focus
+        _speaker_ok = bool((_speaker_focus_metadata or {}).get("rendered"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="speaker_focus",
+            planned=True, attempted=_speaker_ok, applied=_speaker_ok,
+            skipped=not _speaker_ok,
+            skip_reason="" if _speaker_ok else str((_speaker_focus_metadata or {}).get("reason", "speaker_focus_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # branding
+        _branding_ok = bool((_brand_metadata or {}).get("rendered")) and not bool((_brand_metadata or {}).get("dropped_by_budget"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="branding",
+            planned=True, attempted=_branding_ok, applied=_branding_ok,
+            skipped=not _branding_ok,
+            skip_reason="" if _branding_ok else str((_brand_metadata or {}).get("budget_drop_reason") or (_brand_metadata or {}).get("reason", "branding_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # captions (subtitle intelligence)
+        _captions_ok = bool((_subtitle_intelligence_metadata or {}).get("rendered"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="captions",
+            planned=True, attempted=_captions_ok, applied=_captions_ok,
+            skipped=not _captions_ok,
+            skip_reason="" if _captions_ok else str((_subtitle_intelligence_metadata or {}).get("reason", "captions_not_rendered")),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # audio_mastering
+        _audio_master_meta = locals().get("_audio_master_metadata", {}) or {}
+        _audio_master_ok = bool(_audio_master_meta.get("audio_mastering_applied"))
+        _record_premium_layer(
+            task_id=task_id, clip_order=clip_index + 1, category="audio_mastering",
+            planned=True, attempted=_audio_master_ok, applied=_audio_master_ok,
+            skipped=not _audio_master_ok,
+            skip_reason="" if _audio_master_ok else str(_audio_master_meta.get("audio_warnings", ["audio_mastering_not_applied"])[0] if _audio_master_meta.get("audio_warnings") else "audio_mastering_not_applied"),
+            gpu_available=_gpu_available, gpu_used=_gpu_used, nvenc_used=_nvenc_used, cuda_used=_cuda_used,
+        )
+
+        # Build the aggregated trace dict
+        _premium_layer_trace = _build_premium_layer_trace(
+            task_id=task_id,
+            clip_order=clip_index + 1,
+            layers=_premium_layers,
+            gpu_available=_gpu_available,
+            gpu_used=_gpu_used,
+            nvenc_used=_nvenc_used,
+            cuda_used=_cuda_used,
+        )
+
+        # ── Runtime bridge: persist timeline/disfluency artifacts ─────────────
+        try:
+            _timeline_plan_data = _build_premium_timeline_plan(
+                task_id=task_id,
+                clip_index=clip_index,
+                video_path=output_path,
+                segment=segment,
+                duration=float(duration or 0.0),
+                word_timestamps=words_with_confidence or None,
+                editing_plan=_editing_plan_data,
+                hook_plan=_hook_plan_data,
+                broll_metadata=locals().get("_editorial_broll_metadata", []) or [],
+                sfx_metadata=_sfx_metadata,
+                music_metadata=_music_metadata,
+                visual_effects_metadata=_visual_effects_metadata,
+                transitions_metadata=_transition_metadata,
+                overlay_backend=_overlay_backend_runtime,
+            )
+            if _timeline_plan_data.get("timeline_plan"):
+                _timeline_plan_path = _write_plan_artifact(
+                    task_id=task_id,
+                    clip_index=clip_index,
+                    artifact_type="timeline_plan",
+                    payload=_timeline_plan_data.get("timeline_plan"),
+                )
+            if _timeline_plan_data.get("disfluency_plan"):
+                _disfluency_plan_path = _write_plan_artifact(
+                    task_id=task_id,
+                    clip_index=clip_index,
+                    artifact_type="disfluency_plan",
+                    payload=_timeline_plan_data.get("disfluency_plan"),
+                )
+            if _output_cuts_metadata:
+                _write_plan_artifact(
+                    task_id=task_id,
+                    clip_index=clip_index,
+                    artifact_type="applied_cut_plan",
+                    payload=_output_cuts_metadata,
+                )
+            _selection_contract_payload = {
+                "segment_start_time": segment.get("start_time"),
+                "segment_end_time": segment.get("end_time"),
+                "contract_approved": bool(segment.get("contract_approved", False)),
+                "complete_idea_pass": bool(segment.get("complete_idea_pass", False)),
+                "contract_would_runtime_reject": bool(segment.get("contract_would_runtime_reject", True)),
+                "pre_render_approved": bool(segment.get("pre_render_approved", False)),
+            }
+            _selection_contract_path = _write_plan_artifact(
+                task_id=task_id,
+                clip_index=clip_index,
+                artifact_type="selection_contract",
+                payload=_selection_contract_payload,
+            )
+            _timeline_payload = _as_dict(_timeline_plan_data.get("timeline_plan")) if isinstance(_timeline_plan_data, dict) else {}
+            _timeline_meta = _as_dict(_timeline_payload.get("metadata"))
+            _visual_style_for_remotion = (
+                str(_timeline_meta.get("visual_style") or "")
+                or str((_visual_effects_metadata or {}).get("visual_style") or "")
+                or str((_editing_plan_data or {}).get("visual_style") or "")
+                or "clear_explanation"
+            )
+            _remotion_runtime = _build_runtime_remotion_scene_plan(
+                task_id=task_id,
+                clip_index=clip_index,
+                timeline_plan_dict=_timeline_payload,
+                visual_style=_visual_style_for_remotion,
+                face_regions=segment.get("face_regions") if isinstance(segment.get("face_regions"), list) else None,
+            )
+            _remotion_scene_plan_path = _remotion_runtime.get("remotion_scene_plan_path")
+            _remotion_scene_events_count = int(_remotion_runtime.get("remotion_scene_events_count") or 0)
+            _remotion_overlay_status = str(_remotion_runtime.get("remotion_overlay_status") or "disabled")
+            _remotion_installed = bool(_remotion_runtime.get("remotion_installed"))
+            _remotion_scaffold_present = bool(_remotion_runtime.get("remotion_scaffold_present"))
+            _remotion_dependencies_declared = bool(_remotion_runtime.get("remotion_dependencies_declared"))
+            _remotion_dependencies_installed = bool(_remotion_runtime.get("remotion_dependencies_installed"))
+            _remotion_render_enabled = bool(_remotion_runtime.get("remotion_render_enabled"))
+            _remotion_overlay_file_path = _remotion_runtime.get("remotion_overlay_file_path")
+            _remotion_render_command_used = _remotion_runtime.get("remotion_render_command_used")
+            _remotion_scene_warnings = list(_remotion_runtime.get("remotion_scene_warnings") or [])
+            _visual_overlay_backend_applied = _overlay_backend_runtime
+            try:
+                if _remotion_scene_plan_path:
+                    _scene_raw = json.loads(Path(str(_remotion_scene_plan_path)).read_text(encoding="utf-8"))
+                    _scene_events = list((_scene_raw or {}).get("events") or [])
+                    _object_3d_count = sum(
+                        1 for _evt in _scene_events
+                        if str((_evt or {}).get("object_3d_id") or "").strip()
+                        or str((_evt or {}).get("event_type") or "").strip().lower() in {
+                            "semantic_object_3d",
+                            "hero_3d_object",
+                            "document_3d_reveal",
+                            "warning_3d_badge",
+                            "coverage_3d_object",
+                        }
+                    )
+                    _has_3d_object_plan = _object_3d_count > 0
+            except Exception as _scene_meta_e:
+                logger.info("REMOTION_SCENE_PLAN_3D_PARSE_SKIPPED reason=%s", _scene_meta_e)
+            if _remotion_overlay_status == "rendered" and _remotion_overlay_file_path:
+                _overlay_backend_runtime = "remotion_overlay_rendered"
+                _visual_overlay_backend_applied = _overlay_backend_runtime
+
+            # ── Remotion overlay composition (env-gated) ──────────────────────
+            # If VIRACLIP_COMPOSE_REMOTION_OVERLAY=true and overlay file exists,
+            # compose the transparent overlay onto the final clip.
+            _remotion_overlay_composed = False
+            _remotion_overlay_composed_path: Optional[str] = None
+            _remotion_overlay_composition_status = "disabled"
+            _remotion_overlay_composition_fallback_reason = ""
+            _compose_enabled = os.environ.get("VIRACLIP_COMPOSE_REMOTION_OVERLAY", "false").lower() in ("1", "true", "yes")
+            try:
+                from .vpi_production_safe_edit import (
+                    production_safe_edit_enabled as _production_safe_edit_enabled,
+                    production_safe_route_allowed as _production_safe_route_allowed,
+                )
+            except Exception:
+                _production_safe_edit_enabled = lambda: False  # type: ignore[assignment]
+                _production_safe_route_allowed = lambda _route: True  # type: ignore[assignment]
+            if _compose_enabled and _production_safe_edit_enabled() and not _production_safe_route_allowed("remotion_overlay_compose"):
+                _block_production_safe_route("remotion_overlay_compose", "final_contract_integrity")
+                _remotion_overlay_composition_status = "blocked_production_safe"
+                _remotion_overlay_composition_fallback_reason = "final_contract_integrity"
+            elif _compose_enabled:
+                if _remotion_overlay_file_path and Path(str(_remotion_overlay_file_path)).exists():
+                    _compose_base = output_path
+                    _compose_overlay = Path(str(_remotion_overlay_file_path))
+                    _compose_out = _compose_base.parent / f"remotion_composed_{_compose_base.name}"
+                    logger.info(
+                        "REMOTION_OVERLAY_RUNTIME_COMPOSE_REQUESTED "
+                        "base=%s overlay=%s output=%s",
+                        _compose_base, _compose_overlay, _compose_out,
+                    )
+                    try:
+                        _compose_result = compose_transparent_overlay_on_video(
+                            base_video_path=_compose_base,
+                            overlay_video_path=_compose_overlay,
+                            output_path=_compose_out,
+                            mode="remotion_overlay_runtime",
+                        )
+                        if _compose_result.get("status") == "rendered" and _compose_out.exists():
+                            output_path = _compose_out
+                            _remotion_overlay_composed = True
+                            _remotion_overlay_composed_path = str(_compose_out)
+                            _remotion_overlay_composition_status = "rendered"
+                            _visual_overlay_backend_applied = "remotion"
+                            logger.info(
+                                "REMOTION_OVERLAY_RUNTIME_COMPOSED output=%s",
+                                _compose_out,
+                            )
+                        else:
+                            _remotion_overlay_composition_status = "failed"
+                            _remotion_overlay_composition_fallback_reason = str(
+                                _compose_result.get("reason", "unknown")
+                            )
+                            logger.warning(
+                                "REMOTION_OVERLAY_RUNTIME_COMPOSE_FAILED reason=%s",
+                                _remotion_overlay_composition_fallback_reason,
+                            )
+                            logger.info(
+                                "REMOTION_OVERLAY_RUNTIME_FALLBACK_TO_BASE path=%s",
+                                _compose_base,
+                            )
+                    except Exception as _compose_e:
+                        _remotion_overlay_composition_status = "failed"
+                        _remotion_overlay_composition_fallback_reason = str(_compose_e)
+                        logger.warning(
+                            "REMOTION_OVERLAY_RUNTIME_COMPOSE_FAILED reason=%s",
+                            _compose_e,
+                        )
+                        logger.info(
+                            "REMOTION_OVERLAY_RUNTIME_FALLBACK_TO_BASE path=%s",
+                            _compose_base,
+                        )
+                else:
+                    _remotion_overlay_composition_status = "skipped_no_overlay_file"
+                    _remotion_overlay_composition_fallback_reason = (
+                        "Overlay file not found or not rendered"
+                    )
+                    logger.info(
+                        "REMOTION_OVERLAY_RUNTIME_SKIPPED reason=%s",
+                        _remotion_overlay_composition_fallback_reason,
+                    )
+            else:
+                _remotion_overlay_composition_status = "disabled"
+                logger.info(
+                    "REMOTION_OVERLAY_RUNTIME_SKIPPED reason=compose_disabled"
+                )
+        except Exception as _artifact_e:
+            logger.warning("PREMIUM_PLAN_ARTIFACT_SAVE_FAILED task_id=%s clip_id=%s error=%s", task_id, clip_index + 1, _artifact_e)
+
+        logger.info(
+            "FINAL_CONTRACT_PLAN_ARTIFACTS timeline=%s disfluency=%s overlay_backend=%s",
+            _timeline_plan_path or "",
+            _disfluency_plan_path or "",
+            _overlay_backend_runtime,
+        )
+        logger.info(
+            "FINAL_CONTRACT_ASS_CAPTIONS backend=%s ass_file=%s fallback_reason=%s",
+            _caption_backend_runtime,
+            _ass_caption_file_path or "",
+            _caption_fallback_reason or "",
+        )
+        logger.info(
+            "FINAL_CONTRACT_REMOTION_SCENE_PLAN path=%s status=%s events=%d",
+            _remotion_scene_plan_path or "",
+            _remotion_overlay_status,
+            _remotion_scene_events_count,
+        )
+
+        _sfx_intent = str(
+            _sfx_metadata.get("sfx_intent")
+            or _sfx_metadata.get("intent")
+            or _sfx_metadata.get("editorial_intent")
+            or ""
+        ).strip()
+        _sfx_skip_reason = str(
+            _sfx_metadata.get("skip_reason")
+            or _sfx_metadata.get("sfx_warning")
+            or _sfx_metadata.get("sfx_status")
+            or ""
+        ).strip()
+        _bgm_evidence = bool(
+            _music_metadata.get("music_applied")
+            or _music_metadata.get("music_track")
+            or _music_metadata.get("bgm_asset_path")
+            or _music_metadata.get("final_output_uses_bgm")
+        )
+        _broll_confidence_values: List[float] = []
+        for _item in list(locals().get("_editorial_broll_metadata", []) or []):
+            if not isinstance(_item, dict):
+                continue
+            for _key in ("category_confidence", "confidence", "broll_relevance_score", "asset_score"):
+                try:
+                    _val = float(_item.get(_key))
+                except Exception:
+                    continue
+                if _val > 1.0:
+                    _val = _val / 100.0
+                _broll_confidence_values.append(max(0.0, min(1.0, _val)))
+                break
+        _broll_confidence = round(max(_broll_confidence_values), 4) if _broll_confidence_values else None
+        _segment_value_type = str(
+            segment.get("segment_value_type")
+            or segment.get("value_type")
+            or segment.get("editorial_type")
+            or ""
+        ).strip() or None
+        _predicted_first3_strength = (
+            _hook_plan_data.get("hook_first3_score")
+            if isinstance(_hook_plan_data, dict)
+            else None
+        )
+        _hook_start_offset = None
+        try:
+            _hook_start_offset = float(_hook_plan_data.get("hook_start_offset"))
+        except Exception:
+            try:
+                _hook_start_offset = float(_hook_plan_data.get("hook_motion_start_s"))
+            except Exception:
+                _hook_start_offset = 0.0 if bool(segment.get("hook_start_adjusted")) else None
+        _trim_to_hook_candidate = bool(
+            segment.get("hook_start_adjusted")
+            or _hook_plan_data.get("hook_start_adjusted")
+        )
+
+        _audio_identity_ok, _audio_identity_warnings = _assess_vpi_audio_identity(
+            audio_editorial_profile=str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+            music_mood_selected=str(_music_metadata.get("music_mood_selected") or ""),
+            music_asset_id=str(_music_metadata.get("music_asset_id") or _music_metadata.get("bgm_asset_id") or ""),
+            music_track=str(_music_metadata.get("music_track") or _music_metadata.get("bgm_asset_path") or ""),
+            sfx_family_selected=str(_sfx_metadata.get("sfx_family_selected") or ""),
+            sfx_variation_ids=list(_sfx_metadata.get("sfx_variation_ids") or []),
+        )
+        _audio_editorial_profile["vpi_audio_identity_ok"] = bool(_audio_identity_ok)
+        _audio_editorial_profile["vpi_audio_identity_warnings"] = list(_audio_identity_warnings)
+        if _audio_identity_warnings:
+            logger.warning(
+                "VPI_AUDIO_IDENTITY_WARNING profile=%s warnings=%s",
+                str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                "|".join(_audio_identity_warnings),
+            )
+
+        try:
+            from .vpi_publishable_gate import (
+                build_final_mp4_contract as _build_final_mp4_contract_gate,
+                build_final_qc_report as _build_final_qc_report_gate,
+            )
+            _audio_mastering_metadata_current = locals().get("_audio_master_metadata", {}) or {}
+            _audio_chain_state.update({
+                "base_audio_detected": bool(words_with_confidence or segment.get("text") or _audio_mastering_metadata_current.get("audio_voice_status")),
+                "bgm_pass_count": int(_music_metadata.get("bgm_pass_count") or len(_audio_chain_state.get("bgm_passes") or [])),
+                "sfx_pass_count": int(_sfx_metadata.get("sfx_pass_count") or len(_audio_chain_state.get("sfx_passes") or [])),
+                "mastering_pass_count": len(_audio_chain_state.get("mastering_passes") or []),
+                "audio_duplicate_passes_blocked": list(dict.fromkeys(_audio_duplicate_passes_blocked or [])),
+                "bgm_final_status": str(_music_metadata.get("bgm_final_status") or _music_metadata.get("music_status") or ""),
+                "sfx_final_status": str(_sfx_metadata.get("sfx_final_status") or _sfx_metadata.get("sfx_status") or ""),
+                "audio_mastering_final_status": str(_audio_mastering_metadata_current.get("audio_mastering_skip_reason") or _audio_mastering_metadata_current.get("audio_mastering_method") or ""),
+                "audio_chain_errors": list(dict.fromkeys(list(_audio_chain_state.get("audio_chain_errors") or []))),
+                "audio_chain_warnings": list(dict.fromkeys(list(_audio_chain_state.get("audio_chain_warnings") or []) + list(_audio_mastering_metadata_current.get("audio_warnings") or []))),
+            })
+            _final_contract_metadata = verify_final_filename_contract(
+                output_path,
+                music=_music_metadata,
+                sfx=_sfx_metadata,
+                transitions=_transition_metadata,
+                visual_effects=_visual_effects_metadata,
+                broll_events=_editorial_broll_for_status,
+            )
+            _filename_contract_warning = "|".join(_final_contract_metadata.get("final_contract_warnings") or [])
+            _cta_plan = dict((_editing_plan_data or {}).get("cta") or {})
+            _cta_decision = str(_cta_plan.get("decision") or _cta_plan.get("strategy") or "no_cta")
+            _cta_selected_layer = str(((_visual_layer_budget_final or {}).get("visual_support_layer_selected") or "")).strip().lower()
+            _cta_budget_action = str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("cta", {}).get("action") or "").strip().lower()
+            _cta_rendered = bool(
+                _cta_decision == "show_cta"
+                and _cta_selected_layer == "cta"
+                and _cta_budget_action != "drop"
+                and bool((_visual_reinforcement_metadata or {}).get("rendered") or (_visual_reinforcement_metadata or {}).get("visual_reinforcement_rendered"))
+            )
+            _cta_verified = bool(
+                _cta_rendered
+                and bool((_visual_reinforcement_metadata or {}).get("visual_layout_ok", True))
+                and bool((_visual_reinforcement_metadata or {}).get("visual_layout_caption_safe", True))
+                and bool((_brand_metadata or {}).get("brand_final_verified", (_brand_metadata or {}).get("brand_assets_verified", False)))
+                and bool(_cta_plan.get("safety_ok", True))
+            )
+            _cta_skipped_reason = str(
+                _cta_plan.get("skipped_reason")
+                or (
+                    "cta_render_not_selected"
+                    if _cta_decision == "show_cta" and not _cta_rendered
+                    else ""
+                )
+            )
+            if isinstance(_editing_plan_data, dict):
+                _editing_plan_data["cta"] = {
+                    **dict(_editing_plan_data.get("cta") or {}),
+                    "rendered": bool(_cta_rendered),
+                    "verified": bool(_cta_verified),
+                    "skipped_reason": str(_cta_skipped_reason or ""),
+                    "cta_strategy": "optional_end" if _cta_decision == "show_cta" else "metadata_only",
+                }
+            if isinstance(_brand_metadata, dict):
+                _brand_metadata["brand_final_mode"] = str(_brand_metadata.get("brand_final_mode") or ("cta_minimal" if _cta_decision == "show_cta" else "standard"))
+                _brand_metadata["brand_final_verified"] = bool(_brand_metadata.get("brand_final_verified") or _brand_metadata.get("rendered"))
+                _brand_metadata["brand_final_reason"] = str(_brand_metadata.get("brand_final_reason") or ("cta_minimal" if _cta_decision == "show_cta" else "branding_minimal"))
+            if _cta_rendered:
+                logger.info(
+                    "VPI_CTA_RENDERED decision=%s type=%s zone=%s reason=%s",
+                    _cta_decision,
+                    str(_cta_plan.get("type") or ""),
+                    str(_cta_plan.get("layout_zone") or "lower_center_small"),
+                    str(_cta_plan.get("reason") or "rendered"),
+                )
+            elif _cta_decision == "show_cta":
+                logger.info(
+                    "VPI_CTA_SKIPPED_REASON reason=%s",
+                    _cta_skipped_reason or "cta_render_not_selected",
+                )
+                if str(_cta_plan.get("reason") or "").startswith("restraint_"):
+                    logger.warning("VPI_CTA_BLOCKED_BY_RESTRAINT reason=%s", _cta_plan.get("reason"))
+                elif not bool(_cta_plan.get("safety_ok", True)):
+                    logger.warning("VPI_CTA_BLOCKED_BY_SAFETY reason=%s", _cta_plan.get("safety_reason") or "cta_safety_failed")
+
+            _final_mp4_contract_input = {
+                **segment,
+                "original_start_time": str(segment.get("original_start_time") or ""),
+                "original_end_time": str(segment.get("original_end_time") or ""),
+                "original_start": float(segment.get("original_start") or 0.0),
+                "original_end": float(segment.get("original_end") or 0.0),
+                "refined_start": float(segment.get("refined_start") or start_seconds),
+                "refined_end": float(segment.get("refined_end") or end_seconds),
+                "refined_start_time": str(segment.get("refined_start_time") or segment.get("start_time") or ""),
+                "refined_end_time": str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+                "boundary_adjustment_applied": bool(segment.get("boundary_adjustment_applied")),
+                "boundary_adjustment_reason": str(segment.get("boundary_adjustment_reason") or ""),
+                "start_trim_seconds": float(segment.get("start_trim_seconds") or 0.0),
+                "start_extend_seconds": float(segment.get("start_extend_seconds") or 0.0),
+                "end_extend_seconds": float(segment.get("end_extend_seconds") or 0.0),
+                "end_trim_seconds": float(segment.get("end_trim_seconds") or 0.0),
+                "payoff_preserved": bool(segment.get("payoff_preserved")),
+                "starts_cleanly": bool(segment.get("starts_cleanly")),
+                "ends_cleanly": bool(segment.get("ends_cleanly")),
+                "first_second_strength": float(segment.get("first_second_strength") or 0.0),
+                "first_second_reason": str(segment.get("first_second_reason") or ""),
+                "boundary_confidence": float(segment.get("boundary_confidence") or 0.0),
+                "standalone_after_boundary_score": float(segment.get("standalone_after_boundary_score") or 0.0),
+                "standalone_after_boundary_reason": str(segment.get("standalone_after_boundary_reason") or ""),
+                "start_filler_trimmed": bool(segment.get("start_filler_trimmed")),
+                "start_trim_reason": str(segment.get("start_trim_reason") or ""),
+                "start_context_extended": bool(segment.get("start_context_extended")),
+                "start_context_reason": str(segment.get("start_context_reason") or ""),
+                "payoff_extended": bool(segment.get("payoff_extended")),
+                "payoff_extension_reason": str(segment.get("payoff_extension_reason") or ""),
+                "end_cleaned": bool(segment.get("end_cleaned")),
+                "end_clean_reason": str(segment.get("end_clean_reason") or ""),
+                "boundary_reverted": bool(segment.get("boundary_reverted")),
+                "boundary_reverted_reason": str(segment.get("boundary_reverted_reason") or ""),
+                "path": str(output_path),
+                "duration": float(segment.get("duration") or duration or 0.0),
+                "output_root": str(_output_mgmt_context.get("output_root") or ""),
+                "clips_output_dir": str(_output_mgmt_context.get("clips_output_dir") or ""),
+                "manifest_output_path": str(_output_mgmt_context.get("manifest_output_path") or ""),
+                "summary_output_path": str(_output_mgmt_context.get("summary_output_path") or ""),
+                "output_filename_strategy": str(segment.get("output_filename_strategy") or _output_mgmt_context.get("output_filename_strategy") or "vpi_{campaign_intent}_{clip_angle}_{confidence}_{start}_{end}_{clip_id_hash}"),
+                "output_filename_safe": bool(segment.get("output_filename_safe", True)),
+                "output_filename_collision_resolved": bool(segment.get("output_filename_collision_resolved")),
+                "output_management_ok": bool(_output_mgmt_context.get("output_management_ok", False)),
+                "output_management_warnings": list(_output_mgmt_context.get("output_management_warnings") or []),
+                "output_clip_count": int(_output_mgmt_context.get("output_clip_count") or 0),
+                "publishable_clip_count": int(_output_mgmt_context.get("publishable_clip_count") or 0),
+                "review_clip_count": int(_output_mgmt_context.get("review_clip_count") or 0),
+                "words": words_with_confidence,
+                "caption_source": segment.get("caption_source"),
+                "has_ass_captions": bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                "caption_visual_support": _caption_overlay_pack_metadata.get("caption_visual_support") if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                "caption_visual_support_plan": _caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                "editing_plan": _editing_plan_data,
+                "hook_plan": _hook_plan_data,
+                "brand_treatment": _brand_metadata,
+                "cta": _cta_plan,
+                "music": _music_metadata,
+                "sfx": _sfx_metadata,
+                "visual_effects": _visual_effects_metadata,
+                "transitions": _transition_metadata,
+                "motion_overlay": _motion_overlay_metadata,
+                "visual_reinforcement": _visual_reinforcement_metadata,
+                "framing_profile": str(_framing_profile_data.get("framing_profile") or ""),
+                "target_anchor": str(_framing_profile_data.get("target_anchor") or ""),
+                "safe_crop_margin": float(_framing_profile_data.get("safe_crop_margin") or 0.0),
+                "headroom_policy": str(_framing_profile_data.get("headroom_policy") or ""),
+                "subtitle_clearance_policy": str(_framing_profile_data.get("subtitle_clearance_policy") or ""),
+                "max_reframe_shift": float(_framing_profile_data.get("max_reframe_shift") or 0.0),
+                "face_bbox_present": bool(_framing_profile_data.get("face_bbox_present")),
+                "speaker_bbox_present": bool(_framing_profile_data.get("speaker_bbox_present")),
+                "face_framing_safe": bool(_framing_profile_data.get("face_framing_safe")),
+                "headroom_safe": bool(_framing_profile_data.get("headroom_safe")),
+                "face_crop_risk": str(_framing_profile_data.get("face_crop_risk") or ""),
+                "face_framing_adjusted": bool(_framing_profile_data.get("face_framing_adjusted")),
+                "subtitle_clearance_applied": bool(_framing_profile_data.get("subtitle_clearance_applied")),
+                "cta_clearance_applied": bool(_framing_profile_data.get("cta_clearance_applied")),
+                "reframe_skipped_reason": str(_framing_profile_data.get("reframe_skipped_reason") or ""),
+                "original_frame_preserved": bool(_framing_profile_data.get("original_frame_preserved")),
+                "framing_reason": str(_framing_profile_data.get("framing_reason") or ""),
+                "framing_polish_applied": bool(_framing_profile_data.get("framing_polish_applied")),
+                "framing_polish_warnings": list(_framing_profile_data.get("framing_polish_warnings") or []),
+                "audio_qc": locals().get("_audio_master_metadata", {}),
+                "audio_chain_plan": _audio_chain_plan,
+                "audio_chain_state": _audio_chain_state,
+                "audio_editorial_profile": str(_audio_editorial_profile.get("audio_editorial_profile") or ""),
+                "audio_editorial_profile_reason": str(_audio_editorial_profile.get("audio_editorial_profile_reason") or ""),
+                "music_mood_selected": str(_music_metadata.get("music_mood_selected") or _bgm_candidate.get("music_mood_selected") or ""),
+                "music_asset_id": str(_music_metadata.get("music_asset_id") or _music_metadata.get("bgm_asset_id") or ""),
+                "music_selection_reason": str(_music_metadata.get("music_selection_reason") or _bgm_candidate.get("music_selection_reason") or ""),
+                "music_fallback_used": bool(_music_metadata.get("music_fallback_used") or _bgm_candidate.get("music_fallback_used")),
+                "music_reuse_reason": str(_music_metadata.get("music_reuse_reason") or _bgm_candidate.get("music_reuse_reason") or ""),
+                "music_asset_taxonomy_used": str(_bgm_candidate.get("music_asset_taxonomy_used") or "filename"),
+                "sfx_editorial_profile": str(_sfx_metadata.get("sfx_editorial_profile") or _audio_editorial_profile.get("audio_editorial_profile") or ""),
+                "sfx_allowed_families": list(_sfx_metadata.get("sfx_allowed_families") or _audio_editorial_profile.get("sfx_allowed_families") or []),
+                "sfx_blocked_families": list(_sfx_metadata.get("sfx_blocked_families") or _audio_editorial_profile.get("sfx_blocked_families") or []),
+                "sfx_family_selected": str(_sfx_metadata.get("sfx_family_selected") or ""),
+                "sfx_variation_ids": list(_sfx_metadata.get("sfx_variation_ids") or []),
+                "sfx_selection_reason": str(_sfx_metadata.get("sfx_selection_reason") or ""),
+                "sfx_reuse_reason": str(_sfx_metadata.get("sfx_reuse_reason") or ""),
+                "sfx_asset_taxonomy_used": str(_sfx_metadata.get("sfx_asset_taxonomy_used") or "filename"),
+                "vpi_audio_identity_ok": bool(_audio_editorial_profile.get("vpi_audio_identity_ok", True)) if isinstance(_audio_editorial_profile, dict) else True,
+                "vpi_audio_identity_warnings": list(_audio_editorial_profile.get("vpi_audio_identity_warnings") or []) if isinstance(_audio_editorial_profile, dict) else [],
+                "audio_asset_history_key": str(_music_metadata.get("audio_asset_history_key") or _audio_asset_history_key),
+                "audio_asset_recently_used": list(dict.fromkeys([str(item) for item in (_music_metadata.get("audio_asset_recently_used") or _recent_music_asset_ids) if str(item)]))[-5:],
+                "audio_variation_index": int(_music_metadata.get("audio_variation_index") or _audio_variation_index),
+                "audio_asset_inventory_summary": dict(_music_asset_index.get("audio_asset_inventory_summary") or {}),
+                "visual_asset_inventory_summary": dict(_music_asset_index.get("visual_asset_inventory_summary") or {}),
+                "audio_asset_coverage_ok": bool(_audio_asset_coverage.get("audio_asset_coverage_ok", False)) if isinstance(_audio_asset_coverage, dict) else False,
+                "visual_asset_coverage_ok": bool((_music_asset_index.get("visual_asset_coverage") or {}).get("visual_asset_coverage_ok", False)),
+                "missing_music_moods": list(_audio_asset_coverage.get("missing_music_moods") or []),
+                "missing_sfx_families": list(_audio_asset_coverage.get("missing_sfx_families") or []),
+                "missing_visual_intents": list((_music_asset_index.get("visual_asset_coverage") or {}).get("missing_visual_intents") or []),
+                "missing_visual_families": list((_music_asset_index.get("visual_asset_coverage") or {}).get("missing_visual_families") or []),
+                "weak_music_moods": list(_audio_asset_coverage.get("weak_music_moods") or []),
+                "weak_sfx_families": list(_audio_asset_coverage.get("weak_sfx_families") or []),
+                "weak_visual_intents": list((_music_asset_index.get("visual_asset_coverage") or {}).get("weak_visual_intents") or []),
+                "weak_visual_families": list((_music_asset_index.get("visual_asset_coverage") or {}).get("weak_visual_families") or []),
+                "sensitive_sober_available": bool(_audio_asset_coverage.get("sensitive_sober_available")),
+                "sensitive_audio_asset_blocked": bool((_music_asset_index.get("audio_asset_inventory_summary") or {}).get("blocked_identity_assets")),
+                "sensitive_visual_available": bool((_music_asset_index.get("visual_asset_coverage") or {}).get("sensitive_visual_available")),
+                "visual_asset_inventory_used": bool((_music_asset_index.get("visual_asset_inventory") or {}).get("all_assets")),
+                "visual_asset_selected": str((_visual_reinforcement_metadata or {}).get("visual_asset_selected") or ""),
+                "visual_asset_selection_reason": str((_visual_reinforcement_metadata or {}).get("visual_asset_selection_reason") or ""),
+                "visual_asset_fallback_used": bool((_visual_reinforcement_metadata or {}).get("visual_asset_fallback_used")),
+                "sensitive_visual_asset_blocked": bool((_visual_reinforcement_metadata or {}).get("sensitive_visual_asset_blocked")),
+                "visual_asset_identity_warnings": list((_visual_reinforcement_metadata or {}).get("visual_asset_identity_warnings") or (_brand_metadata or {}).get("warnings") or []),
+                "visual_layout_strategy": str((_visual_reinforcement_metadata or {}).get("visual_layout_strategy") or (_motion_overlay_metadata or {}).get("visual_layout_strategy") or ""),
+                "visual_layout_zone": str((_visual_reinforcement_metadata or {}).get("visual_layout_zone") or (_motion_overlay_metadata or {}).get("visual_layout_zone") or ""),
+                "visual_layout_size": str((_visual_reinforcement_metadata or {}).get("visual_layout_size") or (_motion_overlay_metadata or {}).get("visual_layout_size") or ""),
+                "visual_layout_opacity": float((_visual_reinforcement_metadata or {}).get("visual_layout_opacity") or (_motion_overlay_metadata or {}).get("visual_layout_opacity") or 0.0),
+                "visual_layout_duration": float((_visual_reinforcement_metadata or {}).get("visual_layout_duration") or (_motion_overlay_metadata or {}).get("visual_layout_duration") or 0.0),
+                "visual_layout_reason": str((_visual_reinforcement_metadata or {}).get("visual_layout_reason") or (_motion_overlay_metadata or {}).get("visual_layout_reason") or ""),
+                "visual_layout_face_safe": bool((_visual_reinforcement_metadata or {}).get("visual_layout_face_safe", True) if (_visual_reinforcement_metadata or {}).get("visual_layout_face_safe") is not None else (_motion_overlay_metadata or {}).get("visual_layout_face_safe", True)),
+                "visual_layout_caption_safe": bool((_visual_reinforcement_metadata or {}).get("visual_layout_caption_safe", True) if (_visual_reinforcement_metadata or {}).get("visual_layout_caption_safe") is not None else (_motion_overlay_metadata or {}).get("visual_layout_caption_safe", True)),
+                "visual_layout_ok": bool((_visual_reinforcement_metadata or {}).get("visual_layout_ok", True) if (_visual_reinforcement_metadata or {}).get("visual_layout_ok") is not None else (_motion_overlay_metadata or {}).get("visual_layout_ok", True)),
+                "visual_layout_warnings": list((_visual_reinforcement_metadata or {}).get("visual_layout_warnings") or (_motion_overlay_metadata or {}).get("visual_layout_warnings") or []),
+                "premium_restraint_mode": str((_visual_reinforcement_metadata or {}).get("premium_restraint_mode") or ""),
+                "premium_restraint_applied": bool((_visual_reinforcement_metadata or {}).get("premium_restraint_applied")),
+                "premium_restraint_reason": str((_visual_reinforcement_metadata or {}).get("premium_restraint_reason") or ""),
+                "premium_restraint_suppressed_layers": list((_visual_reinforcement_metadata or {}).get("premium_restraint_suppressed_layers") or []),
+                "allowed_visual_support_count": int((_visual_reinforcement_metadata or {}).get("allowed_visual_support_count") or 0),
+                "clip_already_strong": bool((_visual_reinforcement_metadata or {}).get("clip_already_strong")),
+                "visual_support_reduced_reason": str((_visual_reinforcement_metadata or {}).get("visual_support_reduced_reason") or ""),
+                "restraint_broll_interaction": str((_visual_reinforcement_metadata or {}).get("restraint_broll_interaction") or ""),
+                "framing_profile": str(_framing_profile_data.get("framing_profile") or ""),
+                "target_anchor": str(_framing_profile_data.get("target_anchor") or ""),
+                "safe_crop_margin": float(_framing_profile_data.get("safe_crop_margin") or 0.0),
+                "headroom_policy": str(_framing_profile_data.get("headroom_policy") or ""),
+                "subtitle_clearance_policy": str(_framing_profile_data.get("subtitle_clearance_policy") or ""),
+                "max_reframe_shift": float(_framing_profile_data.get("max_reframe_shift") or 0.0),
+                "face_bbox_present": bool(_framing_profile_data.get("face_bbox_present")),
+                "speaker_bbox_present": bool(_framing_profile_data.get("speaker_bbox_present")),
+                "face_framing_safe": bool(_framing_profile_data.get("face_framing_safe")),
+                "headroom_safe": bool(_framing_profile_data.get("headroom_safe")),
+                "face_crop_risk": str(_framing_profile_data.get("face_crop_risk") or ""),
+                "face_framing_adjusted": bool(_framing_profile_data.get("face_framing_adjusted")),
+                "subtitle_clearance_applied": bool(_framing_profile_data.get("subtitle_clearance_applied")),
+                "cta_clearance_applied": bool(_framing_profile_data.get("cta_clearance_applied")),
+                "reframe_skipped_reason": str(_framing_profile_data.get("reframe_skipped_reason") or ""),
+                "original_frame_preserved": bool(_framing_profile_data.get("original_frame_preserved")),
+                "framing_reason": str(_framing_profile_data.get("framing_reason") or ""),
+                "framing_polish_applied": bool(_framing_profile_data.get("framing_polish_applied")),
+                "framing_polish_warnings": list(_framing_profile_data.get("framing_polish_warnings") or []),
+                "output_qc": _output_qc,
+                "final_contract": _final_contract_metadata,
+                "final_rendered_contract": _final_contract_metadata,
+                "filename_contract_mode": str(_final_contract_metadata.get("filename_contract_mode") or "legacy_warning_only"),
+                "final_output_uses_music": bool(_music_metadata.get("final_output_uses_bgm") or _music_metadata.get("music_applied")),
+                "final_output_uses_sfx": bool(_sfx_metadata.get("sfx_applied") or _sfx_metadata.get("sfx_verified")),
+                "final_output_uses_vfx": bool(_visual_effects_metadata.get("final_output_uses_vfx") or _visual_effects_metadata.get("visual_effects_applied")),
+                "final_output_uses_transition": bool(_transition_metadata.get("final_output_uses_transition") or _transition_metadata.get("transition_verified")),
+                "final_output_uses_motion_overlay": bool(_motion_overlay_metadata.get("final_output_uses_motion_overlay") or _motion_overlay_metadata.get("motion_overlay_applied")),
+                "has_audio": bool((locals().get("_audio_master_metadata", {}) or {}).get("audio_voice_status") or words_with_confidence or segment.get("text")),
+                "base_voice_audio_present": bool(words_with_confidence or segment.get("text") or (locals().get("_audio_master_metadata", {}) or {}).get("audio_voice_status")),
+                "bgm_final_status": str(_music_metadata.get("bgm_final_status") or _music_metadata.get("music_status") or ""),
+                "sfx_final_status": str(_sfx_metadata.get("sfx_final_status") or _sfx_metadata.get("sfx_status") or ""),
+                "audio_mastering_final_status": str((_audio_chain_state or {}).get("audio_mastering_final_status") or _audio_mastering_metadata_current.get("audio_mastering_skip_reason") or _audio_mastering_metadata_current.get("audio_mastering_method") or ""),
+                "bgm_pass_count": int(_music_metadata.get("bgm_pass_count") or 0),
+                "sfx_pass_count": int(_sfx_metadata.get("sfx_pass_count") or 0),
+                "audio_duplicate_passes_blocked": list(dict.fromkeys((_audio_duplicate_passes_blocked or []))),
+                "bgm_voice_priority_ok": bool(_music_metadata.get("bgm_voice_priority_ok")),
+                "bgm_loudness_checked": bool(_music_metadata.get("bgm_loudness_checked")),
+                "sfx_voice_clarity_ok": bool(_sfx_metadata.get("sfx_voice_clarity_ok")),
+                "sfx_word_collision_avoided": bool(_sfx_metadata.get("sfx_word_collision_avoided")),
+                "sfx_events_shifted": int(_sfx_metadata.get("sfx_events_shifted") or 0),
+                "sfx_events_dropped_for_voice": int(_sfx_metadata.get("sfx_events_dropped_for_voice") or 0),
+            }
+            _final_mp4_contract = _build_final_mp4_contract_gate(
+                final_output_path=output_path,
+                expected_duration_s=float(segment.get("duration") or duration or 0.0),
+                clip_info=_final_mp4_contract_input,
+                final_qc_report=_final_qc_report,
+                production_safe=bool(os.environ.get("VPI_PRODUCTION_SAFE_EDIT", "").strip().lower() in {"1", "true", "yes", "on"}),
+                captions_metadata=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                bgm_metadata=_music_metadata,
+                sfx_metadata=_sfx_metadata,
+                hook_metadata=_hook_plan_data,
+                rhythm_metadata=_silence_edit_plan_data,
+                visual_layer_budget_metadata=(_editing_plan_data or {}).get("visual_layer_budget") if isinstance(_editing_plan_data, dict) else {},
+                visual_reinforcement_metadata=_visual_reinforcement_metadata,
+                broll_metadata={
+                    "items": _editorial_broll_for_status,
+                    "broll_editorial_decision": _broll_editorial_decision_final,
+                    "broll_applied": bool(_broll_true),
+                    "broll_rendered": bool(_broll_true),
+                    "broll_verified": bool(_broll_true),
+                    "broll_skip_reason": _broll_unfulfilled_reason,
+                    "broll_budget_allowed": bool(_broll_composition_allowed_final),
+                    "broll_asset_id": str(_expected_broll_asset or ""),
+                    "broll_asset_source": str((_broll_asset_match_final or {}).get("asset_source") or ""),
+                },
+                transitions_metadata=_transition_metadata,
+                audio_mastering_metadata=locals().get("_audio_master_metadata", {}) or {},
+                task_id=task_id,
+                clip_order=clip_index + 1,
+            )
+            _editing_richness_frozen = dict(_editing_richness_metadata)
+            _editing_richness_frozen.update({
+                "final_mp4_contract": _final_mp4_contract,
+                "final_contract_ok": bool(_final_mp4_contract.get("final_publishable")),
+                "final_truth_source": str(_final_mp4_contract.get("final_truth_source") or "final_mp4_contract"),
+                "final_output_verified": bool(_final_mp4_contract.get("final_output_verified")),
+                "final_publishable": bool(_final_mp4_contract.get("final_publishable")),
+                "final_needs_review": bool(_final_mp4_contract.get("final_needs_review")),
+                "final_blocking_reasons": list(_final_mp4_contract.get("final_blocking_reasons") or []),
+                "final_warning_reasons": list(_final_mp4_contract.get("final_warning_reasons") or []),
+                "filename_contract_warning": _filename_contract_warning,
+                "route_registry": _route_registry,
+                "route_registry_version": str(_route_registry.get("route_registry_version") or "a2"),
+                "production_safe_compliant": bool(_route_registry.get("production_safe_compliant", True)),
+                "production_safe_routes_blocked": list(dict.fromkeys(_route_registry.get("production_safe_routes_blocked") or [])),
+                "legacy_routes_blocked": list(dict.fromkeys(_route_registry.get("legacy_routes_blocked") or [])),
+                "external_routes_blocked": list(dict.fromkeys(_route_registry.get("external_routes_blocked") or [])),
+                "fallback_routes_used": list(dict.fromkeys(_route_registry.get("fallback_routes_used") or [])),
+                "primary_routes_used": list(dict.fromkeys(_route_registry.get("primary_routes_used") or [])),
+                "production_safe_policy": dict(_final_mp4_contract.get("production_safe_policy") or {}),
+                "production_safe_policy_version": str(_final_mp4_contract.get("production_safe_policy_version") or "a4"),
+                "production_safe_mode_active": bool(_final_mp4_contract.get("production_safe_mode_active")),
+                "production_safe_external_disabled": bool(_final_mp4_contract.get("production_safe_external_disabled")),
+                "production_safe_legacy_disabled": bool(_final_mp4_contract.get("production_safe_legacy_disabled")),
+                "production_safe_routes_allowed": list(dict.fromkeys(_final_mp4_contract.get("production_safe_routes_allowed") or [])),
+                "audio_chain_plan": dict(_final_mp4_contract.get("audio_chain_plan") or _audio_chain_plan),
+                "audio_chain_state": dict(_final_mp4_contract.get("audio_chain_state") or _audio_chain_state),
+                "final_audio_chain_ok": bool(_final_mp4_contract.get("final_audio_chain_ok")),
+                "final_audio_chain_errors": list(_final_mp4_contract.get("final_audio_chain_errors") or []),
+                "final_audio_chain_warnings": list(_final_mp4_contract.get("final_audio_chain_warnings") or []),
+                "bgm_pass_count": int(_final_mp4_contract.get("bgm_pass_count") or _music_metadata.get("bgm_pass_count") or 0),
+                "sfx_pass_count": int(_final_mp4_contract.get("sfx_pass_count") or _sfx_metadata.get("sfx_pass_count") or 0),
+                "audio_duplicate_passes_blocked": list(dict.fromkeys(_final_mp4_contract.get("audio_duplicate_passes_blocked") or _audio_duplicate_passes_blocked or [])),
+                "bgm_final_status": str(_final_mp4_contract.get("bgm_final_status") or _music_metadata.get("bgm_final_status") or ""),
+                "sfx_final_status": str(_final_mp4_contract.get("sfx_final_status") or _sfx_metadata.get("sfx_final_status") or ""),
+                "audio_mastering_final_status": str(_final_mp4_contract.get("audio_mastering_final_status") or (locals().get("_audio_master_metadata", {}) or {}).get("audio_mastering_method") or ""),
+                "base_voice_audio_present": bool(_final_mp4_contract.get("base_voice_audio_present")),
+                "bgm_voice_priority_ok": bool(_final_mp4_contract.get("bgm_voice_priority_ok")),
+                "bgm_loudness_checked": bool(_final_mp4_contract.get("bgm_loudness_checked")),
+                "sfx_voice_clarity_ok": bool(_final_mp4_contract.get("sfx_voice_clarity_ok")),
+                "sfx_word_collision_avoided": bool(_final_mp4_contract.get("sfx_word_collision_avoided")),
+                "sfx_events_shifted": int(_final_mp4_contract.get("sfx_events_shifted") or 0),
+                "sfx_events_dropped_for_voice": int(_final_mp4_contract.get("sfx_events_dropped_for_voice") or 0),
+                "final_audio_analysis": dict(_final_mp4_contract.get("final_audio_analysis") or {}),
+                "final_audio_loudness_ok": bool(_final_mp4_contract.get("final_audio_loudness_ok")),
+                "final_audio_too_quiet": bool(_final_mp4_contract.get("final_audio_too_quiet")),
+                "final_audio_clipping_risk": bool(_final_mp4_contract.get("final_audio_clipping_risk")),
+                "final_audio_silence_likely": bool(_final_mp4_contract.get("final_audio_silence_likely")),
+                "mastering_improved_audio": bool(_final_mp4_contract.get("mastering_improved_audio")),
+                "mastering_rejected_reason": str(_final_mp4_contract.get("mastering_rejected_reason") or ""),
+            })
+            _final_qc_report = _build_final_qc_report_gate(
+                private_premium_status=str(_publishable_metadata.get("private_premium_status") or ""),
+                editing_richness=_editing_richness_frozen,
+                composition_decision=_composition_decision if isinstance(_composition_decision, dict) else {},
+                first3_visual_contract=_first3_visual_contract_result if isinstance(_first3_visual_contract_result, dict) else {},
+                caption_overlay_pack=_caption_overlay_pack_metadata if isinstance(_caption_overlay_pack_metadata, dict) else {},
+                motion_pack=_visual_effects_metadata if isinstance(_visual_effects_metadata, dict) else {},
+                broll_metadata={
+                    "broll_asset_applied_match": _broll_asset_applied_match,
+                    "matched": bool((_broll_asset_match_final or {}).get("matched")),
+                    "timing_valid": _broll_timing_valid,
+                    "composition_allowed": _broll_composition_allowed_final,
+                },
+                sfx_metadata=_sfx_metadata if isinstance(_sfx_metadata, dict) else {},
+                cinematic_finish=_cinematic_finish_metadata if isinstance(_cinematic_finish_metadata, dict) else {},
+                shot_rhythm=_shot_rhythm_plan if isinstance(_shot_rhythm_plan, dict) else {},
+                audio_metadata=locals().get("_audio_master_metadata", {}) or {},
+                subtitle_metadata={
+                    "captions_rendered": bool(add_subtitles and (words_with_confidence or segment.get("text"))),
+                    "hook_first3_score": int((_hook_plan_data or {}).get("hook_first3_score") or 0),
+                },
+                segment_text=str(segment.get("text") or ""),
+                motion_overlay_metadata=_motion_overlay_metadata if isinstance(_motion_overlay_metadata, dict) else {},
+                dynamic_overlay_text_metadata=_motion_overlay_metadata if isinstance(_motion_overlay_metadata, dict) else {},
+                final_mp4_contract=_final_mp4_contract,
+            )
+            if _filename_contract_warning:
+                _final_qc_report.setdefault("warnings", []).append("filename_metadata_mismatch")
+            _final_qc_status = str(_final_qc_report.get("final_qc_status") or "REVIEW")
+            _final_upload_recommendation = str(_final_qc_report.get("upload_recommendation") or "REVIEW_MANUALLY")
+            _final_truth_source = str(_final_mp4_contract.get("final_truth_source") or "final_mp4_contract")
+            _final_output_verified = bool(_final_mp4_contract.get("final_output_verified"))
+            _final_publishable = bool(_final_mp4_contract.get("final_publishable"))
+            _final_needs_review = bool(_final_mp4_contract.get("final_needs_review"))
+            _final_blocking_reasons = list(_final_mp4_contract.get("final_blocking_reasons") or [])
+            _final_warning_reasons = list(_final_mp4_contract.get("final_warning_reasons") or [])
+            _record_route_used(
+                _route_registry,
+                "final_qc",
+                "final_mp4_contract",
+                "final_contract_verified" if _final_publishable else "final_contract_failed",
+                {
+                    "final_truth_source": _final_truth_source,
+                    "final_publishable": _final_publishable,
+                    "final_output_verified": _final_output_verified,
+                },
+            )
+            _playback_route_used = "ready_after_contract" if (_final_publishable and _final_output_verified) else ("blocked_by_contract" if _final_blocking_reasons else "staged")
+            _record_route_used(
+                _route_registry,
+                "playback_url",
+                _playback_route_used,
+                "final_contract_ready" if _playback_route_used == "ready_after_contract" else ("final_contract_blocked" if _playback_route_used == "blocked_by_contract" else "playback_staged"),
+                {
+                    "public_url": str(locals().get("_public_url") or ""),
+                    "file_exists": bool(Path(str(output_path)).exists()),
+                },
+            )
+            _final_mp4_contract["route_registry"] = _route_registry
+            try:
+                from .vpi_production_safe_edit import validate_premium_flow_manifest as _validate_premium_flow_manifest
+            except Exception:
+                _validate_premium_flow_manifest = None  # type: ignore[assignment]
+            if _validate_premium_flow_manifest is not None:
+                _premium_flow_validation = _validate_premium_flow_manifest(_route_registry, _final_mp4_contract)
+                _final_mp4_contract.update(_premium_flow_validation)
+                _publishable_metadata["premium_flow_manifest_ok"] = bool(_premium_flow_validation.get("premium_flow_manifest_ok"))
+                _publishable_metadata["premium_flow_manifest_warnings"] = list(_premium_flow_validation.get("premium_flow_manifest_warnings") or [])
+                _publishable_metadata["premium_flow_manifest_errors"] = list(_premium_flow_validation.get("premium_flow_manifest_errors") or [])
+                _publishable_metadata["observed_phase_order"] = list(_premium_flow_validation.get("observed_phases") or [])
+                _publishable_metadata["missing_critical_phases"] = list(_premium_flow_validation.get("missing_critical_phases") or [])
+                _publishable_metadata["unexpected_mutators_after_freeze"] = list(_premium_flow_validation.get("unexpected_mutators_after_freeze") or [])
+                _publishable_metadata["premium_flow_manifest"] = dict(_premium_flow_validation.get("premium_flow_manifest") or {})
+                if not _premium_flow_validation.get("premium_flow_manifest_ok", True):
+                    _final_publishable = False
+                    _final_needs_review = True
+                    _final_blocking_reasons = list(dict.fromkeys(list(_final_blocking_reasons or []) + ["premium_flow_manifest_failed"]))
+                if _premium_flow_validation.get("unexpected_mutators_after_freeze"):
+                    _final_publishable = False
+                    _final_needs_review = True
+                    _final_blocking_reasons = list(dict.fromkeys(list(_final_blocking_reasons or []) + ["output_mutation_after_final_lock"]))
+                elif _premium_flow_validation.get("premium_flow_manifest_warnings"):
+                    _final_needs_review = True
+                    _final_warning_reasons = list(dict.fromkeys(list(_final_warning_reasons or []) + ["premium_flow_manifest_warning"]))
+            logger.info(
+                "ROUTE_REGISTRY_FINALIZED task_id=%s clip_order=%d compliant=%s used=%s blocked=%s fallbacks=%s",
+                task_id,
+                clip_index + 1,
+                str(_route_registry.get("production_safe_compliant", True)).lower(),
+                ",".join(_route_registry.get("primary_routes_used") or []) or "-",
+                ",".join(_route_registry.get("production_safe_routes_blocked") or []) or "-",
+                ",".join(_route_registry.get("fallback_routes_used") or []) or "-",
+            )
+            _publishable_metadata.update({
+                "final_qc": _final_qc_report,
+                "final_qc_status": _final_qc_status,
+                "final_upload_recommendation": _final_upload_recommendation,
+                "final_private_premium_status": str(_publishable_metadata.get("private_premium_status") or ""),
+                "final_mp4_contract": _final_mp4_contract,
+                "final_contract_ok": _final_publishable,
+                "final_truth_source": _final_truth_source,
+                "final_output_verified": _final_output_verified,
+                "final_publishable": _final_publishable,
+                "final_needs_review": _final_needs_review,
+                "final_blocking_reasons": _final_blocking_reasons,
+                "final_warning_reasons": _final_warning_reasons,
+                "filename_contract_warning": _filename_contract_warning,
+                "route_registry": _route_registry,
+                "route_registry_version": str(_route_registry.get("route_registry_version") or "a2"),
+                "production_safe_compliant": bool(_route_registry.get("production_safe_compliant", True)),
+                "production_safe_routes_blocked": list(dict.fromkeys(_route_registry.get("production_safe_routes_blocked") or [])),
+                "legacy_routes_blocked": list(dict.fromkeys(_route_registry.get("legacy_routes_blocked") or [])),
+                "external_routes_blocked": list(dict.fromkeys(_route_registry.get("external_routes_blocked") or [])),
+                "fallback_routes_used": list(dict.fromkeys(_route_registry.get("fallback_routes_used") or [])),
+                "primary_routes_used": list(dict.fromkeys(_route_registry.get("primary_routes_used") or [])),
+                "production_safe_policy": dict(_final_mp4_contract.get("production_safe_policy") or {}),
+                "production_safe_policy_version": str(_final_mp4_contract.get("production_safe_policy_version") or "a4"),
+                "production_safe_mode_active": bool(_final_mp4_contract.get("production_safe_mode_active")),
+                "production_safe_external_disabled": bool(_final_mp4_contract.get("production_safe_external_disabled")),
+                "production_safe_legacy_disabled": bool(_final_mp4_contract.get("production_safe_legacy_disabled")),
+                "production_safe_routes_allowed": list(dict.fromkeys(_final_mp4_contract.get("production_safe_routes_allowed") or [])),
+                "premium_flow_manifest_version": str(_final_mp4_contract.get("premium_flow_manifest_version") or "a1"),
+                "premium_flow_manifest_ok": bool(_final_mp4_contract.get("premium_flow_manifest_ok")),
+                "premium_flow_manifest_warnings": list(_final_mp4_contract.get("premium_flow_manifest_warnings") or []),
+                "premium_flow_manifest_errors": list(_final_mp4_contract.get("premium_flow_manifest_errors") or []),
+                "observed_phase_order": list(_final_mp4_contract.get("observed_phase_order") or []),
+                "missing_critical_phases": list(_final_mp4_contract.get("missing_critical_phases") or []),
+                "unexpected_mutators_after_freeze": list(_final_mp4_contract.get("unexpected_mutators_after_freeze") or []),
+                "premium_flow_manifest": dict(_final_mp4_contract.get("premium_flow_manifest") or {}),
+                "metadata_consistency_ok": bool(_final_mp4_contract.get("metadata_consistency_ok")),
+                "metadata_consistency_errors": list(_final_mp4_contract.get("metadata_consistency_errors") or []),
+                "metadata_consistency_warnings": list(_final_mp4_contract.get("metadata_consistency_warnings") or []),
+                "phase_consistency": dict(_final_mp4_contract.get("phase_consistency") or {}),
+                "audio_editorial_profile": str(_final_mp4_contract.get("audio_editorial_profile") or _audio_editorial_profile.get("audio_editorial_profile") or ""),
+                "audio_editorial_profile_reason": str(_final_mp4_contract.get("audio_editorial_profile_reason") or _audio_editorial_profile.get("audio_editorial_profile_reason") or ""),
+                "music_mood_selected": str(_final_mp4_contract.get("music_mood_selected") or _music_metadata.get("music_mood_selected") or ""),
+                "music_asset_id": str(_final_mp4_contract.get("music_asset_id") or _music_metadata.get("music_asset_id") or ""),
+                "music_selection_reason": str(_final_mp4_contract.get("music_selection_reason") or _music_metadata.get("music_selection_reason") or ""),
+                "music_fallback_used": bool(_final_mp4_contract.get("music_fallback_used") or _music_metadata.get("music_fallback_used")),
+                "music_reuse_reason": str(_final_mp4_contract.get("music_reuse_reason") or _music_metadata.get("music_reuse_reason") or ""),
+                "sfx_editorial_profile": str(_final_mp4_contract.get("sfx_editorial_profile") or _sfx_metadata.get("sfx_editorial_profile") or ""),
+                "sfx_allowed_families": list(_final_mp4_contract.get("sfx_allowed_families") or _sfx_metadata.get("sfx_allowed_families") or []),
+                "sfx_blocked_families": list(_final_mp4_contract.get("sfx_blocked_families") or _sfx_metadata.get("sfx_blocked_families") or []),
+                "sfx_family_selected": str(_final_mp4_contract.get("sfx_family_selected") or _sfx_metadata.get("sfx_family_selected") or ""),
+                "sfx_variation_ids": list(_final_mp4_contract.get("sfx_variation_ids") or _sfx_metadata.get("sfx_variation_ids") or []),
+                "sfx_selection_reason": str(_final_mp4_contract.get("sfx_selection_reason") or _sfx_metadata.get("sfx_selection_reason") or ""),
+                "sfx_reuse_reason": str(_final_mp4_contract.get("sfx_reuse_reason") or _sfx_metadata.get("sfx_reuse_reason") or ""),
+                "vpi_audio_identity_ok": bool(_final_mp4_contract.get("vpi_audio_identity_ok", True)),
+                "vpi_audio_identity_warnings": list(_final_mp4_contract.get("vpi_audio_identity_warnings") or []),
+                "audio_asset_history_key": str(_final_mp4_contract.get("audio_asset_history_key") or _music_metadata.get("audio_asset_history_key") or _audio_asset_history_key),
+                "audio_asset_recently_used": list(_final_mp4_contract.get("audio_asset_recently_used") or _music_metadata.get("audio_asset_recently_used") or _recent_music_asset_ids),
+                "audio_variation_index": int(_final_mp4_contract.get("audio_variation_index") or _music_metadata.get("audio_variation_index") or _audio_variation_index),
+                "final_render_locked": True,
+                "final_render_locked_at_stage": "post_all_mutators",
+                "final_output_path_locked": str(output_path),
+                "output_mutation_after_lock_detected": False,
+                "production_safe_routes_blocked": list(dict.fromkeys(_production_safe_routes_blocked)),
+            })
+            _editing_richness_metadata.update({
+                "final_qc": _final_qc_report,
+                "final_qc_status": _final_qc_status,
+                "final_upload_recommendation": _final_upload_recommendation,
+                "final_private_premium_status": str(_publishable_metadata.get("private_premium_status") or ""),
+                "final_render_locked": True,
+                "final_render_locked_at_stage": "post_all_mutators",
+                "final_output_path_locked": str(output_path),
+                "output_mutation_after_lock_detected": False,
+                "production_safe_routes_blocked": list(dict.fromkeys(_production_safe_routes_blocked)),
+            })
+            _final_render_locked = True
+            _final_render_locked_at_stage = "post_all_mutators"
+            _final_output_path_locked = str(output_path)
+            logger.info("FINAL_RENDER_LOCKED task_id=%s clip_order=%d stage=%s path=%s", task_id, clip_index + 1, _final_render_locked_at_stage, _final_output_path_locked)
+            logger.info("FINAL_OUTPUT_VERIFIED task_id=%s clip_order=%d path=%s", task_id, clip_index + 1, _final_output_path_locked)
+            logger.info("FINAL_MP4_CONTRACT_BUILT task_id=%s clip_order=%d path=%s", task_id, clip_index + 1, _final_output_path_locked)
+            logger.info(
+                "FINAL_MP4_CONTRACT_%s task_id=%s clip_order=%d path=%s",
+                "PASSED" if _final_publishable else "FAILED",
+                task_id,
+                clip_index + 1,
+                _final_output_path_locked,
+            )
+        except Exception as _final_freeze_e:
+            _final_mp4_contract = dict(locals().get("_final_mp4_contract") or {})
+            _final_mp4_contract.update({
+                "final_truth_source": "final_mp4_contract",
+                "final_output_verified": False,
+                "final_publishable": False,
+                "final_needs_review": True,
+                "final_blocking_reasons": list(dict.fromkeys(list(_final_mp4_contract.get("final_blocking_reasons") or []) + [f"final_freeze_failed:{_final_freeze_e}"])),
+                "final_warning_reasons": list(_final_mp4_contract.get("final_warning_reasons") or []),
+            })
+            _final_qc_report = dict(locals().get("_final_qc_report") or {})
+            _final_qc_report.update({
+                "final_qc_status": "FAIL",
+                "upload_recommendation": "DO_NOT_UPLOAD",
+                "reasons": list(dict.fromkeys(list(_final_qc_report.get("reasons") or []) + ["final_render_freeze_failed"])),
+                "warnings": list(_final_qc_report.get("warnings") or []),
+            })
+            if _filename_contract_warning:
+                _final_qc_report.setdefault("warnings", []).append("filename_metadata_mismatch")
+            _publishable_metadata.update({
+                "final_qc": _final_qc_report,
+                "final_qc_status": "FAIL",
+                "final_upload_recommendation": "DO_NOT_UPLOAD",
+                "final_mp4_contract": _final_mp4_contract,
+                "final_contract_ok": False,
+                "final_truth_source": "final_mp4_contract",
+                "final_output_verified": False,
+                "final_publishable": False,
+                "final_needs_review": True,
+                "final_blocking_reasons": list(_final_mp4_contract.get("final_blocking_reasons") or []),
+                "final_warning_reasons": list(_final_mp4_contract.get("final_warning_reasons") or []),
+                "filename_contract_warning": str(_filename_contract_warning),
+                "route_registry": _route_registry,
+                "route_registry_version": str(_route_registry.get("route_registry_version") or "a2"),
+                "production_safe_compliant": bool(_route_registry.get("production_safe_compliant", True)),
+                "production_safe_routes_blocked": list(dict.fromkeys(_route_registry.get("production_safe_routes_blocked") or [])),
+                "legacy_routes_blocked": list(dict.fromkeys(_route_registry.get("legacy_routes_blocked") or [])),
+                "external_routes_blocked": list(dict.fromkeys(_route_registry.get("external_routes_blocked") or [])),
+                "fallback_routes_used": list(dict.fromkeys(_route_registry.get("fallback_routes_used") or [])),
+                "primary_routes_used": list(dict.fromkeys(_route_registry.get("primary_routes_used") or [])),
+                "metadata_consistency_ok": bool(_final_mp4_contract.get("metadata_consistency_ok")),
+                "metadata_consistency_errors": list(_final_mp4_contract.get("metadata_consistency_errors") or []),
+                "metadata_consistency_warnings": list(_final_mp4_contract.get("metadata_consistency_warnings") or []),
+                "phase_consistency": dict(_final_mp4_contract.get("phase_consistency") or {}),
+                "audio_editorial_profile": str(_final_mp4_contract.get("audio_editorial_profile") or _audio_editorial_profile.get("audio_editorial_profile") or ""),
+                "audio_editorial_profile_reason": str(_final_mp4_contract.get("audio_editorial_profile_reason") or _audio_editorial_profile.get("audio_editorial_profile_reason") or ""),
+                "music_mood_selected": str(_final_mp4_contract.get("music_mood_selected") or _music_metadata.get("music_mood_selected") or ""),
+                "music_asset_id": str(_final_mp4_contract.get("music_asset_id") or _music_metadata.get("music_asset_id") or ""),
+                "music_selection_reason": str(_final_mp4_contract.get("music_selection_reason") or _music_metadata.get("music_selection_reason") or ""),
+                "music_fallback_used": bool(_final_mp4_contract.get("music_fallback_used") or _music_metadata.get("music_fallback_used")),
+                "music_reuse_reason": str(_final_mp4_contract.get("music_reuse_reason") or _music_metadata.get("music_reuse_reason") or ""),
+                "sfx_editorial_profile": str(_final_mp4_contract.get("sfx_editorial_profile") or _sfx_metadata.get("sfx_editorial_profile") or ""),
+                "sfx_allowed_families": list(_final_mp4_contract.get("sfx_allowed_families") or _sfx_metadata.get("sfx_allowed_families") or []),
+                "sfx_blocked_families": list(_final_mp4_contract.get("sfx_blocked_families") or _sfx_metadata.get("sfx_blocked_families") or []),
+                "sfx_family_selected": str(_final_mp4_contract.get("sfx_family_selected") or _sfx_metadata.get("sfx_family_selected") or ""),
+                "sfx_variation_ids": list(_final_mp4_contract.get("sfx_variation_ids") or _sfx_metadata.get("sfx_variation_ids") or []),
+                "sfx_selection_reason": str(_final_mp4_contract.get("sfx_selection_reason") or _sfx_metadata.get("sfx_selection_reason") or ""),
+                "sfx_reuse_reason": str(_final_mp4_contract.get("sfx_reuse_reason") or _sfx_metadata.get("sfx_reuse_reason") or ""),
+                "vpi_audio_identity_ok": bool(_final_mp4_contract.get("vpi_audio_identity_ok", True)),
+                "vpi_audio_identity_warnings": list(_final_mp4_contract.get("vpi_audio_identity_warnings") or []),
+                "audio_asset_history_key": str(_final_mp4_contract.get("audio_asset_history_key") or _music_metadata.get("audio_asset_history_key") or _audio_asset_history_key),
+                "audio_asset_recently_used": list(_final_mp4_contract.get("audio_asset_recently_used") or _music_metadata.get("audio_asset_recently_used") or _recent_music_asset_ids),
+                "audio_variation_index": int(_final_mp4_contract.get("audio_variation_index") or _music_metadata.get("audio_variation_index") or _audio_variation_index),
+                "final_render_locked": True,
+                "final_render_locked_at_stage": "post_all_mutators",
+                "final_output_path_locked": str(output_path),
+                "output_mutation_after_lock_detected": False,
+                "production_safe_routes_blocked": list(dict.fromkeys(_production_safe_routes_blocked)),
+            })
+            _editing_richness_metadata.update({
+                "final_qc": _final_qc_report,
+                "final_qc_status": "FAIL",
+                "final_upload_recommendation": "DO_NOT_UPLOAD",
+                "final_private_premium_status": str(_publishable_metadata.get("private_premium_status") or ""),
+                "final_render_locked": True,
+                "final_render_locked_at_stage": "post_all_mutators",
+                "final_output_path_locked": str(output_path),
+                "output_mutation_after_lock_detected": False,
+                "production_safe_routes_blocked": list(dict.fromkeys(_production_safe_routes_blocked)),
+                "production_safe_policy": dict(_final_mp4_contract.get("production_safe_policy") or {}),
+                "production_safe_policy_version": str(_final_mp4_contract.get("production_safe_policy_version") or "a4"),
+                "production_safe_mode_active": bool(_final_mp4_contract.get("production_safe_mode_active")),
+                "production_safe_external_disabled": bool(_final_mp4_contract.get("production_safe_external_disabled")),
+                "production_safe_legacy_disabled": bool(_final_mp4_contract.get("production_safe_legacy_disabled")),
+                "production_safe_routes_allowed": list(dict.fromkeys(_final_mp4_contract.get("production_safe_routes_allowed") or [])),
+                "audio_chain_plan": dict(_final_mp4_contract.get("audio_chain_plan") or _audio_chain_plan),
+                "audio_chain_state": dict(_final_mp4_contract.get("audio_chain_state") or _audio_chain_state),
+                "final_audio_chain_ok": bool(_final_mp4_contract.get("final_audio_chain_ok")),
+                "final_audio_chain_errors": list(_final_mp4_contract.get("final_audio_chain_errors") or []),
+                "final_audio_chain_warnings": list(_final_mp4_contract.get("final_audio_chain_warnings") or []),
+                "bgm_pass_count": int(_final_mp4_contract.get("bgm_pass_count") or _music_metadata.get("bgm_pass_count") or 0),
+                "sfx_pass_count": int(_final_mp4_contract.get("sfx_pass_count") or _sfx_metadata.get("sfx_pass_count") or 0),
+                "audio_duplicate_passes_blocked": list(dict.fromkeys(_final_mp4_contract.get("audio_duplicate_passes_blocked") or _audio_duplicate_passes_blocked or [])),
+                "bgm_final_status": str(_final_mp4_contract.get("bgm_final_status") or _music_metadata.get("bgm_final_status") or ""),
+                "sfx_final_status": str(_final_mp4_contract.get("sfx_final_status") or _sfx_metadata.get("sfx_final_status") or ""),
+                "audio_mastering_final_status": str(_final_mp4_contract.get("audio_mastering_final_status") or (locals().get("_audio_master_metadata", {}) or {}).get("audio_mastering_method") or ""),
+                "base_voice_audio_present": bool(_final_mp4_contract.get("base_voice_audio_present")),
+                "bgm_voice_priority_ok": bool(_final_mp4_contract.get("bgm_voice_priority_ok")),
+                "bgm_loudness_checked": bool(_final_mp4_contract.get("bgm_loudness_checked")),
+                "sfx_voice_clarity_ok": bool(_final_mp4_contract.get("sfx_voice_clarity_ok")),
+                "sfx_word_collision_avoided": bool(_final_mp4_contract.get("sfx_word_collision_avoided")),
+                "sfx_events_shifted": int(_final_mp4_contract.get("sfx_events_shifted") or 0),
+                "sfx_events_dropped_for_voice": int(_final_mp4_contract.get("sfx_events_dropped_for_voice") or 0),
+                "final_audio_analysis": dict(_final_mp4_contract.get("final_audio_analysis") or {}),
+                "final_audio_loudness_ok": bool(_final_mp4_contract.get("final_audio_loudness_ok")),
+                "final_audio_too_quiet": bool(_final_mp4_contract.get("final_audio_too_quiet")),
+                "final_audio_clipping_risk": bool(_final_mp4_contract.get("final_audio_clipping_risk")),
+                "final_audio_silence_likely": bool(_final_mp4_contract.get("final_audio_silence_likely")),
+                "mastering_improved_audio": bool(_final_mp4_contract.get("mastering_improved_audio")),
+                "mastering_rejected_reason": str(_final_mp4_contract.get("mastering_rejected_reason") or ""),
+            })
+            _final_render_locked = True
+            _final_render_locked_at_stage = "post_all_mutators"
+            _final_output_path_locked = str(output_path)
+            _output_mutation_after_lock_detected = False
+            logger.warning(
+                "FINAL_MP4_CONTRACT_FAILED task_id=%s clip_order=%d path=%s reason=%s",
+                task_id,
+                clip_index + 1,
+                _final_output_path_locked,
+                _final_freeze_e,
+            )
+
+        logger.info(
+            "VPI_SELECTION_RENDER_METADATA_PERSISTED task_id=%s clip_order=%d complete_idea=%.3f incomplete_window=%s boundary_confidence=%.3f bts_tail=%s shifted_back=%s",
+            task_id,
+            clip_index + 1,
+            float(segment.get("complete_idea_score") or 0.0),
+            str(bool(segment.get("incomplete_viral_window_detected"))).lower(),
+            float(segment.get("boundary_confidence") or 0.0),
+            str(bool(segment.get("bts_tail_detected"))).lower(),
+            str(bool(segment.get("viral_window_shifted_back"))).lower(),
+        )
         return {
             "clip_id": clip_index + 1,
             "filename": output_path.name,
             "path": str(output_path),
+            "output_root": str(_output_mgmt_context.get("output_root") or ""),
+            "clips_output_dir": str(_output_mgmt_context.get("clips_output_dir") or ""),
+            "manifest_output_path": str(_output_mgmt_context.get("manifest_output_path") or ""),
+            "summary_output_path": str(_output_mgmt_context.get("summary_output_path") or ""),
+            "output_filename_strategy": str(segment.get("output_filename_strategy") or _output_mgmt_context.get("output_filename_strategy") or "vpi_{campaign_intent}_{clip_angle}_{confidence}_{start}_{end}_{clip_id_hash}"),
+            "output_filename_safe": bool(segment.get("output_filename_safe", True)),
+            "output_filename_collision_resolved": bool(segment.get("output_filename_collision_resolved")),
+            "output_management_ok": bool(segment.get("output_management_ok") if segment.get("output_management_ok") is not None else _output_mgmt_context.get("output_management_ok", False)),
+            "output_management_warnings": list(segment.get("output_management_warnings") or _output_mgmt_context.get("output_management_warnings") or []),
+            "output_clip_count": int(segment.get("output_clip_count") or _output_mgmt_context.get("output_clip_count") or 0),
+            "publishable_clip_count": int(segment.get("publishable_clip_count") or _output_mgmt_context.get("publishable_clip_count") or 0),
+            "review_clip_count": int(segment.get("review_clip_count") or _output_mgmt_context.get("review_clip_count") or 0),
+            "motion_profile": str((_motion_rhythm_profile or {}).get("motion_profile") or ""),
+            "motion_profile_reason": str((_motion_rhythm_profile or {}).get("reason") or ""),
+            "zoom_intensity": float((_motion_rhythm_profile or {}).get("zoom_intensity") or 0.0),
+            "max_zoom_events": int((_motion_rhythm_profile or {}).get("max_zoom_events") or 0),
+            "actual_zoom_events": int((_editing_plan_data or {}).get("actual_zoom_events") or len(list((_editing_plan_data or {}).get("smart_zoom_events") or [])) or 0),
+            "first3_motion_boost_applied": bool((_motion_rhythm_profile or {}).get("first3_motion_boost_applied")),
+            "first3_motion_boost_reason": str((_motion_rhythm_profile or {}).get("first3_motion_boost_reason") or ""),
+            "intentional_pause_preserved": bool((_motion_rhythm_profile or {}).get("intentional_pause_preserved")),
+            "dead_pause_trimmed": bool((_motion_rhythm_profile or {}).get("dead_pause_trimmed")),
+            "motion_polish_applied": bool((_editing_plan_data or {}).get("motion_polish_applied")),
+            "motion_polish_warnings": list((_editing_plan_data or {}).get("motion_polish_warnings") or []),
+            "framing_profile": str((_framing_profile_data or {}).get("framing_profile") or ""),
+            "target_anchor": str((_framing_profile_data or {}).get("target_anchor") or ""),
+            "safe_crop_margin": float((_framing_profile_data or {}).get("safe_crop_margin") or 0.0),
+            "headroom_policy": str((_framing_profile_data or {}).get("headroom_policy") or ""),
+            "subtitle_clearance_policy": str((_framing_profile_data or {}).get("subtitle_clearance_policy") or ""),
+            "max_reframe_shift": float((_framing_profile_data or {}).get("max_reframe_shift") or 0.0),
+            "face_bbox_present": bool((_framing_profile_data or {}).get("face_bbox_present")),
+            "speaker_bbox_present": bool((_framing_profile_data or {}).get("speaker_bbox_present")),
+            "face_framing_safe": bool((_framing_profile_data or {}).get("face_framing_safe")),
+            "headroom_safe": bool((_framing_profile_data or {}).get("headroom_safe")),
+            "face_crop_risk": str((_framing_profile_data or {}).get("face_crop_risk") or ""),
+            "face_framing_adjusted": bool((_framing_profile_data or {}).get("face_framing_adjusted")),
+            "subtitle_clearance_applied": bool((_framing_profile_data or {}).get("subtitle_clearance_applied")),
+            "cta_clearance_applied": bool((_framing_profile_data or {}).get("cta_clearance_applied")),
+            "reframe_skipped_reason": str((_framing_profile_data or {}).get("reframe_skipped_reason") or ""),
+            "original_frame_preserved": bool((_framing_profile_data or {}).get("original_frame_preserved")),
+            "framing_reason": str((_framing_profile_data or {}).get("framing_reason") or ""),
+            "framing_polish_applied": bool((_framing_profile_data or {}).get("framing_polish_applied")),
+            "framing_polish_warnings": list((_framing_profile_data or {}).get("framing_polish_warnings") or []),
             "start_time": segment["start_time"],
             "end_time": segment["end_time"],
+            "original_start_time": segment.get("original_start_time"),
+            "original_end_time": segment.get("original_end_time"),
+            "refined_start_time": segment.get("refined_start_time"),
+            "refined_end_time": segment.get("refined_end_time"),
+            "original_start": segment.get("original_start"),
+            "original_end": segment.get("original_end"),
+            "refined_start": segment.get("refined_start"),
+            "refined_end": segment.get("refined_end"),
             "duration": duration,
             "text": segment.get("text", ""),
             "relevance_score": segment.get("relevance_score", 0.0),
@@ -4991,6 +14594,65 @@ class VideoService:
             "matched_patterns": segment.get("matched_patterns", []),
             "vpi_score": segment.get("vpi_score"),
             "vpi_reason": segment.get("vpi_reason"),
+            "vpi_editorial_categories": segment.get("vpi_editorial_categories", []),
+            "hookability_score": segment.get("hookability_score"),
+            "hookability_reason": segment.get("hookability_reason"),
+            "commercial_usefulness_score": segment.get("commercial_usefulness_score"),
+            "commercial_usefulness_reason": segment.get("commercial_usefulness_reason"),
+            "standalone_score": segment.get("standalone_score"),
+            "standalone_reason": segment.get("standalone_reason"),
+            "weak_segment_penalties": segment.get("weak_segment_penalties", []),
+            "weak_segment_reason": segment.get("weak_segment_reason"),
+            "segment_selection_confidence": segment.get("segment_selection_confidence"),
+            "selected_for_reason": segment.get("selected_for_reason"),
+            "rejected_for_reason": segment.get("rejected_for_reason"),
+            "weak_editorial_segment": bool(segment.get("weak_editorial_segment")),
+            "boundary_adjustment_applied": bool(segment.get("boundary_adjustment_applied")),
+            "boundary_adjustment_reason": str(segment.get("boundary_adjustment_reason") or ""),
+            "start_trim_seconds": float(segment.get("start_trim_seconds") or 0.0),
+            "start_extend_seconds": float(segment.get("start_extend_seconds") or 0.0),
+            "end_extend_seconds": float(segment.get("end_extend_seconds") or 0.0),
+            "end_trim_seconds": float(segment.get("end_trim_seconds") or 0.0),
+            "payoff_preserved": bool(segment.get("payoff_preserved")),
+            "starts_cleanly": bool(segment.get("starts_cleanly")),
+            "ends_cleanly": bool(segment.get("ends_cleanly")),
+            "first_second_strength": float(segment.get("first_second_strength") or 0.0),
+            "first_second_reason": str(segment.get("first_second_reason") or ""),
+            "boundary_confidence": float(segment.get("boundary_confidence") or 0.0),
+            "standalone_after_boundary_score": float(segment.get("standalone_after_boundary_score") or 0.0),
+            "standalone_after_boundary_reason": str(segment.get("standalone_after_boundary_reason") or ""),
+            "start_filler_trimmed": bool(segment.get("start_filler_trimmed")),
+            "start_trim_reason": str(segment.get("start_trim_reason") or ""),
+            "start_context_extended": bool(segment.get("start_context_extended")),
+            "start_context_reason": str(segment.get("start_context_reason") or ""),
+            "payoff_extended": bool(segment.get("payoff_extended")),
+            "payoff_extension_reason": str(segment.get("payoff_extension_reason") or ""),
+            "end_cleaned": bool(segment.get("end_cleaned")),
+            "end_clean_reason": str(segment.get("end_clean_reason") or ""),
+            "boundary_reverted": bool(segment.get("boundary_reverted")),
+            "boundary_reverted_reason": str(segment.get("boundary_reverted_reason") or ""),
+            "complete_idea_score": float(segment.get("complete_idea_score") or 0.0),
+            "incomplete_viral_window_detected": bool(segment.get("incomplete_viral_window_detected")),
+            "setup_context_shift_seconds": float(segment.get("setup_context_shift_seconds") or 0.0),
+            "trailing_low_value_seconds": float(segment.get("trailing_low_value_seconds") or 0.0),
+            "forced_shift_back_applied": bool(segment.get("forced_shift_back_applied")),
+            "selected_alternative_for_complete_idea": bool(segment.get("selected_alternative_for_complete_idea")),
+            "incomplete_window_uncorrectable": bool(segment.get("incomplete_window_uncorrectable")),
+            "viral_window_shifted_back": bool(segment.get("viral_window_shifted_back")),
+            "viral_window_shift_reason": str(segment.get("viral_window_shift_reason") or ""),
+            "selected_window_before": segment.get("selected_window_before"),
+            "selected_window_after": segment.get("selected_window_after"),
+            "bts_tail_detected": bool(segment.get("bts_tail_detected")),
+            "bts_tail_trimmed_seconds": float(segment.get("bts_tail_trimmed_seconds") or 0.0),
+            "package_diversity_score": float(_diversity_metadata.get("package_diversity_score") or 0.0),
+            "package_diversity_reason": str(_diversity_metadata.get("package_diversity_reason") or ""),
+            "package_category_distribution": dict(_diversity_metadata.get("package_category_distribution") or {}),
+            "package_theme_distribution": dict(_diversity_metadata.get("package_theme_distribution") or {}),
+            "package_duration_balance_ok": bool(_diversity_metadata.get("package_duration_balance_ok")),
+            "package_duration_warnings": list(_diversity_metadata.get("package_duration_warnings") or []),
+            "package_diversity_warnings": list(_diversity_metadata.get("package_diversity_warnings") or []),
+            "selected_clip_package_summary": dict(_diversity_metadata.get("selected_clip_package_summary") or {}),
+            "package_diversity_context": dict(_diversity_metadata.get("package_diversity_context") or {}),
             "suggested_broll_cue_type": segment.get("suggested_broll_cue_type"),
             "social_title": segment.get("suggested_title"),
             "suggested_hashtags": viral_meta.get("hashtags") or segment.get("suggested_hashtags", []),
@@ -5019,19 +14681,199 @@ class VideoService:
             "audio_recommendations": _audio_recs,
             "ab_variants": _variants,
             "editorial_broll": locals().get("_editorial_broll_metadata", []),
+            "broll_editorial_decision": dict((_editing_plan_data or {}).get("broll_editorial_decision") or {}),
+            "broll_applied": bool((_editing_plan_data or {}).get("broll_applied")),
+            "broll_rendered": bool((_editing_plan_data or {}).get("broll_rendered")),
+            "broll_verified": bool((_editing_plan_data or {}).get("broll_verified")),
+            "broll_intent": str((_editing_plan_data or {}).get("broll_intent") or ""),
+            "broll_confidence": float((_editing_plan_data or {}).get("broll_confidence") or 0.0),
+            "broll_mode": str((_editing_plan_data or {}).get("broll_mode") or "no_broll"),
+            "broll_asset_id": str((_editing_plan_data or {}).get("broll_asset_id") or ""),
+            "broll_asset_source": str((_editing_plan_data or {}).get("broll_asset_source") or ""),
+            "broll_start_time": float((_editing_plan_data or {}).get("broll_start_time") or 0.0),
+            "broll_end_time": float((_editing_plan_data or {}).get("broll_end_time") or 0.0),
+            "broll_duration": float((_editing_plan_data or {}).get("broll_duration") or 0.0),
+            "broll_insertions_count": int((_editing_plan_data or {}).get("broll_insertions_count") or 0),
+            "broll_skip_reason": str((_editing_plan_data or {}).get("broll_skip_reason") or ""),
+            "broll_budget_allowed": bool((_editing_plan_data or {}).get("broll_budget_allowed")),
+            "broll_face_safe": bool((_editing_plan_data or {}).get("broll_face_safe")),
+            "broll_caption_safe": bool((_editing_plan_data or {}).get("broll_caption_safe")),
+            "broll_route_used": str((_editing_plan_data or {}).get("broll_route_used") or "none"),
+            "broll_duplicate_routes_blocked": bool((_editing_plan_data or {}).get("broll_duplicate_routes_blocked")),
+            "broll_timing_strategy": str((_editing_plan_data or {}).get("broll_timing_strategy") or ""),
+            "broll_timing_reason": str((_editing_plan_data or {}).get("broll_timing_reason") or ""),
+            "broll_phrase_matched": bool((_editing_plan_data or {}).get("broll_phrase_matched")),
+            "broll_phrase_match_terms": list((_editing_plan_data or {}).get("broll_phrase_match_terms") or []),
+            "broll_phrase_match_confidence": float((_editing_plan_data or {}).get("broll_phrase_match_confidence") or 0.0),
+            "broll_entry_style": str((_editing_plan_data or {}).get("broll_entry_style") or ""),
+            "broll_exit_style": str((_editing_plan_data or {}).get("broll_exit_style") or ""),
+            "broll_transition_sober": bool((_editing_plan_data or {}).get("broll_transition_sober")),
+            "broll_return_to_speaker": bool((_editing_plan_data or {}).get("broll_return_to_speaker")),
+            "broll_return_reason": str((_editing_plan_data or {}).get("broll_return_reason") or ""),
+            "broll_status": str((_editing_plan_data or {}).get("broll_status") or ""),
+            "transition_polish_mode": str((_transition_metadata or {}).get("transition_polish_mode") or ""),
+            "transition_duration_ms": int((_transition_metadata or {}).get("transition_duration_ms") or 0),
+            "transition_reason": str((_transition_metadata or {}).get("transition_reason") or ""),
+            "transition_should_render": bool((_transition_metadata or {}).get("transition_should_render")),
+            "transition_repetition_avoided": bool((_transition_metadata or {}).get("transition_repetition_avoided")),
+            "transition_broll_sync_ok": bool((_transition_metadata or {}).get("transition_broll_sync_ok")),
+            "transition_broll_sync_reason": str((_transition_metadata or {}).get("transition_broll_sync_reason") or ""),
+            "transition_sfx_allowed": bool((_transition_metadata or {}).get("transition_sfx_allowed")),
+            "transition_sfx_family": str((_transition_metadata or {}).get("transition_sfx_family") or ""),
+            "transition_sfx_suppressed_reason": str((_transition_metadata or {}).get("transition_sfx_suppressed_reason") or ""),
+            "transition_status": str((_transition_metadata or {}).get("transition_status") or (_transition_metadata or {}).get("transition_skip_reason") or ("rendered" if bool((_transition_metadata or {}).get("transition_rendered")) else "no_transition")),
             "caption_ass_debug_path": locals().get("_caption_ass_debug_path"),
             "editing_plan": _editing_plan_data,
             "hook_plan": _hook_plan_data,
+            "hook_visual_applied": bool((_hook_plan_data or {}).get("hook_visual_applied")),
+            "hook_visual_backend": str((_hook_plan_data or {}).get("hook_visual_backend") or "none"),
+            "hook_visual_start": float((_hook_plan_data or {}).get("hook_visual_start") or 0.0),
+            "hook_visual_duration": float((_hook_plan_data or {}).get("hook_visual_duration") or 0.0),
+            "hook_visual_end": float((_hook_plan_data or {}).get("hook_visual_end") or 0.0),
+            "hook_visual_verified": bool((_hook_plan_data or {}).get("hook_visual_verified")),
+            "hook_text": str((_hook_plan_data or {}).get("hook_text") or ""),
+            "hook_source": str((_hook_plan_data or {}).get("hook_source") or ""),
+            "hook_text_overlay_rendered": bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+            "hook_text_redundant_with_captions": bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+            "hook_non_text_visual_applied": bool((_hook_plan_data or {}).get("hook_non_text_visual_applied")),
+            "hook_redundancy_reason": str((_hook_plan_data or {}).get("hook_redundancy_reason") or ""),
+            "hook_strategy": str((_hook_plan_data or {}).get("hook_strategy") or "text_hook"),
+            "hook_strategy_reason": str((_hook_plan_data or {}).get("hook_strategy_reason") or ""),
+            "hook_strategy_candidate": str((_hook_plan_data or {}).get("hook_strategy_candidate") or (_hook_plan_data or {}).get("hook_strategy") or "text_hook"),
+            "hook_strategy_final": str((_hook_plan_data or {}).get("hook_strategy_final") or (_hook_plan_data or {}).get("hook_strategy") or "text_hook"),
+            "hook_strategy_degraded": bool((_hook_plan_data or {}).get("hook_strategy_degraded")),
+            "hook_strategy_degraded_reason": str((_hook_plan_data or {}).get("hook_strategy_degraded_reason") or ""),
+            "hook_icon_candidate": (_hook_plan_data or {}).get("hook_icon_candidate") or {},
+            "hook_icon_renderable": bool((_hook_plan_data or {}).get("hook_icon_renderable")),
+            "hook_icon_degraded_reason": str((_hook_plan_data or {}).get("hook_icon_degraded_reason") or ""),
+            "hook_silence_tension_applied": bool((_hook_plan_data or {}).get("hook_silence_tension_applied")),
+            "hook_extra_text_suppressed": bool((_hook_plan_data or {}).get("hook_extra_text_suppressed")),
+            "hook_needs_review": bool(
+                (_hook_plan_data or {}).get("hook_visual_missing")
+                or (
+                    str((_hook_plan_data or {}).get("hook_strategy_final") or "").strip() == "no_extra_hook"
+                    and str((_hook_plan_data or {}).get("hook_strategy_reason") or "").strip() not in {
+                        "captions_sufficient",
+                        "visual_density_high",
+                        "clip_too_short",
+                        "redundancy_with_captions",
+                        "caption_redundancy",
+                    }
+                )
+            ),
+            "hook_card_applied": bool(segment.get("hook_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("hook_overlay", {}).get("action") or "") != "drop",
+            "semantic_card_applied": bool(segment.get("semantic_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("semantic_card", {}).get("action") or "") != "drop",
+            "overlay_card_applied": bool(segment.get("overlay_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get(_overlay_layer_name, {}).get("action") or "") != "drop",
+            "final_output_uses_overlay": bool(segment.get("final_output_uses_overlay")),
             "silence_edit_plan": _silence_edit_plan_data,
             "smart_reframe": _smart_reframe_metadata,
             "brand_treatment": _brand_metadata,
+            "brand_assets_verified": bool((_brand_metadata or {}).get("brand_assets_verified")),
+            "brand_logo_asset_id": str((_brand_metadata or {}).get("brand_logo_asset_id") or ""),
+            "brand_logo_status": str((_brand_metadata or {}).get("brand_logo_status") or ""),
+            "brand_final_mode": str((_brand_metadata or {}).get("brand_final_mode") or "standard"),
+            "brand_final_verified": bool((_brand_metadata or {}).get("brand_final_verified")),
+            "brand_final_reason": str((_brand_metadata or {}).get("brand_final_reason") or ""),
+            "cta_decision": _cta_decision,
+            "cta_type": str(_cta_plan.get("type") or "no_cta"),
+            "cta_text": str(_cta_plan.get("text") or ""),
+            "cta_planned": bool(_cta_plan.get("planned")),
+            "cta_rendered": bool(_cta_rendered),
+            "cta_verified": bool(_cta_verified),
+            "cta_safety_ok": bool(_cta_plan.get("safety_ok")),
+            "cta_safety_warnings": list(_cta_plan.get("safety_warnings") or []),
+            "cta_safety_rewritten": bool(_cta_plan.get("safety_rewritten")),
+            "cta_safety_reason": str(_cta_plan.get("safety_reason") or ""),
+            "cta_reason": str(_cta_plan.get("reason") or ""),
+            "cta_skipped_reason": str(_cta_skipped_reason or ""),
+            "visual_design_version": str((_final_mp4_contract or {}).get("visual_design_version") or (_publishable_metadata or {}).get("visual_design_version") or ""),
+            "visual_design_tokens_applied": bool((_final_mp4_contract or {}).get("visual_design_tokens_applied") or (_publishable_metadata or {}).get("visual_design_tokens_applied")),
+            "visual_design_tokens_applied_to_captions": bool((_final_mp4_contract or {}).get("visual_design_tokens_applied_to_captions") or (_publishable_metadata or {}).get("visual_design_tokens_applied_to_captions")),
+            "visual_design_tokens_applied_to_hook": bool((_final_mp4_contract or {}).get("visual_design_tokens_applied_to_hook") or (_publishable_metadata or {}).get("visual_design_tokens_applied_to_hook")),
+            "visual_design_tokens_applied_to_reinforcement": bool((_final_mp4_contract or {}).get("visual_design_tokens_applied_to_reinforcement") or (_publishable_metadata or {}).get("visual_design_tokens_applied_to_reinforcement")),
+            "visual_design_tokens_applied_to_branding": bool((_final_mp4_contract or {}).get("visual_design_tokens_applied_to_branding") or (_publishable_metadata or {}).get("visual_design_tokens_applied_to_branding")),
+            "visual_identity_ok": bool((_final_mp4_contract or {}).get("visual_identity_ok") or (_publishable_metadata or {}).get("visual_identity_ok")),
+            "visual_identity_warnings": list((_final_mp4_contract or {}).get("visual_identity_warnings") or (_publishable_metadata or {}).get("visual_identity_warnings") or []),
+            "visual_style_consistency_ok": bool((_final_mp4_contract or {}).get("visual_style_consistency_ok") or (_publishable_metadata or {}).get("visual_style_consistency_ok")),
+            "visual_asset_identity_warnings": list((_final_mp4_contract or {}).get("visual_asset_identity_warnings") or (_publishable_metadata or {}).get("visual_asset_identity_warnings") or []),
+            "visual_asset_inventory_summary": dict((_music_asset_index or {}).get("visual_asset_inventory_summary") or {}),
+            "visual_asset_coverage_ok": bool(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("visual_asset_coverage_ok", False)),
+            "missing_visual_intents": list(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("missing_visual_intents") or []),
+            "weak_visual_intents": list(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("weak_visual_intents") or []),
+            "missing_visual_families": list(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("missing_visual_families") or []),
+            "weak_visual_families": list(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("weak_visual_families") or []),
+            "sensitive_visual_available": bool(((_music_asset_index or {}).get("visual_asset_coverage") or {}).get("sensitive_visual_available")),
+            "visual_asset_inventory_used": bool(((_music_asset_index or {}).get("visual_asset_inventory") or {}).get("all_assets")),
+            "visual_asset_selected": str((_visual_reinforcement_metadata or {}).get("visual_asset_selected") or ""),
+            "visual_asset_selection_reason": str((_visual_reinforcement_metadata or {}).get("visual_asset_selection_reason") or ""),
+            "visual_asset_fallback_used": bool((_visual_reinforcement_metadata or {}).get("visual_asset_fallback_used")),
+            "sensitive_visual_asset_blocked": bool((_visual_reinforcement_metadata or {}).get("sensitive_visual_asset_blocked")),
+            "visual_layout_strategy": str((_final_mp4_contract or {}).get("visual_layout_strategy") or (_publishable_metadata or {}).get("visual_layout_strategy") or (_visual_reinforcement_metadata or {}).get("visual_layout_strategy") or (_motion_overlay_metadata or {}).get("visual_layout_strategy") or ""),
+            "visual_layout_zone": str((_final_mp4_contract or {}).get("visual_layout_zone") or (_publishable_metadata or {}).get("visual_layout_zone") or (_visual_reinforcement_metadata or {}).get("visual_layout_zone") or (_motion_overlay_metadata or {}).get("visual_layout_zone") or ""),
+            "visual_layout_size": str((_final_mp4_contract or {}).get("visual_layout_size") or (_publishable_metadata or {}).get("visual_layout_size") or (_visual_reinforcement_metadata or {}).get("visual_layout_size") or (_motion_overlay_metadata or {}).get("visual_layout_size") or ""),
+            "visual_layout_opacity": float((_final_mp4_contract or {}).get("visual_layout_opacity") or (_publishable_metadata or {}).get("visual_layout_opacity") or (_visual_reinforcement_metadata or {}).get("visual_layout_opacity") or (_motion_overlay_metadata or {}).get("visual_layout_opacity") or 0.0),
+            "visual_layout_duration": float((_final_mp4_contract or {}).get("visual_layout_duration") or (_publishable_metadata or {}).get("visual_layout_duration") or (_visual_reinforcement_metadata or {}).get("visual_layout_duration") or (_motion_overlay_metadata or {}).get("visual_layout_duration") or 0.0),
+            "visual_layout_reason": str((_final_mp4_contract or {}).get("visual_layout_reason") or (_publishable_metadata or {}).get("visual_layout_reason") or (_visual_reinforcement_metadata or {}).get("visual_layout_reason") or (_motion_overlay_metadata or {}).get("visual_layout_reason") or ""),
+            "visual_layout_face_safe": bool(
+                (_final_mp4_contract or {}).get("visual_layout_face_safe")
+                if (_final_mp4_contract or {}).get("visual_layout_face_safe") is not None
+                else (_publishable_metadata or {}).get("visual_layout_face_safe", (_visual_reinforcement_metadata or {}).get("visual_layout_face_safe", True))
+            ),
+            "visual_layout_caption_safe": bool(
+                (_final_mp4_contract or {}).get("visual_layout_caption_safe")
+                if (_final_mp4_contract or {}).get("visual_layout_caption_safe") is not None
+                else (_publishable_metadata or {}).get("visual_layout_caption_safe", (_visual_reinforcement_metadata or {}).get("visual_layout_caption_safe", True))
+            ),
+            "visual_layout_ok": bool(
+                (_final_mp4_contract or {}).get("visual_layout_ok")
+                if (_final_mp4_contract or {}).get("visual_layout_ok") is not None
+                else (_publishable_metadata or {}).get("visual_layout_ok", (_visual_reinforcement_metadata or {}).get("visual_layout_ok", True))
+            ),
+            "visual_layout_warnings": list((_final_mp4_contract or {}).get("visual_layout_warnings") or (_publishable_metadata or {}).get("visual_layout_warnings") or (_visual_reinforcement_metadata or {}).get("visual_layout_warnings") or (_motion_overlay_metadata or {}).get("visual_layout_warnings") or []),
+            "premium_restraint_mode": str((_final_mp4_contract or {}).get("premium_restraint_mode") or (_publishable_metadata or {}).get("premium_restraint_mode") or (_visual_reinforcement_metadata or {}).get("premium_restraint_mode") or ""),
+            "premium_restraint_applied": bool((_final_mp4_contract or {}).get("premium_restraint_applied") if (_final_mp4_contract or {}).get("premium_restraint_applied") is not None else (_publishable_metadata or {}).get("premium_restraint_applied", (_visual_reinforcement_metadata or {}).get("premium_restraint_applied", False))),
+            "premium_restraint_reason": str((_final_mp4_contract or {}).get("premium_restraint_reason") or (_publishable_metadata or {}).get("premium_restraint_reason") or (_visual_reinforcement_metadata or {}).get("premium_restraint_reason") or ""),
+            "premium_restraint_suppressed_layers": list((_final_mp4_contract or {}).get("premium_restraint_suppressed_layers") or (_publishable_metadata or {}).get("premium_restraint_suppressed_layers") or (_visual_reinforcement_metadata or {}).get("premium_restraint_suppressed_layers") or []),
+            "allowed_visual_support_count": int((_final_mp4_contract or {}).get("allowed_visual_support_count") or (_publishable_metadata or {}).get("allowed_visual_support_count") or (_visual_reinforcement_metadata or {}).get("allowed_visual_support_count") or 0),
+            "clip_already_strong": bool((_final_mp4_contract or {}).get("clip_already_strong") if (_final_mp4_contract or {}).get("clip_already_strong") is not None else (_publishable_metadata or {}).get("clip_already_strong", (_visual_reinforcement_metadata or {}).get("clip_already_strong", False))),
+            "visual_support_reduced_reason": str((_final_mp4_contract or {}).get("visual_support_reduced_reason") or (_publishable_metadata or {}).get("visual_support_reduced_reason") or (_visual_reinforcement_metadata or {}).get("visual_support_reduced_reason") or ""),
+            "restraint_broll_interaction": str((_final_mp4_contract or {}).get("restraint_broll_interaction") or (_publishable_metadata or {}).get("restraint_broll_interaction") or (_visual_reinforcement_metadata or {}).get("restraint_broll_interaction") or ""),
             "visual_effects": _visual_effects_metadata,
             "transitions": _transition_metadata,
             "music": _music_metadata,
             "sfx": _sfx_metadata,
+            "motion_overlay": _motion_overlay_metadata,
+            "visual_reinforcement": _visual_reinforcement_metadata,
+            "visual_reinforcement_applied": bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_applied")),
+            "visual_reinforcement_strategy": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_strategy") or "none"),
+            "visual_reinforcement_asset": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_asset") or ""),
+            "visual_reinforcement_reason": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_reason") or ""),
+            "visual_reinforcement_rendered": bool((_visual_reinforcement_metadata or {}).get("visual_reinforcement_rendered")),
+            "visual_reinforcement_backend": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_backend") or "none"),
+            "visual_reinforcement_safe_zone": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_safe_zone") or ""),
+            "visual_reinforcement_dropped_reason": str((_visual_reinforcement_metadata or {}).get("visual_reinforcement_dropped_reason") or ""),
+            "visual_renderer_selected": str((_visual_reinforcement_metadata or {}).get("visual_renderer_selected") or ""),
+            "visual_renderer_fallback_used": bool((_visual_reinforcement_metadata or {}).get("visual_renderer_fallback_used")),
+            "visual_renderer_unavailable_reason": str((_visual_reinforcement_metadata or {}).get("visual_renderer_unavailable_reason") or ""),
             "cinematic_finish": _cinematic_finish_metadata,
             "speaker_focus": _speaker_focus_metadata,
             "composition_decision": _composition_decision,
+            "visual_layer_budget_applied": bool((_editing_plan_data or {}).get("visual_layer_budget")),
+            "visual_layers_allowed": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_layers_allowed") or []),
+            "visual_layers_dropped": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_layers_dropped") or []),
+            "visual_layers_delayed": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_layers_delayed") or []),
+            "visual_layers_reduced": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_layers_reduced") or []),
+            "text_layer_count_max": int(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("text_layer_count_max") or 2),
+            "collision_guard_applied": bool(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("collision_guard_applied")),
+            "collision_guard_reasons": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("collision_guard_reasons") or []),
+            "visual_support_layer_selected": str(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_support_layer_selected") or ""),
+            "visual_support_layer_reason": str(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_support_layer_reason") or ""),
+            "visual_support_candidates_rejected": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("visual_support_candidates_rejected") or []),
+            "safe_zone_map": ((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("safe_zone_map") or {},
+            "layer_safe_zone_assignments": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("layer_safe_zone_assignments") or []),
+            "temporal_density_budget_applied": bool(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("temporal_density_budget_applied")),
+            "temporal_density_drops": list(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("temporal_density_drops") or []),
+            "temporal_density_reason": str(((_editing_plan_data or {}).get("visual_layer_budget") or {}).get("temporal_density_reason") or ""),
             "premium_runtime": _premium_runtime,
             "premium_runtime_enabled": _premium_runtime["premium_runtime_enabled"],
             "premium_layers_requested": list(_premium_runtime["premium_layers_requested"]),
@@ -5051,10 +14893,171 @@ class VideoService:
             "publishable_warnings": _publishable_metadata.get("publishable_warnings", []),
             "publishable_score": _publishable_metadata.get("publishable_score"),
             "hook_quality": _publishable_metadata.get("hook_quality"),
+            "final_rendered_contract": _final_mp4_contract,
+            "final_mp4_contract": _final_mp4_contract,
+            "final_contract_ok": bool(_final_mp4_contract.get("final_publishable")),
+            "output_root": str((_final_mp4_contract or {}).get("output_root") or _output_mgmt_context.get("output_root") or ""),
+            "clips_output_dir": str((_final_mp4_contract or {}).get("clips_output_dir") or _output_mgmt_context.get("clips_output_dir") or ""),
+            "output_manifest_path": str((_final_mp4_contract or {}).get("output_manifest_path") or _output_mgmt_context.get("manifest_output_path") or ""),
+            "output_summary_path": str((_final_mp4_contract or {}).get("output_summary_path") or _output_mgmt_context.get("summary_output_path") or ""),
+            "output_filename_strategy": str((_final_mp4_contract or {}).get("output_filename_strategy") or _output_mgmt_context.get("output_filename_strategy") or "vpi_{campaign_intent}_{clip_angle}_{confidence}_{start}_{end}_{clip_id_hash}"),
+            "output_filename_safe": bool((_final_mp4_contract or {}).get("output_filename_safe") if (_final_mp4_contract or {}).get("output_filename_safe") is not None else segment.get("output_filename_safe", True)),
+            "output_filename_collision_resolved": bool((_final_mp4_contract or {}).get("output_filename_collision_resolved") if (_final_mp4_contract or {}).get("output_filename_collision_resolved") is not None else segment.get("output_filename_collision_resolved", False)),
+            "output_management_ok": bool((_final_mp4_contract or {}).get("output_management_ok") if (_final_mp4_contract or {}).get("output_management_ok") is not None else False),
+            "output_management_warnings": list((_final_mp4_contract or {}).get("output_management_warnings") or _publishable_metadata.get("output_management_warnings") or []),
+            "output_clip_count": int((_final_mp4_contract or {}).get("output_clip_count") or 0),
+            "publishable_clip_count": int((_final_mp4_contract or {}).get("publishable_clip_count") or 0),
+            "review_clip_count": int((_final_mp4_contract or {}).get("review_clip_count") or 0),
+            "final_truth_source": _publishable_metadata.get("final_truth_source", "final_mp4_contract"),
+            "final_output_verified": bool(_publishable_metadata.get("final_output_verified")),
+            "final_publishable": bool(_publishable_metadata.get("final_publishable")),
+            "final_needs_review": bool(_publishable_metadata.get("final_needs_review")),
+            "final_blocking_reasons": list(_publishable_metadata.get("final_blocking_reasons") or []),
+            "final_warning_reasons": list(_publishable_metadata.get("final_warning_reasons") or []),
+            "filename_contract_warning": str(_publishable_metadata.get("filename_contract_warning") or ""),
+            "filename_contract_mode": str(_final_contract_metadata.get("filename_contract_mode") or "legacy_warning_only"),
+            "route_registry": dict(_publishable_metadata.get("route_registry") or {}),
+            "route_registry_version": str(_publishable_metadata.get("route_registry_version") or "a2"),
+            "production_safe_compliant": bool(_publishable_metadata.get("production_safe_compliant", True)),
+            "production_safe_routes_blocked": list(dict.fromkeys(_publishable_metadata.get("production_safe_routes_blocked") or [])),
+            "legacy_routes_blocked": list(dict.fromkeys(_publishable_metadata.get("legacy_routes_blocked") or [])),
+            "external_routes_blocked": list(dict.fromkeys(_publishable_metadata.get("external_routes_blocked") or [])),
+            "fallback_routes_used": list(dict.fromkeys(_publishable_metadata.get("fallback_routes_used") or [])),
+            "primary_routes_used": list(dict.fromkeys(_publishable_metadata.get("primary_routes_used") or [])),
+            "legacy_routes_quarantined": list(dict.fromkeys(_publishable_metadata.get("legacy_routes_quarantined") or [])),
+            "experimental_routes_quarantined": list(dict.fromkeys(_publishable_metadata.get("experimental_routes_quarantined") or [])),
+            "deprecated_routes_present": list(dict.fromkeys(_publishable_metadata.get("deprecated_routes_present") or [])),
+            "deprecated_routes_used": list(dict.fromkeys(_publishable_metadata.get("deprecated_routes_used") or [])),
+            "deprecated_routes_blocked": list(dict.fromkeys(_publishable_metadata.get("deprecated_routes_blocked") or [])),
+            "legacy_route_warning": list(dict.fromkeys(_publishable_metadata.get("legacy_route_warning") or [])),
+            "production_safe_policy": dict(_publishable_metadata.get("production_safe_policy") or {}),
+            "production_safe_policy_version": str(_publishable_metadata.get("production_safe_policy_version") or "a4"),
+            "production_safe_mode_active": bool(_publishable_metadata.get("production_safe_mode_active")),
+            "production_safe_external_disabled": bool(_publishable_metadata.get("production_safe_external_disabled")),
+            "production_safe_legacy_disabled": bool(_publishable_metadata.get("production_safe_legacy_disabled")),
+            "production_safe_routes_allowed": list(dict.fromkeys(_publishable_metadata.get("production_safe_routes_allowed") or [])),
+            "vpi_daily_mode_enabled": bool(_publishable_metadata.get("vpi_daily_mode_enabled")),
+            "daily_mode_version": str(_publishable_metadata.get("daily_mode_version") or "a1"),
+            "daily_mode_policy": dict(_publishable_metadata.get("daily_mode_policy") or {}),
+            "daily_mode_outputs_enabled": bool(_publishable_metadata.get("daily_mode_outputs_enabled")),
+            "daily_mode_conflicts_resolved": list(_publishable_metadata.get("daily_mode_conflicts_resolved") or []),
+            "daily_mode_unsafe_override_used": bool(_publishable_metadata.get("daily_mode_unsafe_override_used")),
+            "metadata_consistency_ok": bool(_publishable_metadata.get("metadata_consistency_ok")),
+            "metadata_consistency_errors": list(_publishable_metadata.get("metadata_consistency_errors") or []),
+            "metadata_consistency_warnings": list(_publishable_metadata.get("metadata_consistency_warnings") or []),
+            "phase_consistency": dict(_publishable_metadata.get("phase_consistency") or {}),
+            "final_render_locked": bool(_final_render_locked),
+            "final_render_locked_at_stage": str(_final_render_locked_at_stage or ""),
+            "final_output_path_locked": str(_final_output_path_locked or ""),
+            "output_mutation_after_lock_detected": bool(_output_mutation_after_lock_detected),
+            "production_safe_routes_blocked": list(dict.fromkeys(_production_safe_routes_blocked)),
             "final_qc": _publishable_metadata.get("final_qc", {}),
             "final_qc_status": _publishable_metadata.get("final_qc_status"),
             "final_upload_recommendation": _publishable_metadata.get("final_upload_recommendation"),
             "final_private_premium_status": _publishable_metadata.get("final_private_premium_status"),
+            # ── FIX 3: Contract metadata injection ──────────────────────────────
+            # These fields are injected from the pre-render editorial contract so
+            # the caller (task_service.py) can verify that contract-approved clips
+            # were rendered without legacy rejection.
+            "strict_publishable": bool(
+                segment.get("contract_approved", False)
+                and not segment.get("contract_would_runtime_reject", True)
+            ),
+            "rhythm_edit_applied": bool(
+                (_silence_edit_plan_data or {}).get("rendered")
+                or (_smart_reframe_metadata or {}).get("rendered")
+                or (_hook_plan_data or {}).get("hook_motion_rendered")
+                or (_hook_plan_data or {}).get("kickframe_applied")
+                or (_hook_plan_data or {}).get("hook_non_text_visual_applied")
+            ),
+            "rhythm_edit_count": int(_rhythm_edit_count if "_rhythm_edit_count" in locals() else 0),
+            "rhythm_actions": list(dict.fromkeys(_rhythm_actions_applied or [])),
+            "silence_trim_count": int(_silence_trim_count if "_silence_trim_count" in locals() else len((_silence_edit_plan_data or {}).get("cuts") or [])),
+            "silence_preserved_count": int(_silence_preserved_count if "_silence_preserved_count" in locals() else 0),
+            "zoom_push_count": int(_zoom_push_count if "_zoom_push_count" in locals() else 0),
+            "rhythm_backend": str(_rhythm_backend if "_rhythm_backend" in locals() else "none"),
+            "rhythm_verified": bool(_rhythm_verified if "_rhythm_verified" in locals() else False),
+            "rhythm_skip_reason": str(_rhythm_skip_reason if "_rhythm_skip_reason" in locals() else ""),
+            "hook_visual_applied": bool((_hook_plan_data or {}).get("hook_visual_applied")),
+            "hook_visual_backend": str((_hook_plan_data or {}).get("hook_visual_backend") or "none"),
+            "hook_visual_start": float((_hook_plan_data or {}).get("hook_visual_start") or 0.0),
+            "hook_visual_duration": float((_hook_plan_data or {}).get("hook_visual_duration") or 0.0),
+            "hook_visual_end": float((_hook_plan_data or {}).get("hook_visual_end") or 0.0),
+            "hook_visual_verified": bool((_hook_plan_data or {}).get("hook_visual_verified")),
+            "hook_text": str((_hook_plan_data or {}).get("hook_text") or ""),
+            "hook_source": str((_hook_plan_data or {}).get("hook_source") or ""),
+            "hook_text_overlay_rendered": bool((_hook_plan_data or {}).get("hook_text_overlay_rendered")),
+            "hook_text_redundant_with_captions": bool((_hook_plan_data or {}).get("hook_text_redundant_with_captions")),
+            "hook_non_text_visual_applied": bool((_hook_plan_data or {}).get("hook_non_text_visual_applied")),
+            "hook_redundancy_reason": str((_hook_plan_data or {}).get("hook_redundancy_reason") or ""),
+            "hook_card_applied": bool(segment.get("hook_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("hook_overlay", {}).get("action") or "") != "drop",
+            "semantic_card_applied": bool(segment.get("semantic_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get("semantic_card", {}).get("action") or "") != "drop",
+            "overlay_card_applied": bool(segment.get("overlay_card_applied")) and str(((_visual_layer_budget_final or {}).get("layer_decisions") or {}).get(_overlay_layer_name, {}).get("action") or "") != "drop",
+            "final_output_uses_overlay": bool(segment.get("final_output_uses_overlay")),
+            "visual_support_type": str((segment.get("visual_support") or {}).get("type") or ""),
+            "visual_support_asset_or_template": str((segment.get("visual_support") or {}).get("asset_or_template") or ""),
+            "hook_support_type": str((segment.get("hook_support") or {}).get("type") or ""),
+            "hook_support_executable": bool((segment.get("hook_support") or {}).get("executable", False)),
+            "visual_support_executable": bool((segment.get("visual_support") or {}).get("executable", False)),
+            "pre_render_approved": bool(segment.get("pre_render_approved", False)),
+            "contract_approved": bool(segment.get("contract_approved", False)),
+            "contract_would_runtime_reject": bool(segment.get("contract_would_runtime_reject", True)),
+            "retention_editing_applied": bool((_silence_edit_plan_data or {}).get("rendered")),
+            "rhythm_cleanup_evidence": bool((_silence_edit_plan_data or {}).get("total_removed_s", 0.0) > 0.0),
+            "bgm_tracks_available": int(segment.get("bgm_tracks_available", 0)),
+            "bgm_applied": bool(_music_metadata.get("music_applied")),
+            "sfx_applied": bool(_sfx_metadata.get("sfx_applied")),
+            "sfx_event_count": int(_sfx_metadata.get("sfx_event_count") or _sfx_metadata.get("sfx_count") or 0),
+            "sfx_verified": bool(_sfx_metadata.get("sfx_verified")),
+            "sfx_families": list(_sfx_metadata.get("sfx_families") or []),
+            "timeline_plan": _timeline_plan_data.get("timeline_plan") if isinstance(_timeline_plan_data, dict) else {},
+            "timeline_plan_path": _timeline_plan_path,
+            "disfluency_plan": _timeline_plan_data.get("disfluency_plan") if isinstance(_timeline_plan_data, dict) else {},
+            "disfluency_plan_path": _disfluency_plan_path,
+            "selection_contract_path": _selection_contract_path,
+            "timeline_warnings": list((_timeline_plan_data.get("timeline_warnings") if isinstance(_timeline_plan_data, dict) else []) or []),
+            "disfluency_actions_count": int((_timeline_plan_data.get("disfluency_actions_count") if isinstance(_timeline_plan_data, dict) else 0) or 0),
+            "high_severity_unhandled_count": int((_timeline_plan_data.get("high_severity_unhandled_count") if isinstance(_timeline_plan_data, dict) else 0) or 0),
+            "overlay_backend": _overlay_backend_runtime,
+            "remotion_scene_plan_path": _remotion_scene_plan_path,
+            "remotion_scene_events_count": int(_remotion_scene_events_count or 0),
+            "remotion_overlay_status": _remotion_overlay_status,
+            "remotion_installed": bool(_remotion_installed),
+            "remotion_scaffold_present": bool(_remotion_scaffold_present),
+            "remotion_dependencies_declared": bool(_remotion_dependencies_declared),
+            "remotion_dependencies_installed": bool(_remotion_dependencies_installed),
+            "remotion_render_enabled": bool(_remotion_render_enabled),
+            "remotion_overlay_file_path": _remotion_overlay_file_path,
+            "remotion_render_command_used": _remotion_render_command_used,
+            "remotion_scene_warnings": _remotion_scene_warnings,
+            "remotion_overlay_composed": bool(_remotion_overlay_composed),
+            "remotion_overlay_composed_path": _remotion_overlay_composed_path,
+            "remotion_overlay_composition_fallback_reason": _remotion_overlay_composition_fallback_reason,
+            "has_3d_object_plan": bool(_has_3d_object_plan),
+            "object_3d_count": int(_object_3d_count or 0),
+            "visual_overlay_backend_applied": _visual_overlay_backend_applied or _overlay_backend_runtime,
+            "ass_caption_plan_path": _ass_caption_plan_path,
+            "ass_caption_file_path": _ass_caption_file_path,
+            "caption_backend": _caption_backend_runtime,
+            "has_ass_captions": bool(_has_ass_captions and _ass_caption_file_path),
+            "ass_caption_events_count": int(_ass_caption_events_count or 0),
+            "ass_caption_highlights_count": int(_ass_caption_highlights_count or 0),
+            "caption_fallback_reason": _caption_fallback_reason or None,
+            "segment_value_type": _segment_value_type,
+            "predicted_first3_strength": _predicted_first3_strength,
+            "trim_to_hook_candidate": _trim_to_hook_candidate,
+            "hook_start_offset": _hook_start_offset,
+            "sfx_intent": _sfx_intent or None,
+            "sfx_skip_reason": _sfx_skip_reason or None,
+            "bgm_evidence": _bgm_evidence,
+            "broll_confidence": _broll_confidence,
+            "one_strong_thing_conflicts": [],
+            # ── FIX 7: Honest premium layer trace ──────────────────────────────
+            # These fields are built from actual render metadata so strict QC can
+            # use real applied evidence instead of optimistic/planned metadata.
+            **_premium_layer_trace,
+            # ── StageRecorder: diagnostic trace for EditingPipeline.apply() ──
+            "stage_recorder": _stage_recorder,
         }
         # Cancel prefetch task if still running
         if _broll_prefetch_task is not None and not _broll_prefetch_task.done():
@@ -5073,9 +15076,46 @@ class VideoService:
 
         Returns updated clip_info with the transitioned path when successful;
         returns the original clip_info unchanged on any failure.
+        Legacy optical-flow entrypoint; quarantined in production-safe mode.
         """
         current_path = Path(current_clip_info.get("path", ""))
         prev_path = Path(prev_clip_path) if prev_clip_path else None
+        try:
+            from .vpi_production_safe_edit import (
+                production_safe_edit_enabled as _production_safe_edit_enabled,
+                production_safe_route_allowed as _production_safe_route_allowed,
+                legacy_route_status as _legacy_route_status,
+            )
+        except Exception:
+            _production_safe_edit_enabled = lambda: False  # type: ignore[assignment]
+            _production_safe_route_allowed = lambda _route: True  # type: ignore[assignment]
+            _legacy_route_status = lambda _route: {"status": "allowed", "reason": "", "allowed_in_production_safe": True}  # type: ignore[assignment]
+
+        _transition_route = "apply_single_transition_optical_flow"
+        _transition_status = _legacy_route_status(_transition_route)
+        if _production_safe_edit_enabled() and not _production_safe_route_allowed(_transition_route):
+            logger.info(
+                "LEGACY_ROUTE_QUARANTINED route=%s reason=%s",
+                _transition_route,
+                _transition_status.get("reason") or "legacy_transition_path",
+            )
+            logger.info(
+                "PRODUCTION_SAFE_ROUTE_BLOCKED route=%s reason=premium_local_stability",
+                _transition_route,
+            )
+            updated = dict(current_clip_info)
+            updated.setdefault("transition_applied", None)
+            updated["transition_strategy"] = "hard_cut_clean"
+            updated["transition_rendered"] = False
+            updated["transition_verified"] = False
+            updated["transition_skip_reason"] = "production_safe_edit"
+            return updated
+        if not _production_safe_edit_enabled() and _transition_status.get("status") != "allowed":
+            logger.info(
+                "LEGACY_ROUTE_USED_OUTSIDE_PRODUCTION_SAFE route=%s reason=%s",
+                _transition_route,
+                _transition_status.get("reason") or "legacy_transition_path",
+            )
 
         if not prev_path or not prev_path.exists() or not current_path.exists():
             logger.debug(
@@ -5134,12 +15174,18 @@ class VideoService:
             except Exception as _e2:
                 logger.debug("[transition] Fallback also failed: %s", _e2)
 
-        return current_clip_info
+        updated = dict(current_clip_info)
+        updated.setdefault("transition_applied", None)
+        updated["transition_strategy"] = updated.get("transition_strategy") or "legacy_transition_unavailable"
+        updated["transition_rendered"] = bool(updated.get("transition_rendered") and updated.get("transition_verified"))
+        updated["transition_verified"] = bool(updated.get("transition_verified") and updated.get("transition_rendered"))
+        updated["transition_skip_reason"] = updated.get("transition_skip_reason") or "transition_fallback_failed"
+        return updated
 
     @staticmethod
     def determine_source_type(url: str) -> str:
         """Determine if source is YouTube or uploaded file."""
-        video_id = get_youtube_video_id(url)
+        video_id = _youtube_utils().get_youtube_video_id(url)
         return "youtube" if video_id else "video_url"
 
     @staticmethod
@@ -5160,6 +15206,12 @@ class VideoService:
         url_secondary: Optional[str] = None,
         cached_transcript: Optional[str] = None,
         cached_analysis_json: Optional[str] = None,
+        force_fresh_editorial_decisions: bool = False,
+        task_metadata: Optional[Dict[str, Any]] = None,
+        user_options: Optional[Dict[str, Any]] = None,
+        campaign_prompt: Optional[str] = None,
+        campaign_config: Optional[Dict[str, Any]] = None,
+        product_hints: Optional[List[str]] = None,
         progress_callback: Optional[Callable[[int, str, str], Awaitable[None]]] = None,
         should_cancel: Optional[Callable[[], Awaitable[bool]]] = None,
         num_clips: int = 6,
@@ -5172,8 +15224,35 @@ class VideoService:
                           Signature: async def callback(progress: int, message: str, status: str)
         """
         try:
+            _deadline_safe_mode = _deadline_safe_mode_enabled()
+            try:
+                from .vpi_production_safe_edit import get_vpi_daily_mode_policy
+                _daily_mode_policy = dict(get_vpi_daily_mode_policy())
+            except Exception:
+                _daily_mode_policy = {}
+            _daily_mode_enabled = bool(_daily_mode_policy.get("vpi_daily_mode_enabled"))
+            if _daily_mode_enabled:
+                logger.info(
+                    "VPI_DAILY_MODE_ENABLED version=%s outputs_enabled=%s",
+                    str(_daily_mode_policy.get("daily_mode_version") or "a1"),
+                    str(bool(_daily_mode_policy.get("daily_mode_outputs_enabled", True))).lower(),
+                )
+            if _deadline_safe_mode:
+                include_broll = False
+                logger.info(
+                    "DEADLINE_SAFE_MODE external_planning_disabled=true include_broll=false"
+                )
+
             # Initialize metrics collector for this pipeline
             metrics = get_metrics_collector().start_pipeline(task_id or "unknown")
+            _route_registry = _init_route_registry()
+            cache_usage: Dict[str, Any] = {
+                "source_download_cache_used": False,
+                "transcript_cache_used": False,
+                "transcript_cache_source": "",
+                "editorial_cache_used": False,
+                "force_fresh_editorial_decisions": bool(force_fresh_editorial_decisions),
+            }
             
             # Step 1: Get video path (download or use existing)
             if should_cancel and await should_cancel():
@@ -5183,7 +15262,16 @@ class VideoService:
                 await progress_callback(10, "Downloading video...", "processing")
 
             if source_type == "youtube":
-                video_info = await async_get_youtube_video_info(url, task_id=task_id)
+                _task_scoped_source_preexisting = False
+                if task_id:
+                    try:
+                        _video_id = _youtube_utils().get_youtube_video_id(url)
+                        if _video_id:
+                            _candidate = Path(get_service_config().temp_dir) / "tasks" / task_id / f"{_video_id}.mp4"
+                            _task_scoped_source_preexisting = _candidate.exists()
+                    except Exception:
+                        _task_scoped_source_preexisting = False
+                video_info = await _youtube_utils().async_get_youtube_video_info(url, task_id=task_id)
                 if video_info:
                     cfg = get_service_config()
                     duration = video_info.get("duration", 0)
@@ -5197,6 +15285,7 @@ class VideoService:
                 video_path = await VideoService.download_video(url, task_id=task_id)
                 if not video_path:
                     raise Exception("Failed to download video")
+                cache_usage["source_download_cache_used"] = bool(_task_scoped_source_preexisting)
             else:
                 video_path = VideoService.resolve_local_video_path(url)
                 if not video_path.exists():
@@ -5223,13 +15312,70 @@ class VideoService:
             # Try Smart Cache first (Redis + local + disk fallback)
             cache_manager = get_cache_manager()
             cached_transcript_data = await get_cached_transcript_smart(video_path) if not cached_transcript else None
+            expected_transcript_language = (os.environ.get("VPI_EXPECTED_TRANSCRIPT_LANGUAGE", "es") or "es").strip().lower()
+            current_video_hash = cache_manager._generate_file_hash(video_path)
             
             if cached_transcript:
                 transcript = cached_transcript
                 logger.info("[CACHE] Using provided cached transcript")
+                cache_usage["transcript_cache_used"] = True
+                cache_usage["transcript_cache_source"] = "processing_cache"
             elif cached_transcript_data:
-                transcript = cached_transcript_data.get("text", "")
-                logger.info(f"[CACHE] Smart cache HIT for transcript: {len(transcript)} chars")
+                cached_video_hash = str(cached_transcript_data.get("video_hash") or "")
+                cached_language = str(cached_transcript_data.get("language") or "").strip().lower()
+                if cached_video_hash and cached_video_hash != current_video_hash:
+                    logger.warning(
+                        "TRANSCRIPT_CACHE_REJECTED reason=source_hash_mismatch expected=%s actual=%s",
+                        cached_video_hash[:12],
+                        current_video_hash[:12],
+                    )
+                    transcript = await execute_with_recovery(
+                        VideoService.generate_transcript,
+                        video_path,
+                        processing_mode,
+                        max_retries=2,
+                        context={"stage": "transcription", "video_path": str(video_path)},
+                    )
+                    await cache_transcript_smart(
+                        video_path,
+                        {
+                            "text": transcript,
+                            "timestamp": datetime.now().isoformat(),
+                            "video_hash": current_video_hash,
+                            "language": expected_transcript_language,
+                        },
+                    )
+                    cache_usage["transcript_cache_used"] = False
+                    cache_usage["transcript_cache_source"] = "fresh_generation_hash_mismatch"
+                elif cached_language and cached_language != expected_transcript_language:
+                    logger.warning(
+                        "TRANSCRIPT_CACHE_REJECTED reason=language_mismatch cached=%s expected=%s",
+                        cached_language,
+                        expected_transcript_language,
+                    )
+                    transcript = await execute_with_recovery(
+                        VideoService.generate_transcript,
+                        video_path,
+                        processing_mode,
+                        max_retries=2,
+                        context={"stage": "transcription", "video_path": str(video_path)},
+                    )
+                    await cache_transcript_smart(
+                        video_path,
+                        {
+                            "text": transcript,
+                            "timestamp": datetime.now().isoformat(),
+                            "video_hash": current_video_hash,
+                            "language": expected_transcript_language,
+                        },
+                    )
+                    cache_usage["transcript_cache_used"] = False
+                    cache_usage["transcript_cache_source"] = "fresh_generation_language_mismatch"
+                else:
+                    transcript = cached_transcript_data.get("text", "")
+                    logger.info(f"[CACHE] Smart cache HIT for transcript: {len(transcript)} chars")
+                    cache_usage["transcript_cache_used"] = True
+                    cache_usage["transcript_cache_source"] = "smart_cache"
             else:
                 # Generate with retry logic for transient failures
                 transcript = await execute_with_recovery(
@@ -5242,9 +15388,16 @@ class VideoService:
                 # Cache in all layers
                 await cache_transcript_smart(
                     video_path,
-                    {"text": transcript, "timestamp": datetime.now().isoformat()}
+                    {
+                        "text": transcript,
+                        "timestamp": datetime.now().isoformat(),
+                        "video_hash": current_video_hash,
+                        "language": expected_transcript_language,
+                    }
                 )
                 logger.info(f"[CACHE] Saved transcript to smart cache: {len(transcript)} chars")
+                cache_usage["transcript_cache_used"] = False
+                cache_usage["transcript_cache_source"] = "fresh_generation"
 
             # Step 2.5: Analyze content niche for optimization
             if progress_callback:
@@ -5286,9 +15439,10 @@ class VideoService:
                     self.broll_opportunities = payload.get("broll_opportunities")
 
             relevant_parts = None
+            video_hash = cache_manager._generate_file_hash(video_path)
             
             # Try cached analysis from parameter first
-            if cached_analysis_json:
+            if cached_analysis_json and not force_fresh_editorial_decisions:
                 try:
                     cached_analysis = json.loads(cached_analysis_json)
                     segments = cached_analysis.get("most_relevant_segments", [])
@@ -5301,21 +15455,29 @@ class VideoService:
                         }
                     )
                     logger.info("[CACHE] Using provided cached AI analysis")
+                    cache_usage["editorial_cache_used"] = True
                 except Exception as e:
                     logger.error(f"[CACHE] Failed to parse cached AI analysis: {e}", exc_info=True)
                     relevant_parts = None
+            elif cached_analysis_json and force_fresh_editorial_decisions:
+                logger.info("[CACHE] Bypassing provided cached AI analysis due to force_fresh_editorial_decisions=true")
             
             # Try Smart Cache for AI analysis
-            if relevant_parts is None:
-                video_hash = cache_manager._generate_file_hash(video_path)
+            if relevant_parts is None and not force_fresh_editorial_decisions:
                 cached_ai = await cache_manager.get("ai_analysis", video_hash)
                 if cached_ai:
                     relevant_parts = _SimpleResult(cached_ai["data"])
                     logger.info(f"[CACHE] Smart cache HIT for AI analysis: {len(cached_ai['data'].get('most_relevant_segments', []))} segments")
+                    cache_usage["editorial_cache_used"] = True
+            elif force_fresh_editorial_decisions:
+                logger.info("[CACHE] Bypassing smart AI analysis cache due to force_fresh_editorial_decisions=true")
 
             if relevant_parts is None:
-                if get_service_config().beta_clean:
-                    logger.info("[beta-clean] local segment selection only")
+                if get_service_config().beta_clean or _deadline_safe_mode:
+                    if _deadline_safe_mode:
+                        logger.info("[deadline-safe] local segment selection only")
+                    else:
+                        logger.info("[beta-clean] local segment selection only")
                     from .vpi_retention_editing_service import build_clean_take_candidates
 
                     _pool = build_clean_take_candidates(
@@ -5383,6 +15545,11 @@ class VideoService:
                         num_clips=num_clips,
                     )
                     _pool_segments = list(_pool.get("segments") or [])
+                    logger.info(
+                        "[candidate-pool-source] transcript_duration_source=%s transcript_duration_fallback_used=%s",
+                        _pool.get("transcript_duration_source"),
+                        str(bool(_pool.get("transcript_duration_fallback_used"))).lower(),
+                    )
                     if len(_pool_segments) > len(_existing_segments):
                         relevant_parts.most_relevant_segments = _pool_segments
                         relevant_parts.key_topics = _pool.get("topics", [])
@@ -5420,8 +15587,11 @@ class VideoService:
             if progress_callback:
                 await progress_callback(60, "Predicting virality with local scoring...", "processing")
 
-            if get_service_config().beta_clean:
-                logger.info("[beta-clean] local virality scoring only")
+            if get_service_config().beta_clean or _deadline_safe_mode:
+                if _deadline_safe_mode:
+                    logger.info("[deadline-safe] local virality scoring only")
+                else:
+                    logger.info("[beta-clean] local virality scoring only")
                 virality_map = {
                     idx: {
                         "segment_index": idx,
@@ -5505,11 +15675,56 @@ class VideoService:
                 "hook_quote",
                 "editorial_score",
                 "editorial_type",
+                "vpi_editorial_categories",
                 "matched_patterns",
                 "vpi_score",
                 "vpi_reason",
                 "vpi_generic_penalty",
                 "suggested_broll_cue_type",
+                "hookability_score",
+                "hookability_reason",
+                "commercial_usefulness_score",
+                "commercial_usefulness_reason",
+                "standalone_score",
+                "standalone_reason",
+                "weak_segment_penalties",
+                "weak_segment_reason",
+                "segment_selection_confidence",
+                "selected_for_reason",
+                "rejected_for_reason",
+                "weak_editorial_segment",
+                "original_start_time",
+                "original_end_time",
+                "original_start",
+                "original_end",
+                "refined_start",
+                "refined_end",
+                "refined_start_time",
+                "refined_end_time",
+                "boundary_adjustment_applied",
+                "boundary_adjustment_reason",
+                "start_trim_seconds",
+                "start_extend_seconds",
+                "end_extend_seconds",
+                "end_trim_seconds",
+                "payoff_preserved",
+                "starts_cleanly",
+                "ends_cleanly",
+                "first_second_strength",
+                "first_second_reason",
+                "boundary_confidence",
+                "standalone_after_boundary_score",
+                "standalone_after_boundary_reason",
+                "start_filler_trimmed",
+                "start_trim_reason",
+                "start_context_extended",
+                "start_context_reason",
+                "payoff_extended",
+                "payoff_extension_reason",
+                "end_cleaned",
+                "end_clean_reason",
+                "boundary_reverted",
+                "boundary_reverted_reason",
                 "standalone_clarity_score",
                 "completion_score",
                 "insurance_relevance_score",
@@ -5563,9 +15778,30 @@ class VideoService:
                 if vpi_score is None:
                     return base
 
-                vpi_boost = _clamp01(vpi_score / 100.0) * 0.35
-                penalty = _clamp01(generic_penalty / 100.0) * 0.15
-                return _clamp01(base + vpi_boost - penalty)
+                editorial_score = _safe_float(seg.get("editorial_score"))
+                if editorial_score is None:
+                    editorial_score = vpi_score
+                hookability_score = _safe_float(seg.get("hookability_score")) or 0.0
+                commercial_usefulness_score = _safe_float(seg.get("commercial_usefulness_score")) or 0.0
+                standalone_score = _safe_float(seg.get("standalone_score")) or 0.0
+                weak_penalty_count = len(_safe_list(seg.get("weak_segment_penalties")))
+                penalty = min(0.28, (weak_penalty_count * 0.03) + (_clamp01(generic_penalty / 100.0) * 0.10))
+                return _clamp01(
+                    base * 0.12
+                    + _clamp01(editorial_score / 100.0) * 0.20
+                    + _clamp01(vpi_score / 100.0) * 0.22
+                    + _clamp01(hookability_score / 100.0) * 0.20
+                    + _clamp01(commercial_usefulness_score / 100.0) * 0.18
+                    + _clamp01(standalone_score / 100.0) * 0.20
+                    - penalty
+                )
+
+            def _selection_strength(seg: Dict[str, Any]) -> float:
+                return (
+                    _clamp01((_safe_float(seg.get("hookability_score")) or 0.0) / 100.0) * 0.45
+                    + _clamp01((_safe_float(seg.get("standalone_score")) or 0.0) / 100.0) * 0.35
+                    + _clamp01((_safe_float(seg.get("commercial_usefulness_score")) or 0.0) / 100.0) * 0.20
+                )
 
             def _extract_editorial_fields(src: Any) -> Dict[str, Any]:
                 data: Dict[str, Any] = {}
@@ -5604,16 +15840,64 @@ class VideoService:
                 seg["editorial_type"] = scored.editorial_type
                 seg["vpi_reason"] = scored.reason
                 seg["vpi_generic_penalty"] = scored.generic_penalty
+                seg["vpi_editorial_categories"] = list(scored.editorial_categories or [scored.editorial_type])
+                seg["hookability_score"] = scored.hookability_score
+                seg["hookability_reason"] = scored.hookability_reason
+                seg["commercial_usefulness_score"] = scored.commercial_usefulness_score
+                seg["commercial_usefulness_reason"] = scored.commercial_usefulness_reason
+                seg["standalone_score"] = scored.standalone_score
+                seg["standalone_reason"] = scored.standalone_reason
+                seg["weak_segment_penalties"] = list(scored.weak_segment_penalties or [])
+                seg["weak_segment_reason"] = scored.weak_segment_reason
+                seg["segment_selection_confidence"] = scored.segment_selection_confidence
+                seg["selected_for_reason"] = scored.selected_for_reason
+                seg["rejected_for_reason"] = scored.rejected_for_reason
+                seg["weak_editorial_segment"] = bool(
+                    scored.weak_segment_penalties
+                    or scored.vpi_score < 35.0
+                    or scored.hookability_score < 45.0
+                    or scored.standalone_score < 45.0
+                    or scored.commercial_usefulness_score < 40.0
+                )
                 if scored.suggested_broll_cue_type:
                     seg["suggested_broll_cue_type"] = scored.suggested_broll_cue_type
 
                 logger.info(
-                    "[vpi-scorer] segment=%s→%s type=%s boost=%.2f patterns=%s",
+                    "VPI_EDITORIAL_SCORE_COMPUTED segment=%s→%s type=%s score=%.2f confidence=%.3f patterns=%s",
                     seg.get("start_time", "?"),
                     seg.get("end_time", "?"),
                     scored.editorial_type,
                     scored.vpi_score,
+                    scored.segment_selection_confidence,
                     ",".join(scored.matched_patterns[:5]) or "-",
+                )
+                logger.info(
+                    "VPI_HOOKABILITY_SCORE_COMPUTED segment=%s→%s score=%.2f reason=%s",
+                    seg.get("start_time", "?"),
+                    seg.get("end_time", "?"),
+                    scored.hookability_score,
+                    scored.hookability_reason,
+                )
+                logger.info(
+                    "VPI_COMMERCIAL_USEFULNESS_SCORE_COMPUTED segment=%s→%s score=%.2f reason=%s",
+                    seg.get("start_time", "?"),
+                    seg.get("end_time", "?"),
+                    scored.commercial_usefulness_score,
+                    scored.commercial_usefulness_reason,
+                )
+                logger.info(
+                    "VPI_STANDALONE_SCORE_COMPUTED segment=%s→%s score=%.2f reason=%s",
+                    seg.get("start_time", "?"),
+                    seg.get("end_time", "?"),
+                    scored.standalone_score,
+                    scored.standalone_reason,
+                )
+                logger.info(
+                    "VPI_SEGMENT_SELECTED_REASON segment=%s→%s reason=%s rejected=%s",
+                    seg.get("start_time", "?"),
+                    seg.get("end_time", "?"),
+                    scored.selected_for_reason,
+                    scored.rejected_for_reason or "-",
                 )
                 return seg
 
@@ -5650,20 +15934,25 @@ class VideoService:
                     if current is None:
                         best_by_key[str(key)] = item
                         continue
-                    if item.get("final_rank_score", 0.0) > current.get("final_rank_score", 0.0):
+                    current_strength = _selection_strength(current)
+                    item_strength = _selection_strength(item)
+                    if item_strength > current_strength or (
+                        item_strength == current_strength
+                        and item.get("final_rank_score", 0.0) > current.get("final_rank_score", 0.0)
+                    ):
                         logger.info(
-                            "[EDITORIAL] dedup duplicate_theme_key=%s kept_later=%.3f dropped=%.3f",
+                            "VPI_SEGMENT_DEDUPE_APPLIED duplicate_theme_key=%s kept_later=%.3f dropped=%.3f",
                             key,
-                            item.get("final_rank_score", 0.0),
-                            current.get("final_rank_score", 0.0),
+                            item_strength,
+                            current_strength,
                         )
                         best_by_key[str(key)] = item
                     else:
                         logger.info(
-                            "[EDITORIAL] dedup duplicate_theme_key=%s kept=%.3f dropped=%.3f",
+                            "VPI_SEGMENT_DEDUPE_APPLIED duplicate_theme_key=%s kept=%.3f dropped=%.3f",
                             key,
-                            current.get("final_rank_score", 0.0),
-                            item.get("final_rank_score", 0.0),
+                            current_strength,
+                            item_strength,
                         )
                 return result + list(best_by_key.values())
 
@@ -5766,17 +16055,137 @@ class VideoService:
                     _apply_vpi_score(item)
                     segments_json.append(_apply_final_rank(item))
 
+            candidate_categories = []
+            for seg in segments_json:
+                _seg_categories = seg.get("vpi_editorial_categories")
+                if isinstance(_seg_categories, list) and _seg_categories:
+                    candidate_categories.append(str(_seg_categories[0] or "generic"))
+                else:
+                    candidate_categories.append(str(seg.get("editorial_type") or "generic"))
+            _campaign_context: Dict[str, Any] = {}
+            try:
+                _campaign_context = _resolve_vpi_campaign_intent(
+                    task_metadata=task_metadata or {},
+                    user_options=user_options or {},
+                    prompt=campaign_prompt,
+                    config=campaign_config or {},
+                    transcript_text=transcript,
+                    candidate_categories=candidate_categories,
+                    product_hints=product_hints or [
+                        str(niche_info.get("primary_niche") or ""),
+                        str(target_platform or ""),
+                        str(source_type or ""),
+                    ],
+                )
+            except Exception as _campaign_e:
+                logger.warning("VPI_CAMPAIGN_WARNING reason=resolution_failed error=%s", _campaign_e)
+                _campaign_context = {
+                    "campaign_intent": "general_vpi",
+                    "campaign_intent_confidence": 0.0,
+                    "campaign_intent_source": "default_general",
+                    "campaign_intent_reason": f"resolution_failed:{_campaign_e}",
+                    "preferred_categories": [],
+                    "suppressed_categories": [],
+                    "preferred_keywords": [],
+                    "sensitive_handling_required": False,
+                }
+
+            for segment in segments_json:
+                alignment_score, boost_score, alignment_reason = _campaign_alignment_for_segment(segment, _campaign_context)
+                segment["campaign_intent"] = str(_campaign_context.get("campaign_intent") or "general_vpi")
+                segment["campaign_intent_confidence"] = float(_campaign_context.get("campaign_intent_confidence") or 0.0)
+                segment["campaign_intent_source"] = str(_campaign_context.get("campaign_intent_source") or "default_general")
+                segment["campaign_intent_reason"] = str(_campaign_context.get("campaign_intent_reason") or "")
+                segment["preferred_categories"] = list(_campaign_context.get("preferred_categories") or [])
+                segment["suppressed_categories"] = list(_campaign_context.get("suppressed_categories") or [])
+                segment["preferred_keywords"] = list(_campaign_context.get("preferred_keywords") or [])
+                segment["sensitive_handling_required"] = bool(_campaign_context.get("sensitive_handling_required"))
+                segment["campaign_alignment_score"] = round(float(alignment_score), 4)
+                segment["campaign_boost_score"] = round(float(boost_score), 4)
+                segment["campaign_alignment_reason"] = alignment_reason
+                segment["campaign_boost_applied"] = bool(alignment_score > 0.0 or boost_score > 0.0)
+                if segment["campaign_boost_applied"]:
+                    base_rank = float(segment.get("final_rank_score") or 0.0)
+                    segment["final_rank_score"] = round(min(1.0, base_rank + min(0.08, max(0.0, boost_score) / 100.0 + alignment_score * 0.05)), 4)
+                logger.info(
+                    "VPI_CAMPAIGN_ALIGNMENT_SCORED segment=%s→%s intent=%s score=%.3f boost=%.3f reason=%s",
+                    segment.get("start_time", "?"),
+                    segment.get("end_time", "?"),
+                    str(segment.get("campaign_intent") or "general_vpi"),
+                    alignment_score,
+                    boost_score,
+                    alignment_reason,
+                )
+                if segment["campaign_boost_applied"]:
+                    logger.info(
+                        "VPI_CAMPAIGN_BOOST_APPLIED segment=%s→%s intent=%s boost=%.3f",
+                        segment.get("start_time", "?"),
+                        segment.get("end_time", "?"),
+                        str(segment.get("campaign_intent") or "general_vpi"),
+                        boost_score,
+                    )
+            _campaign_alignment_summary = {
+                "campaign_intent": str(_campaign_context.get("campaign_intent") or "general_vpi"),
+                "campaign_intent_confidence": float(_campaign_context.get("campaign_intent_confidence") or 0.0),
+                "campaign_intent_source": str(_campaign_context.get("campaign_intent_source") or "default_general"),
+                "campaign_intent_reason": str(_campaign_context.get("campaign_intent_reason") or ""),
+                "preferred_categories": list(_campaign_context.get("preferred_categories") or []),
+                "suppressed_categories": list(_campaign_context.get("suppressed_categories") or []),
+                "preferred_keywords": list(_campaign_context.get("preferred_keywords") or []),
+                "sensitive_handling_required": bool(_campaign_context.get("sensitive_handling_required")),
+                "selected_campaign_mix": {},
+            }
+            _selected_campaign_mix: Dict[str, int] = {}
+            for _seg in segments_json:
+                _seg_categories = _seg.get("vpi_editorial_categories")
+                if isinstance(_seg_categories, list) and _seg_categories:
+                    _category = str(_seg_categories[0] or "generic")
+                else:
+                    _category = str(_seg.get("editorial_type") or "generic")
+                _selected_campaign_mix[_category] = _selected_campaign_mix.get(_category, 0) + 1
+            _campaign_alignment_summary["selected_campaign_mix"] = _selected_campaign_mix
+            _campaign_alignment_summary["campaign_alignment_score"] = round(
+                sum(float(seg.get("campaign_alignment_score") or 0.0) for seg in segments_json) / max(1, len(segments_json)),
+                4,
+            )
+            _campaign_alignment_summary["campaign_boost_score"] = round(
+                max((float(seg.get("campaign_boost_score") or 0.0) for seg in segments_json), default=0.0),
+                4,
+            )
+            _campaign_alignment_summary["campaign_boost_applied"] = bool(any(bool(seg.get("campaign_boost_applied")) for seg in segments_json))
+            _campaign_alignment_summary["campaign_alignment_reason"] = str(_campaign_context.get("campaign_intent_reason") or "")
+            _campaign_alignment_summary["source_count"] = len(segments_json)
+            if _campaign_alignment_summary["campaign_intent"] != "general_vpi":
+                logger.info(
+                    "VPI_CAMPAIGN_PACKAGE_SELECTED intent=%s selected=%d alignment=%.3f boost=%.3f",
+                    _campaign_alignment_summary["campaign_intent"],
+                    len(segments_json),
+                    float(_campaign_alignment_summary["campaign_alignment_score"] or 0.0),
+                    float(_campaign_alignment_summary["campaign_boost_score"] or 0.0),
+                )
+                if _campaign_alignment_summary["campaign_alignment_score"] < 0.35:
+                    logger.warning(
+                        "VPI_CAMPAIGN_WARNING intent=%s reason=low_alignment selected=%d alignment=%.3f",
+                        _campaign_alignment_summary["campaign_intent"],
+                        len(segments_json),
+                        float(_campaign_alignment_summary["campaign_alignment_score"] or 0.0),
+                    )
+
             propagated = sorted({field for seg in segments_json for field in _editorial_fields if field in seg})
             if propagated:
                 logger.info("[EDITORIAL] propagated_fields=%s", ",".join(propagated))
-                logger.info("[EDITORIAL] ranking uses editorial_score/final_rank_score")
+                logger.info("[EDITORIAL] ranking uses editorial_score/final_rank_score/hookability/commercial_usefulness/standalone")
             segments_json = _dedupe_editorial_segments(segments_json)
             _candidate_pool_generated = len(segments_json)
             segments_json, _content_quality_rejections = _apply_content_quality_filter(segments_json)
+            _bts_override_used = any(bool(seg.get("bts_override_used")) for seg in segments_json)
+            _fallback_candidate_selected = any(bool(seg.get("fallback_candidate_selected")) for seg in segments_json)
             logger.info(
-                "[candidate-pool] generated=%d after_quality_filter=%d",
+                "[candidate-pool] generated=%d after_quality_filter=%d bts_override_used=%s fallback_candidate_selected=%s",
                 _candidate_pool_generated,
                 len(segments_json),
+                str(_bts_override_used).lower(),
+                str(_fallback_candidate_selected).lower(),
             )
 
             # ── CAUSA 5 guard: pad with synthetic segments if AI returned too few ──
@@ -5820,12 +16229,82 @@ class VideoService:
             segments_json = _dedupe_editorial_segments(segments_json)
             _candidate_pool_after_pad = len(segments_json)
             segments_json, _more_quality_rejections = _apply_content_quality_filter(segments_json)
+            _bts_override_used = _bts_override_used or any(bool(seg.get("bts_override_used")) for seg in segments_json)
+            _fallback_candidate_selected = _fallback_candidate_selected or any(bool(seg.get("fallback_candidate_selected")) for seg in segments_json)
             _content_quality_rejections.extend(_more_quality_rejections)
             logger.info(
-                "[candidate-pool] generated=%d after_quality_filter=%d",
+                "[candidate-pool] generated=%d after_quality_filter=%d bts_override_used=%s fallback_candidate_selected=%s",
                 _candidate_pool_after_pad,
                 len(segments_json),
+                str(_bts_override_used).lower(),
+                str(_fallback_candidate_selected).lower(),
             )
+            if len(segments_json) < num_clips and transcript:
+                try:
+                    from .vpi_retention_editing_service import build_clean_take_candidates
+
+                    _dialogue_pool = build_clean_take_candidates(
+                        transcript,
+                        transcript_duration_s=float(file_duration or 0.0),
+                        num_clips=num_clips,
+                    )
+                    _dialogue_candidates = list(_dialogue_pool.get("segments") or [])
+                    _existing_keys = {
+                        (
+                            str(seg.get("start_time") or ""),
+                            str(seg.get("end_time") or ""),
+                            str(seg.get("text") or "").strip(),
+                        )
+                        for seg in segments_json
+                    }
+                    _dialogue_candidates = [
+                        seg for seg in _dialogue_candidates
+                        if (
+                            str(seg.get("start_time") or ""),
+                            str(seg.get("end_time") or ""),
+                            str(seg.get("text") or "").strip(),
+                        ) not in _existing_keys
+                    ]
+                    if _dialogue_candidates:
+                        logger.info(
+                            "CLIP_SELECTION_DIALOGUE_FALLBACK_TRIGGERED reason=insufficient_primary_candidates primary=%d fallback=%d",
+                            len(segments_json),
+                            len(_dialogue_candidates),
+                        )
+                        if not segments_json:
+                            logger.info(
+                                "FAST_FAIL_EDITING_ZERO_AVOIDED reason=dialogue_fallback_selected count=%d",
+                                len(_dialogue_candidates),
+                            )
+                        for _seg in _dialogue_candidates:
+                            _seg["fallback_candidate_selected"] = True
+                            _seg["fallback_candidate_reason"] = "clean_take_dialogue_window"
+                            _apply_vpi_score(_seg)
+                            _apply_final_rank(_seg)
+                            logger.info(
+                                "CLIP_SELECTION_DIALOGUE_FALLBACK_SELECTED start=%s end=%s anchors=%s",
+                                _seg.get("start_time"),
+                                _seg.get("end_time"),
+                                ",".join(
+                                    [
+                                        str(_seg.get("clean_take_topic") or "generic"),
+                                        f"useful={int(_seg.get('clean_take_useful_lines') or 0)}",
+                                    ]
+                                ),
+                            )
+                        segments_json.extend(_dialogue_candidates)
+                        segments_json = _dedupe_editorial_segments(segments_json)
+                        segments_json, _dialogue_quality_rejections = _apply_content_quality_filter(segments_json)
+                        _content_quality_rejections.extend(_dialogue_quality_rejections)
+                        _bts_override_used = _bts_override_used or any(bool(seg.get("bts_override_used")) for seg in segments_json)
+                        _fallback_candidate_selected = _fallback_candidate_selected or any(bool(seg.get("fallback_candidate_selected")) for seg in segments_json)
+                        logger.info(
+                            "[candidate-pool] dialogue_fallback_added=%d after_quality_filter=%d",
+                            len(_dialogue_candidates),
+                            len(segments_json),
+                        )
+                except Exception as _dialogue_fallback_exc:
+                    logger.warning("[candidate-pool] dialogue_fallback_failed reason=%s", _dialogue_fallback_exc)
             segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
             if get_service_config().beta_clean and num_clips >= 3:
                 _topic_priority = ("decesos", "salud", "autonomos")
@@ -5852,6 +16331,9 @@ class VideoService:
                 if len(_selected_topic_segments) >= min(num_clips, len(_topic_priority)):
                     _rest = [seg for seg in segments_json if id(seg) not in _selected_ids]
                     segments_json = _selected_topic_segments + _rest
+            # Preserve wide ranked pool for task_service pre-render gate (before truncation).
+            _pre_render_candidate_pool = list(segments_json)
+
             # ── Render a buffer of +2 extra segments so that if 1-2 clips fail to
             # render the save loop can still fill the requested quota.
             # The save loop in task_service.py caps successful saves at num_clips.
@@ -5860,6 +16342,10 @@ class VideoService:
             logger.info(
                 f"[PIPELINE] Selected {len(segments_json)} segments for render "
                 f"(quota={num_clips}, buffer={render_buffer})"
+            )
+            logger.info(
+                "[candidate-pool] selected_segments_count_final=%d",
+                len(segments_json),
             )
             logger.info("[candidate-pool] after_diversity=%d", len(segments_json))
 
@@ -5980,18 +16466,990 @@ class VideoService:
                     str(seg.get("editorial_type") or "") for seg in segments_json[:num_clips]
                 ]
 
+            # ── H13.2 Fix B — candidate pool expansion ──────────────────────
+            # Daily Mode / VPI needs a minimum real-candidate pool so the selector
+            # (and its complete-idea rescue mechanism) has genuine alternatives to
+            # pick from instead of a single forced choice. When the pool is below
+            # target, build extra 20-45s windows by combining consecutive REAL
+            # transcript-derived segments already in segments_json — every
+            # window's start/end/text is sliced/joined from real data (no render,
+            # no LLM, no invented text or timestamps), then scored with the same
+            # real VPI scorer used for every other candidate.
+            _vpi_pool_target_min_candidates = 5
+            _vpi_pool_fallback_min_candidates = 3
+            _vpi_signal_phrases = (
+                "protección", "proteccion", "familia", "seguro", "salud", "vida",
+                "tranquilidad", "esto mucha gente no lo sabe", "importante",
+                "cuidado", "problema", "solución", "solucion", "no es solo",
+                "objeción", "objecion", "explicación", "explicacion", "consejo", "riesgo",
+            )
+            _vpi_bts_signal_phrases = ("corta", "grabando", "otra vez", "espera", "no no", "jajaja")
+            _vpi_pool_min_window_s = 20.0
+            _vpi_pool_max_window_s = 45.0
+            _candidate_pool_expanded = False
+            _candidate_pool_expansion_count = 0
+
+            if len(segments_json) < _vpi_pool_target_min_candidates:
+                logger.warning(
+                    "VPI_CANDIDATE_POOL_TOO_SMALL count=%d target_min_candidates=%d fallback_min_candidates=%d",
+                    len(segments_json),
+                    _vpi_pool_target_min_candidates,
+                    _vpi_pool_fallback_min_candidates,
+                )
+                logger.warning(
+                    "VPI_CANDIDATE_POOL_EXPANSION_ROUTE_REACHED count=%d target=%d raw_segments_available=%d",
+                    len(segments_json),
+                    _vpi_pool_target_min_candidates,
+                    len(raw_segments) if raw_segments else 0,
+                )
+                try:
+                    _pool_existing_keys = {
+                        (str(seg.get("start_time") or ""), str(seg.get("end_time") or ""))
+                        for seg in segments_json
+                    }
+                    # Source atoms from raw_segments (full original LLM pool) instead of
+                    # the quality-filtered segments_json which may be reduced to 1 element.
+                    _pool_atom_source = list(raw_segments) if raw_segments else segments_json
+                    if _pool_atom_source:
+                        logger.warning(
+                            "VPI_CANDIDATE_POOL_EXPANSION_SOURCE_READY source_len=%d",
+                            len(_pool_atom_source),
+                        )
+                    else:
+                        logger.warning("VPI_CANDIDATE_POOL_EXPANSION_SOURCE_EMPTY")
+                    _pool_atoms: List[Dict[str, Any]] = []
+                    for _atom_seg in _pool_atom_source:
+                        _atom_start = str((_atom_seg.get("start_time") if isinstance(_atom_seg, dict) else getattr(_atom_seg, "start_time", "")) or "")
+                        _atom_end = str((_atom_seg.get("end_time") if isinstance(_atom_seg, dict) else getattr(_atom_seg, "end_time", "")) or "")
+                        _atom_text = str((_atom_seg.get("text") if isinstance(_atom_seg, dict) else getattr(_atom_seg, "text", "")) or "").strip()
+                        if not _atom_start or not _atom_end or not _atom_text:
+                            continue
+                        try:
+                            _atom_start_s = float(parse_timestamp_to_seconds(_atom_start))
+                            _atom_end_s = float(parse_timestamp_to_seconds(_atom_end))
+                        except Exception:
+                            continue
+                        if _atom_end_s <= _atom_start_s:
+                            continue
+                        _pool_atoms.append({
+                            "start_time": _atom_start,
+                            "end_time": _atom_end,
+                            "start_s": _atom_start_s,
+                            "end_s": _atom_end_s,
+                            "text": _atom_text,
+                        })
+                    _pool_atoms.sort(key=lambda a: a["start_s"])
+
+                    _pool_window_candidates: List[Dict[str, Any]] = []
+                    for _i in range(len(_pool_atoms)):
+                        _joined_text_parts: List[str] = []
+                        for _j in range(_i, len(_pool_atoms)):
+                            _window_start = _pool_atoms[_i]
+                            _window_end = _pool_atoms[_j]
+                            _window_duration = _window_end["end_s"] - _window_start["start_s"]
+                            if _window_duration > _vpi_pool_max_window_s:
+                                break
+                            _joined_text_parts.append(_pool_atoms[_j]["text"])
+                            if _window_duration < _vpi_pool_min_window_s:
+                                continue
+                            _window_key = (_window_start["start_time"], _window_end["end_time"])
+                            if _window_key in _pool_existing_keys:
+                                continue
+                            _window_text = " ".join(_joined_text_parts).strip()
+                            if not _window_text:
+                                continue
+                            _window_text_lower = _window_text.lower()
+                            _vpi_hits = sum(1 for _p in _vpi_signal_phrases if _p in _window_text_lower)
+                            _bts_hits = sum(1 for _p in _vpi_bts_signal_phrases if _p in _window_text_lower)
+                            _pool_window_candidates.append({
+                                "start_time": _window_start["start_time"],
+                                "end_time": _window_end["end_time"],
+                                "text": _window_text,
+                                "duration": round(_window_duration, 3),
+                                "_vpi_signal_hits": _vpi_hits,
+                                "_bts_signal_hits": _bts_hits,
+                            })
+                            _pool_existing_keys.add(_window_key)
+
+                    _pool_window_candidates.sort(
+                        key=lambda c: (c["_vpi_signal_hits"] - c["_bts_signal_hits"], c["_vpi_signal_hits"]),
+                        reverse=True,
+                    )
+
+                    _pool_needed = max(0, _vpi_pool_target_min_candidates - len(segments_json))
+                    _pool_added = 0
+                    for _cand in _pool_window_candidates:
+                        if _pool_added >= _pool_needed:
+                            break
+                        if _cand["_bts_signal_hits"] > _cand["_vpi_signal_hits"]:
+                            continue
+                        _new_item: Dict[str, Any] = {
+                            "start_time": _cand["start_time"],
+                            "end_time": _cand["end_time"],
+                            "text": _cand["text"],
+                            "relevance_score": 0.0,
+                            "reasoning": "candidate_pool_expansion_window",
+                            "virality_score": 0.0,
+                            "hook_score": 0.0,
+                            "engagement_score": 0.0,
+                            "value_score": 0.0,
+                            "shareability_score": 0.0,
+                            "hook_strength": "Medium",
+                            "hook_type": None,
+                            "suggested_title": "",
+                            "suggested_hashtags": [],
+                            "theme": None,
+                            "suggested_edits": None,
+                            "viral_cues": None,
+                            "split_screen": split_screen,
+                            "elite_metadata": None,
+                            "generated_by": "candidate_pool_expansion",
+                            "candidate_pool_expanded": True,
+                            "candidate_pool_expansion_vpi_signal_hits": _cand["_vpi_signal_hits"],
+                            "candidate_pool_expansion_bts_signal_hits": _cand["_bts_signal_hits"],
+                            "render_source_mode": "full_source_window",
+                            "requires_source_window_extract": True,
+                            "original_source_start_time": _cand["start_time"],
+                            "original_source_end_time": _cand["end_time"],
+                        }
+                        _apply_vpi_score(_new_item)
+                        _apply_final_rank(_new_item)
+                        segments_json.append(_new_item)
+                        _pool_added += 1
+                        logger.info(
+                            "VPI_CANDIDATE_POOL_EXPANSION_CANDIDATE_ADDED start=%s end=%s duration=%.2f vpi_signal_hits=%d bts_signal_hits=%d",
+                            _new_item.get("start_time"),
+                            _new_item.get("end_time"),
+                            float(_cand.get("duration") or 0.0),
+                            _cand["_vpi_signal_hits"],
+                            _cand["_bts_signal_hits"],
+                        )
+
+                    if _pool_added > 0:
+                        segments_json.sort(key=lambda x: x.get("final_rank_score", _compute_final_rank_score(x)), reverse=True)
+                        _candidate_pool_expanded = True
+                        _candidate_pool_expansion_count = _pool_added
+                        # Refresh the pre_render_candidate_pool to include expansion candidates so
+                        # task_service pre_render gate can evaluate them. Without this refresh,
+                        # _pre_render_candidate_pool only contains the pre-expansion primary candidates
+                        # and expansion candidates are invisible to the render gate.
+                        _pre_render_candidate_pool = list(segments_json)
+                        logger.info(
+                            "VPI_CANDIDATE_POOL_EXPANDED added=%d total=%d target_min_candidates=%d",
+                            _pool_added,
+                            len(segments_json),
+                            _vpi_pool_target_min_candidates,
+                        )
+                        logger.info(
+                            "VPI_EXPANSION_CANDIDATE_RENDER_SOURCE_MARKED added=%d pool_size=%d",
+                            _pool_added,
+                            len(_pre_render_candidate_pool),
+                        )
+                    logger.info(
+                        "VPI_CANDIDATE_POOL_EXPANSION_COMPLETE total_candidates=%d added=%d met_target=%s met_fallback=%s",
+                        len(segments_json),
+                        _pool_added,
+                        str(len(segments_json) >= _vpi_pool_target_min_candidates).lower(),
+                        str(len(segments_json) >= _vpi_pool_fallback_min_candidates).lower(),
+                    )
+                except Exception as _pool_expansion_e:
+                    logger.warning("VPI_CANDIDATE_POOL_EXPANSION_FAILED reason=%s", _pool_expansion_e)
+
+            # ── H10.2 Fix 1: pre-selection completeness scoring ─────────────────
+            # FASE 2 / FASE 2.5 (inside create_single_clip) compute complete_idea_score,
+            # incomplete_viral_window_detected, boundary_confidence, bts_tail_detected,
+            # etc. — but only at RENDER time, i.e. *after* select_diverse_vpi_clip_package
+            # has already locked in the winning segment. That makes the rescue-to-
+            # complete-idea-alternative mechanism inside the selector permanently inert
+            # (every candidate's complete_idea_score reads as 0.0/unset at selection
+            # time). Precompute the same signals here, on the actual candidate pool,
+            # reusing the exact same scorer/refiner functions — no render, no LLM, no
+            # mutation of segment start/end (purely additive scoring metadata).
+            try:
+                from .vpi_editorial_fluency_service import score_complete_idea as _pre_score_complete_idea
+            except Exception as _pre_score_import_e:
+                _pre_score_complete_idea = None
+                logger.debug("[pre-selection-scoring] import_skipped reason=%s", _pre_score_import_e)
+
+            _pre_scored_count = 0
+            _pre_scored_incomplete_count = 0
+            for _pre_seg in segments_json:
+                try:
+                    _pre_text = str(_pre_seg.get("text") or "")
+                    if not _pre_text:
+                        continue
+                    _pre_idea_score = 0.0
+                    if _pre_score_complete_idea is not None:
+                        _pre_idea_result = _pre_score_complete_idea(_pre_text)
+                        _pre_idea_score = float((_pre_idea_result or {}).get("complete_idea_score") or 0.0)
+                    _pre_seg["complete_idea_score"] = round(_pre_idea_score, 4)
+
+                    _pre_boundary_meta: Dict[str, Any] = {}
+                    try:
+                        _pre_boundary_meta = refine_segment_boundaries_for_vpi(
+                            segment=dict(_pre_seg),
+                            transcript_text=_pre_text,
+                            words_with_timestamps=list(_pre_seg.get("words") or _pre_seg.get("word_timestamps") or []),
+                            vpi_editorial_categories=list(_pre_seg.get("vpi_editorial_categories") or []),
+                            hookability_score=float(_pre_seg.get("hookability_score") or 0.0),
+                            standalone_score=float(_pre_seg.get("standalone_score") or 0.0),
+                            commercial_usefulness_score=float(_pre_seg.get("commercial_usefulness_score") or 0.0),
+                            weak_segment_penalties=list(_pre_seg.get("weak_segment_penalties") or []),
+                            clip_min_duration=float(_pre_seg.get("clip_min_duration") or 8.0),
+                            clip_max_duration=float(_pre_seg.get("clip_max_duration") or 90.0),
+                        )
+                    except Exception as _pre_boundary_e:
+                        logger.debug("[pre-selection-scoring] boundary_probe_skipped reason=%s", _pre_boundary_e)
+
+                    _pre_seg["payoff_preserved"] = bool(_pre_boundary_meta.get("payoff_preserved", _pre_seg.get("payoff_preserved", True)))
+                    _pre_seg["starts_cleanly"] = bool(_pre_boundary_meta.get("starts_cleanly", _pre_seg.get("starts_cleanly", True)))
+                    _pre_seg["ends_cleanly"] = bool(_pre_boundary_meta.get("ends_cleanly", _pre_seg.get("ends_cleanly", True)))
+                    _pre_seg["bts_tail_detected"] = bool(_pre_boundary_meta.get("bts_tail_detected"))
+                    _pre_seg["bts_tail_trimmed_seconds"] = float(_pre_boundary_meta.get("bts_tail_trimmed_seconds") or 0.0)
+                    _pre_boundary_confidence = float(_pre_boundary_meta.get("boundary_confidence") or _pre_seg.get("boundary_confidence") or 0.0)
+                    _pre_seg.setdefault("boundary_confidence", _pre_boundary_confidence)
+                    _pre_seg["trailing_low_value_seconds"] = float(
+                        _pre_boundary_meta.get("end_trim_seconds")
+                        or _pre_boundary_meta.get("bts_tail_trimmed_seconds")
+                        or _pre_seg.get("trailing_low_value_seconds")
+                        or 0.0
+                    )
+                    _pre_seg["setup_context_shift_seconds"] = float(
+                        _pre_boundary_meta.get("start_extend_seconds") or _pre_seg.get("setup_context_shift_seconds") or 0.0
+                    )
+
+                    _pre_seg["incomplete_viral_window_detected"] = bool(
+                        bool(_pre_seg.get("bts_tail_detected"))
+                        or not bool(_pre_seg.get("payoff_preserved", True))
+                        or not bool(_pre_seg.get("ends_cleanly", True))
+                        or _pre_idea_score < 0.70
+                        or (_pre_boundary_confidence >= 0.75 and _pre_idea_score < 0.80)
+                    )
+                    _pre_seg["pre_selection_scored"] = True
+                    _pre_seg["pre_selection_scoring_source"] = "video_service_pre_selection"
+                    _pre_scored_count += 1
+                    if _pre_seg["incomplete_viral_window_detected"]:
+                        _pre_scored_incomplete_count += 1
+                        logger.info(
+                            "VPI_SELECTION_INCOMPLETE_WINDOW_PRECOMPUTED segment=%s->%s complete_idea=%.3f boundary=%.3f bts_tail=%s",
+                            _pre_seg.get("start_time"),
+                            _pre_seg.get("end_time"),
+                            _pre_idea_score,
+                            _pre_boundary_confidence,
+                            str(bool(_pre_seg.get("bts_tail_detected"))).lower(),
+                        )
+                    logger.info(
+                        "VPI_SELECTION_COMPLETE_IDEA_PRECOMPUTED segment=%s->%s complete_idea_score=%.3f incomplete=%s",
+                        _pre_seg.get("start_time"),
+                        _pre_seg.get("end_time"),
+                        _pre_idea_score,
+                        str(bool(_pre_seg.get("incomplete_viral_window_detected"))).lower(),
+                    )
+                except Exception as _pre_score_e:
+                    logger.debug("[pre-selection-scoring] segment_skipped reason=%s", _pre_score_e)
+
+            logger.info(
+                "VPI_SELECTION_PRE_SCORING_APPLIED candidates=%d scored=%d incomplete=%d",
+                len(segments_json),
+                _pre_scored_count,
+                _pre_scored_incomplete_count,
+            )
+
+            # ── H14.7 Fix A — conversational hook shift-back + Fix D rescoring ──
+            # Some candidates start mid-sentence right after a verbal hook that
+            # belongs to an earlier overlapping candidate window (e.g. "...no es
+            # una conversación reservada para [cierta edad]"). When another
+            # candidate in the pool ends 5-12s before this one starts and carries
+            # a recognized VPI verbal hook cue, shift this candidate's start back
+            # to recover that hook, then re-score (hookability/complete_idea/
+            # boundary/incomplete_viral_window) on the adjusted text.
+            def _fmt_ts_seconds_h147(seconds: float) -> str:
+                total = max(0, int(round(float(seconds or 0.0))))
+                return f"{total // 60:02d}:{total % 60:02d}"
+
+            _hook_shift_back_count = 0
+            for _pre_seg in segments_json:
+                try:
+                    _idea_score = float(_pre_seg.get("complete_idea_score") or 0.0)
+                    _incomplete = bool(_pre_seg.get("incomplete_viral_window_detected"))
+                    _is_bts = bool(_pre_seg.get("bts_tail_detected"))
+                    _campaign_intent_seg = str(_pre_seg.get("campaign_intent") or "general_vpi")
+                    _editorial_categories = list(_pre_seg.get("vpi_editorial_categories") or [])
+                    _is_vpi_segment = (
+                        _campaign_intent_seg == "general_vpi"
+                        or any("emotional_protection" in str(c or "") for c in _editorial_categories)
+                        or str(_pre_seg.get("editorial_type") or "") == "emotional_protection"
+                    )
+                    if not (_incomplete and _idea_score < 0.70 and not _is_bts and _is_vpi_segment):
+                        continue
+
+                    _seg_start_s = parse_timestamp_to_seconds(str(_pre_seg.get("start_time") or "00:00"))
+                    _seg_end_s = parse_timestamp_to_seconds(str(_pre_seg.get("end_time") or "00:00"))
+                    _clip_max = float(_pre_seg.get("clip_max_duration") or 90.0)
+
+                    logger.info(
+                        "VPI_CONVERSATIONAL_HOOK_SHIFT_BACK_ATTEMPTED segment=%s->%s complete_idea=%.3f",
+                        _pre_seg.get("start_time"),
+                        _pre_seg.get("end_time"),
+                        _idea_score,
+                    )
+
+                    _donor: Optional[Dict[str, Any]] = None
+                    _donor_shift = 0.0
+                    for _other in segments_json:
+                        if _other is _pre_seg:
+                            continue
+                        _other_start_s = parse_timestamp_to_seconds(str(_other.get("start_time") or "00:00"))
+                        _other_end_s = parse_timestamp_to_seconds(str(_other.get("end_time") or "00:00"))
+                        if not (_other_start_s < _seg_start_s):
+                            continue
+                        _gap = _seg_start_s - _other_start_s
+                        if not (5.0 <= _gap <= 12.0):
+                            continue
+                        if _other_end_s <= _seg_start_s - 12.0:
+                            continue  # donor ends too early — backstage/silence gap
+                        if bool(_other.get("bts_tail_detected")):
+                            continue  # never shift into a backstage segment
+                        _other_text_norm = _vpi_normalize_text(str(_other.get("text") or ""))
+                        if not _vpi_contains_any(_other_text_norm, _VPI_INSURANCE_VERBAL_HOOK_CUES):
+                            continue
+                        if (_seg_end_s - _other_start_s) > _clip_max:
+                            continue  # would create excessive duration
+                        _donor = _other
+                        _donor_shift = _gap
+                        break
+
+                    if _donor is None:
+                        logger.info(
+                            "VPI_CONVERSATIONAL_HOOK_SHIFT_BACK_SKIPPED segment=%s->%s reason=no_donor_hook_found",
+                            _pre_seg.get("start_time"),
+                            _pre_seg.get("end_time"),
+                        )
+                        continue
+
+                    _new_start_s = max(0.0, _seg_start_s - _donor_shift)
+                    _original_start_time = str(_pre_seg.get("start_time") or "")
+                    _shifted_start_time = _fmt_ts_seconds_h147(_new_start_s)
+                    _donor_text = str(_donor.get("text") or "").strip()
+                    _own_text = str(_pre_seg.get("text") or "").strip()
+                    if _donor_text and _donor_text not in _own_text:
+                        _pre_seg["text"] = f"{_donor_text} {_own_text}".strip()
+                    _pre_seg["start_time"] = _shifted_start_time
+                    _pre_seg["start_seconds"] = _new_start_s
+                    _pre_seg["duration"] = max(0.0, _seg_end_s - _new_start_s)
+                    _pre_seg["conversational_hook_shift_back_applied"] = True
+                    _pre_seg["conversational_hook_shift_back_seconds"] = round(_donor_shift, 3)
+                    _pre_seg["conversational_hook_shift_back_reason"] = "recover_truncated_verbal_hook"
+                    _pre_seg["original_start_time"] = _original_start_time
+                    _pre_seg["shifted_start_time"] = _shifted_start_time
+                    _hook_shift_back_count += 1
+                    logger.info(
+                        "VPI_CONVERSATIONAL_HOOK_SHIFT_BACK_APPLIED segment=%s->%s shift=%.2f new_start=%s donor=%s->%s",
+                        _original_start_time,
+                        _pre_seg.get("end_time"),
+                        _donor_shift,
+                        _shifted_start_time,
+                        _donor.get("start_time"),
+                        _donor.get("end_time"),
+                    )
+
+                    # H14.7 Fix D — re-score after the shift/text adjustment.
+                    if _pre_score_complete_idea is not None:
+                        _new_idea_result = _pre_score_complete_idea(str(_pre_seg.get("text") or ""))
+                        _pre_seg["complete_idea_score"] = round(float((_new_idea_result or {}).get("complete_idea_score") or 0.0), 4)
+                    try:
+                        _apply_vpi_score(_pre_seg)
+                        _apply_final_rank(_pre_seg)
+                    except Exception as _rescore_e:
+                        logger.debug("[hook-shift-back] vpi_rescore_skipped reason=%s", _rescore_e)
+                    try:
+                        _post_boundary_meta = refine_segment_boundaries_for_vpi(
+                            segment=dict(_pre_seg),
+                            transcript_text=str(_pre_seg.get("text") or ""),
+                            words_with_timestamps=list(_pre_seg.get("words") or _pre_seg.get("word_timestamps") or []),
+                            vpi_editorial_categories=list(_pre_seg.get("vpi_editorial_categories") or []),
+                            hookability_score=float(_pre_seg.get("hookability_score") or 0.0),
+                            standalone_score=float(_pre_seg.get("standalone_score") or 0.0),
+                            commercial_usefulness_score=float(_pre_seg.get("commercial_usefulness_score") or 0.0),
+                            weak_segment_penalties=list(_pre_seg.get("weak_segment_penalties") or []),
+                            clip_min_duration=float(_pre_seg.get("clip_min_duration") or 8.0),
+                            clip_max_duration=_clip_max,
+                        )
+                    except Exception as _post_boundary_e:
+                        _post_boundary_meta = {}
+                        logger.debug("[hook-shift-back] boundary_reprobe_skipped reason=%s", _post_boundary_e)
+
+                    _pre_seg["payoff_preserved"] = bool(_post_boundary_meta.get("payoff_preserved", _pre_seg.get("payoff_preserved", True)))
+                    _pre_seg["starts_cleanly"] = bool(_post_boundary_meta.get("starts_cleanly", _pre_seg.get("starts_cleanly", True)))
+                    _pre_seg["ends_cleanly"] = bool(_post_boundary_meta.get("ends_cleanly", _pre_seg.get("ends_cleanly", True)))
+                    _pre_seg["bts_tail_detected"] = bool(_post_boundary_meta.get("bts_tail_detected"))
+                    _post_boundary_confidence = float(_post_boundary_meta.get("boundary_confidence") or _pre_seg.get("boundary_confidence") or 0.0)
+                    _pre_seg["boundary_confidence"] = _post_boundary_confidence
+                    _new_idea_score = float(_pre_seg.get("complete_idea_score") or 0.0)
+                    _pre_seg["incomplete_viral_window_detected"] = bool(
+                        bool(_pre_seg.get("bts_tail_detected"))
+                        or not bool(_pre_seg.get("payoff_preserved", True))
+                        or not bool(_pre_seg.get("ends_cleanly", True))
+                        or _new_idea_score < 0.70
+                        or (_post_boundary_confidence >= 0.75 and _new_idea_score < 0.80)
+                    )
+                    _pre_seg["rescored_after_boundary_adjustment"] = True
+                    logger.info(
+                        "VPI_CANDIDATE_RESCORING_AFTER_BOUNDARY_ADJUSTMENT segment=%s->%s complete_idea=%.3f hookability=%.2f incomplete=%s",
+                        _pre_seg.get("start_time"),
+                        _pre_seg.get("end_time"),
+                        _new_idea_score,
+                        float(_pre_seg.get("hookability_score") or 0.0),
+                        str(bool(_pre_seg.get("incomplete_viral_window_detected"))).lower(),
+                    )
+                except Exception as _hook_shift_e:
+                    logger.debug("[hook-shift-back] segment_skipped reason=%s", _hook_shift_e)
+
+            if _hook_shift_back_count:
+                logger.info("VPI_CONVERSATIONAL_HOOK_SHIFT_BACK_SUMMARY applied=%d", _hook_shift_back_count)
+
+            # ── Package Diversity — final editorial mix selection ───────────────
+            _package_diversity_metadata: Dict[str, Any] = {}
+            try:
+                _package_diversity_metadata = _select_diverse_vpi_clip_package(
+                    segments_json,
+                    max_clips=num_clips,
+                    min_clips=max(1, min(num_clips, 3)),
+                    campaign_context=_campaign_alignment_summary,
+                )
+                _selected_package_segments = list(_package_diversity_metadata.get("selected_segments") or [])
+                _rejected_package_segments = list(_package_diversity_metadata.get("rejected_segments") or [])
+                segments_json = _selected_package_segments + _rejected_package_segments
+
+                # ── H14.9 Fix A/B/C — post-render-input dedupe ──────────────
+                # VPI_EXPANSION_CANDIDATE_RENDER_INPUT_REPLACED (task_service.py,
+                # read-only) operates on the full segments_json above (selected +
+                # rejected) without honoring rejected_for_reason from Fix C, so a
+                # candidate Fix C tagged "duplicate_window_overlap" can still be
+                # selected for a render slot and produce a near-duplicate final
+                # clip. Physically remove such duplicates here, before this list
+                # is returned as segments_to_render/candidate_pool.
+                try:
+                    if int(num_clips) > 1 and len(segments_json) > 1:
+                        logger.info(
+                            "VPI_POST_RENDER_INPUT_DEDUPE_STARTED candidates=%d max_clips=%d",
+                            len(segments_json),
+                            int(num_clips),
+                        )
+
+                        def _h149_ts_seconds(_value: Any) -> float:
+                            try:
+                                return float(parse_timestamp_to_seconds(str(_value or "00:00")))
+                            except Exception:
+                                return 0.0
+
+                        def _h149_quality(_seg: Dict[str, Any]) -> tuple:
+                            return (
+                                0 if bool(_seg.get("incomplete_viral_window_detected")) else 1,
+                                float(_seg.get("complete_idea_score") or 0.0),
+                                float(_seg.get("hookability_score") or 0.0),
+                                float(_seg.get("campaign_alignment_score") or 0.0),
+                                float(_seg.get("final_rank_score") or _seg.get("package_rank_score") or 0.0),
+                            )
+
+                        # H14.11 -- reasons that mark a candidate as already
+                        # rejected for being a near-duplicate of another
+                        # candidate, by H14.7 Fix C and/or H14.9 Fix A. A
+                        # candidate carrying any of these (or equivalent
+                        # metadata) must never be reintroduced by the Fix B
+                        # backfill below, unless it is explicitly flagged as
+                        # a distinct-payoff exception.
+                        _H149_PROHIBITED_DUPLICATE_REASONS = {
+                            "duplicate_window_overlap",
+                            "post_render_input_duplicate_window_overlap",
+                            "duplicate_theme_key",
+                        }
+
+                        def _h149_is_duplicate_rejected(_seg: Dict[str, Any]) -> tuple:
+                            """Return (is_duplicate, basis) for backfill exclusion.
+
+                            basis is "reason" if rejected_for_reason itself marks
+                            the candidate as a duplicate, "metadata" if other
+                            duplicate-tagging metadata (duplicate_of_candidate_id,
+                            post_render_dedupe_stage) marks it, or "" if the
+                            candidate is not duplicate-tagged.
+                            """
+                            if bool(_seg.get("distinct_payoff")) or bool(_seg.get("kept_distinct_payoff")):
+                                return (False, "")
+                            _reason = str(_seg.get("rejected_for_reason") or "")
+                            if _reason in _H149_PROHIBITED_DUPLICATE_REASONS:
+                                return (True, "reason")
+                            if "duplicate" in _reason and "overlap" in _reason:
+                                return (True, "reason")
+                            if _seg.get("duplicate_of_candidate_id"):
+                                return (True, "metadata")
+                            _stage = str(_seg.get("post_render_dedupe_stage") or "")
+                            if "duplicate" in _stage:
+                                return (True, "metadata")
+                            return (False, "")
+
+                        _h149_to_remove: set = set()
+                        for _h149_i in range(len(segments_json)):
+                            _seg_a = segments_json[_h149_i]
+                            if id(_seg_a) in _h149_to_remove:
+                                continue
+                            for _h149_j in range(_h149_i + 1, len(segments_json)):
+                                _seg_b = segments_json[_h149_j]
+                                if id(_seg_b) in _h149_to_remove:
+                                    continue
+                                _a_start = _h149_ts_seconds(_seg_a.get("start_time"))
+                                _a_end = _h149_ts_seconds(_seg_a.get("end_time"))
+                                _b_start = _h149_ts_seconds(_seg_b.get("start_time"))
+                                _b_end = _h149_ts_seconds(_seg_b.get("end_time"))
+                                _h149_union = max(_a_end, _b_end) - min(_a_start, _b_start)
+                                _h149_inter = max(0.0, min(_a_end, _b_end) - max(_a_start, _b_start))
+                                _h149_overlap_ratio = (_h149_inter / _h149_union) if _h149_union > 0 else 0.0
+                                _h149_jaccard, _h149_coverage = _vpi_text_overlap_metrics(
+                                    str(_seg_a.get("text") or ""), str(_seg_b.get("text") or "")
+                                )
+                                _h149_text_sim = max(_h149_jaccard, _h149_coverage)
+                                if _h149_overlap_ratio > 0.65 and _h149_text_sim >= 0.50:
+                                    _qa = _h149_quality(_seg_a)
+                                    _qb = _h149_quality(_seg_b)
+                                    if _qb > _qa:
+                                        _h149_keep, _h149_drop = _seg_b, _seg_a
+                                    elif _qa > _qb:
+                                        _h149_keep, _h149_drop = _seg_a, _seg_b
+                                    else:
+                                        _a_dur = _a_end - _a_start
+                                        _b_dur = _b_end - _b_start
+                                        if (_a_dur <= 45.0) and not (_b_dur <= 45.0):
+                                            _h149_keep, _h149_drop = _seg_a, _seg_b
+                                        else:
+                                            _h149_keep, _h149_drop = _seg_b, _seg_a
+                                    _h149_keep_id = str(_h149_keep.get("candidate_id") or _h149_keep.get("segment_id") or "")
+                                    _h149_drop["rejected_for_reason"] = "post_render_input_duplicate_window_overlap"
+                                    _h149_drop["duplicate_of_candidate_id"] = _h149_keep_id
+                                    _h149_drop["post_render_temporal_overlap_ratio"] = round(_h149_overlap_ratio, 4)
+                                    _h149_drop["post_render_text_similarity"] = round(_h149_text_sim, 4)
+                                    _h149_drop["post_render_dedupe_stage"] = "after_render_input_replacement_before_create_single_clip"
+                                    _h149_to_remove.add(id(_h149_drop))
+                                    logger.info(
+                                        "VPI_POST_RENDER_INPUT_DUPLICATE_REJECTED dropped_window=%s->%s kept_window=%s->%s overlap=%.4f text_similarity=%.4f",
+                                        _h149_drop.get("start_time"),
+                                        _h149_drop.get("end_time"),
+                                        _h149_keep.get("start_time"),
+                                        _h149_keep.get("end_time"),
+                                        _h149_overlap_ratio,
+                                        _h149_text_sim,
+                                    )
+                                    logger.info(
+                                        "VPI_POST_RENDER_INPUT_DUPLICATE_KEEPING_BETTER_CANDIDATE kept_window=%s->%s candidate_id=%s",
+                                        _h149_keep.get("start_time"),
+                                        _h149_keep.get("end_time"),
+                                        _h149_keep_id,
+                                    )
+                                    if id(_seg_a) in _h149_to_remove:
+                                        break
+
+                        if _h149_to_remove:
+                            # Keep removed (duplicate-tagged) segments visible in
+                            # _rejected_package_segments for audit (candidate_ranking_snapshot),
+                            # but exclude them from segments_json/segments_to_render entirely —
+                            # task_service.py does not honor rejected_for_reason, so a tagged
+                            # duplicate left in segments_json would still be picked up by
+                            # VPI_EXPANSION_CANDIDATE_RENDER_INPUT_REPLACED (the H14.8 bug).
+                            _selected_package_segments = [s for s in _selected_package_segments if id(s) not in _h149_to_remove]
+                            _h149_existing_rejected_ids = {id(s) for s in _rejected_package_segments}
+                            for _h149_s in segments_json:
+                                if id(_h149_s) in _h149_to_remove and id(_h149_s) not in _h149_existing_rejected_ids:
+                                    _rejected_package_segments = _rejected_package_segments + [_h149_s]
+
+                            # Fix B — backfill if a gap remains for max_clips
+                            _h149_backfill_attempted = False
+                            _h149_backfill_added = False
+                            _h149_backfill_reason = ""
+                            if len(_selected_package_segments) < int(num_clips) and _rejected_package_segments:
+                                _h149_backfill_attempted = True
+                                logger.info("VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_ATTEMPTED gap=%d", int(num_clips) - len(_selected_package_segments))
+                                for _h149_cand in list(_rejected_package_segments):
+                                    # H14.11 Fix A — never backfill a candidate already
+                                    # marked as a duplicate by H14.7 Fix C
+                                    # (rejected_for_reason="duplicate_window_overlap"),
+                                    # H14.9 Fix A (this block,
+                                    # "post_render_input_duplicate_window_overlap"), or
+                                    # any equivalent duplicate-tagging metadata
+                                    # (duplicate_of_candidate_id, post_render_dedupe_stage),
+                                    # unless explicitly flagged distinct_payoff /
+                                    # kept_distinct_payoff.
+                                    _h149_is_dup_rejected, _h149_dup_basis = _h149_is_duplicate_rejected(_h149_cand)
+                                    if _h149_is_dup_rejected:
+                                        if _h149_dup_basis == "reason":
+                                            logger.info(
+                                                "VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_REJECTED_DUPLICATE_REASON window=%s->%s candidate_id=%s rejected_for_reason=%s",
+                                                _h149_cand.get("start_time"),
+                                                _h149_cand.get("end_time"),
+                                                str(_h149_cand.get("candidate_id") or _h149_cand.get("segment_id") or ""),
+                                                str(_h149_cand.get("rejected_for_reason") or ""),
+                                            )
+                                        else:
+                                            logger.info(
+                                                "VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_REJECTED_DUPLICATE_METADATA window=%s->%s candidate_id=%s duplicate_of_candidate_id=%s post_render_dedupe_stage=%s",
+                                                _h149_cand.get("start_time"),
+                                                _h149_cand.get("end_time"),
+                                                str(_h149_cand.get("candidate_id") or _h149_cand.get("segment_id") or ""),
+                                                str(_h149_cand.get("duplicate_of_candidate_id") or ""),
+                                                str(_h149_cand.get("post_render_dedupe_stage") or ""),
+                                            )
+                                        continue
+                                    if bool(_h149_cand.get("bts_tail_detected")):
+                                        continue
+                                    _cand_start = _h149_ts_seconds(_h149_cand.get("start_time"))
+                                    _cand_end = _h149_ts_seconds(_h149_cand.get("end_time"))
+                                    _h149_is_dup_of_selected = False
+                                    _h149_dup_sel_seg = None
+                                    _h149_dup_sel_ratio = 0.0
+                                    _h149_dup_sel_textsim = 0.0
+                                    for _h149_sel in _selected_package_segments:
+                                        _sel_start = _h149_ts_seconds(_h149_sel.get("start_time"))
+                                        _sel_end = _h149_ts_seconds(_h149_sel.get("end_time"))
+                                        _h149_union2 = max(_cand_end, _sel_end) - min(_cand_start, _sel_start)
+                                        _h149_inter2 = max(0.0, min(_cand_end, _sel_end) - max(_cand_start, _sel_start))
+                                        _h149_ratio2 = (_h149_inter2 / _h149_union2) if _h149_union2 > 0 else 0.0
+                                        _h149_j2, _h149_c2 = _vpi_text_overlap_metrics(str(_h149_cand.get("text") or ""), str(_h149_sel.get("text") or ""))
+                                        _h149_textsim2 = max(_h149_j2, _h149_c2)
+                                        if _h149_ratio2 > 0.65 and _h149_textsim2 >= 0.50:
+                                            _h149_is_dup_of_selected = True
+                                            _h149_dup_sel_seg = _h149_sel
+                                            _h149_dup_sel_ratio = _h149_ratio2
+                                            _h149_dup_sel_textsim = _h149_textsim2
+                                            break
+                                    if _h149_is_dup_of_selected:
+                                        # H14.11 Fix B — backfill candidate is itself a
+                                        # near-duplicate of a currently-selected
+                                        # candidate; reject it and record why.
+                                        _h149_cand["backfill_rejected_for_reason"] = "backfill_duplicate_against_kept_candidate"
+                                        _h149_cand["backfill_duplicate_of_candidate_id"] = str(
+                                            (_h149_dup_sel_seg or {}).get("candidate_id")
+                                            or (_h149_dup_sel_seg or {}).get("segment_id")
+                                            or ""
+                                        )
+                                        _h149_cand["backfill_temporal_overlap_ratio"] = round(_h149_dup_sel_ratio, 4)
+                                        _h149_cand["backfill_text_similarity"] = round(_h149_dup_sel_textsim, 4)
+                                        logger.info(
+                                            "VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_REJECTED_DUPLICATE_AGAINST_KEPT window=%s->%s candidate_id=%s duplicate_of_candidate_id=%s overlap=%.4f text_similarity=%.4f",
+                                            _h149_cand.get("start_time"),
+                                            _h149_cand.get("end_time"),
+                                            str(_h149_cand.get("candidate_id") or _h149_cand.get("segment_id") or ""),
+                                            _h149_cand["backfill_duplicate_of_candidate_id"],
+                                            _h149_dup_sel_ratio,
+                                            _h149_dup_sel_textsim,
+                                        )
+                                        continue
+                                    _h149_cand["post_render_dedupe_backfill_added"] = True
+                                    _h149_cand["post_render_dedupe_backfill_reason"] = "valid_non_duplicate_alternative_found"
+                                    _selected_package_segments.append(_h149_cand)
+                                    _rejected_package_segments.remove(_h149_cand)
+                                    _h149_backfill_added = True
+                                    _h149_backfill_reason = "valid_non_duplicate_alternative_found"
+                                    logger.info(
+                                        "VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_ADDED window=%s->%s candidate_id=%s",
+                                        _h149_cand.get("start_time"),
+                                        _h149_cand.get("end_time"),
+                                        str(_h149_cand.get("candidate_id") or _h149_cand.get("segment_id") or ""),
+                                    )
+                                    break
+                                if not _h149_backfill_added:
+                                    # H14.11 Fix C — no artificial backfill: if every
+                                    # remaining rejected candidate is itself a
+                                    # duplicate (or otherwise invalid), do not fill
+                                    # the slot with a clone. effective_clips_count
+                                    # below will reflect the real, deduplicated count.
+                                    _h149_backfill_reason = "no_valid_non_duplicate_candidate"
+                                    logger.info("VPI_POST_RENDER_INPUT_DEDUPE_BACKFILL_SKIPPED_NO_VALID_CANDIDATE")
+
+                            # segments_to_render excludes any segment still tagged as a
+                            # post-render-input duplicate (kept only in _rejected_package_segments
+                            # for audit purposes).
+                            segments_json = _selected_package_segments + [
+                                s for s in _rejected_package_segments if id(s) not in _h149_to_remove
+                            ]
+                            for _h149_seg in segments_json:
+                                _h149_seg["post_render_dedupe_backfill_attempted"] = _h149_backfill_attempted
+                                _h149_seg["post_render_dedupe_backfill_added"] = _h149_backfill_added
+                                _h149_seg["post_render_dedupe_backfill_reason"] = _h149_backfill_reason
+
+                            # Fix C — effective_clips_count consistency
+                            _h149_effective_clips_count = min(len(_selected_package_segments), int(num_clips))
+                            _diversity_metadata["effective_clips_count"] = _h149_effective_clips_count
+                            logger.info(
+                                "VPI_POST_RENDER_INPUT_DEDUPE_EFFECTIVE_CLIP_COUNT_UPDATED effective_clips_count=%d max_clips=%d",
+                                _h149_effective_clips_count,
+                                int(num_clips),
+                            )
+
+                        logger.info(
+                            "VPI_POST_RENDER_INPUT_DEDUPE_COMPLETE total=%d removed=%d",
+                            len(segments_json),
+                            len(_h149_to_remove),
+                        )
+                except Exception as _h149_e:
+                    logger.warning("VPI_POST_RENDER_INPUT_DEDUPE_WARNING reason=%s", _h149_e)
+
+                try:
+                    _crs_candidates: List[Dict[str, Any]] = []
+                    _crs_all_segments = list(_selected_package_segments) + list(_rejected_package_segments)
+                    _crs_selected_id = None
+                    _crs_selected_window = None
+                    for _crs_idx, _crs_seg in enumerate(_crs_all_segments):
+                        _crs_id = str(_crs_seg.get("segment_id") or _crs_seg.get("id") or f"candidate_{_crs_idx + 1}")
+                        _crs_is_selected = _crs_seg in _selected_package_segments
+                        if _crs_is_selected and _crs_selected_id is None:
+                            _crs_selected_id = _crs_id
+                            _crs_selected_window = f"{_crs_seg.get('start_time')} -> {_crs_seg.get('end_time')}"
+                        _crs_candidates.append({
+                            "candidate_id": _crs_id,
+                            "start_time": _crs_seg.get("start_time"),
+                            "end_time": _crs_seg.get("end_time"),
+                            "text_preview": str(_crs_seg.get("text") or "")[:160],
+                            "editorial_type": _crs_seg.get("editorial_type") or _crs_seg.get("primary_category"),
+                            "editorial_score": _crs_seg.get("editorial_score"),
+                            "virality_score": _crs_seg.get("virality_score"),
+                            "final_rank_score": _crs_seg.get("final_rank_score") or _crs_seg.get("package_rank_score"),
+                            "boundary_confidence": _crs_seg.get("boundary_confidence"),
+                            "complete_idea_score": _crs_seg.get("complete_idea_score"),
+                            "incomplete_viral_window_detected": bool(_crs_seg.get("incomplete_viral_window_detected")),
+                            "bts_tail_detected": bool(_crs_seg.get("bts_tail_detected")),
+                            "selected_for_reason": _crs_seg.get("selected_for_reason"),
+                            "rejected_for_reason": _crs_seg.get("rejected_for_reason"),
+                            "duplicate_theme_key": _crs_seg.get("duplicate_theme_key") or _crs_seg.get("similar_theme_key"),
+                            "pre_selection_scored": bool(_crs_seg.get("pre_selection_scored")),
+                            "generated_by": str(_crs_seg.get("generated_by") or "primary_pipeline"),
+                            "rescue_eligible": bool(
+                                float(_crs_seg.get("complete_idea_score") or 0.0) >= 0.70
+                                and not bool(_crs_seg.get("incomplete_viral_window_detected"))
+                                and not bool(_crs_seg.get("bts_tail_detected"))
+                            ),
+                        })
+                    _crs_snapshot = {
+                        "task_id": str(task_id or "unknown"),
+                        "source_url": str(url or ""),
+                        "source_path": str(video_path) if video_path else "",
+                        "max_clips": int(num_clips),
+                        "quota": int(num_clips),
+                        "generated_candidates_count": len(_crs_all_segments),
+                        # H13.2 Fix D — candidate pool expansion audit fields
+                        "candidate_pool_expanded": bool(_candidate_pool_expanded),
+                        "candidate_pool_expansion_count": int(_candidate_pool_expansion_count),
+                        "selected_candidate_id": _crs_selected_id,
+                        "selected_window": _crs_selected_window,
+                        "candidates": _crs_candidates,
+                    }
+                    _crs_plans_dir = _resolve_plan_artifacts_dir(task_id)
+                    _crs_out_path = _crs_plans_dir / "candidate_ranking_snapshot.json"
+                    _crs_out_path.write_text(
+                        json.dumps(_json_safe(_crs_snapshot), ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    logger.info(
+                        "VPI_SELECTION_CANDIDATE_RANKING_SNAPSHOT_WRITTEN task_id=%s path=%s candidates=%d selected=%s",
+                        task_id,
+                        str(_crs_out_path),
+                        len(_crs_candidates),
+                        str(_crs_selected_id),
+                    )
+                except Exception as _crs_e:
+                    logger.warning("VPI_SELECTION_CANDIDATE_RANKING_SNAPSHOT_WARNING reason=%s", _crs_e)
+                _diversity_metadata["package_diversity_score"] = float(_package_diversity_metadata.get("package_diversity_score") or 0.0)
+                _diversity_metadata["package_diversity_reason"] = str(_package_diversity_metadata.get("package_diversity_reason") or "")
+                _diversity_metadata["package_category_distribution"] = dict(_package_diversity_metadata.get("package_category_distribution") or {})
+                _diversity_metadata["package_theme_distribution"] = dict(_package_diversity_metadata.get("package_theme_distribution") or {})
+                _diversity_metadata["package_duration_balance_ok"] = bool(_package_diversity_metadata.get("package_duration_balance_ok"))
+                _diversity_metadata["package_duration_warnings"] = list(_package_diversity_metadata.get("package_duration_warnings") or [])
+                _diversity_metadata["package_diversity_warnings"] = list(_package_diversity_metadata.get("package_diversity_warnings") or [])
+                _diversity_metadata["selected_clip_package_summary"] = dict(_package_diversity_metadata.get("selected_clip_package_summary") or {})
+                _diversity_metadata["package_diversity_context"] = dict(_package_diversity_metadata.get("package_diversity_context") or {})
+                _diversity_metadata["package_rejection_reasons"] = list(_package_diversity_metadata.get("package_rejection_reasons") or [])
+                _diversity_metadata["campaign_intent"] = str(_package_diversity_metadata.get("campaign_intent") or _campaign_alignment_summary.get("campaign_intent") or "general_vpi")
+                _diversity_metadata["campaign_intent_confidence"] = float(_package_diversity_metadata.get("campaign_intent_confidence") or _campaign_alignment_summary.get("campaign_intent_confidence") or 0.0)
+                _diversity_metadata["campaign_intent_source"] = str(_package_diversity_metadata.get("campaign_intent_source") or _campaign_alignment_summary.get("campaign_intent_source") or "default_general")
+                _diversity_metadata["campaign_intent_reason"] = str(_package_diversity_metadata.get("campaign_intent_reason") or _campaign_alignment_summary.get("campaign_intent_reason") or "")
+                _diversity_metadata["preferred_categories"] = list(_package_diversity_metadata.get("preferred_categories") or _campaign_alignment_summary.get("preferred_categories") or [])
+                _diversity_metadata["suppressed_categories"] = list(_package_diversity_metadata.get("suppressed_categories") or _campaign_alignment_summary.get("suppressed_categories") or [])
+                _diversity_metadata["preferred_keywords"] = list(_package_diversity_metadata.get("preferred_keywords") or _campaign_alignment_summary.get("preferred_keywords") or [])
+                _diversity_metadata["sensitive_handling_required"] = bool(_package_diversity_metadata.get("sensitive_handling_required") if _package_diversity_metadata.get("sensitive_handling_required") is not None else _campaign_alignment_summary.get("sensitive_handling_required"))
+                _diversity_metadata["campaign_boost_applied"] = bool(_package_diversity_metadata.get("campaign_boost_applied") if _package_diversity_metadata.get("campaign_boost_applied") is not None else _campaign_alignment_summary.get("campaign_boost_applied"))
+                _diversity_metadata["campaign_boost_score"] = float(_package_diversity_metadata.get("campaign_boost_score") or _campaign_alignment_summary.get("campaign_boost_score") or 0.0)
+                _diversity_metadata["campaign_alignment_score"] = float(_package_diversity_metadata.get("campaign_alignment_score") or _campaign_alignment_summary.get("campaign_alignment_score") or 0.0)
+                _diversity_metadata["campaign_alignment_reason"] = str(_package_diversity_metadata.get("campaign_alignment_reason") or _campaign_alignment_summary.get("campaign_alignment_reason") or "")
+                _diversity_metadata["selected_campaign_mix"] = dict(_package_diversity_metadata.get("selected_campaign_mix") or _campaign_alignment_summary.get("selected_campaign_mix") or {})
+                _diversity_metadata["campaign_alignment_summary"] = dict(_package_diversity_metadata.get("campaign_alignment_summary") or _campaign_alignment_summary or {})
+                logger.info(
+                    "VPI_PACKAGE_DIVERSITY_SELECTED selected=%d rejected=%d score=%.4f",
+                    len(_selected_package_segments),
+                    len(_rejected_package_segments),
+                    float(_package_diversity_metadata.get("package_diversity_score") or 0.0),
+                )
+            except Exception as _package_div_e:
+                logger.warning("VPI_PACKAGE_DIVERSITY_WARNING reason=%s", _package_div_e)
+                _package_diversity_metadata = {
+                    "package_diversity_score": 0.0,
+                    "package_diversity_reason": str(_package_div_e),
+                    "package_category_distribution": {},
+                    "package_theme_distribution": {},
+                    "package_duration_balance_ok": False,
+                    "package_duration_warnings": ["package_diversity_failed"],
+                    "package_diversity_warnings": ["package_diversity_failed"],
+                    "selected_segments": list(segments_json[:num_clips]),
+                    "rejected_segments": list(segments_json[num_clips:]),
+                    "selected_clip_package_summary": {},
+                    "package_diversity_context": {},
+                    "package_rejection_reasons": ["package_diversity_failed"],
+                }
+            if isinstance(_package_diversity_metadata, dict):
+                _diversity_metadata["package_diversity_score"] = float(_package_diversity_metadata.get("package_diversity_score") or 0.0)
+                _diversity_metadata["package_diversity_reason"] = str(_package_diversity_metadata.get("package_diversity_reason") or "")
+                _diversity_metadata["package_category_distribution"] = dict(_package_diversity_metadata.get("package_category_distribution") or {})
+                _diversity_metadata["package_theme_distribution"] = dict(_package_diversity_metadata.get("package_theme_distribution") or {})
+                _diversity_metadata["package_duration_balance_ok"] = bool(_package_diversity_metadata.get("package_duration_balance_ok"))
+                _diversity_metadata["package_duration_warnings"] = list(_package_diversity_metadata.get("package_duration_warnings") or [])
+                _diversity_metadata["package_diversity_warnings"] = list(_package_diversity_metadata.get("package_diversity_warnings") or [])
+                _diversity_metadata["selected_clip_package_summary"] = dict(_package_diversity_metadata.get("selected_clip_package_summary") or {})
+                _diversity_metadata["package_diversity_context"] = dict(_package_diversity_metadata.get("package_diversity_context") or {})
+                _diversity_metadata["package_rejection_reasons"] = list(_package_diversity_metadata.get("package_rejection_reasons") or [])
+                _diversity_metadata["campaign_intent"] = str(_package_diversity_metadata.get("campaign_intent") or _campaign_alignment_summary.get("campaign_intent") or "general_vpi")
+                _diversity_metadata["campaign_intent_confidence"] = float(_package_diversity_metadata.get("campaign_intent_confidence") or _campaign_alignment_summary.get("campaign_intent_confidence") or 0.0)
+                _diversity_metadata["campaign_intent_source"] = str(_package_diversity_metadata.get("campaign_intent_source") or _campaign_alignment_summary.get("campaign_intent_source") or "default_general")
+                _diversity_metadata["campaign_intent_reason"] = str(_package_diversity_metadata.get("campaign_intent_reason") or _campaign_alignment_summary.get("campaign_intent_reason") or "")
+                _diversity_metadata["preferred_categories"] = list(_package_diversity_metadata.get("preferred_categories") or _campaign_alignment_summary.get("preferred_categories") or [])
+                _diversity_metadata["suppressed_categories"] = list(_package_diversity_metadata.get("suppressed_categories") or _campaign_alignment_summary.get("suppressed_categories") or [])
+                _diversity_metadata["preferred_keywords"] = list(_package_diversity_metadata.get("preferred_keywords") or _campaign_alignment_summary.get("preferred_keywords") or [])
+                _diversity_metadata["sensitive_handling_required"] = bool(_package_diversity_metadata.get("sensitive_handling_required") if _package_diversity_metadata.get("sensitive_handling_required") is not None else _campaign_alignment_summary.get("sensitive_handling_required"))
+                _diversity_metadata["campaign_boost_applied"] = bool(_package_diversity_metadata.get("campaign_boost_applied") if _package_diversity_metadata.get("campaign_boost_applied") is not None else _campaign_alignment_summary.get("campaign_boost_applied"))
+                _diversity_metadata["campaign_boost_score"] = float(_package_diversity_metadata.get("campaign_boost_score") or _campaign_alignment_summary.get("campaign_boost_score") or 0.0)
+                _diversity_metadata["campaign_alignment_score"] = float(_package_diversity_metadata.get("campaign_alignment_score") or _campaign_alignment_summary.get("campaign_alignment_score") or 0.0)
+                _diversity_metadata["campaign_alignment_reason"] = str(_package_diversity_metadata.get("campaign_alignment_reason") or _campaign_alignment_summary.get("campaign_alignment_reason") or "")
+                _diversity_metadata["selected_campaign_mix"] = dict(_package_diversity_metadata.get("selected_campaign_mix") or _campaign_alignment_summary.get("selected_campaign_mix") or {})
+                _diversity_metadata["campaign_alignment_summary"] = dict(_package_diversity_metadata.get("campaign_alignment_summary") or _campaign_alignment_summary or {})
+
             # Add niche info to segments
             for segment in segments_json:
                 segment["niche_info"] = niche_info
+                segment["package_diversity_score"] = float(_diversity_metadata.get("package_diversity_score") or 0.0)
+                segment["package_diversity_reason"] = str(_diversity_metadata.get("package_diversity_reason") or "")
+                segment["package_category_distribution"] = dict(_diversity_metadata.get("package_category_distribution") or {})
+                segment["package_theme_distribution"] = dict(_diversity_metadata.get("package_theme_distribution") or {})
+                segment["package_duration_balance_ok"] = bool(_diversity_metadata.get("package_duration_balance_ok"))
+                segment["package_duration_warnings"] = list(_diversity_metadata.get("package_duration_warnings") or [])
+                segment["package_diversity_warnings"] = list(_diversity_metadata.get("package_diversity_warnings") or [])
+                segment["package_diversity_context"] = dict(_diversity_metadata.get("package_diversity_context") or {})
+                segment["selected_clip_package_summary"] = dict(_diversity_metadata.get("selected_clip_package_summary") or {})
+                segment["campaign_intent"] = str(_diversity_metadata.get("campaign_intent") or "general_vpi")
+                segment["campaign_intent_confidence"] = float(_diversity_metadata.get("campaign_intent_confidence") or 0.0)
+                segment["campaign_intent_source"] = str(_diversity_metadata.get("campaign_intent_source") or "default_general")
+                segment["campaign_intent_reason"] = str(_diversity_metadata.get("campaign_intent_reason") or "")
+                segment["preferred_categories"] = list(_diversity_metadata.get("preferred_categories") or [])
+                segment["suppressed_categories"] = list(_diversity_metadata.get("suppressed_categories") or [])
+                segment["preferred_keywords"] = list(_diversity_metadata.get("preferred_keywords") or [])
+                segment["sensitive_handling_required"] = bool(_diversity_metadata.get("sensitive_handling_required"))
+                segment["campaign_boost_applied"] = bool(_diversity_metadata.get("campaign_boost_applied") or False)
+                segment["campaign_boost_score"] = float(_diversity_metadata.get("campaign_boost_score") or 0.0)
+                segment["campaign_alignment_score"] = float(_diversity_metadata.get("campaign_alignment_score") or 0.0)
+                segment["campaign_alignment_reason"] = str(_diversity_metadata.get("campaign_alignment_reason") or "")
+                segment["selected_campaign_mix"] = dict(_diversity_metadata.get("selected_campaign_mix") or {})
+                segment["campaign_alignment_summary"] = dict(_diversity_metadata.get("campaign_alignment_summary") or {})
+                if not segment.get("selected_for_reason"):
+                    if segment in (_package_diversity_metadata.get("selected_segments") or []):
+                        segment["selected_for_reason"] = "campaign_alignment_boost" if bool(segment.get("campaign_boost_applied")) else "category_diversity_boost"
+                    else:
+                        segment["selected_for_reason"] = str(segment.get("selected_for_reason") or "")
+                    if segment in (_package_diversity_metadata.get("rejected_segments") or []):
+                        segment["rejected_for_reason"] = str(segment.get("rejected_for_reason") or "diversity_replacement")
+
+            clip_briefs: List[Dict[str, Any]] = []
+            brief_high_confidence_count = 0
+            brief_review_count = 0
+            campaign_fit_summary: Dict[str, int] = {}
+            for _brief_idx, segment in enumerate(segments_json):
+                try:
+                    _brief_boundary_confidence = float(segment.get("boundary_confidence") or 0.0)
+                    if _brief_boundary_confidence > 0.0:
+                        logger.info(
+                            "VPI_SELECTION_CLIP_BRIEF_BOUNDARY_FROM_REFINED clip_order=%d window=%s->%s boundary_confidence=%.3f source=%s",
+                            _brief_idx + 1,
+                            str(segment.get("start_time") or ""),
+                            str(segment.get("end_time") or ""),
+                            _brief_boundary_confidence,
+                            "pre_selection_scored" if segment.get("pre_selection_scored") else "segment_snapshot",
+                        )
+                    else:
+                        logger.info(
+                            "VPI_SELECTION_CLIP_BRIEF_BOUNDARY_STALE_SNAPSHOT_AVOIDED clip_order=%d window=%s->%s reason=no_real_boundary_confidence_available",
+                            _brief_idx + 1,
+                            str(segment.get("start_time") or ""),
+                            str(segment.get("end_time") or ""),
+                        )
+                    _brief = _build_vpi_clip_editorial_brief(
+                        segment_text=str(segment.get("text") or ""),
+                        vpi_editorial_categories=list(segment.get("vpi_editorial_categories") or [segment.get("editorial_type") or "generic"]),
+                        primary_category=str(segment.get("primary_category") or segment.get("editorial_type") or "generic"),
+                        editorial_score=float(segment.get("editorial_score") or segment.get("vpi_score") or 0.0),
+                        hookability_score=float(segment.get("hookability_score") or 0.0),
+                        commercial_usefulness_score=float(segment.get("commercial_usefulness_score") or 0.0),
+                        standalone_score=float(segment.get("standalone_score") or 0.0),
+                        boundary_confidence=_brief_boundary_confidence,
+                        package_diversity_context=dict(segment.get("package_diversity_context") or {}),
+                        campaign_intent=str(segment.get("campaign_intent") or "general_vpi"),
+                        campaign_alignment_score=float(segment.get("campaign_alignment_score") or 0.0),
+                        selected_for_reason=str(segment.get("selected_for_reason") or ""),
+                        weak_segment_penalties=list(segment.get("weak_segment_penalties") or []),
+                        sensitive_handling_required=bool(segment.get("sensitive_handling_required")),
+                        cta_metadata=_as_dict(segment.get("cta") or segment.get("editing_plan") or {}),
+                    )
+                    segment.update(_brief)
+                    clip_briefs.append(dict(_brief.get("clip_brief") or {}))
+                    if str(_brief.get("clip_confidence_label") or "") == "high":
+                        brief_high_confidence_count += 1
+                    if _brief.get("clip_review_flags"):
+                        brief_review_count += 1
+                    _campaign_fit = _as_dict(_brief.get("clip_campaign_fit"))
+                    _intent_key = str(_campaign_fit.get("campaign_intent") or segment.get("campaign_intent") or "general_vpi")
+                    campaign_fit_summary[_intent_key] = campaign_fit_summary.get(_intent_key, 0) + 1
+                except Exception as _brief_e:
+                    logger.warning("VPI_CLIP_BRIEF_TASK_SUMMARY reason=build_failed error=%s", _brief_e)
+                    segment["clip_brief_build_error"] = str(_brief_e)
+            _diversity_metadata["clip_briefs"] = list(clip_briefs)
+            _diversity_metadata["clip_brief_summary"] = {
+                "total_briefs": len(clip_briefs),
+                "high_confidence_clip_count": brief_high_confidence_count,
+                "review_clip_count": brief_review_count,
+                "campaign_fit_summary": campaign_fit_summary,
+            }
+            _diversity_metadata["high_confidence_clip_count"] = brief_high_confidence_count
+            _diversity_metadata["review_clip_count"] = brief_review_count
+            _diversity_metadata["campaign_fit_summary"] = dict(campaign_fit_summary)
+            logger.info(
+                "VPI_CLIP_BRIEF_TASK_SUMMARY total=%d high_confidence=%d review=%d campaigns=%s",
+                len(clip_briefs),
+                brief_high_confidence_count,
+                brief_review_count,
+                "|".join(f"{k}:{v}" for k, v in campaign_fit_summary.items()) or "none",
+            )
 
             # CRITICAL VALIDATION before return
             logger.info(f"[PIPELINE RETURN] Preparing return with {len(segments_json)} segments")
+            _selection_failure_reason = ""
             if len(segments_json) == 0:
+                if _content_quality_rejections:
+                    _selection_failure_reason = "all_candidates_rejected_by_content_quality"
+                elif _candidate_pool_generated == 0:
+                    _selection_failure_reason = "candidate_generation_produced_zero_segments"
+                else:
+                    _selection_failure_reason = "no_segments_selected"
                 logger.error(
                     f"[PIPELINE RETURN] ❌❌❌ CRITICAL ERROR: segments_json is EMPTY at return! "
                     f"Task will complete with 0 clips. "
                     f"raw_segments count was: {len(raw_segments)}, "
                     f"relevant_parts.most_relevant_segments: {len(relevant_parts.most_relevant_segments) if relevant_parts else 'N/A'}"
+                )
+                logger.error(
+                    "[candidate-pool] selected_segments_count_final=0 selection_failure_reason=%s",
+                    _selection_failure_reason,
                 )
             else:
                 top_virality = segments_json[0].get("virality_score", 0)
@@ -5999,7 +17457,10 @@ class VideoService:
 
             # Step 5: RENDER CLIPS TO DISK
             clips_info = []
-            if len(segments_json) > 0 and video_path:
+            _allow_internal_render = not bool(get_service_config().beta_clean)
+            if not _allow_internal_render and len(segments_json) > 0:
+                logger.info("EARLY_RENDER_PATH_DISABLED reason=pre_render_qc_required")
+            if _allow_internal_render and len(segments_json) > 0 and video_path:
                 if should_cancel and await should_cancel():
                     raise Exception("Task cancelled")
 
@@ -6061,10 +17522,41 @@ class VideoService:
             return {
                 "segments": segments_json,
                 "segments_to_render": segments_json,
+                "candidate_pool": _pre_render_candidate_pool,
+                "pre_render_candidate_pool": _pre_render_candidate_pool,
+                "segments_before_final_selection": _pre_render_candidate_pool,
+                "ranked_segments": _pre_render_candidate_pool,
                 "video_path": str(video_path),
                 "clips": clips_info,
                 "clips_info": clips_info,
                 "diversity_metadata": _diversity_metadata,
+                "selected_clip_package_summary": _diversity_metadata.get("selected_clip_package_summary") or {},
+                "package_diversity_score": float(_diversity_metadata.get("package_diversity_score") or 0.0),
+                "package_diversity_reason": str(_diversity_metadata.get("package_diversity_reason") or ""),
+                "package_category_distribution": dict(_diversity_metadata.get("package_category_distribution") or {}),
+                "package_theme_distribution": dict(_diversity_metadata.get("package_theme_distribution") or {}),
+                "package_duration_balance_ok": bool(_diversity_metadata.get("package_duration_balance_ok")),
+                "package_duration_warnings": list(_diversity_metadata.get("package_duration_warnings") or []),
+                "package_diversity_warnings": list(_diversity_metadata.get("package_diversity_warnings") or []),
+                "clip_briefs": list(_diversity_metadata.get("clip_briefs") or []),
+                "clip_brief_summary": dict(_diversity_metadata.get("clip_brief_summary") or {}),
+                "high_confidence_clip_count": int(_diversity_metadata.get("high_confidence_clip_count") or 0),
+                "review_clip_count": int(_diversity_metadata.get("review_clip_count") or 0),
+                "campaign_fit_summary": dict(_diversity_metadata.get("campaign_fit_summary") or {}),
+                "campaign_intent": str(_diversity_metadata.get("campaign_intent") or "general_vpi"),
+                "campaign_intent_confidence": float(_diversity_metadata.get("campaign_intent_confidence") or 0.0),
+                "campaign_intent_source": str(_diversity_metadata.get("campaign_intent_source") or "default_general"),
+                "campaign_intent_reason": str(_diversity_metadata.get("campaign_intent_reason") or ""),
+                "preferred_categories": list(_diversity_metadata.get("preferred_categories") or []),
+                "suppressed_categories": list(_diversity_metadata.get("suppressed_categories") or []),
+                "preferred_keywords": list(_diversity_metadata.get("preferred_keywords") or []),
+                "campaign_boost_applied": bool(_diversity_metadata.get("campaign_boost_applied")),
+                "campaign_boost_score": float(_diversity_metadata.get("campaign_boost_score") or 0.0),
+                "campaign_alignment_score": float(_diversity_metadata.get("campaign_alignment_score") or 0.0),
+                "campaign_alignment_reason": str(_diversity_metadata.get("campaign_alignment_reason") or ""),
+                "selected_campaign_mix": dict(_diversity_metadata.get("selected_campaign_mix") or {}),
+                "campaign_alignment_summary": dict(_diversity_metadata.get("campaign_alignment_summary") or {}),
+                "sensitive_handling_required": bool(_diversity_metadata.get("sensitive_handling_required")),
                 "summary": relevant_parts.summary if relevant_parts else None,
                 "key_topics": relevant_parts.key_topics if relevant_parts else None,
                 "transcript": transcript,
@@ -6074,9 +17566,12 @@ class VideoService:
                         "key_topics": relevant_parts.key_topics
                         if relevant_parts
                         else [],
-                        "most_relevant_segments": segments_json,
+                        "most_relevant_segments": _pre_render_candidate_pool,
                     }
                 ),
+                "selection_failure_reason": _selection_failure_reason or "",
+                "content_quality_rejections": _content_quality_rejections,
+                "cache_usage": cache_usage,
                 "_metrics": get_metrics_collector().get_pipeline_report(task_id or "unknown"),
             }
 

@@ -1,0 +1,409 @@
+ M .dockerignore
+ M .env.example
+ M assets/README_ASSET_LIBRARY.md
+ M assets/vpi_asset_manifest.json
+ M assets/vpi_asset_manifest.template.json
+ M backend/Dockerfile
+ M backend/src/ai.py
+ M backend/src/api/routes/tasks.py
+ M backend/src/config.py
+ M backend/src/database.py
+ M backend/src/main.py
+ M backend/src/main_refactored.py
+ M backend/src/repositories/clip_repository.py
+ M backend/src/repositories/task_repository.py
+ M backend/src/services/background_music_service.py
+ M backend/src/services/broll_compositor.py
+ M backend/src/services/broll_density_planner.py
+ M backend/src/services/broll_provider_strategy.py
+ M backend/src/services/broll_service.py
+ M backend/src/services/caption_service.py
+ M backend/src/services/coordinator.py
+ M backend/src/services/creative_pipeline.py
+ M backend/src/services/cut_zoom_service.py
+ M backend/src/services/editorial_broll_planner.py
+ M backend/src/services/hook_visual_service.py
+ M backend/src/services/local_broll_asset_bank.py
+ M backend/src/services/pexels_service.py
+ M backend/src/services/semantic_broll_service.py
+ M backend/src/services/smart_audio.py
+ M backend/src/services/smart_reframe_service.py
+ M backend/src/services/sound_design_service.py
+ M backend/src/services/task_service.py
+ M backend/src/services/video_polish_service.py
+ M backend/src/services/video_service.py
+ M backend/src/services/vpi_asset_library_service.py
+ M backend/src/services/vpi_audio_mastering.py
+ M backend/src/services/vpi_branding_service.py
+ M backend/src/services/vpi_broll_intent.py
+ M backend/src/services/vpi_editing_plan.py
+AM backend/src/services/vpi_editorial_contract.py
+ M backend/src/services/vpi_editorial_scorer.py
+AM backend/src/services/vpi_final_overlay_composer.py
+ M backend/src/services/vpi_hook_engine.py
+ M backend/src/services/vpi_music_service.py
+A  backend/src/services/vpi_overlay_card_composer.py
+ M backend/src/services/vpi_premium_runtime.py
+AM backend/src/services/vpi_production_safe_edit.py
+ M backend/src/services/vpi_publishable_gate.py
+ M backend/src/services/vpi_retention_editing_service.py
+ M backend/src/services/vpi_sfx_service.py
+ M backend/src/services/vpi_silence_editor.py
+ M backend/src/services/vpi_transition_engine.py
+ M backend/src/services/vpi_visual_effects_service.py
+ M backend/src/utils/gpu_utils.py
+ M backend/src/utils/scene_analysis.py
+ M backend/src/video_processing/audio.py
+ M backend/src/video_processing/clip_creation.py
+ M backend/src/video_processing/editing_pipeline.py
+ M backend/src/video_processing/ffmpeg_guard.py
+ M backend/src/video_processing/overlay_renderer.py
+ M backend/src/video_processing/transcription.py
+ M backend/src/youtube_utils.py
+ M docker-compose.override.yml
+ M docker-compose.yml
+ M docs/vpi_asset_intake_checklist.md
+ M frontend/Dockerfile
+ M frontend/next.config.ts
+ M frontend/package.json
+ M frontend/src/app/api/auth/[...all]/route.ts
+ M frontend/src/app/dashboard/layout.tsx
+ M frontend/src/app/dashboard/page.tsx
+ M frontend/src/app/dashboard/settings/page.tsx
+ M frontend/src/app/tasks/[id]/page.tsx
+ M frontend/src/lib/auth.ts
+ M package.json
+ M reports/editorial_eval/preflight_latest.json
+ M reports/editorial_eval/preflight_latest.md
+ M scripts/debug_asset_intake_pack.py
+ M scripts/debug_asset_library_pack.py
+ M scripts/debug_asset_runtime_selection.py
+ M scripts/debug_final_qc_pack.py
+ M scripts/debug_music_service.py
+ M scripts/debug_private_premium_smoke_harness.py
+ M scripts/debug_sfx_service.py
+ M scripts/run_private_premium_smoke_render.py
+ M scripts/vpi_asset_intake.py
+ M scripts/vpi_editorial_preflight.py
+?? .ipynb_checkpoints/
+?? BETA_CLEAN_MODE_AUDIT.md
+?? BROLL_AUDIT_REPORT.md
+?? GPU_CUDA_DIAGNOSTIC.md
+?? _debug_cinematic.py
+?? assets/broll/.asset_usage_memory.json
+?? assets/broll/.asset_usage_memory.json.bak.20260528T092034Z
+?? assets/broll/.asset_usage_memory.json.bak.20260528T092106Z
+?? assets/broll/.asset_usage_memory.json.bak.20260528T092122Z
+?? assets/broll/.usage_history.json
+?? assets/fonts/
+?? assets/icons/
+?? assets/lottie/
+?? assets/overlays/
+?? assets/overlays_staging/
+?? assets/vpi_3d_asset_sources.json
+?? assets/vpi_3d_asset_sources.schema.json
+?? assets/vpi_3d_object_registry.json
+?? assets/vpi_animated_asset_registry.json
+?? backend/alembic/
+?? backend/src/services/vpi_3d_object_registry.py
+?? backend/src/services/vpi_animated_asset_registry.py
+?? backend/src/services/vpi_ass_caption_service.py
+?? backend/src/services/vpi_complete_idea_gate.py
+?? backend/src/services/vpi_disfluency_editor.py
+?? backend/src/services/vpi_dynamic_overlay_text_service.py
+?? backend/src/services/vpi_editly_exporter.py
+?? backend/src/services/vpi_editorial_fluency_service.py
+?? backend/src/services/vpi_face_safe_layout.py
+?? backend/src/services/vpi_fast_fail_rescue.py
+?? backend/src/services/vpi_gpu_runtime.py
+?? backend/src/services/vpi_lottie_asset_registry.py
+?? backend/src/services/vpi_metadata_normalization.py
+?? backend/src/services/vpi_motion_grammar.py
+?? backend/src/services/vpi_motion_overlay_service.py
+?? backend/src/services/vpi_overlay_renderer_adapter.py
+?? backend/src/services/vpi_remotion_scene_plan.py
+?? backend/src/services/vpi_task_source_contract.py
+?? backend/src/services/vpi_timeline_plan.py
+?? backend/src/services/vpi_visual_priority_guard.py
+?? backend/tests/run_fixes_standalone.py
+?? checkpoints/
+?? configs/
+?? docker-compose.remotion.example.yml
+?? docs/animated_icon_download_audit.md
+?? docs/animated_icon_synthesizer_plan.md
+?? docs/animated_icon_synthesizer_review.md
+?? docs/generated_animated_icon_manifest_intake_review.md
+?? docs/generated_icon_license_review.md
+?? docs/generic_overlay_manifest_intake_review.md
+?? docs/generic_overlay_manual_download_links.md
+?? docs/generic_overlay_review.md
+?? docs/local_icon_inventory_for_animation.md
+?? docs/swishy_gif_download_plan.md
+?? docs/vpi_2_5d_remotion_asset_strategy.md
+?? docs/vpi_3d_asset_intake_policy.md
+?? docs/vpi_ass_caption_rendering_plan.md
+?? docs/vpi_controlled_remotion_activation.md
+?? docs/vpi_editly_bridge_plan.md
+?? docs/vpi_first_real_task_runbook.md
+?? docs/vpi_local_production_runbook.md
+?? docs/vpi_lottie_asset_bridge_plan.md
+?? docs/vpi_premium_3d_object_layer.md
+?? docs/vpi_premium_visual_library.md
+?? docs/vpi_remotion_2_5d_object_components.md
+?? docs/vpi_remotion_adapter_plan.md
+?? docs/vpi_remotion_overlay_runtime.md
+?? docs/vpi_remotion_overlay_scaffold_plan.md
+?? docs/vpi_remotion_quarantine_and_production_path.md
+?? docs/vpi_remotion_sidecar_runtime.md
+?? docs/vpi_serious_motion_grammar.md
+?? docs/vpi_silence_decision_matrix.md
+?? docs/vpi_silence_editing_playbook.md
+?? docs/vpi_silence_runtime_integration_plan.md
+?? docs/vpi_visual_quality_playbook.md
+?? fix_ai_normalize.py
+?? fix_broll.py
+?? fix_broll2.py
+?? fix_broll_keywords.py
+?? fix_broll_keywords_override.py
+?? fix_caption_fallback.py
+?? fix_cleanup.py
+?? fix_clip_urls.py
+?? fix_clip_urls2.py
+?? fix_color_match.py
+?? fix_comfyui_default.py
+?? fix_confidence_subtitle.py
+?? fix_cooldown.py
+?? fix_coverr_insurance.py
+?? fix_ctx_overlay.py
+?? fix_cumulative_offset.py
+?? fix_db_rollback.py
+?? fix_discourse_constant.py
+?? fix_dup_func.py
+?? fix_emphasis_ts.py
+?? fix_karaoke_cache.py
+?? fix_normalize_ss.py
+?? fix_overlay_insurance.py
+?? fix_perf_import.py
+?? fix_performance_analyzer.py
+?? fix_pexels_insurance_gate.py
+?? fix_polling.py
+?? fix_polling2.py
+?? fix_polling3.py
+?? fix_pytest_config.py
+?? fix_re_align.py
+?? fix_scene_logs.py
+?? fix_self_healing.py
+?? fix_stability_gate.py
+?? fix_staticmethod.py
+?? fix_tests_yml.py
+?? fixtures/
+?? frontend/prisma/migrations/0_init/
+?? frontend/prisma/migrations/20260524000000_add_context_to_task/
+?? frontend/scripts/
+?? frontend/src/app/dashboard/error.tsx
+?? frontend/src/app/dashboard/loading.tsx
+?? frontend/src/app/error.tsx
+?? frontend/src/app/global-error.tsx
+?? frontend/src/app/loading.tsx
+?? frontend/src/app/sign-in/error.tsx
+?? frontend/src/app/sign-in/loading.tsx
+?? frontend/src/app/tasks/[id]/error.tsx
+?? frontend/src/app/tasks/[id]/loading.tsx
+?? frontend/~/
+?? nlp_tarea1.ipynb
+?? nlp_tarea1_resuelto.ipynb
+?? nlp_tarea2.ipynb
+?? outputs/
+?? remotion/
+?? reports/asset_missing_refs_inventory.md
+?? reports/broll_memory_repair_report.json
+?? reports/broll_memory_repair_report.md
+?? reports/core_diff_risk_audit.md
+?? reports/current_fix_file_manifest.txt
+?? reports/dirty_tree_audit.md
+?? reports/docker_asset_parity_audit.md
+?? reports/editorial_eval/latest_editorial_eval.json
+?? reports/editorial_eval/latest_editorial_eval.md
+?? reports/no_heavy_validation_sweep.md
+?? reports/premium_editing_flow_audit.md
+?? reports/premium_editing_runtime_wiring_audit.md
+?? reports/premium_perception_audit_7771da5d.json
+?? reports/premium_perception_audit_7771da5d.md
+?? reports/premium_productive_checkpoint.md
+?? reports/premium_productive_checkpoint_files.txt
+?? reports/premium_productive_clean_checkpoint.md
+?? reports/premium_productive_do_not_commit.txt
+?? reports/premium_productive_risk_register.md
+?? reports/premium_visual_stack_integration_audit.md
+?? reports/render_validation/
+?? reports/runtime_integration_audit.md
+?? reports/task_diagnostics/
+?? reports/vpi_asset_category_coverage.md
+?? reports/vpi_full_pipeline_forensics.md
+?? reports/vpi_next_real_task_stability_gate.md
+?? salvage-2ed26c7c-51b6-495b-90bb-693376d68f0b/
+?? salvage-655c30ce-90e8-4447-b893-80fcb3f162a3/
+?? scripts/audit_broll_asset_bank.py
+?? scripts/audit_core_diff_risks.py
+?? scripts/audit_premium_output_perception.py
+?? scripts/audit_vpi_broll_library.py
+?? scripts/deadline_safe_smoke.py
+?? scripts/debug_animated_icon_synthesizer.py
+?? scripts/debug_bgm_manifest_runtime.py
+?? scripts/debug_complete_idea.py
+?? scripts/debug_dynamic_overlay_card_composer.py
+?? scripts/debug_dynamic_overlay_text_pack.py
+?? scripts/debug_dynamic_overlay_text_render_pack.py
+?? scripts/debug_editorial_fluency.py
+?? scripts/debug_editorial_runtime_integration.py
+?? scripts/debug_final_overlay_video_composition.py
+?? scripts/debug_frontend_no_clips_generated_e2e.py
+?? scripts/debug_frontend_task_clip_persistence.py
+?? scripts/debug_generated_icon_intake_review.py
+?? scripts/debug_generated_icon_license_review.py
+?? scripts/debug_generated_icon_manifest_registration.py
+?? scripts/debug_generic_overlay_intake_review.py
+?? scripts/debug_generic_overlay_normalization.py
+?? scripts/debug_hook_assets.py
+?? scripts/debug_hook_fit.py
+?? scripts/debug_local_input_render_entrypoint.py
+?? scripts/debug_motion_overlay_gif_normalization.py
+?? scripts/debug_motion_overlay_pack.py
+?? scripts/debug_production_overlay_smoke_render.py
+?? scripts/debug_real_beta_clean_overlay_test.py
+?? scripts/debug_real_overlay_smoke_render.py
+?? scripts/debug_real_user_video_overlay_test.py
+?? scripts/debug_registered_generated_icon_smoke_render.py
+?? scripts/debug_review_overlay_smoke_render.py
+?? scripts/debug_shot_rhythm_pack.py
+?? scripts/diagnose_task_delivery.py
+?? scripts/download_animated_icons_alternative.py
+?? scripts/download_generic_overlays.py
+?? scripts/download_vpi_pexels_broll.py
+?? scripts/frontend_delivery_contract_smoke.py
+?? scripts/generate_animated_icons_from_svg.py
+?? scripts/generate_vpi_broll_download_plan.py
+?? scripts/generate_vpi_broll_review_csv.py
+?? scripts/make_vpi_broll_contact_sheets.py
+?? scripts/migrate_add_context.sql
+?? scripts/normalize_generic_overlays.py
+?? scripts/normalize_motion_overlay_gif.py
+?? scripts/prepare_approved_vpi_broll_assets.py
+?? scripts/recover_rendered_task.py
+?? scripts/recovery_mock_smoke.py
+?? scripts/render_remotion_overlay.sh
+?? scripts/run_production_overlay_smoke_render.py
+?? scripts/run_real_beta_clean_overlay_test.py
+?? scripts/run_real_overlay_smoke_render.py
+?? scripts/run_real_user_video_overlay_test.py
+?? scripts/run_registered_generated_icon_smoke_render.py
+?? scripts/run_review_overlay_smoke_render.py
+?? scripts/verify_vpi_operational_task.py
+?? scripts/vpi_3d_asset_intake_audit.py
+?? scripts/vpi_3d_asset_intake_policy_regression.py
+?? scripts/vpi_3d_object_layer_regression.py
+?? scripts/vpi_ass_caption_runtime_wiring_regression.py
+?? scripts/vpi_asset_category_coverage_report.py
+?? scripts/vpi_asset_manifest_regression.py
+?? scripts/vpi_auth_readiness.py
+?? scripts/vpi_auth_stability_regression.py
+?? scripts/vpi_bgm_mood_regression.py
+?? scripts/vpi_bgm_unpack_regression.py
+?? scripts/vpi_broll_editorial_regression.py
+?? scripts/vpi_broll_quality_regression.py
+?? scripts/vpi_candidate_retry_regression.py
+?? scripts/vpi_caption_overlay_coherence_regression.py
+?? scripts/vpi_clip_url_contract_regression.py
+?? scripts/vpi_compose_mount_contract_regression.py
+?? scripts/vpi_contract_schema_smoke_test.py
+?? scripts/vpi_controlled_remotion_activation_regression.py
+?? scripts/vpi_create_dummy_vertical_video.py
+?? scripts/vpi_cut_zoom_export_regression.py
+?? scripts/vpi_existing_task_playback_diagnostics.py
+?? scripts/vpi_fast_fail_contract_behavior_regression.py
+?? scripts/vpi_fast_fail_contract_regression.py
+?? scripts/vpi_fast_preflight_task.py
+?? scripts/vpi_first_real_quality_regression.py
+?? scripts/vpi_first_real_task_readiness.py
+?? scripts/vpi_first_real_task_readiness_regression.py
+?? scripts/vpi_fix_local_auth_now.py
+?? scripts/vpi_frontend_quality_gate.py
+?? scripts/vpi_frontend_readiness.py
+?? scripts/vpi_frontend_smoke.py
+?? scripts/vpi_frontend_smoke_regression.py
+?? scripts/vpi_full_local_premium_regression.py
+?? scripts/vpi_full_pipeline_delivery_smoke.py
+?? scripts/vpi_generated_static_route_diagnostics.py
+?? scripts/vpi_generated_static_serving_regression.py
+?? scripts/vpi_gpu_nvenc_runtime_regression.py
+?? scripts/vpi_gpu_runtime_probe.py
+?? scripts/vpi_local_admin_repair.py
+?? scripts/vpi_local_quality_gate.py
+?? scripts/vpi_manifest_missing_refs_report.py
+?? scripts/vpi_mini_runtime_harness.py
+?? scripts/vpi_next_real_task_stability_gate.py
+?? scripts/vpi_next_real_task_stability_gate_regression.py
+?? scripts/vpi_preflight_go_no_go.py
+?? scripts/vpi_preflight_runtime_parity_regression.py
+?? scripts/vpi_premaster_editing_engines_regression.py
+?? scripts/vpi_premium_editing_quality_regression.py
+?? scripts/vpi_premium_layers_regression.py
+?? scripts/vpi_premium_output_quality_regression.py
+?? scripts/vpi_premium_productive_hardening_regression.py
+?? scripts/vpi_premium_runtime_wiring_audit.py
+?? scripts/vpi_premium_visual_library_regression.py
+?? scripts/vpi_premium_visual_stack_integration_audit.py
+?? scripts/vpi_premium_visual_stack_integration_regression.py
+?? scripts/vpi_product_reliability_regression.py
+?? scripts/vpi_production_healthcheck.py
+?? scripts/vpi_production_readiness_summary.py
+?? scripts/vpi_production_safe_edit_regression.py
+?? scripts/vpi_productive_minimum_regression.py
+?? scripts/vpi_publish_review.py
+?? scripts/vpi_publishable_gate_regression.py
+?? scripts/vpi_remotion_2_5d_components_regression.py
+?? scripts/vpi_remotion_cli_render_command_regression.py
+?? scripts/vpi_remotion_component_compile_regression.py
+?? scripts/vpi_remotion_config_import_regression.py
+?? scripts/vpi_remotion_jsx_extension_regression.py
+?? scripts/vpi_remotion_lottie_editly_bridge_regression.py
+?? scripts/vpi_remotion_minimal_probe_regression.py
+?? scripts/vpi_remotion_mock_harness_regression.py
+?? scripts/vpi_remotion_mock_overlay_smoke.py
+?? scripts/vpi_remotion_no_node_fs_regression.py
+?? scripts/vpi_remotion_optional_renderer_regression.py
+?? scripts/vpi_remotion_overlay_composition_regression.py
+?? scripts/vpi_remotion_quarantine_regression.py
+?? scripts/vpi_remotion_runtime_availability_regression.py
+?? scripts/vpi_remotion_runtime_readiness.py
+?? scripts/vpi_remotion_scene_runtime_wiring_regression.py
+?? scripts/vpi_remotion_sidecar_regression.py
+?? scripts/vpi_remotion_stability_regression.py
+?? scripts/vpi_remotion_tsconfig_regression.py
+?? scripts/vpi_rescued_complete_idea_render_gate_regression.py
+?? scripts/vpi_runtime_dependency_check.py
+?? scripts/vpi_runtime_parity_check.py
+?? scripts/vpi_runtime_path_resolution_regression.py
+?? scripts/vpi_runtime_path_utils.py
+?? scripts/vpi_runtime_timeline_wiring_regression.py
+?? scripts/vpi_segment_selection_quality_regression.py
+?? scripts/vpi_selection_fallback_regression.py
+?? scripts/vpi_sfx_contextual_regression.py
+?? scripts/vpi_sfx_meta_normalization_regression.py
+?? scripts/vpi_simulate_task.py
+?? scripts/vpi_tail_task_logs.sh
+?? scripts/vpi_task_diagnostics_regression.py
+?? scripts/vpi_task_service_rescue_handoff_exact_failure_regression.py
+?? scripts/vpi_task_service_rescue_handoff_regression.py
+?? scripts/vpi_task_source_contract_regression.py
+?? scripts/vpi_task_status_semantics_regression.py
+?? scripts/vpi_transcript_cache.py
+?? scripts/vpi_transcript_cache_smoke_test.py
+?? scripts/vpi_validate_failed_task_contract.py
+?? scripts/vpi_verify_completed_task.py
+?? scripts/vpi_visible_edit_contract_check.py
+?? scripts/vpi_visual_coherence_disfluency_regression.py
+?? scripts/vpi_visual_editing_layer_regression.py
+?? scripts/vpi_worker_runtime_sync_check.py
+?? scripts/vpi_worker_runtime_sync_regression.py
+?? task_progress.md

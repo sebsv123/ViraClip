@@ -131,6 +131,342 @@ def choose_transition_type(context: Dict[str, Any]) -> str:
     return "clean_cut"
 
 
+def choose_transition_strategy(
+    *,
+    editorial_type: str = "",
+    hook_strategy_final: str = "",
+    hook_visual_applied: bool = False,
+    hook_overlay_active: bool = False,
+    broll_applied: bool = False,
+    broll_mode: str = "",
+    broll_start_time: float = 0.0,
+    broll_duration: float = 0.0,
+    rhythm_edit_applied: bool = False,
+    visual_reinforcement_applied: bool = False,
+    captions_active: bool = False,
+    caption_density: float = 0.0,
+    visual_layer_budget_applied: bool = False,
+    clip_duration: float = 0.0,
+    face_bbox: Optional[Dict[str, Any]] = None,
+    speaker_bbox: Optional[Dict[str, Any]] = None,
+    transition_routes_used: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    clip_duration = max(0.0, float(clip_duration or 0.0))
+    editorial = str(editorial_type or "").lower()
+    hook_strategy = str(hook_strategy_final or "").lower()
+    broll_mode = str(broll_mode or "").lower()
+    routes_used = [str(item) for item in (transition_routes_used or []) if str(item)]
+    first3_protected = clip_duration > 0.0 and (
+        hook_visual_applied or hook_overlay_active or hook_strategy in {"text_hook", "non_text_push_hook", "silence_tension_hook"}
+    )
+    before_first3 = clip_duration <= 3.0 or first3_protected
+    budget_blocked = bool(visual_layer_budget_applied and (captions_active and caption_density >= 7.0))
+    if hook_visual_applied and hook_overlay_active and clip_duration <= 3.0:
+        logger.info(
+            "TRANSITION_STRATEGY_SELECTED decision=%s strategy=%s reason=%s start=%.2f dur_frames=%d max=%d hook_blocked=%s budget_blocked=%s",
+            "no_transition",
+            "no_transition",
+            "hook_first3",
+            3.0,
+            0,
+            1 if clip_duration < 20.0 else 2,
+            "true",
+            str(bool(caption_density >= 7.0 and visual_layer_budget_applied)).lower(),
+        )
+        return {
+            "transition_decision": "no_transition",
+            "transition_strategy": "no_transition",
+            "reason": "hook_first3",
+            "start_time": 3.0,
+            "duration_frames": 0,
+            "max_transitions": 1 if clip_duration < 20.0 else 2,
+            "sfx_sync_allowed": False,
+            "blocked_by_hook": True,
+            "blocked_by_budget": budget_blocked,
+            "heavy_route_allowed": False,
+        }
+    if budget_blocked:
+        logger.info(
+            "TRANSITION_STRATEGY_SELECTED decision=%s strategy=%s reason=%s start=%.2f dur_frames=%d max=%d hook_blocked=%s budget_blocked=%s",
+            "no_transition",
+            "no_transition",
+            "visual_budget_blocked",
+            3.0 if clip_duration > 3.0 else clip_duration,
+            0,
+            1 if clip_duration < 20.0 else 2,
+            "false",
+            "true",
+        )
+        return {
+            "transition_decision": "no_transition",
+            "transition_strategy": "no_transition",
+            "reason": "visual_budget_blocked",
+            "start_time": 3.0 if clip_duration > 3.0 else clip_duration,
+            "duration_frames": 0,
+            "max_transitions": 1 if clip_duration < 20.0 else 2,
+            "sfx_sync_allowed": False,
+            "blocked_by_hook": False,
+            "blocked_by_budget": True,
+            "heavy_route_allowed": False,
+        }
+    if clip_duration < 3.0 and strategy not in {"hard_cut_clean", "soft_push", "no_transition"}:
+        logger.info(
+            "TRANSITION_STRATEGY_SELECTED decision=%s strategy=%s reason=%s start=%.2f dur_frames=%d max=%d hook_blocked=%s budget_blocked=%s",
+            "no_transition",
+            "no_transition",
+            "clip_too_short",
+            clip_duration,
+            0,
+            1 if clip_duration < 20.0 else 2,
+            "false",
+            "false",
+        )
+        return {
+            "transition_decision": "no_transition",
+            "transition_strategy": "no_transition",
+            "reason": "clip_too_short",
+            "start_time": clip_duration,
+            "duration_frames": 0,
+            "max_transitions": 1 if clip_duration < 20.0 else 2,
+            "sfx_sync_allowed": False,
+            "blocked_by_hook": False,
+            "blocked_by_budget": False,
+            "heavy_route_allowed": False,
+        }
+    strategy = "hard_cut_clean"
+    reason = "default_clean_cut"
+    start_time = 0.0
+    duration_frames = 0
+    sfx_sync_allowed = False
+    heavy_route_allowed = False
+
+    if broll_applied:
+        strategy = "broll_fade_in_out" if not any(r.startswith("broll") for r in routes_used) else "hard_cut_clean"
+        reason = "broll_entry_exit" if strategy == "broll_fade_in_out" else "duplicate_broll_route"
+        start_time = max(3.0 if before_first3 else 0.0, float(broll_start_time or 0.0))
+        duration_frames = 7
+        sfx_sync_allowed = strategy == "broll_fade_in_out"
+    elif rhythm_edit_applied:
+        strategy = "soft_push"
+        reason = "rhythm_visible_edit"
+        start_time = 3.0 if before_first3 else max(0.0, min(clip_duration, 0.6))
+        duration_frames = 8
+        sfx_sync_allowed = True
+    elif visual_reinforcement_applied:
+        strategy = "short_fade"
+        reason = "visual_reinforcement_support"
+        start_time = max(3.0 if before_first3 else 0.0, 0.45)
+        duration_frames = 5
+        sfx_sync_allowed = False
+    elif editorial in {"myth_debunk", "client_objection"} and hook_strategy != "no_extra_hook":
+        strategy = "match_cut"
+        reason = "editorial_match_cut"
+        start_time = max(3.0 if before_first3 else 0.0, 0.45)
+        duration_frames = 5
+        sfx_sync_allowed = True
+    elif editorial in {"risk_warning", "coverage_explanation"} and captions_active and caption_density < 7.0:
+        strategy = "dip_blur_short"
+        reason = "subtle_context_shift"
+        start_time = max(3.0 if before_first3 else 0.0, 0.55)
+        duration_frames = 5
+        sfx_sync_allowed = False
+    elif editorial in {"travel", "emotional_protection", "health", "money_saving"}:
+        strategy = "slide_minimal"
+        reason = "gentle_context_shift"
+        start_time = max(3.0 if before_first3 else 0.0, 0.5)
+        duration_frames = 5
+        sfx_sync_allowed = False
+    if (hook_visual_applied or hook_overlay_active) and strategy not in {"hard_cut_clean", "soft_push", "no_transition"}:
+        start_time = max(start_time, 3.0)
+    if hook_strategy in {"text_hook", "non_text_push_hook", "silence_tension_hook"} and clip_duration <= 8.0:
+        strategy = "hard_cut_clean" if strategy == "hard_cut_clean" else strategy
+        reason = reason or "hook_protected"
+    if hook_visual_applied and not before_first3 and strategy not in {"hard_cut_clean", "soft_push"}:
+        heavy_route_allowed = False
+    if strategy in {"match_cut", "dip_blur_short", "slide_minimal", "short_fade"}:
+        heavy_route_allowed = False
+    if strategy == "broll_fade_in_out":
+        heavy_route_allowed = False
+    decision = "use_transition" if strategy not in {"no_transition", "hard_cut_clean"} else "no_transition"
+    logger.info(
+        "TRANSITION_STRATEGY_SELECTED decision=%s strategy=%s reason=%s start=%.2f dur_frames=%d max=%d hook_blocked=%s budget_blocked=%s",
+        decision,
+        strategy,
+        reason,
+        start_time,
+        duration_frames,
+        1 if clip_duration < 20.0 else 2,
+        str(bool(hook_visual_applied or hook_overlay_active)).lower(),
+        str(budget_blocked).lower(),
+    )
+    return {
+        "transition_decision": decision,
+        "transition_strategy": strategy,
+        "reason": reason,
+        "start_time": round(float(start_time), 3),
+        "duration_frames": int(duration_frames),
+        "max_transitions": 1 if clip_duration < 20.0 else 2,
+        "sfx_sync_allowed": bool(sfx_sync_allowed),
+        "blocked_by_hook": bool(hook_visual_applied or hook_overlay_active) and decision == "no_transition" and strategy != "hard_cut_clean",
+        "blocked_by_budget": bool(budget_blocked),
+        "heavy_route_allowed": bool(heavy_route_allowed),
+    }
+
+
+def choose_vpi_transition_polish(
+    *,
+    transition_strategy: str = "",
+    editorial_type: str = "",
+    motion_profile: str = "",
+    broll_timing_strategy: str = "",
+    broll_entry_style: str = "",
+    broll_exit_style: str = "",
+    premium_restraint_mode: str = "",
+    hook_strategy_final: str = "",
+    first_second_strength: float = 0.0,
+    sensitive_topic: bool = False,
+    clip_duration: float = 0.0,
+    caption_density: float = 0.0,
+    sfx_allowed: bool = True,
+) -> Dict[str, Any]:
+    strategy = str(transition_strategy or "no_transition")
+    editorial = str(editorial_type or "").lower()
+    motion = str(motion_profile or "").lower()
+    restraint = str(premium_restraint_mode or "").lower()
+    broll_strategy = str(broll_timing_strategy or "").lower()
+    broll_entry = str(broll_entry_style or "").lower()
+    broll_exit = str(broll_exit_style or "").lower()
+    hook = str(hook_strategy_final or "").lower()
+    strong_first3 = float(first_second_strength or 0.0) >= 72.0 or hook in {"text_hook", "non_text_push_hook", "silence_tension_hook"}
+
+    transition_polish_mode = "none"
+    transition_duration_ms = 0
+    transition_sfx_allowed = False
+    transition_sfx_family = ""
+    transition_reason = "default_no_transition"
+    transition_should_render = False
+    transition_repetition_avoided = False
+    transition_broll_sync_ok = True
+    transition_broll_sync_reason = "no_broll_conflict"
+
+    if sensitive_topic or editorial in {"sensitive_decesos", "decesos"}:
+        transition_polish_mode = "sensitive_cut"
+        transition_duration_ms = 180
+        transition_reason = "sensitive_topic"
+    elif restraint in {"no_extra_visual", "minimal"}:
+        transition_polish_mode = "hard_cut_clean"
+        transition_duration_ms = 0
+        transition_reason = "minimal_restraint"
+    elif editorial in {"risk_warning", "myth_debunk"}:
+        transition_polish_mode = "punch_cut"
+        transition_duration_ms = 220
+        transition_reason = "risk_or_myth_emphasis"
+    elif editorial in {"coverage_explanation", "tramite_documentacion"}:
+        transition_polish_mode = "hard_cut_clean" if caption_density >= 7.0 else "soft_cut"
+        transition_duration_ms = 120 if transition_polish_mode == "soft_cut" else 0
+        transition_reason = "coverage_or_tramite"
+    elif editorial in {"emotional_protection"}:
+        transition_polish_mode = "soft_fade" if motion in {"calm", "sensitive_soft"} else "soft_cut"
+        transition_duration_ms = 240 if transition_polish_mode == "soft_fade" else 140
+        transition_reason = "emotional_protection"
+    elif motion == "punchy":
+        transition_polish_mode = "subtle_push"
+        transition_duration_ms = 180
+        transition_reason = "punchy_motion"
+    elif motion in {"calm", "sensitive_soft"}:
+        transition_polish_mode = "soft_cut"
+        transition_duration_ms = 140 if motion == "calm" else 100
+        transition_reason = "calm_motion"
+    else:
+        transition_polish_mode = "soft_cut" if strategy not in {"no_transition", "hard_cut_clean"} else "hard_cut_clean"
+        transition_duration_ms = 120 if transition_polish_mode == "soft_cut" else 0
+        transition_reason = "default_polish"
+
+    if broll_strategy in {"phrase_matched_insert", "supportive_overlay", "late_context_insert", "short_cutaway"}:
+        transition_broll_sync_ok = broll_entry in {"cut", "soft_fade", "subtle_push"} and broll_exit in {"cut", "soft_fade"}
+        transition_broll_sync_reason = "broll_style_already_sober" if transition_broll_sync_ok else "broll_needs_no_extra_transition"
+        if not transition_broll_sync_ok:
+            transition_polish_mode = "none"
+            transition_reason = "broll_sync_conflict"
+        else:
+            logger.info("VPI_TRANSITION_BROLL_SYNC_OK reason=%s", transition_broll_sync_reason)
+
+    if motion == "punchy" and transition_polish_mode in {"soft_cut", "subtle_push"} and not strong_first3:
+        transition_polish_mode = "subtle_push"
+        transition_reason = "punchy_motion_without_first3_boost"
+
+    if strong_first3 and strategy not in {"no_transition", "hard_cut_clean"} and float(clip_duration or 0.0) > 3.0:
+        if transition_polish_mode == "soft_cut":
+            transition_polish_mode = "subtle_push"
+            transition_reason = "first3_motion_support"
+
+    if sensitive_topic:
+        transition_sfx_allowed = False
+        transition_sfx_family = ""
+        if transition_polish_mode not in {"sensitive_cut", "soft_fade"}:
+            transition_polish_mode = "sensitive_cut"
+            transition_reason = "sensitive_topic"
+        transition_sfx_suppressed_reason = "sensitive_topic"
+    else:
+        transition_sfx_allowed = bool(sfx_allowed and transition_polish_mode not in {"hard_cut_clean", "none", "soft_fade", "sensitive_cut"})
+        if transition_polish_mode == "punch_cut":
+            transition_sfx_family = "soft_hit"
+            transition_sfx_suppressed_reason = "" if transition_sfx_allowed else "punch_cut_policy"
+        elif transition_polish_mode == "subtle_push":
+            transition_sfx_family = "soft_whoosh"
+            transition_sfx_suppressed_reason = "" if transition_sfx_allowed else "voice_or_policy"
+        elif transition_polish_mode == "soft_cut" and editorial in {"risk_warning", "myth_debunk"}:
+            transition_sfx_family = "soft_hit"
+            transition_sfx_suppressed_reason = "" if transition_sfx_allowed else "voice_or_policy"
+        elif transition_polish_mode == "soft_cut":
+            transition_sfx_family = "soft_whoosh"
+            transition_sfx_suppressed_reason = "" if transition_sfx_allowed else "voice_or_policy"
+        else:
+            transition_sfx_suppressed_reason = "" if transition_sfx_allowed else "voice_or_policy"
+
+    if transition_polish_mode in {"none", "hard_cut_clean"}:
+        transition_should_render = strategy not in {"no_transition"} and transition_polish_mode != "none"
+    else:
+        transition_should_render = strategy not in {"no_transition"} and float(clip_duration or 0.0) >= 3.0
+
+    if strategy in {"no_transition", "hard_cut_clean"} and transition_polish_mode not in {"sensitive_cut"}:
+        transition_repetition_avoided = True
+        logger.info("VPI_TRANSITION_REPETITION_AVOIDED mode=%s reason=%s", transition_polish_mode, transition_reason)
+    if broll_strategy in {"phrase_matched_insert", "supportive_overlay"} and transition_polish_mode in {"soft_cut", "subtle_push"}:
+        transition_repetition_avoided = True
+
+    if not transition_should_render:
+        transition_reason = transition_reason or "polish_suppressed"
+        logger.info("VPI_TRANSITION_POLISH_WARNING reason=%s mode=%s", transition_reason, transition_polish_mode)
+    if sensitive_topic or not transition_sfx_allowed:
+        logger.info(
+            "VPI_TRANSITION_SFX_SUPPRESSED reason=%s family=%s",
+            transition_sfx_suppressed_reason,
+            transition_sfx_family or "none",
+        )
+
+    logger.info(
+        "VPI_TRANSITION_POLISH_SELECTED mode=%s duration_ms=%d sfx_allowed=%s family=%s reason=%s",
+        transition_polish_mode,
+        transition_duration_ms,
+        str(bool(transition_sfx_allowed)).lower(),
+        transition_sfx_family or "none",
+        transition_reason,
+    )
+    return {
+        "transition_polish_mode": transition_polish_mode,
+        "transition_duration_ms": int(transition_duration_ms),
+        "transition_sfx_allowed": bool(transition_sfx_allowed),
+        "transition_sfx_family": transition_sfx_family,
+        "transition_reason": transition_reason,
+        "transition_should_render": bool(transition_should_render),
+        "transition_repetition_avoided": bool(transition_repetition_avoided),
+        "transition_broll_sync_ok": bool(transition_broll_sync_ok),
+        "transition_broll_sync_reason": transition_broll_sync_reason,
+        "transition_sfx_suppressed_reason": "" if transition_sfx_allowed else ("sensitive_topic" if sensitive_topic else "voice_or_policy"),
+    }
+
+
 def _sfx_hint_for(transition_type: str, context: Dict[str, Any]) -> str:
     if transition_type in {"sweeping_reveal", "sweeping_object_reveal", "mask_reveal", "shape_morph_beta"}:
         return "magic_whoosh"
@@ -503,13 +839,17 @@ def apply_transition(
 
     if not input_a.exists():
         metadata = _metadata_applied(event)
-        logger.info("[transition-apply] type=%s applied=true output=%s", event.transition_type, output_path)
+        metadata["simulated"] = True
+        metadata["transition_rendered"] = False
+        metadata["transition_verified"] = False
+        metadata["transition_skip_reason"] = "input_missing"
+        logger.warning("TRANSITION_SKIPPED_REASON reason=input_missing")
         return TransitionResult(
-            applied=True,
+            applied=False,
             output_path=str(output_path),
             transition_type=event.transition_type,
             frames_used=[event.duration_frames],
-            warning="simulated_output",
+            warning="input_missing",
             ffmpeg_cmd_summary="simulated",
             metadata=metadata,
         )
@@ -542,6 +882,9 @@ def apply_transition(
         result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=180)
         if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
             metadata = _metadata_applied(event)
+            metadata["transition_rendered"] = True
+            metadata["transition_verified"] = True
+            metadata["transition_skip_reason"] = ""
             if event.sfx_hint:
                 logger.info("[transition-sweep] sfx=%s applied=false", event.sfx_hint)
                 metadata.update({
@@ -551,6 +894,7 @@ def apply_transition(
                 })
                 logger.info("[transition-sfx] missing=%s transition=%s", event.sfx_hint, event.transition_type)
             logger.info("[transition-apply] type=%s applied=true output=%s", event.transition_type, output_path)
+            logger.info("TRANSITION_RENDERED")
             return TransitionResult(
                 applied=True,
                 output_path=str(output_path),
@@ -564,6 +908,7 @@ def apply_transition(
     except Exception as exc:
         reason = str(exc)
     logger.warning("[transition-apply] failed type=%s fallback=%s reason=%s", event.transition_type, event.safe_fallback, reason)
+    logger.warning("TRANSITION_SKIPPED_REASON reason=output_unverified")
     return TransitionResult(
         applied=False,
         output_path=str(input_a),
@@ -572,7 +917,13 @@ def apply_transition(
         fallback_used=True,
         warning=reason,
         ffmpeg_cmd_summary=f"fallback={event.safe_fallback}",
-        metadata={"transition_failed_fallback_used": True},
+        metadata={
+            "transition_failed_fallback_used": True,
+            "transition_rendered": False,
+            "transition_verified": False,
+            "transition_skip_reason": "output_unverified",
+            "simulated": False,
+        },
     )
 
 
@@ -586,6 +937,19 @@ def apply_transition_plan(
         logger.info("[transition-apply] skipped reason=no_premium_transition_needed")
         return {
             "transitions_applied": False,
+            "transition_planned": False,
+            "transition_rendered": False,
+            "transition_verified": False,
+            "transition_strategy": "no_transition",
+            "transition_backend": "vpi_transition_engine",
+            "transition_skip_reason": "no_premium_transition_needed",
+            "transition_output_path": str(input_path),
+            "transition_routes_used": [],
+            "transition_routes_blocked": [],
+            "transition_sfx_sync_allowed": False,
+            "transition_count": 0,
+            "transition_visible_count": 0,
+            "transition_budget_exhausted": False,
             "transition_events": [],
             "transition_types": [],
             "transition_warnings": list(transition_plan.transition_warnings or ["no_premium_transition_needed"]),
@@ -613,6 +977,19 @@ def apply_transition_plan(
     logger.info("[transition-qc] final_verified=%s warnings=%s", str(final_verified).lower(), "|".join(warnings) or "none")
     return {
         "transitions_applied": final_verified,
+        "transition_planned": bool(transition_plan.enabled and transition_plan.events),
+        "transition_rendered": final_verified,
+        "transition_verified": final_verified,
+        "transition_strategy": str(transition_plan.events[0].transition_type if transition_plan.events else "no_transition"),
+        "transition_backend": "vpi_transition_engine",
+        "transition_skip_reason": "" if final_verified else (warnings[-1] if warnings else "output_unverified"),
+        "transition_output_path": str(current),
+        "transition_routes_used": [event.transition_type for event in transition_plan.events],
+        "transition_routes_blocked": warnings,
+        "transition_sfx_sync_allowed": bool(any(bool(event.sfx_hint) for event in transition_plan.events) and final_verified),
+        "transition_count": len(applied_events),
+        "transition_visible_count": int(sum(1 for item in applied_events if bool(item.get("applied") or item.get("transition_rendered") or item.get("transition_verified")))),
+        "transition_budget_exhausted": False,
         "transition_events": applied_events,
         "transition_types": [event.transition_type for event in transition_plan.events],
         "transition_contextual": any(bool(item.get("contextual")) for item in applied_events),

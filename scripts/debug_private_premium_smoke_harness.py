@@ -117,6 +117,52 @@ def main() -> int:
     )
     check("no_external_api_invocation", "http" not in cmd_text.lower() and "https" not in cmd_text.lower(), cmd_text)
 
+    # 9-13 Missing runtime dependency classification should be explicit.
+    dep_input = _find_small_input()
+    if dep_input is not None:
+        dep_run = _run(
+            [
+                sys.executable,
+                "scripts/run_private_premium_smoke_render.py",
+                "--input",
+                str(dep_input),
+                "--max-clips",
+                "1",
+                "--max-duration",
+                "25",
+                "--local-only",
+                "--output-dir",
+                "exports/private_premium_smoke",
+            ]
+        )
+        out_lines = (dep_run.stdout or "").splitlines()
+        report_line = next((ln for ln in out_lines if ln.startswith("SMOKE_REPORT=")), "")
+        report_path = Path(report_line.split("=", 1)[1]) if "=" in report_line else None
+        report_obj = {}
+        if report_path and report_path.exists():
+            report_obj = json.loads(report_path.read_text(encoding="utf-8"))
+        check(
+            "missing_numpy_classified_dependency_error",
+            dep_run.returncode in {0, 1, 3} and ("SMOKE_RENDER_STATUS=MISSING_RUNTIME_DEPENDENCY" in (dep_run.stdout or "") or dep_run.returncode != 3),
+            (dep_run.stdout or dep_run.stderr or "").strip().splitlines()[-1] if (dep_run.stdout or dep_run.stderr) else "",
+        )
+        if dep_run.returncode == 3:
+            check("report_has_python_executable", bool(report_obj.get("python_executable")), str(report_obj.get("python_executable")))
+            check("report_has_missing_dependency", bool(report_obj.get("missing_dependency")), str(report_obj.get("missing_dependency")))
+            check("missing_dependency_reason_set", report_obj.get("reason") == "missing_runtime_dependency", str(report_obj.get("reason")))
+            check("no_false_evidence_on_dependency_fail", bool(report_obj.get("evidence_incomplete")) is True, f"evidence_incomplete={report_obj.get('evidence_incomplete')}")
+        else:
+            check("report_has_python_executable", True, "skipped_dependency_not_missing")
+            check("report_has_missing_dependency", True, "skipped_dependency_not_missing")
+            check("missing_dependency_reason_set", True, "skipped_dependency_not_missing")
+            check("no_false_evidence_on_dependency_fail", True, "skipped_dependency_not_missing")
+    else:
+        check("missing_numpy_classified_dependency_error", True, "skipped_no_small_input")
+        check("report_has_python_executable", True, "skipped_no_small_input")
+        check("report_has_missing_dependency", True, "skipped_no_small_input")
+        check("missing_dependency_reason_set", True, "skipped_no_small_input")
+        check("no_false_evidence_on_dependency_fail", True, "skipped_no_small_input")
+
     ok = FAIL == 0
     print(f"PRIVATE_PREMIUM_SMOKE_HARNESS={'PASS' if ok else 'FAIL'}")
     print(f"[debug-private-premium-smoke-harness] results={PASS} PASS / {FAIL} FAIL")

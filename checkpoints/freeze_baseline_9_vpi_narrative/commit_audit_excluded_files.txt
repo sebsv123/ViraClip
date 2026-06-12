@@ -1,0 +1,21 @@
+# C. debug_or_generated_exclude — NO añadir al commit
+
+outputs/                       # 3.0 GB — MP4s/planes/manifests generados
+checkpoints/ (resto)           # 395 MB total — frames jpg, worker traces, clips de evidencia
+                               #   (solo se añade freeze_baseline_9 + summaries/tests de texto)
+assets/broll/                  # 640 MB — media local (va fuera de git; recomendar .gitignore)
+assets/overlays_staging/       # 229 MB — media staging
+assets/fonts/                  # 21 MB — binarios (decidir aparte: ¿necesarios para build?)
+assets/overlays/               # 2.3 MB — media
+assets/icons/                  # 156 KB — media (pequeño, pero coherencia: assets via manifests)
+assets/lottie/                 # vacío
+assets/broll/.asset_usage_memory.json(.bak.*)  # estado runtime + backups
+frontend/~/                    # 1.7 GB — directorio basura accidental (revisar y borrar a mano)
+.ipynb_checkpoints/            # cache jupyter
+_debug_cinematic.py            # debug suelto en raíz
+task_progress.md               # notas de trabajo
+BETA_CLEAN_MODE_AUDIT.md, BROLL_AUDIT_REPORT.md, GPU_CUDA_DIAGNOSTIC.md  # audits sueltos (commit aparte si se quieren)
+reports/                       # 13 MB — evaluaciones generadas (preflight_latest.* tracked se actualizan con -u; ok)
+scripts/ (163 untracked)       # tooling debug/regression — texto, válido para un commit aparte "tooling", no para la baseline mínima
+downloads/, temp/              # ya en .gitignore
+__pycache__/                   # bytecode

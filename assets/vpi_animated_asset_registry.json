@@ -1,0 +1,1090 @@
+{
+  "schema_version": "2.0",
+  "last_updated": "2026-02-05",
+  "description": "VPI Premium Animated Asset Registry v2 — 30 brand-safe assets across 6 visual families for insurance/finance short-form video. Updated with new asset IDs, expanded intent mappings, and cross-family sharing rules.",
+  "assets": [
+    {
+      "asset_id": "heart_shield",
+      "name": "Heart Shield",
+      "visual_family": "protection_calm",
+      "category": "icon",
+      "allowed_intents": [
+        "protection",
+        "security",
+        "coverage",
+        "safety",
+        "peace_of_mind",
+        "health",
+        "care"
+      ],
+      "allowed_visual_styles": [
+        "calm_trust",
+        "protection_calm"
+      ],
+      "avoid_intents": [
+        "warning",
+        "risk",
+        "urgency",
+        "comparison"
+      ],
+      "tone": "reassuring",
+      "intensity": 0.6,
+      "brand_fit_score": 0.9,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "soft_scale_in",
+      "exit_motion": "gentle_fade",
+      "remotion_component": "HeartShield",
+      "lottie_future_path": "/assets/lottie/vpi/heart_shield.json",
+      "static_svg_path": "/assets/icons/vpi/heart_shield.svg",
+      "fallback_asset_id": "family_home",
+      "usage_examples": [
+        "Tu tranquilidad no tiene precio",
+        "Protegemos lo que más importa"
+      ],
+      "prohibited_contexts": [
+        "fraud",
+        "legal_dispute",
+        "bankruptcy"
+      ]
+    },
+    {
+      "asset_id": "family_home",
+      "name": "Family Home",
+      "visual_family": "protection_calm",
+      "category": "icon",
+      "allowed_intents": [
+        "protection",
+        "security",
+        "home",
+        "safety",
+        "family",
+        "trust"
+      ],
+      "allowed_visual_styles": [
+        "calm_trust",
+        "protection_calm"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "comparison"
+      ],
+      "tone": "reassuring",
+      "intensity": 0.55,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.75,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "soft_scale_in",
+      "exit_motion": "gentle_fade",
+      "remotion_component": "FamilyHome",
+      "lottie_future_path": "/assets/lottie/vpi/family_home.json",
+      "static_svg_path": "/assets/icons/vpi/family_home.svg",
+      "fallback_asset_id": "heart_shield",
+      "usage_examples": [
+        "Protegemos tu hogar",
+        "Tu futuro está asegurado"
+      ],
+      "prohibited_contexts": [
+        "eviction",
+        "foreclosure"
+      ]
+    },
+    {
+      "asset_id": "calm_check",
+      "name": "Calm Checkmark",
+      "visual_family": "protection_calm",
+      "category": "icon",
+      "allowed_intents": [
+        "protection",
+        "security",
+        "peace_of_mind",
+        "approval",
+        "confirmation"
+      ],
+      "allowed_visual_styles": [
+        "calm_trust",
+        "protection_calm"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "comparison"
+      ],
+      "tone": "reassuring",
+      "intensity": 0.45,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "soft_scale_in",
+      "exit_motion": "gentle_fade",
+      "remotion_component": "CalmCheck",
+      "lottie_future_path": "/assets/lottie/vpi/calm_check.json",
+      "static_svg_path": "/assets/icons/vpi/calm_check.svg",
+      "fallback_asset_id": "heart_shield",
+      "usage_examples": [
+        "Todo en orden",
+        "Cobertura total para ti y los tuyos"
+      ],
+      "prohibited_contexts": [
+        "fraud",
+        "legal_dispute"
+      ]
+    },
+    {
+      "asset_id": "coverage_umbrella",
+      "name": "Coverage Umbrella",
+      "visual_family": "protection_calm",
+      "category": "icon",
+      "allowed_intents": [
+        "protection",
+        "coverage",
+        "safety",
+        "security",
+        "included"
+      ],
+      "allowed_visual_styles": [
+        "calm_trust",
+        "protection_calm",
+        "coverage_explanation"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "comparison"
+      ],
+      "tone": "reassuring",
+      "intensity": 0.5,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "soft_scale_in",
+      "exit_motion": "gentle_fade",
+      "remotion_component": "CoverageUmbrella",
+      "lottie_future_path": "/assets/lottie/vpi/coverage_umbrella.json",
+      "static_svg_path": "/assets/icons/vpi/coverage_umbrella.svg",
+      "fallback_asset_id": "heart_shield",
+      "usage_examples": [
+        "Cobertura total para ti y los tuyos",
+        "Con nuestro seguro, duermes tranquilo"
+      ],
+      "prohibited_contexts": [
+        "fraud",
+        "legal_dispute"
+      ]
+    },
+    {
+      "asset_id": "shield_life",
+      "name": "Shield Life",
+      "visual_family": "protection_calm",
+      "category": "icon",
+      "allowed_intents": [
+        "protection",
+        "security",
+        "health",
+        "life",
+        "care",
+        "wellness"
+      ],
+      "allowed_visual_styles": [
+        "calm_trust",
+        "protection_calm",
+        "serious_warning"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "comparison"
+      ],
+      "tone": "reassuring",
+      "intensity": 0.55,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.7,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "soft_scale_in",
+      "exit_motion": "gentle_fade",
+      "remotion_component": "ShieldLife",
+      "lottie_future_path": "/assets/lottie/vpi/shield_life.json",
+      "static_svg_path": "/assets/icons/vpi/shield_life.svg",
+      "fallback_asset_id": "heart_shield",
+      "usage_examples": [
+        "Cuidamos de ti y los tuyos",
+        "Tu salud es lo primero"
+      ],
+      "prohibited_contexts": [
+        "medical_malpractice",
+        "denied_claim"
+      ]
+    },
+    {
+      "asset_id": "storm_cloud_risk",
+      "name": "Storm Cloud Risk",
+      "visual_family": "serious_warning",
+      "category": "icon",
+      "allowed_intents": [
+        "warning",
+        "risk",
+        "urgency",
+        "danger",
+        "alert",
+        "vulnerability"
+      ],
+      "allowed_visual_styles": [
+        "serious_warning",
+        "risk_warning"
+      ],
+      "avoid_intents": [
+        "protection",
+        "calm",
+        "advice",
+        "explanation"
+      ],
+      "tone": "urgent",
+      "intensity": 0.85,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.9,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 60,
+      "entry_motion": "subtle_warning_pulse",
+      "exit_motion": "dark_push",
+      "remotion_component": "StormCloudRisk",
+      "lottie_future_path": "/assets/lottie/vpi/storm_cloud_risk.json",
+      "static_svg_path": "/assets/icons/vpi/storm_cloud_risk.svg",
+      "fallback_asset_id": "risk_marker",
+      "usage_examples": [
+        "No te la juegues",
+        "El riesgo es real"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "humor",
+        "positive_news"
+      ]
+    },
+    {
+      "asset_id": "risk_marker",
+      "name": "Risk Marker",
+      "visual_family": "serious_warning",
+      "category": "icon",
+      "allowed_intents": [
+        "warning",
+        "risk",
+        "urgency",
+        "danger",
+        "alert"
+      ],
+      "allowed_visual_styles": [
+        "serious_warning",
+        "risk_warning"
+      ],
+      "avoid_intents": [
+        "protection",
+        "calm",
+        "advice"
+      ],
+      "tone": "urgent",
+      "intensity": 0.8,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 60,
+      "entry_motion": "subtle_warning_pulse",
+      "exit_motion": "dark_push",
+      "remotion_component": "RiskMarker",
+      "lottie_future_path": "/assets/lottie/vpi/risk_marker.json",
+      "static_svg_path": "/assets/icons/vpi/risk_marker.svg",
+      "fallback_asset_id": "storm_cloud_risk",
+      "usage_examples": [
+        "Las multas pueden arruinarte",
+        "No esperes a que sea demasiado tarde"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "celebration"
+      ]
+    },
+    {
+      "asset_id": "alert_line",
+      "name": "Alert Line",
+      "visual_family": "serious_warning",
+      "category": "icon",
+      "allowed_intents": [
+        "warning",
+        "alert",
+        "urgency",
+        "attention",
+        "danger"
+      ],
+      "allowed_visual_styles": [
+        "serious_warning",
+        "risk_warning"
+      ],
+      "avoid_intents": [
+        "protection",
+        "calm",
+        "advice"
+      ],
+      "tone": "alarming",
+      "intensity": 0.9,
+      "brand_fit_score": 0.75,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 45,
+      "entry_motion": "subtle_warning_pulse",
+      "exit_motion": "dark_push",
+      "remotion_component": "AlertLine",
+      "lottie_future_path": "/assets/lottie/vpi/alert_line.json",
+      "static_svg_path": "/assets/icons/vpi/alert_line.svg",
+      "fallback_asset_id": "storm_cloud_risk",
+      "usage_examples": [
+        "Sin seguro, estás descubierto",
+        "El peligro es real"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "humor",
+        "positive_news"
+      ]
+    },
+    {
+      "asset_id": "broken_shield",
+      "name": "Broken Shield",
+      "visual_family": "serious_warning",
+      "category": "icon",
+      "allowed_intents": [
+        "warning",
+        "risk",
+        "vulnerability",
+        "lack_of_protection",
+        "danger"
+      ],
+      "allowed_visual_styles": [
+        "serious_warning",
+        "risk_warning"
+      ],
+      "avoid_intents": [
+        "protection",
+        "calm",
+        "security"
+      ],
+      "tone": "ominous",
+      "intensity": 0.85,
+      "brand_fit_score": 0.7,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 60,
+      "entry_motion": "subtle_warning_pulse",
+      "exit_motion": "dark_push",
+      "remotion_component": "BrokenShield",
+      "lottie_future_path": "/assets/lottie/vpi/broken_shield.json",
+      "static_svg_path": "/assets/icons/vpi/broken_shield.svg",
+      "fallback_asset_id": "storm_cloud_risk",
+      "usage_examples": [
+        "Sin protección estás expuesto",
+        "No dejes tu futuro al azar"
+      ],
+      "prohibited_contexts": [
+        "positive_news",
+        "celebration"
+      ]
+    },
+    {
+      "asset_id": "folder_paperwork",
+      "name": "Folder Paperwork",
+      "visual_family": "paperwork_clarity",
+      "category": "icon",
+      "allowed_intents": [
+        "document",
+        "contract",
+        "terms",
+        "paperwork",
+        "clarity",
+        "organization"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "paperwork_clarity"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "organized",
+      "intensity": 0.45,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "document_slide_reveal",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "FolderPaperwork",
+      "lottie_future_path": "/assets/lottie/vpi/folder_paperwork.json",
+      "static_svg_path": "/assets/icons/vpi/folder_paperwork.svg",
+      "fallback_asset_id": "signature_form",
+      "usage_examples": [
+        "Revisa la letra pequeña",
+        "Documentación en regla"
+      ],
+      "prohibited_contexts": [
+        "fraud",
+        "scam"
+      ]
+    },
+    {
+      "asset_id": "signature_form",
+      "name": "Signature Form",
+      "visual_family": "paperwork_clarity",
+      "category": "icon",
+      "allowed_intents": [
+        "document",
+        "contract",
+        "terms",
+        "paperwork",
+        "approval",
+        "signature"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "paperwork_clarity"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "professional",
+      "intensity": 0.5,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "document_slide_reveal",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "SignatureForm",
+      "lottie_future_path": "/assets/lottie/vpi/signature_form.json",
+      "static_svg_path": "/assets/icons/vpi/signature_form.svg",
+      "fallback_asset_id": "folder_paperwork",
+      "usage_examples": [
+        "Firma aquí y ya está",
+        "Todo está en el contrato"
+      ],
+      "prohibited_contexts": [
+        "fraud",
+        "forgery"
+      ]
+    },
+    {
+      "asset_id": "calendar_deadline",
+      "name": "Calendar Deadline",
+      "visual_family": "paperwork_clarity",
+      "category": "icon",
+      "allowed_intents": [
+        "document",
+        "deadline",
+        "terms",
+        "paperwork",
+        "urgency",
+        "review"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "paperwork_clarity"
+      ],
+      "avoid_intents": [
+        "warning",
+        "revelation",
+        "hook"
+      ],
+      "tone": "analytical",
+      "intensity": 0.5,
+      "brand_fit_score": 0.75,
+      "clarity_gain_score": 0.75,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "document_slide_reveal",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "CalendarDeadline",
+      "lottie_future_path": "/assets/lottie/vpi/calendar_deadline.json",
+      "static_svg_path": "/assets/icons/vpi/calendar_deadline.svg",
+      "fallback_asset_id": "folder_paperwork",
+      "usage_examples": [
+        "No dejes pasar la fecha",
+        "Términos y condiciones claros"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "frivolous",
+        "entertainment"
+      ]
+    },
+    {
+      "asset_id": "checklist_advice",
+      "name": "Checklist Advice",
+      "visual_family": "paperwork_clarity",
+      "category": "icon",
+      "allowed_intents": [
+        "document",
+        "list",
+        "checklist",
+        "paperwork",
+        "organization",
+        "advice",
+        "steps",
+        "guide"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "paperwork_clarity",
+        "practical_advice"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "instructional",
+      "intensity": 0.5,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "document_slide_reveal",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "ChecklistAdvice",
+      "lottie_future_path": "/assets/lottie/vpi/checklist_advice.json",
+      "static_svg_path": "/assets/icons/vpi/checklist_advice.svg",
+      "fallback_asset_id": "folder_paperwork",
+      "usage_examples": [
+        "Sigue estos pasos",
+        "Todo en orden"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "frivolous",
+        "entertainment"
+      ]
+    },
+    {
+      "asset_id": "magnifying_glass",
+      "name": "Magnifying Glass",
+      "visual_family": "paperwork_clarity",
+      "category": "icon",
+      "allowed_intents": [
+        "document",
+        "review",
+        "inspection",
+        "clarity",
+        "details",
+        "discovery"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "paperwork_clarity",
+        "practical_advice"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "analytical",
+      "intensity": 0.5,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "document_slide_reveal",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "MagnifyingGlass",
+      "lottie_future_path": "/assets/lottie/vpi/magnifying_glass.json",
+      "static_svg_path": "/assets/icons/vpi/magnifying_glass.svg",
+      "fallback_asset_id": "folder_paperwork",
+      "usage_examples": [
+        "Revisa los detalles",
+        "Examina las condiciones"
+      ],
+      "prohibited_contexts": [
+        "fraud"
+      ]
+    },
+    {
+      "asset_id": "arrow_action",
+      "name": "Arrow Action",
+      "visual_family": "practical_advice",
+      "category": "icon",
+      "allowed_intents": [
+        "advice",
+        "tip",
+        "direction",
+        "action",
+        "guide",
+        "how_to"
+      ],
+      "allowed_visual_styles": [
+        "practical_advice",
+        "clear_explanation"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "motivational",
+      "intensity": 0.5,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.75,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "checklist_step_reveal",
+      "exit_motion": "caption_beat_reveal",
+      "remotion_component": "ArrowAction",
+      "lottie_future_path": "/assets/lottie/vpi/arrow_action.json",
+      "static_svg_path": "/assets/icons/vpi/arrow_action.svg",
+      "fallback_asset_id": "step_marker",
+      "usage_examples": [
+        "Así puedes ahorrar",
+        "Te explicamos cómo"
+      ],
+      "prohibited_contexts": [
+        "warning",
+        "legal_advice"
+      ]
+    },
+    {
+      "asset_id": "step_marker",
+      "name": "Step Marker",
+      "visual_family": "practical_advice",
+      "category": "icon",
+      "allowed_intents": [
+        "advice",
+        "steps",
+        "guide",
+        "how_to",
+        "instructions",
+        "goal"
+      ],
+      "allowed_visual_styles": [
+        "practical_advice",
+        "clear_explanation"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency",
+        "revelation"
+      ],
+      "tone": "instructional",
+      "intensity": 0.5,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "checklist_step_reveal",
+      "exit_motion": "caption_beat_reveal",
+      "remotion_component": "StepMarker",
+      "lottie_future_path": "/assets/lottie/vpi/step_marker.json",
+      "static_svg_path": "/assets/icons/vpi/step_marker.svg",
+      "fallback_asset_id": "arrow_action",
+      "usage_examples": [
+        "Sigue estos pasos",
+        "Hazlo en 3 pasos"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "frivolous",
+        "entertainment"
+      ]
+    },
+    {
+      "asset_id": "key_insight",
+      "name": "Key Insight",
+      "visual_family": "practical_advice",
+      "category": "icon",
+      "allowed_intents": [
+        "advice",
+        "tip",
+        "idea",
+        "insight",
+        "discovery",
+        "revelation"
+      ],
+      "allowed_visual_styles": [
+        "practical_advice",
+        "clear_explanation",
+        "revelation_hook"
+      ],
+      "avoid_intents": [
+        "warning",
+        "urgency"
+      ],
+      "tone": "insightful",
+      "intensity": 0.55,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "checklist_step_reveal",
+      "exit_motion": "caption_beat_reveal",
+      "remotion_component": "KeyInsight",
+      "lottie_future_path": "/assets/lottie/vpi/key_insight.json",
+      "static_svg_path": "/assets/icons/vpi/key_insight.svg",
+      "fallback_asset_id": "arrow_action",
+      "usage_examples": [
+        "Consejo práctico del día",
+        "Descubre el secreto"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "frivolous",
+        "entertainment"
+      ]
+    },
+    {
+      "asset_id": "revelation_spark",
+      "name": "Revelation Spark",
+      "visual_family": "revelation_hook",
+      "category": "icon",
+      "allowed_intents": [
+        "revelation",
+        "surprise",
+        "discovery",
+        "hook",
+        "wow",
+        "awareness"
+      ],
+      "allowed_visual_styles": [
+        "revelation_hook"
+      ],
+      "avoid_intents": [
+        "warning",
+        "paperwork",
+        "advice"
+      ],
+      "tone": "exciting",
+      "intensity": 0.8,
+      "brand_fit_score": 0.7,
+      "clarity_gain_score": 0.6,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 45,
+      "entry_motion": "sweep_reveal",
+      "exit_motion": "push_in",
+      "remotion_component": "RevelationSpark",
+      "lottie_future_path": "/assets/lottie/vpi/revelation_spark.json",
+      "static_svg_path": "/assets/icons/vpi/revelation_spark.svg",
+      "fallback_asset_id": "hook_badge",
+      "usage_examples": [
+        "Esto te va a sorprender",
+        "Descubre el secreto"
+      ],
+      "prohibited_contexts": [
+        "bad_news",
+        "warning"
+      ]
+    },
+    {
+      "asset_id": "spotlight_marker",
+      "name": "Spotlight Marker",
+      "visual_family": "revelation_hook",
+      "category": "icon",
+      "allowed_intents": [
+        "revelation",
+        "reveal",
+        "discovery",
+        "hook",
+        "awareness"
+      ],
+      "allowed_visual_styles": [
+        "revelation_hook"
+      ],
+      "avoid_intents": [
+        "warning",
+        "paperwork",
+        "advice"
+      ],
+      "tone": "dramatic",
+      "intensity": 0.85,
+      "brand_fit_score": 0.75,
+      "clarity_gain_score": 0.55,
+      "safe_area_preference": "full_frame",
+      "max_duration_frames": 60,
+      "entry_motion": "sweep_reveal",
+      "exit_motion": "push_in",
+      "remotion_component": "SpotlightMarker",
+      "lottie_future_path": "/assets/lottie/vpi/spotlight_marker.json",
+      "static_svg_path": "/assets/icons/vpi/spotlight_marker.svg",
+      "fallback_asset_id": "revelation_spark",
+      "usage_examples": [
+        "La verdad que nadie te cuenta",
+        "Resulta que..."
+      ],
+      "prohibited_contexts": [
+        "bad_news"
+      ]
+    },
+    {
+      "asset_id": "hook_badge",
+      "name": "Hook Badge",
+      "visual_family": "revelation_hook",
+      "category": "icon",
+      "allowed_intents": [
+        "revelation",
+        "hook",
+        "surprise",
+        "wow",
+        "attention"
+      ],
+      "allowed_visual_styles": [
+        "revelation_hook"
+      ],
+      "avoid_intents": [
+        "warning",
+        "paperwork",
+        "advice"
+      ],
+      "tone": "exciting",
+      "intensity": 0.75,
+      "brand_fit_score": 0.7,
+      "clarity_gain_score": 0.6,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 60,
+      "entry_motion": "sweep_reveal",
+      "exit_motion": "push_in",
+      "remotion_component": "HookBadge",
+      "lottie_future_path": "/assets/lottie/vpi/hook_badge.json",
+      "static_svg_path": "/assets/icons/vpi/hook_badge.svg",
+      "fallback_asset_id": "revelation_spark",
+      "usage_examples": [
+        "Esto te va a sorprender",
+        "Lo que no sabías"
+      ],
+      "prohibited_contexts": [
+        "bad_news",
+        "scam"
+      ]
+    },
+    {
+      "asset_id": "myth_break",
+      "name": "Myth Break",
+      "visual_family": "revelation_hook",
+      "category": "icon",
+      "allowed_intents": [
+        "revelation",
+        "surprise",
+        "discovery",
+        "hook",
+        "myth",
+        "truth"
+      ],
+      "allowed_visual_styles": [
+        "revelation_hook"
+      ],
+      "avoid_intents": [
+        "warning",
+        "paperwork",
+        "advice"
+      ],
+      "tone": "revealing",
+      "intensity": 0.8,
+      "brand_fit_score": 0.75,
+      "clarity_gain_score": 0.7,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 60,
+      "entry_motion": "sweep_reveal",
+      "exit_motion": "push_in",
+      "remotion_component": "MythBreak",
+      "lottie_future_path": "/assets/lottie/vpi/myth_break.json",
+      "static_svg_path": "/assets/icons/vpi/myth_break.svg",
+      "fallback_asset_id": "revelation_spark",
+      "usage_examples": [
+        "La verdad que nadie te cuenta",
+        "Mito o realidad"
+      ],
+      "prohibited_contexts": [
+        "bad_news"
+      ]
+    },
+    {
+      "asset_id": "beneficiary_node",
+      "name": "Beneficiary Node",
+      "visual_family": "coverage_explanation",
+      "category": "icon",
+      "allowed_intents": [
+        "comparison",
+        "coverage",
+        "network",
+        "breakdown",
+        "distribution",
+        "included"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "coverage_explanation"
+      ],
+      "avoid_intents": [
+        "warning",
+        "revelation",
+        "hook"
+      ],
+      "tone": "comparative",
+      "intensity": 0.55,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.85,
+      "safe_area_preference": "hook_card_zone",
+      "max_duration_frames": 120,
+      "entry_motion": "policy_card_slide",
+      "exit_motion": "simple_node_connection",
+      "remotion_component": "BeneficiaryNode",
+      "lottie_future_path": "/assets/lottie/vpi/beneficiary_node.json",
+      "static_svg_path": "/assets/icons/vpi/beneficiary_node.svg",
+      "fallback_asset_id": "capital_stack",
+      "usage_examples": [
+        "Esto está cubierto",
+        "Red de cobertura"
+      ],
+      "prohibited_contexts": [
+        "joke",
+        "frivolous",
+        "entertainment"
+      ]
+    },
+    {
+      "asset_id": "capital_stack",
+      "name": "Capital Stack",
+      "visual_family": "coverage_explanation",
+      "category": "icon",
+      "allowed_intents": [
+        "comparison",
+        "coverage",
+        "breakdown",
+        "distribution",
+        "allocation",
+        "savings"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "coverage_explanation"
+      ],
+      "avoid_intents": [
+        "warning",
+        "revelation",
+        "hook"
+      ],
+      "tone": "analytical",
+      "intensity": 0.5,
+      "brand_fit_score": 0.8,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_left_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "policy_card_slide",
+      "exit_motion": "simple_node_connection",
+      "remotion_component": "CapitalStack",
+      "lottie_future_path": "/assets/lottie/vpi/capital_stack.json",
+      "static_svg_path": "/assets/icons/vpi/capital_stack.svg",
+      "fallback_asset_id": "beneficiary_node",
+      "usage_examples": [
+        "Desglose de coberturas",
+        "Distribución de primas"
+      ],
+      "prohibited_contexts": [
+        "emergency",
+        "death"
+      ]
+    },
+    {
+      "asset_id": "medical_cross",
+      "name": "Medical Cross",
+      "visual_family": "coverage_explanation",
+      "category": "icon",
+      "allowed_intents": [
+        "coverage",
+        "health",
+        "care",
+        "included",
+        "policy",
+        "wellness"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "coverage_explanation",
+        "calm_trust"
+      ],
+      "avoid_intents": [
+        "warning",
+        "revelation",
+        "hook"
+      ],
+      "tone": "professional",
+      "intensity": 0.5,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "object_right_zone",
+      "max_duration_frames": 90,
+      "entry_motion": "policy_card_slide",
+      "exit_motion": "simple_node_connection",
+      "remotion_component": "MedicalCross",
+      "lottie_future_path": "/assets/lottie/vpi/medical_cross.json",
+      "static_svg_path": "/assets/icons/vpi/medical_cross.svg",
+      "fallback_asset_id": "health_card",
+      "usage_examples": [
+        "Cobertura médica incluida",
+        "Tu salud protegida"
+      ],
+      "prohibited_contexts": [
+        "emergency",
+        "crisis",
+        "death"
+      ]
+    },
+    {
+      "asset_id": "health_card",
+      "name": "Health Card",
+      "visual_family": "coverage_explanation",
+      "category": "icon",
+      "allowed_intents": [
+        "coverage",
+        "health",
+        "policy",
+        "terms",
+        "conditions",
+        "coverage_detail"
+      ],
+      "allowed_visual_styles": [
+        "clear_explanation",
+        "coverage_explanation",
+        "paperwork_clarity"
+      ],
+      "avoid_intents": [
+        "warning",
+        "revelation",
+        "hook",
+        "emergency"
+      ],
+      "tone": "professional",
+      "intensity": 0.45,
+      "brand_fit_score": 0.85,
+      "clarity_gain_score": 0.8,
+      "safe_area_preference": "center",
+      "max_duration_frames": 90,
+      "entry_motion": "policy_card_slide",
+      "exit_motion": "page_flip_subtle",
+      "remotion_component": "HealthCard",
+      "lottie_future_path": "/assets/lottie/vpi/health_card.json",
+      "static_svg_path": "/assets/icons/vpi/health_card.svg",
+      "fallback_asset_id": "medical_cross",
+      "usage_examples": [
+        "Términos de la póliza",
+        "Condiciones generales"
+      ],
+      "prohibited_contexts": [
+        "emergency",
+        "crisis",
+        "death"
+      ]
+    }
+  ]
+}

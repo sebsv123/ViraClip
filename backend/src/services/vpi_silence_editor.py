@@ -262,8 +262,18 @@ def classify_pause(
     reason = "micro_breath"
     confidence = 0.62
 
+    hard_dead_air_s = float(global_rules.get("hard_dead_air_threshold_s", 1.2))
+
+    # ── OUTPUT-CUTS-8: long dead air overrides keyword-based emphasis branches.
+    # Every editorial keep-range tops out at 0.7s, so a pause beyond
+    # hard_dead_air_s can never be an expressive pause regardless of the
+    # surrounding keywords (COMPRESS_SILENCE: leave 0.25-0.55s, not zero).
+    if duration >= hard_dead_air_s:
+        pause_type, action, target, reason, confidence = (
+            "dead_air", "shorten", 0.35, "long_dead_air_overrides_emphasis", 0.86,
+        )
     # ── Retention v4.0: tension silence (micro-silence before key VPI concepts) ──
-    if after_contains_vpi and key_phrase_micro_min_s <= duration <= key_phrase_micro_max_s:
+    elif after_contains_vpi and key_phrase_micro_min_s <= duration <= key_phrase_micro_max_s:
         pause_type, action, target, reason, confidence = (
             "tension_silence", "preserve_for_tension", duration,
             f"micro_silence_before_key_phrase:{after[:40]}", 0.88,
@@ -587,9 +597,12 @@ def _build_safe_cuts(segments: Sequence[SilenceSegment], *, mode: str) -> List[D
         removed = round(max(0.0, segment.duration_s - target), 3)
         if removed <= 0.05:
             continue
-        if total_removed + removed > 2.5:
+        # OUTPUT-CUTS-8: long dead air gets a larger removal budget; every
+        # other pause type keeps the conservative 2.5s ceiling.
+        budget = 12.0 if segment.pause_type in {"dead_air", "awkward_pause"} else 2.5
+        if total_removed + removed > budget:
             continue
-        if len(cuts) >= 4:
+        if len(cuts) >= 8:
             break
         cut_start = round(segment.start_s + target, 3)
         cut_end = round(segment.end_s, 3)

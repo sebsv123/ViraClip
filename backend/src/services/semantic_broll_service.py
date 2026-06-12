@@ -9,8 +9,13 @@ import logging
 from typing import List, Dict, Optional, Tuple, Any
 from dataclasses import dataclass
 import numpy as np
+from .vpi_production_safe_edit import production_safe_mode_active, production_safe_route_allowed
 
 logger = logging.getLogger(__name__)
+
+
+def _production_safe_blocked(route_name: str) -> bool:
+    return bool(production_safe_mode_active() and not production_safe_route_allowed(route_name))
 
 # Module-level singleton for SentenceTransformer (CPU-only to preserve VRAM for Whisper)
 _SENTENCE_MODEL = None
@@ -99,6 +104,9 @@ class SemanticBrollService:
         Returns:
             List of PexelsVideo objects
         """
+        if _production_safe_blocked("external_pexels"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+            return []
         if not self.api_key:
             logger.error("Pexels API key required")
             return []
@@ -202,6 +210,9 @@ class SemanticBrollService:
         Returns:
             B-roll metadata dict or None
         """
+        if _production_safe_blocked("semantic_broll_external"):
+            logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=semantic_broll_external reason=premium_local_stability")
+            return None
         # Extract keywords from transcript for initial search
         search_query = self._extract_keywords(transcript_segment)
         

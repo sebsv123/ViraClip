@@ -1,0 +1,123 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "VPI 3D Asset Source Schema",
+  "description": "Schema for tracking 3D/2.5D asset sources and their license metadata.",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Schema version for migration tracking."
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "asset_id",
+          "source_name",
+          "source_url",
+          "source_type",
+          "license_type",
+          "author",
+          "attribution_required",
+          "original_filename",
+          "original_format",
+          "imported_format",
+          "imported_path",
+          "status"
+        ],
+        "properties": {
+          "asset_id": {
+            "type": "string",
+            "description": "Unique identifier matching the 3D object registry."
+          },
+          "source_name": {
+            "type": "string",
+            "description": "Human-readable source name (e.g., 'Kenney', 'Quaternius')."
+          },
+          "source_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL to the original source."
+          },
+          "source_type": {
+            "type": "string",
+            "enum": ["self_authored", "open_source_svg", "kenney", "quaternius", "poly_pizza", "sketchfab", "blenderkit", "lottie", "marketplace", "other"],
+            "description": "Type of source."
+          },
+          "license_type": {
+            "type": "string",
+            "enum": ["self_authored", "MIT", "ISC", "CC0", "CC-BY", "CC-BY-SA", "public_domain", "marketplace_free", "editorial_use_only", "non_commercial", "unclear", "other"],
+            "description": "License type of the asset."
+          },
+          "license_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "URL to the license text."
+          },
+          "author": {
+            "type": "string",
+            "description": "Original author/creator name."
+          },
+          "attribution_required": {
+            "type": "boolean",
+            "description": "Whether attribution is required."
+          },
+          "attribution_text": {
+            "type": "string",
+            "description": "Attribution text if required."
+          },
+          "original_filename": {
+            "type": "string",
+            "description": "Original filename from source."
+          },
+          "original_format": {
+            "type": "string",
+            "description": "Original format (glb, gltf, blend, svg, etc.)."
+          },
+          "imported_format": {
+            "type": "string",
+            "description": "Format after import (glb, webm_alpha, pseudo_3d_svg, etc.)."
+          },
+          "imported_path": {
+            "type": "string",
+            "description": "Path to the imported asset file."
+          },
+          "transformation_notes": {
+            "type": "string",
+            "description": "Notes about transformations applied."
+          },
+          "allowed_use": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Allowed use cases."
+          },
+          "prohibited_use": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Prohibited use cases."
+          },
+          "verified_by": {
+            "type": "string",
+            "description": "Person who verified the license."
+          },
+          "verified_at": {
+            "type": "string",
+            "format": "date",
+            "description": "Date of license verification."
+          },
+          "checksum": {
+            "type": "string",
+            "description": "File checksum for integrity."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["candidate", "approved", "blocked", "needs_review"],
+            "description": "Current status of the asset."
+          }
+        }
+      }
+    }
+  },
+  "required": ["schema_version", "assets"]
+}

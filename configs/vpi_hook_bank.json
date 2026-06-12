@@ -1,0 +1,311 @@
+{
+  "emotional_protection": [
+    {
+      "text": "Cuando alguien depende de ti, cambia la conversación",
+      "tone": "responsibility_warm",
+      "intensity": "medium",
+      "visual_treatment": "emotional_push_in",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["depende de ti", "cambia"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Hook humano, no vender miedo"
+    },
+    {
+      "text": "No es miedo. Es responsabilidad.",
+      "tone": "calm_conviction",
+      "intensity": "medium",
+      "visual_treatment": "emotional_push_in",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 4.5,
+      "highlight_terms": ["responsabilidad"],
+      "avoid_broll_before_s": 4.0,
+      "notes": "Reframe positivo del miedo"
+    },
+    {
+      "text": "Pareja, hijos, hipoteca… proteger empieza aquí",
+      "tone": "warm_direct",
+      "intensity": "medium",
+      "visual_treatment": "emotional_push_in",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["pareja", "hijos", "proteger"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Enumera responsabilidades concretas"
+    },
+    {
+      "text": "Si alguien depende de ti, esto importa",
+      "tone": "warm_serious",
+      "intensity": "medium",
+      "visual_treatment": "emotional_push_in",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["depende de ti", "importa"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Gancho emocional suave"
+    },
+    {
+      "text": "Proteger también es planificar",
+      "tone": "calm_positive",
+      "intensity": "low",
+      "visual_treatment": "speaker_focus",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 5.0,
+      "highlight_terms": ["proteger", "planificar"],
+      "avoid_broll_before_s": 4.5,
+      "notes": "Para clips más reflexivos"
+    }
+  ],
+  "client_objection": [
+    {
+      "text": "El seguro de vida no es solo para mayores",
+      "tone": "direct_myth_debunk",
+      "intensity": "high",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.2,
+      "highlight_terms": ["no es solo", "mayores"],
+      "avoid_broll_before_s": 2.8,
+      "notes": "Hook principal para objeción edad"
+    },
+    {
+      "text": "No siempre va de edad. Va de responsabilidad.",
+      "tone": "direct_clarifying",
+      "intensity": "high",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.5,
+      "highlight_terms": ["edad", "responsabilidad"],
+      "avoid_broll_before_s": 3.0,
+      "notes": "Contraste claro"
+    },
+    {
+      "text": "Eso de mirarlo más adelante puede costarte",
+      "tone": "direct_warning",
+      "intensity": "medium",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.5,
+      "highlight_terms": ["mas adelante", "costarte"],
+      "avoid_broll_before_s": 3.0,
+      "notes": "Para objeción de procrastinación"
+    },
+    {
+      "text": "La edad no siempre es el punto",
+      "tone": "direct_clarifying",
+      "intensity": "medium",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.5,
+      "highlight_terms": ["edad", "punto"],
+      "avoid_broll_before_s": 3.0,
+      "notes": "Alternativa suave"
+    },
+    {
+      "text": "El error es esperar demasiado",
+      "tone": "direct_serious",
+      "intensity": "medium",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.5,
+      "highlight_terms": ["error", "esperar"],
+      "avoid_broll_before_s": 3.0,
+      "notes": "Para procrastinación"
+    }
+  ],
+  "myth_debunk": [
+    {
+      "text": "Esto mucha gente lo entiende tarde",
+      "tone": "revelation",
+      "intensity": "high",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.0,
+      "highlight_terms": ["entiende tarde"],
+      "avoid_broll_before_s": 2.5,
+      "notes": "Hook revelación"
+    },
+    {
+      "text": "Hay un mito enorme con el seguro de vida",
+      "tone": "revelation",
+      "intensity": "high",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.0,
+      "highlight_terms": ["mito"],
+      "avoid_broll_before_s": 2.5,
+      "notes": "Abre curiosidad"
+    },
+    {
+      "text": "No es como mucha gente cree",
+      "tone": "revelation",
+      "intensity": "medium",
+      "visual_treatment": "punch_subtitle",
+      "recommended_zoom": "emphasis_punch",
+      "recommended_broll_delay": 3.2,
+      "highlight_terms": ["no es como", "cree"],
+      "avoid_broll_before_s": 2.8,
+      "notes": "Alternativa suave"
+    },
+    {
+      "text": "No va de miedo. Va de planificación.",
+      "tone": "calm_revelation",
+      "intensity": "medium",
+      "visual_treatment": "emotional_push_in",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["miedo", "planificacion"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Reframe positivo"
+    }
+  ],
+  "risk_warning": [
+    {
+      "text": "Un imprevisto no avisa",
+      "tone": "serious_sober",
+      "intensity": "medium",
+      "visual_treatment": "risk_punch",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 3.0,
+      "highlight_terms": ["imprevisto", "no avisa"],
+      "avoid_broll_before_s": 2.5,
+      "notes": "Tensión sobria, no alarmista"
+    },
+    {
+      "text": "El problema no es pensarlo tarde",
+      "tone": "serious_direct",
+      "intensity": "medium",
+      "visual_treatment": "risk_punch",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 3.0,
+      "highlight_terms": ["problema", "tarde"],
+      "avoid_broll_before_s": 2.5,
+      "notes": "Enfoca en prevención"
+    },
+    {
+      "text": "Hay decisiones que protegen antes",
+      "tone": "serious_positive",
+      "intensity": "low",
+      "visual_treatment": "speaker_focus",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["decisiones", "protegen"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Alternativa positiva"
+    },
+    {
+      "text": "Cuando pasa algo, ya no se puede improvisar",
+      "tone": "serious_sober",
+      "intensity": "medium",
+      "visual_treatment": "risk_punch",
+      "recommended_zoom": "subtle_push_in",
+      "recommended_broll_delay": 3.0,
+      "highlight_terms": ["pasa algo", "improvisar"],
+      "avoid_broll_before_s": 2.5,
+      "notes": "Realista, no alarmista"
+    }
+  ],
+  "coverage_explanation": [
+    {
+      "text": "Antes de contratar, entiende esto",
+      "tone": "informative_clear",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 5.0,
+      "highlight_terms": ["contratar", "entiende"],
+      "avoid_broll_before_s": 4.0,
+      "notes": "Hook informativo"
+    },
+    {
+      "text": "No firmes sin mirar esto",
+      "tone": "informative_direct",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 5.0,
+      "highlight_terms": ["firmes", "mirar"],
+      "avoid_broll_before_s": 4.0,
+      "notes": "Gancho de atención"
+    },
+    {
+      "text": "La clave no es pagar más",
+      "tone": "informative_clear",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 5.0,
+      "highlight_terms": ["clave", "pagar"],
+      "avoid_broll_before_s": 4.0,
+      "notes": "Desmonta precio como prioridad"
+    },
+    {
+      "text": "Lo importante es saber qué estás protegiendo",
+      "tone": "informative_warm",
+      "intensity": "low",
+      "visual_treatment": "speaker_focus",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 5.0,
+      "highlight_terms": ["importante", "protegiendo"],
+      "avoid_broll_before_s": 4.0,
+      "notes": "Enfoque en valor"
+    }
+  ],
+  "actionable_advice": [
+    {
+      "text": "Antes de elegir, revisa esto",
+      "tone": "useful_practical",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["elegir", "revisa"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Hook práctico"
+    },
+    {
+      "text": "Tres cosas que deberías mirar",
+      "tone": "useful_practical",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["tres cosas", "mirar"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Lista, genera expectativa"
+    },
+    {
+      "text": "Haz esta pregunta antes de contratar",
+      "tone": "useful_practical",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["pregunta", "contratar"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Interactivo"
+    },
+    {
+      "text": "Esto te puede ahorrar un problema",
+      "tone": "useful_direct",
+      "intensity": "low",
+      "visual_treatment": "clean_explanation",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": 4.0,
+      "highlight_terms": ["ahorrar", "problema"],
+      "avoid_broll_before_s": 3.5,
+      "notes": "Beneficio claro"
+    }
+  ],
+  "weak_intro": {
+    "rules": {
+      "hook_type": "weak_intro",
+      "visual_treatment": "speaker_focus",
+      "recommended_zoom": "none",
+      "recommended_broll_delay": null,
+      "highlight_terms": [],
+      "avoid_broll_before_s": null,
+      "notes": "No fabricar hook artificial. Speaker focus. Warning: weak_hook."
+    }
+  }
+}

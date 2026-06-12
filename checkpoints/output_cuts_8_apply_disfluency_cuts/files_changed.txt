@@ -1,0 +1,30 @@
+OUTPUT-CUTS-8 — archivos modificados en este bloque (la working tree ya tenía
+muchos cambios previos sin commitear; estos son los tocados por el bloque):
+
+1. backend/src/services/vpi_silence_editor.py
+   - classify_pause: rama temprana hard dead air (>=1.2s -> shorten a 0.35s)
+     con prioridad sobre las ramas de énfasis por keywords.
+   - _build_safe_cuts: presupuesto 12s para dead_air/awkward_pause (resto 2.5s),
+     límite de cuts 4 -> 8.
+2. backend/src/services/vpi_disfluency_editor.py
+   - build_output_cut_plan(): contrato applied_cut_plan (cuts, keep_segments,
+     totales) con política editorial HARD_CUT/COMPRESS_SILENCE/
+     KEEP_EDITORIAL_PAUSE/MASK_WITH_VISUAL(sólo metadata)/SFX_PUNCTUATE(sólo
+     metadata), reutilizando detectores existentes; snap pass para cortes
+     de línea; presupuesto y suelo de duración final.
+3. backend/src/services/video_service.py
+   - Bridge OUTPUT-CUTS-8: merge de cuts en _silence_plan_obj.cuts antes de
+     apply_silence_edit_plan + logs VPI_OUTPUT_CUTS_*.
+   - Post-apply: filtrado de words dentro de cortes antes del remap, logs
+     RENDERED_WITH_CONCAT / CAPTION_WORDS_REBUILT / CAPTIONS_RETIMED /
+     AUDIO_SYNC_VERIFIED, metadata output_cuts, artifact
+     plans/clip_N_applied_cut_plan.json.
+4. backend/src/services/vpi_retention_editing_service.py  (FASE 5)
+   - bts_override eliminado -> VPI_OUTPUT_CUTS_BACKSTAGE_RESCUE_BLOCKED +
+     placeholder; razones BTS vetadas en dialogue/generic fallbacks.
+5. backend/src/services/vpi_editorial_scorer.py  (FASE 5)
+   - Guard en el bucle de diversity_fill: candidatos reject con razón BTS o
+     backstage_pure no pueden ser rescatados.
+
+Nota: 4 y 5 no estaban en la lista de "archivos permitidos" pero son la
+ubicación exacta del rescate que la FASE 5 exige bloquear; cambio mínimo.

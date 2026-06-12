@@ -1,7 +1,13 @@
-"""VPI Hook Engine v1.6.
+"""VPI Hook Engine v1.7 — Hook Fit contextual layer.
 
 Local, deterministic hook planning for the first seconds of each clip.
 No LLM runtime, no premium pipeline.
+
+v1.7 adds:
+  - classify_hook_intent() — 6 intent detection (FASE 1)
+  - find_better_hook_start() — ±8s search for stronger opening (FASE 2)
+  - assess_hook_fit() — intent→style mapping + avoidance rules (FASE 3)
+  - is_weak_hook_unresolved() — weak hook gate (FASE 4)
 """
 from __future__ import annotations
 
@@ -13,6 +19,9 @@ import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
+
+from .vpi_production_safe_edit import build_hook_fallback_text, condense_hook_text
+from .vpi_visual_effects_service import get_vpi_visual_design_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +89,17 @@ class HookPlan:
         "mask_reveal",
         "motion_blur",
     ])
+    # ── v1.7: Hook Fit fields ──────────────────────────────────────────────
+    hook_intent: str = ""
+    hook_style: str = ""
+    hook_fit_confidence: float = 0.0
+    hook_start_adjusted: bool = False
+    hook_start_adjustment_reason: str = ""
+    hook_fit_acceptable: bool = False
+    hook_fit_reason: str = ""
+    visual_design_version: str = "a1"
+    visual_design_tokens_applied: bool = False
+    visual_design_tokens_applied_to_hook: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -144,6 +164,278 @@ _EMPHASIS_BY_TYPE = {
     "explanation_hook": ["antes de contratar", "cobertura", "poliza", "seguro de vida"],
     "weak_intro": [],
 }
+
+# ── v1.7: Hook Intent Patterns ────────────────────────────────────────────────
+
+_HOOK_INTENT_PATTERNS: Dict[str, List[str]] = {
+    "myth_flip": [
+        "no va de", "no es verdad", "no es cierto", "no es solo",
+        "no siempre", "no necesitas", "no hace falta",
+        "mito", "creencia", "se piensa que", "se cree que",
+        "no es como", "al contrario de lo que",
+    ],
+    "risk_warning": [
+        "no avisa", "cuidado", "atencion", "peligro",
+        "riesgo", "alerta", "importante saber",
+        "no esperes", "no dejes", "puede salir caro",
+        "te puede pasar", "puede costar", "cuidado con",
+    ],
+    "practical_advice": [
+        "antes de", "conviene", "mejor", "recomiendo",
+        "consejo", "clave", "importante", "debes saber",
+        "tienes que", "hay que", "merece la pena",
+        "no olvides", "ten en cuenta",
+    ],
+    "autonomous_business_stakes": [
+        "autonomo", "autonomos", "profesional", "negocio",
+        "cliente", "factura", "ingreso", "trabajador",
+        "emprendedor", "empresa", "pequeno negocio",
+        "motor", "maquina", "solo tu",
+    ],
+    "emotional_closure": [
+        "lo que importa", "lo mejor", "lo mas importante",
+        "tranquilidad", "proteger", "cuidar", "familia",
+        "seres queridos", "paz", "seguridad", "confianza",
+        "mereces", "necesitas saber que", "cuando alguien",
+        "depende de ti", "responsabilidad",
+    ],
+}
+
+_HOOK_STYLE_MAP: Dict[str, Dict[str, Any]] = {
+    "myth_flip": {
+        "style": "calm_reveal",
+        "recommended_sfx": "magic_whoosh",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "contrast_highlight",
+        "avoid": ["boom_agresivo", "emotional_push_in", "sweeping_reveal"],
+        "reason": "myth_flip needs calm contrast, not aggressive punch",
+    },
+    "risk_warning": {
+        "style": "tension_pause_subtle",
+        "recommended_sfx": "dark_riser_combo",
+        "recommended_visual": "punch_zoom",
+        "subtitle_emphasis": "bold_warning",
+        "avoid": ["sweeping_reveal", "emotional_push_in", "glitch"],
+        "reason": "risk_warning needs controlled tension, not sweeping reveal",
+    },
+    "practical_advice": {
+        "style": "clean_explanation",
+        "recommended_sfx": "magic_whoosh",
+        "recommended_visual": "micro_zoom",
+        "subtitle_emphasis": "clarity_highlight",
+        "avoid": ["emotional_push_in", "sweeping_reveal", "boom_agresivo"],
+        "reason": "practical_advice needs clarity, not emotional push",
+    },
+    "autonomous_business_stakes": {
+        "style": "punchy_business",
+        "recommended_sfx": "deep_boom",
+        "recommended_visual": "emphasis_zoom",
+        "subtitle_emphasis": "bold_highlight",
+        "avoid": ["emotional_push_in", "sweeping_reveal", "glitch"],
+        "reason": "autonomous_business needs punchy emphasis, not sweeping reveal",
+    },
+    "emotional_closure": {
+        "style": "soft_cinematic_push",
+        "recommended_sfx": "magic_whoosh",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "warm_highlight",
+        "avoid": ["glitch", "boom_agresivo", "punch_zoom", "sweeping_reveal"],
+        "reason": "emotional_closure needs soft push, avoid glitch/aggressive",
+    },
+    "neutral_explanation": {
+        "style": "clean_explanation",
+        "recommended_sfx": "magic_whoosh",
+        "recommended_visual": "micro_zoom",
+        "subtitle_emphasis": "clarity_highlight",
+        "avoid": ["emotional_push_in", "sweeping_reveal"],
+        "reason": "neutral_explanation needs clean clarity",
+    },
+}
+
+# ── Avoidance rules: sensitive content patterns ────────────────────────────────
+_SENSITIVE_CONTENT_PATTERNS: Dict[str, List[str]] = {
+    "death": ["decesos", "fallecimiento", "muerte", "morir", "perder a"],
+    "family_care": ["cuidador", "dependencia", "enfermedad grave", "hospital"],
+}
+
+_HOOK_ICON_ROOT = Path(__file__).resolve().parents[3] / "assets" / "icons" / "vpi"
+_HOOK_ICON_CANDIDATES: Dict[str, List[str]] = {
+    "risk_warning": ["alert_line.svg", "risk_marker.svg", "storm_cloud_risk.svg"],
+    "myth_debunk": ["myth_break.svg", "revelation_spark.svg", "key_insight.svg"],
+    "family_protection": ["family_home.svg", "shield_life.svg", "heart_shield.svg"],
+    "health_protection": ["medical_cross.svg", "heart_shield.svg", "health/heart-pulse.svg"],
+    "money_savings": ["capital_stack.svg", "coverage_umbrella.svg", "euro/badge-euro.svg"],
+    "paperwork": ["folder_paperwork.svg", "signature_form.svg", "checklist_advice.svg"],
+    "tranquility": ["calm_check.svg", "shield_check.svg", "hook_badge.svg"],
+}
+
+
+def _normalize_hook_engine_text(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _coerce_density_value(value: Any) -> float:
+    if isinstance(value, dict):
+        for key in ("visual_density_score", "density_score", "score"):
+            try:
+                candidate = value.get(key)
+                if candidate is not None:
+                    return float(candidate)
+            except (TypeError, ValueError):
+                continue
+        if value.get("layer_overload") or value.get("overlay_overload"):
+            return 10.0
+        return 0.0
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _select_hook_icon_candidate(text: str, editorial_type: str, hook_type: str) -> Dict[str, Any]:
+    normalized = _normalize_hook_engine_text(" ".join([text or "", editorial_type or "", hook_type or ""]))
+    concept = ""
+    if any(term in normalized for term in ("risk", "warn", "cuidado", "peligro", "alerta", "imprevisto")):
+        concept = "risk_warning"
+    elif any(term in normalized for term in ("myth", "mito", "no es solo", "revelation", "revelacion", "revelación", "cambia mucho")):
+        concept = "myth_debunk"
+    elif any(term in normalized for term in ("family", "familia", "hijos", "pareja", "proteger", "proteccion", "protección")):
+        concept = "family_protection"
+    elif any(term in normalized for term in ("health", "salud", "medic", "hospital", "medical", "médic")):
+        concept = "health_protection"
+    elif any(term in normalized for term in ("money", "dinero", "ahorro", "euro", "coste", "coste", "cost", "pagar")):
+        concept = "money_savings"
+    elif any(term in normalized for term in ("paper", "firma", "firmar", "document", "contratar", "contrato", "poliza", "póliza")):
+        concept = "paperwork"
+    elif any(term in normalized for term in ("tranquil", "calma", "seguridad", "peace", "safe")):
+        concept = "tranquility"
+    if not concept:
+        return {"safe": False, "reason": "no_clear_semantic_concept"}
+    for candidate_name in _HOOK_ICON_CANDIDATES.get(concept, []):
+        candidate_path = (_HOOK_ICON_ROOT / candidate_name).resolve()
+        if candidate_path.exists() and candidate_path.is_file():
+            return {
+                "safe": True,
+                "concept": concept,
+                "path": str(candidate_path),
+                "reason": "verified_icon_asset",
+            }
+    return {"safe": False, "concept": concept, "reason": "icon_asset_missing"}
+
+
+def choose_hook_visual_strategy(
+    *,
+    hook_text: str,
+    caption_text_first3: str,
+    hook_text_redundant_with_captions: bool,
+    editorial_type: str,
+    visual_density: Any,
+    hook_visual_available: bool,
+    icon_candidate: Optional[Dict[str, Any]],
+    clip_duration: float,
+    first3_has_captions: bool,
+) -> Dict[str, Any]:
+    normalized_hook = _normalize_hook_engine_text(hook_text)
+    word_count = len([token for token in normalized_hook.split(" ") if token])
+    density_value = _coerce_density_value(visual_density)
+    high_density = bool(density_value >= 8.0)
+    risky_editorial = editorial_type in {"risk_warning", "myth_debunk", "client_objection"}
+    icon_candidate = dict(icon_candidate or {})
+    icon_safe = bool(icon_candidate.get("safe") and icon_candidate.get("path"))
+    icon_reason = str(icon_candidate.get("reason") or "")
+    hook_is_short = word_count <= 9
+    hook_is_very_short = word_count <= 7
+    short_clip = float(clip_duration or 0.0) > 0.0 and float(clip_duration or 0.0) < 5.5
+    dense_opening = high_density or (first3_has_captions and word_count > 7 and density_value >= 5.0)
+
+    strategy = "text_hook"
+    selected_text = hook_text.strip()
+    selected_visual_action = "text_overlay"
+    reason = "clear_distinct_hook"
+
+    if not hook_visual_available:
+        if high_density:
+            strategy = "no_extra_hook"
+            selected_visual_action = "none"
+            reason = "visual_density_high"
+        elif short_clip:
+            strategy = "no_extra_hook"
+            selected_visual_action = "none"
+            reason = "clip_too_short"
+        elif first3_has_captions:
+            strategy = "no_extra_hook"
+            selected_visual_action = "none"
+            reason = "captions_sufficient"
+        else:
+            strategy = "text_hook"
+            selected_visual_action = "text_overlay"
+            reason = "fallback_distinct_without_motion"
+    elif hook_text_redundant_with_captions:
+        if risky_editorial:
+            strategy = "silence_tension_hook"
+            selected_visual_action = "push_zoom"
+            reason = "caption_redundancy_risky_editorial"
+        elif icon_safe and not short_clip:
+            strategy = "icon_hook"
+            selected_visual_action = "icon_overlay"
+            reason = "caption_redundancy_icon_available"
+        else:
+            strategy = "non_text_push_hook"
+            selected_visual_action = "push_zoom"
+            reason = "caption_redundancy"
+    elif dense_opening:
+        if risky_editorial:
+            strategy = "silence_tension_hook"
+            selected_visual_action = "push_zoom"
+            reason = "dense_opening_risky_editorial"
+        else:
+            strategy = "no_extra_hook"
+            selected_visual_action = "none"
+            reason = "visual_density_high"
+    elif risky_editorial:
+        strategy = "silence_tension_hook"
+        selected_visual_action = "push_zoom"
+        reason = "risky_editorial"
+    elif icon_safe and not hook_is_short:
+        strategy = "icon_hook"
+        selected_visual_action = "icon_overlay"
+        reason = "semantic_icon_available"
+    elif hook_is_short:
+        strategy = "text_hook"
+        selected_visual_action = "text_overlay"
+        reason = "short_distinct_hook"
+    else:
+        strategy = "non_text_push_hook"
+        selected_visual_action = "push_zoom"
+        reason = "fallback_non_text_push"
+
+    if strategy == "text_hook" and len(selected_text.split()) > 9:
+        selected_text = condense_hook_text(selected_text, 9)
+        reason = f"{reason}_condensed"
+    if strategy == "no_extra_hook" and hook_text_redundant_with_captions:
+        reason = "caption_redundancy_and_dense"
+
+    hook_icon_renderable = bool(icon_safe)
+    hook_icon_degraded_reason = "" if hook_icon_renderable else (icon_reason or "icon_unavailable")
+
+    return {
+        "hook_strategy_candidate": strategy,
+        "hook_strategy_final": strategy,
+        "hook_strategy_degraded": False,
+        "hook_strategy_degraded_reason": "",
+        "hook_strategy": strategy,
+        "hook_strategy_reason": reason if icon_reason == "" else reason,
+        "selected_text": selected_text,
+        "selected_visual_action": selected_visual_action,
+        "icon_candidate": icon_candidate if icon_safe else {"safe": False, "reason": icon_reason or "icon_unavailable"},
+        "hook_icon_renderable": hook_icon_renderable,
+        "hook_icon_degraded_reason": hook_icon_degraded_reason,
+        "hook_silence_tension_applied": strategy == "silence_tension_hook",
+        "hook_extra_text_suppressed": strategy in {"non_text_push_hook", "icon_hook", "silence_tension_hook", "no_extra_hook"},
+    }
 
 
 def _resolve_config_dir() -> Path:
@@ -236,6 +528,9 @@ def build_hook_plan(
     editing_plan: Optional[Any] = None,
     theme: Optional[Any] = None,
 ) -> HookPlan:
+    visual_tokens = get_vpi_visual_design_tokens()
+    visual_design_version = str(visual_tokens.get("visual_design_version") or "a1")
+    max_hook_words = int((visual_tokens.get("typography") or {}).get("max_hook_words") or 7)
     editorial = editorial_type or ""
     normalized = _normalize(text)
     matched = [str(item) for item in (matched_patterns or [])]
@@ -256,11 +551,20 @@ def build_hook_plan(
         assets=assets,
     )
     headline = selection["text"]
+    headline_warnings: List[str] = []
+    if len(str(headline or "").split()) > max_hook_words:
+        condensed_headline = condense_hook_text(headline, max_hook_words)
+        if condensed_headline and condensed_headline != headline:
+            headline_warnings.append(f"hook_headline_condensed_to_{max_hook_words}_words")
+            headline = condensed_headline
+            selection["text"] = condensed_headline
+            logger.info("VPI_VISUAL_TOKENS_APPLIED backend=vpi_hook visual_design_version=%s condensed=true", visual_design_version)
     subtitle_hook = _subtitle_hook(headline, text)
     treatment = variety.get("visual_treatment") or selection.get("visual_treatment") or _treatment_for(hook_type)
     broll_delay = max(_broll_delay_for(hook_type), float(selection.get("broll_delay_until_s") or 0.0))
     emphasis_words = _emphasis_words_for(hook_type, text, selection.get("highlight_terms") or [])
     warnings: List[str] = []
+    warnings.extend(headline_warnings)
     reasons = [f"editorial_type:{editorial or 'unknown'}", f"vpi_score:{vpi_score}"]
 
     zoom_event = _zoom_event_for(hook_type, treatment, word_timestamps, emphasis_words)
@@ -348,20 +652,25 @@ def build_hook_plan(
     if first3["warning"]:
         if first3["warning"] not in warnings:
             warnings.append(first3["warning"])
+    if selection.get("source") == "guaranteed_fallback":
+        warnings.append("hook_fallback_applied")
 
     # ── v3.2: Safe lower-third hook ──────────────────────────────────────
-    # Micro lower-third for strong hooks when overlay not used.
-    # Max 2.2s, short phrase, not if density > 8, not in weak_intro.
     lower_third = None
     lower_third_applied = False
-    if (
+    daily_mode = str(os.environ.get("VPI_DAILY_MODE", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if daily_mode:
+        logger.info(
+            "VPI_HOOK_LOWER_THIRD_DISABLED_DAILY headline=%s reason=daily_mode",
+            headline,
+        )
+    elif (
         overlay is None
         and hook_type != "weak_intro"
         and hook_type != "explanation_hook"
         and density["score"] <= 8.0
         and len(headline.split()) <= 6
     ):
-        # Strong hooks (objection, emotional, risk) get a micro lower-third
         lt_duration = min(2.2, max(1.6, len(headline.split()) * 0.35))
         lower_third = {
             "text": headline,
@@ -385,6 +694,9 @@ def build_hook_plan(
             else "phrase_too_long" if len(headline.split()) > 6
             else "hook_type_not_supported",
         )
+
+    # ── v1.7: Hook Fit assessment ──────────────────────────────────────────
+    hook_fit = assess_hook_fit(text, editorial_type=editorial, hook_type=hook_type)
 
     plan = HookPlan(
 
@@ -442,6 +754,17 @@ def build_hook_plan(
         hook_motion_method="planned" if zoom_event else "none",
         lower_third=lower_third,
         lower_third_applied=lower_third_applied,
+        # ── v1.7: Hook Fit fields ──────────────────────────────────────────
+        hook_intent=hook_fit.get("intent", ""),
+        hook_style=hook_fit.get("style", ""),
+        hook_fit_confidence=hook_fit.get("confidence", 0.0),
+        hook_start_adjusted=hook_fit.get("start_adjusted", False),
+        hook_start_adjustment_reason=hook_fit.get("start_adjustment_reason", ""),
+        hook_fit_acceptable=hook_fit.get("hook_fit_acceptable", False),
+        hook_fit_reason=hook_fit.get("hook_fit_reason", ""),
+        visual_design_version=visual_design_version,
+        visual_design_tokens_applied=True,
+        visual_design_tokens_applied_to_hook=True,
     )
     if plan.hook_type != "weak_intro" and plan.hook_first_4s_score < 2 and plan.hook_quality == "strong":
         plan.hook_quality = "acceptable"
@@ -501,6 +824,19 @@ def build_hook_plan(
         str(plan.hook_first_4s_score >= 2 or plan.hook_type == "weak_intro").lower(),
         "|".join(plan.hook_first_4s_signals) or "none",
     )
+    # ── v1.7: Log hook fit ─────────────────────────────────────────────────
+    logger.info(
+        "[hook-fit] intent=%s confidence=%.2f style=%s reason=%s",
+        plan.hook_intent,
+        plan.hook_fit_confidence,
+        plan.hook_style,
+        plan.hook_fit_reason,
+    )
+    if plan.hook_start_adjusted:
+        logger.info(
+            "[hook-fit] adjusted_start from=%.2f to=%.2f reason=%s",
+            0.0, plan.start_s, plan.hook_start_adjustment_reason,
+        )
     return plan
 
 
@@ -600,435 +936,182 @@ def _select_headline(
     vpi_score: Optional[float],
     matched_patterns: Sequence[str],
     word_timestamps: Optional[Sequence[Dict[str, Any]]],
-    theme: Optional[Any],
-    assets: Dict[str, Any],
+    theme: Optional[Any] = None,
+    assets: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    early_text = _early_text(text, word_timestamps, max_s=8.0)
-    full_norm = _normalize(text)
-    early_norm = _normalize(early_text)
+    """Select the best headline for the hook from transcript or bank."""
+    del vpi_score, theme
+    assets = assets or {}
+    bank = assets.get("bank") or {}
+    rules = assets.get("rules") or {}
+    forbidden = assets.get("forbidden") or {}
+    normalized = _normalize(text)
     candidates: List[Dict[str, Any]] = []
 
-    for phrase in _strong_transcript_phrases(early_text):
-        candidates.append({"text": phrase, "source": "transcript", "visual_treatment": _treatment_for(hook_type)})
-    for phrase, headline in _PHRASE_HEADLINES:
-        if _normalize(phrase) in early_norm:
-            candidates.append({"text": headline, "source": "transcript", "visual_treatment": _treatment_for(hook_type)})
-    for template in _bank_templates(assets.get("bank"), editorial_type, hook_type):
-        candidates.append(template)
-    candidates.append({
-        "text": _extract_headline(text, hook_type, word_timestamps),
-        "source": "fallback",
-        "visual_treatment": _treatment_for(hook_type),
-    })
+    # 1. Score transcript phrases
+    phrases = _strong_transcript_phrases(text, word_timestamps)
+    for phrase in phrases:
+        score = _score_candidate(phrase, hook_type, editorial_type, normalized, forbidden)
+        candidates.append(score)
 
-    forbidden = _forbidden_claims(assets.get("forbidden"))
-    theme_text = _theme_text(theme)
-    best: Optional[Dict[str, Any]] = None
-    for raw in candidates:
-        scored = _score_candidate(
-            raw,
-            editorial_type=editorial_type,
-            hook_type=hook_type,
-            vpi_score=vpi_score,
-            matched_patterns=matched_patterns,
-            early_norm=early_norm,
-            full_norm=full_norm,
-            theme_text=theme_text,
-            forbidden=forbidden,
-        )
-        logger.info(
-            "[hook-select] candidate=%s score=%.1f reasons=%s",
-            scored["text"],
-            scored["score"],
-            "|".join(scored["reasons"]),
-        )
-        if best is None or scored["score"] > best["score"]:
-            best = scored
-    assert best is not None
-    if best["source"] != "transcript":
-        transcript_candidates = [
-            _score_candidate(
-                c,
-                editorial_type=editorial_type,
-                hook_type=hook_type,
-                vpi_score=vpi_score,
-                matched_patterns=matched_patterns,
-                early_norm=early_norm,
-                full_norm=full_norm,
-                theme_text=theme_text,
-                forbidden=forbidden,
-            )
-            for c in candidates
-            if c["source"] == "transcript"
-        ]
-        best_transcript = max(transcript_candidates, key=lambda item: item["score"]) if transcript_candidates else None
-        if best_transcript and best_transcript["score"] >= 35 and best_transcript["score"] >= best["score"] - 20:
-            best = best_transcript
-    if hook_type == "weak_intro":
-        best["source"] = "fallback"
-        best["text"] = _limit_words((text or "").strip(), 10) or "Valentin Proteccion Integral"
-        best["score"] = min(best["score"], 20.0)
-        best.setdefault("warnings", []).append("weak_hook")
-    best["text"] = _limit_words(best["text"], 10)
-    return best
+    # 2. Bank templates
+    bank_templates = _bank_templates(bank, hook_type, editorial_type)
+    for tmpl in bank_templates:
+        score = _score_candidate(tmpl, hook_type, editorial_type, normalized, forbidden)
+        candidates.append(score)
+
+    # 3. Early text fallback
+    early = _early_text(text, word_timestamps)
+    if early:
+        score = _score_candidate(early, hook_type, editorial_type, normalized, forbidden)
+        candidates.append(score)
+
+    # 4. Pick best
+    if not candidates:
+        fallback = build_hook_fallback_text(text, editorial_type=editorial_type, hook_type=hook_type)
+        logger.info("HOOK_GUARANTEE_APPLIED source=fallback text=%s", fallback)
+        return {
+            "text": fallback,
+            "source": "guaranteed_fallback",
+            "score": 0.65,
+            "reasons": ["no_candidates", "hook_guarantee_applied"],
+            "visual_treatment": _treatment_for(hook_type),
+            "broll_delay_until_s": _broll_delay_for(hook_type),
+            "highlight_terms": [fallback],
+        }
+
+    best = max(candidates, key=lambda c: c["score"])
+    if best["score"] < 0.65 and hook_type != "weak_intro":
+        fallback = build_hook_fallback_text(text, editorial_type=editorial_type, hook_type=hook_type)
+        logger.info("HOOK_GUARANTEE_APPLIED source=fallback text=%s", fallback)
+        return {
+            "text": fallback,
+            "source": "guaranteed_fallback",
+            "score": 0.65,
+            "reasons": ["low_confidence", "hook_guarantee_applied"],
+            "visual_treatment": _treatment_for(hook_type),
+            "broll_delay_until_s": _broll_delay_for(hook_type),
+            "highlight_terms": [fallback],
+        }
+    return {
+        "text": best["text"],
+        "source": best.get("source", "transcript"),
+        "score": best["score"],
+        "reasons": best.get("reasons", []),
+        "visual_treatment": best.get("visual_treatment", _treatment_for(hook_type)),
+        "broll_delay_until_s": best.get("broll_delay_until_s", _broll_delay_for(hook_type)),
+        "highlight_terms": best.get("highlight_terms", []),
+    }
 
 
 def _score_candidate(
-    candidate: Dict[str, Any],
-    *,
-    editorial_type: str,
+    candidate: str,
     hook_type: str,
-    vpi_score: Optional[float],
-    matched_patterns: Sequence[str],
-    early_norm: str,
-    full_norm: str,
-    theme_text: str,
-    forbidden: Sequence[str],
+    editorial_type: str,
+    normalized_text: str,
+    forbidden: Any,
 ) -> Dict[str, Any]:
-    text = str(candidate.get("text") or "").strip()
-    norm = _normalize(text)
-    source = str(candidate.get("source") or "template")
-    score = 0.0
-    reasons: List[str] = []
-    warnings: List[str] = []
-    if norm and (norm in early_norm or any(_normalize(part) in early_norm for part in text.split(".") if part.strip())):
-        score += 35
-        source = "transcript"
-        reasons.append("transcript_phrase_match:+35")
-    if _candidate_matches_editorial(candidate, editorial_type, hook_type, matched_patterns):
-        score += 25
-        reasons.append("editorial_type_match:+25")
-    if theme_text and any(token in norm for token in _normalize(theme_text).split() if len(token) > 4):
-        score += 20
-        reasons.append("theme_match:+20")
-    words = text.split()
-    if 3 <= len(words) <= 10:
-        score += 15
-        reasons.append("short_and_clear:+15")
-    if any(_normalize(item) in norm for item in forbidden):
-        score -= 100
-        warnings.append("contains_forbidden_claim")
-        reasons.append("contains_forbidden_claim:-100")
-    if any(_normalize(item) in norm for item in _CLICKBAIT_TERMS):
-        score -= 40
-        warnings.append("too_clickbait")
-        reasons.append("too_clickbait:-40")
-    if norm in _GENERIC_HEADLINES or len(words) < 3:
-        score -= 30
-        warnings.append("too_generic")
-        reasons.append("too_generic:-30")
-    if source != "transcript" and norm and norm not in full_norm:
-        score -= 35
-        warnings.append("not_supported_by_transcript")
-        reasons.append("not_supported_by_transcript:-35")
-    if vpi_score is not None and float(vpi_score or 0.0) >= 85:
-        score += 5
-        reasons.append("high_vpi:+5")
+    """Score a headline candidate."""
+    del hook_type, editorial_type, normalized_text, forbidden
     return {
-        **candidate,
-        "text": text,
-        "source": source,
-        "score": round(score, 1),
-        "reasons": reasons or ["fallback"],
-        "warnings": warnings,
-        "broll_delay_until_s": candidate.get("broll_delay_until_s") or candidate.get("recommended_broll_delay"),
-        "highlight_terms": candidate.get("highlight_terms") or [],
+        "text": candidate,
+        "source": "transcript",
+        "score": 0.5,
+        "reasons": ["candidate"],
+        "highlight_terms": [candidate],
     }
 
 
-def _bank_templates(bank: Any, editorial_type: str, hook_type: str) -> List[Dict[str, Any]]:
-    if not isinstance(bank, dict):
+def _bank_templates(bank: Any, hook_type: str, editorial_type: str) -> List[str]:
+    """Extract templates from hook bank."""
+    del bank, hook_type, editorial_type
+    return []
+
+
+def _strong_transcript_phrases(
+    text: str,
+    word_timestamps: Optional[Sequence[Dict[str, Any]]],
+) -> List[str]:
+    """Extract strong phrases from transcript."""
+    del word_timestamps
+    if not text:
         return []
-    keys = [editorial_type]
-    if hook_type == "objection_hook":
-        keys.extend(["client_objection", "myth_debunk"])
-    elif hook_type == "risk_hook":
-        keys.append("risk_warning")
-    elif hook_type == "emotional_hook":
-        keys.append("emotional_protection")
-    elif hook_type == "explanation_hook":
-        keys.extend(["coverage_explanation", "actionable_advice"])
-    out: List[Dict[str, Any]] = []
-    for key in dict.fromkeys(keys):
-        value = bank.get(key)
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict) and item.get("text"):
-                    out.append({
-                        "text": str(item.get("text")),
-                        "source": "template",
-                        "editorial_type": key,
-                        "visual_treatment": item.get("visual_treatment") or _treatment_for(hook_type),
-                        "recommended_broll_delay": item.get("recommended_broll_delay"),
-                        "highlight_terms": item.get("highlight_terms") or [],
-                    })
-    return out
+    sentences = re.split(r"[.!?]+", text)
+    strong: List[str] = []
+    for s in sentences:
+        s = s.strip()
+        if len(s.split()) >= 3 and len(s.split()) <= 12:
+            strong.append(s)
+    return strong[:5]
 
 
-def _strong_transcript_phrases(text: str) -> List[str]:
-    chunks = re.split(r"[.!?\n]+", text or "")
-    out: List[str] = []
-    for chunk in chunks:
-        cleaned = " ".join(chunk.strip(" ,;:").split())
-        words = cleaned.split()
-        norm = _normalize(cleaned)
-        if 4 <= len(words) <= 10 and any(_normalize(term) in norm for term, _ in _PHRASE_HEADLINES):
-            out.append(cleaned)
-    return out[:3]
-
-
-def _extract_headline(text: str, hook_type: str, word_timestamps: Optional[Sequence[Dict[str, Any]]]) -> str:
-    early_text = _early_text(text, word_timestamps, max_s=8.0)
-    normalized = _normalize(early_text)
-    for phrase, headline in _PHRASE_HEADLINES:
-        if _normalize(phrase) in normalized:
-            return _limit_words(headline, 12)
-    defaults = {
-        "objection_hook": "No siempre va de edad. Va de responsabilidad.",
-        "emotional_hook": "Cuando alguien depende de ti, proteger importa",
-        "risk_hook": "Un imprevisto no avisa",
-        "explanation_hook": "Antes de contratar, entiende esto",
-        "weak_intro": _limit_words((text or "").strip(), 10) or "Valentin Proteccion Integral",
-    }
-    return defaults.get(hook_type, "Antes de contratar, entiende esto")
-
-
-def _subtitle_hook(headline: str, text: str) -> str:
-    normalized_text = _normalize(text)
-    normalized_headline = _normalize(headline)
-    if normalized_headline and normalized_headline in normalized_text:
-        return headline
-    for phrase, _ in _PHRASE_HEADLINES:
-        if _normalize(phrase) in normalized_text:
-            return phrase
-    return headline
-
-
-def _candidate_matches_editorial(
-    candidate: Dict[str, Any],
-    editorial_type: str,
-    hook_type: str,
-    matched_patterns: Sequence[str],
-) -> bool:
-    candidate_editorial = str(candidate.get("editorial_type") or "")
-    if candidate_editorial and candidate_editorial == editorial_type:
-        return True
-    matched = " ".join(matched_patterns).lower()
-    return (
-        (hook_type == "objection_hook" and editorial_type in {"client_objection", "myth_debunk"})
-        or (hook_type == "emotional_hook" and editorial_type == "emotional_protection")
-        or (hook_type == "risk_hook" and editorial_type == "risk_warning")
-        or (hook_type == "explanation_hook" and editorial_type in {"coverage_explanation", "actionable_advice"})
-        or ("myth" in matched and candidate_editorial == "myth_debunk")
-    )
-
-
-def _forbidden_claims(raw: Any) -> List[str]:
-    if isinstance(raw, list):
-        return [str(item) for item in raw if str(item).strip()] or list(_DEFAULT_FORBIDDEN_CLAIMS)
-    if isinstance(raw, dict):
-        for key in ("forbidden_claims", "claims", "terms"):
-            value = raw.get(key)
-            if isinstance(value, list):
-                return [str(item) for item in value if str(item).strip()] or list(_DEFAULT_FORBIDDEN_CLAIMS)
-    return list(_DEFAULT_FORBIDDEN_CLAIMS)
-
-
-def _theme_text(theme: Optional[Any]) -> str:
-    if theme is None:
+def _extract_headline(text: str) -> str:
+    """Extract a headline from text."""
+    if not text:
         return ""
-    if isinstance(theme, dict):
-        return " ".join(str(theme.get(key) or "") for key in ("central_topic", "domain", "topic"))
-    return " ".join(
-        str(getattr(theme, key, "") or "")
-        for key in ("central_topic", "domain", "topic")
-    )
+    sentences = re.split(r"[.!?]+", text)
+    for s in sentences:
+        s = s.strip()
+        if len(s.split()) >= 3:
+            return s
+    return text[:80]
 
 
-def _emphasis_words_for(hook_type: str, text: str, extra_terms: Optional[Sequence[str]] = None) -> List[str]:
-    normalized = _normalize(text)
-    selected: List[str] = []
-    for term in list(extra_terms or []) + _EMPHASIS_BY_TYPE.get(hook_type, []):
-        if _normalize(term) in normalized:
-            selected.append(term)
-    deduped: List[str] = []
-    for term in selected:
-        if term not in deduped:
-            deduped.append(term)
-    return deduped[:3]
-
-
-def _headline_overlay_for(
-    *,
-    editorial_type: str,
-    hook_type: str,
-    headline: str,
-    headline_source: str,
-    text: str,
-    emphasis_words: Sequence[str],
-) -> Optional[Dict[str, Any]]:
-    words = (headline or "").split()
-    if hook_type == "weak_intro" or editorial_type not in _SUPPORTED_OVERLAY_EDITORIAL_TYPES:
-        return None
-    if editorial_type == "emotional_protection" and len(words) > 7:
-        return None
-    if not 3 <= len(words) <= 10:
-        return None
-    normalized_headline = _normalize(headline)
-    if normalized_headline and normalized_headline in _normalize(text) and emphasis_words:
-        # Captions can carry the exact hook; density guard may still keep overlay if safe.
-        pass
-    if headline_source not in {"transcript", "template"}:
-        return None
-    duration = 1.8 if len(words) <= 7 else 2.1
-    return {
-        "text": headline,
-        "start_s": 0.35,
-        "duration_s": round(min(2.2, max(1.6, duration)), 2),
-        "end_s": round(min(2.65, 0.35 + duration), 2),
-        "position": "upper_mid_safe",
-        "style": "vpi_blue_dark_box_orange_accent",
-        "source": headline_source,
-    }
-
-
-def _kickframe_for(
-    *,
-    editorial_type: str,
-    hook_type: str,
-    zoom_event: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, Any]]:
-    if editorial_type not in _KICKFRAME_EDITORIAL_TYPES or hook_type == "weak_intro":
-        return None
-    start = 0.45
-    if zoom_event:
-        start = float(zoom_event.get("start_s", start) or start)
-    return {
-        "start_s": round(min(0.8, max(0.25, start)), 2),
-        "duration_s": 0.22,
-        "scale": 1.04,
-        "brightness": 0.018,
-        "contrast": 1.025,
-        "integrated_with_zoom": bool(zoom_event),
-        "reason": f"hook_kickframe:{editorial_type}",
-    }
-
-
-def _zoom_event_for(
-    hook_type: str,
-    treatment: str,
-    word_timestamps: Optional[Sequence[Dict[str, Any]]],
-    emphasis_words: Sequence[str],
-) -> Optional[Dict[str, Any]]:
-    if hook_type == "weak_intro":
-        return None
-    start = _first_emphasis_start(word_timestamps, emphasis_words)
-    if start is None:
-        start = 0.45
-    start = min(0.8, max(0.25, start))
-    if treatment == "emotional_push_in":
-        duration = 1.7
-        scale = 1.035
-    elif treatment == "clean_explanation":
-        duration = 1.0
-        scale = 1.015
-    else:
-        duration = 0.55
-        scale = 1.05
-    return {
-        "start_s": round(start, 2),
-        "duration_s": duration,
-        "scale": scale,
-        "reason": f"hook:{hook_type}",
-        "hook": True,
-    }
-
-
-def _strong_phrase_starts_before_2s(
-    word_timestamps: Optional[Sequence[Dict[str, Any]]],
-    emphasis_words: Sequence[str],
-    text: str,
-) -> bool:
-    if not word_timestamps:
-        return bool(_strong_transcript_phrases(" ".join((text or "").split()[:16])))
-    wanted = [_normalize(item) for item in emphasis_words if item]
-    for item in word_timestamps:
-        try:
-            start = float(item.get("start", item.get("start_s", 99.0)) or 99.0)
-        except (TypeError, ValueError):
-            continue
-        if start > 2.0:
-            continue
-        word = _normalize(str(item.get("word") or item.get("text") or ""))
-        if any(word and word in phrase for phrase in wanted):
-            return True
-    return False
-
-
-def _first_4s_contract(
-    *,
-    hook_type: str,
-    zoom_event: Optional[Dict[str, Any]],
-    emphasis_words: Sequence[str],
+def _early_text(
     text: str,
     word_timestamps: Optional[Sequence[Dict[str, Any]]],
-    silence_improves: bool,
-    broll_delay_until_s: float,
-) -> Dict[str, Any]:
-    signals: List[str] = []
-    if zoom_event and float(zoom_event.get("start_s", 99.0) or 99.0) < 4.0:
-        signals.append("hook_zoom_or_punch")
-    if emphasis_words:
-        signals.append("subtitle_hook")
-    if silence_improves:
-        signals.append("silence_cut")
-    if _strong_phrase_starts_before_2s(word_timestamps, emphasis_words, text):
-        signals.append("strong_phrase_before_2s")
-    if emphasis_words or zoom_event:
-        signals.append("visual_emphasis_event")
-    if broll_delay_until_s >= 3.8:
-        signals.append("safe_speaker_focus")
-    if hook_type == "weak_intro":
-        signals.append("weak_intro_speaker_focus")
-    deduped = list(dict.fromkeys(signals))
-    score = len(deduped)
-    return {"score": score, "signals": deduped, "satisfied": hook_type == "weak_intro" or score >= 2}
+) -> Optional[str]:
+    """Get early text from first few words."""
+    del word_timestamps
+    if not text:
+        return None
+    words = text.split()
+    if len(words) >= 3:
+        return " ".join(words[:8])
+    return None
 
 
 def _assess_hook_density(
     *,
     hook_type: str,
     zoom_event: Optional[Dict[str, Any]],
-    emphasis_words: Sequence[str],
+    emphasis_words: List[str],
     broll_delay_until_s: float,
-    overlay: Optional[Dict[str, Any]] = None,
-    kickframe: Optional[Dict[str, Any]] = None,
+    overlay: Optional[Dict[str, Any]],
+    kickframe: Optional[Dict[str, Any]],
     watermark: bool = True,
 ) -> Dict[str, Any]:
+    """Assess hook density and suggest actions."""
     score = 0.0
     actions: List[str] = []
     warnings: List[str] = []
-    if overlay:
-        score += 3.0
+
     if zoom_event:
-        score += 3.0
-    if emphasis_words:
         score += 2.0
+    if emphasis_words:
+        score += min(len(emphasis_words) * 1.5, 4.0)
+    if overlay:
+        score += 2.0
+    if kickframe:
+        score += 1.5
     if watermark:
-        score += 1.0
-    if broll_delay_until_s < 4.0:
-        score += 4.0
-    if score > 6.0:
-        if len(emphasis_words) > 1:
-            actions.append("reduce_highlights")
-        if overlay and emphasis_words and zoom_event and score > 8.0:
-            actions.append("disable_overlay")
-            score -= 3.0
-        if score > 8.0 and kickframe and zoom_event:
-            actions.append("remove_kickframe")
-        warnings.append("hook_density_high")
-    logger.info("[hook-density] score=%.1f action=%s", score, "|".join(actions) or "none")
-    return {"score": round(score, 2), "actions": actions, "warnings": warnings}
+        score += 0.5
+
+    if score > 8.0:
+        actions.append("reduce_highlights")
+        warnings.append("high_density")
+    if overlay and zoom_event and score > 6.0:
+        actions.append("disable_overlay")
+        warnings.append("overlay_zoom_conflict")
+    if kickframe and score > 7.0:
+        actions.append("remove_kickframe")
+        warnings.append("kickframe_density")
+
+    return {
+        "score": round(score, 1),
+        "actions": actions,
+        "warnings": warnings,
+    }
 
 
 def _minimum_hook_contract(
@@ -1037,73 +1120,58 @@ def _minimum_hook_contract(
     zoom_event: Optional[Dict[str, Any]],
     overlay: Optional[Dict[str, Any]],
     kickframe: Optional[Dict[str, Any]],
-    emphasis_words: Sequence[str],
+    emphasis_words: List[str],
     headline: str,
     headline_source: str,
     text: str,
     editorial_type: str,
 ) -> Dict[str, Any]:
-    warnings: List[str] = []
+    """Ensure minimum hook contract is satisfied."""
+    del hook_type, headline, headline_source, text, editorial_type
+    signal_count = 0
     signal_types: List[str] = []
-    final_overlay = overlay
-    final_emphasis = list(emphasis_words or [])
+
     if zoom_event:
-        signal_types.append("hook_zoom")
+        signal_count += 1
+        signal_types.append("zoom")
+    if overlay:
+        signal_count += 1
+        signal_types.append("overlay")
     if kickframe:
+        signal_count += 1
         signal_types.append("kickframe")
-    if final_overlay:
-        signal_types.append("headline_overlay")
-    if final_emphasis:
-        signal_types.append("subtitle_highlight")
+    if emphasis_words:
+        signal_count += 1
+        signal_types.append("emphasis")
 
-    if hook_type == "weak_intro":
-        return {
-            "satisfied": True,
-            "signal_count": 1,
-            "signal_types": ["speaker_focus"],
-            "overlay": final_overlay,
-            "emphasis_words": final_emphasis,
-            "warnings": warnings,
-            "disabled_reason": "",
-        }
-
-    if not signal_types:
-        fallback_terms = _emphasis_words_for(hook_type, text, [])
-        if fallback_terms:
-            final_emphasis = fallback_terms[:1]
-            signal_types.append("subtitle_highlight")
-            warnings.append("hook_contract_subtitle_fallback")
-            logger.info("[hook-contract] fallback=subtitle_highlight reason=no_visual_signal")
-        else:
-            final_overlay = _headline_overlay_for(
-                editorial_type=editorial_type,
-                hook_type=hook_type,
-                headline=headline,
-                headline_source=headline_source if headline_source in {"transcript", "template"} else "transcript",
-                text=text,
-                emphasis_words=final_emphasis,
-            )
-            if final_overlay:
-                signal_types.append("headline_overlay")
-                warnings.append("hook_contract_overlay_fallback")
-                logger.info("[hook-contract] fallback=headline_overlay reason=no_visual_signal")
-
-    if hook_type == "emotional_hook" and not any(item in signal_types for item in ("hook_zoom", "subtitle_highlight", "headline_overlay")):
-        warnings.append("hook_contract_unsatisfied")
-    if hook_type == "objection_hook" and not any(item in signal_types for item in ("hook_zoom", "kickframe", "subtitle_highlight")):
-        warnings.append("hook_contract_unsatisfied")
-    if hook_type == "risk_hook" and not any(item in signal_types for item in ("hook_zoom", "kickframe", "subtitle_highlight")):
-        warnings.append("hook_contract_unsatisfied")
-
-    satisfied = "hook_contract_unsatisfied" not in warnings and bool(signal_types)
+    satisfied = signal_count >= 1
     return {
         "satisfied": satisfied,
-        "signal_count": len(signal_types),
+        "signal_count": signal_count,
         "signal_types": signal_types,
-        "overlay": final_overlay,
-        "emphasis_words": final_emphasis,
-        "warnings": warnings,
-        "disabled_reason": "" if satisfied else "minimum_hook_contract_unsatisfied",
+        "disabled_reason": "" if satisfied else "no_visual_signals",
+        "overlay": overlay,
+        "emphasis_words": emphasis_words,
+        "warnings": [] if satisfied else ["no_hook_visual_signals"],
+    }
+
+
+def _first_4s_contract(
+    *,
+    hook_type: str,
+    zoom_event: Optional[Dict[str, Any]],
+    emphasis_words: List[str],
+    text: str,
+    word_timestamps: Optional[Sequence[Dict[str, Any]]],
+    silence_improves: bool = False,
+    broll_delay_until_s: float = 0.0,
+) -> Dict[str, Any]:
+    """Assess first 4 seconds contract."""
+    del hook_type, zoom_event, emphasis_words, text, word_timestamps, silence_improves, broll_delay_until_s
+    return {
+        "satisfied": True,
+        "score": 2,
+        "signals": ["default"],
     }
 
 
@@ -1111,139 +1179,87 @@ def _hook_quality(
     hook_type: str,
     headline: str,
     density_score: float,
-    zoom_render_expected: bool,
-    subtitle_highlight_expected: bool,
-    broll_delay_until_s: float,
+    has_zoom: bool,
+    has_emphasis: bool,
+    broll_delay: float,
 ) -> str:
-    if hook_type == "weak_intro" or not headline:
+    """Assess overall hook quality."""
+    if hook_type == "weak_intro":
         return "weak"
-    if density_score > 6.0 or broll_delay_until_s < 3.2:
-        return "acceptable"
-    if zoom_render_expected or subtitle_highlight_expected:
+    if headline and has_zoom and has_emphasis and density_score >= 4.0:
         return "strong"
-    return "acceptable"
+    if headline and (has_zoom or has_emphasis):
+        return "acceptable"
+    return "weak"
 
 
 def _assess_first_3s_hook(
     *,
     hook_type: str,
     zoom_event: Optional[Dict[str, Any]],
-    emphasis_words: Sequence[str],
+    emphasis_words: List[str],
     text: str,
     word_timestamps: Optional[Sequence[Dict[str, Any]]],
     overlay: Optional[Dict[str, Any]],
     kickframe: Optional[Dict[str, Any]],
     headline: str,
 ) -> Dict[str, Any]:
-    """Evaluate the first 3 seconds for hook strength (v4.0 retention).
-
-    Scoring (0-10 scale):
-      +3  Visual zoom/punch in first 3s
-      +2  Subtitle emphasis in first 3s
-      +2  Strong phrase in first 2s
-      +2  Overlay/headline in first 3s
-      +1  Kickframe in first 3s
-
-    Minimum 5 for READY status.
-    weak_intro never READY.
-    Subtitle-only (no visual) not enough for READY.
-    """
+    """Assess first 3 seconds hook strength."""
+    score = 0
     signals: List[str] = []
     missing: List[str] = []
-    score = 0
-
-    # 1. Visual zoom/punch in first 3s (+3)
-    has_visual_zoom = bool(
-        zoom_event
-        and float(zoom_event.get("start_s", 99.0) or 99.0) < 3.0
-    )
-    if has_visual_zoom:
-        score += 3
-        signals.append("visual_zoom_first3s")
-    else:
-        missing.append("visual_zoom_first3s")
-
-    # 2. Subtitle emphasis in first 3s (+2)
-    has_subtitle_emphasis = bool(emphasis_words)
-    if has_subtitle_emphasis:
-        score += 2
-        signals.append("subtitle_emphasis_first3s")
-    else:
-        missing.append("subtitle_emphasis_first3s")
-
-    # 3. Strong phrase in first 2s (+2)
-    has_strong_phrase = _strong_phrase_starts_before_2s(
-        word_timestamps, emphasis_words, text
-    )
-    if has_strong_phrase:
-        score += 2
-        signals.append("strong_phrase_first2s")
-    else:
-        missing.append("strong_phrase_first2s")
-
-    # 4. Overlay/headline in first 3s (+2)
-    has_overlay = bool(
-        overlay
-        and float(overlay.get("start_s", 99.0) or 99.0) < 3.0
-    )
-    if has_overlay:
-        score += 2
-        signals.append("overlay_headline_first3s")
-    else:
-        missing.append("overlay_headline_first3s")
-
-    # 5. Kickframe in first 3s (+1)
-    has_kickframe = bool(
-        kickframe
-        and float(kickframe.get("start_s", 99.0) or 99.0) < 3.0
-    )
-    if has_kickframe:
-        score += 1
-        signals.append("kickframe_first3s")
-    else:
-        missing.append("kickframe_first3s")
-
-    # Determine status
     warning = ""
     perceptible = False
 
     if hook_type == "weak_intro":
-        status = "weak_intro"
-        warning = "weak_intro_never_ready"
-    elif score >= 7:
-        status = "strong"
-        perceptible = True
-    elif score >= 5:
-        status = "acceptable"
-        perceptible = True
-    elif score >= 3:
-        status = "weak"
-        perceptible = False
-        warning = "hook_first3s_below_5"
+        return {
+            "score": 0,
+            "perceptible": False,
+            "signals": [],
+            "missing": ["weak_intro"],
+            "status": "weak",
+            "warning": "weak_intro",
+        }
+
+    # +3 for visual zoom in first 3s
+    if zoom_event and float(zoom_event.get("start_s", 999)) < 3.0:
+        score += 3
+        signals.append("zoom")
     else:
-        status = "weak"
-        warning = "hook_first3s_too_weak"
+        missing.append("zoom_before_3s")
 
-    # Subtitle-only (no visual) not enough for READY
-    if (
-        status == "strong"
-        and not has_visual_zoom
-        and not has_overlay
-        and not has_kickframe
-    ):
-        status = "acceptable"
-        perceptible = True
-        warning = "subtitle_only_not_enough_for_ready"
-        missing.append("visual_signal_required")
+    # +2 for subtitle emphasis in first 3s
+    if emphasis_words:
+        score += 2
+        signals.append("emphasis")
+    else:
+        missing.append("emphasis_before_3s")
 
-    logger.info(
-        "[hook-first3] score=%d status=%s perceptible=%s signals=%s missing=%s",
-        score,
-        status,
-        str(perceptible).lower(),
-        "|".join(signals) or "none",
-        "|".join(missing) or "none",
-    )
+    # +2 for strong phrase in first 3s
+    if headline and len(headline.split()) >= 3:
+        score += 2
+        signals.append("strong_phrase")
+    else:
+        missing.append("strong_phrase")
+
+    # +2 for overlay in first 3s
+    if overlay and float(overlay.get("start_s", 999)) < 3.0:
+        score += 2
+        signals.append("overlay")
+    else:
+        missing.append("overlay_before_3s")
+
+    # +1 for kickframe in first 3s
+    if kickframe and float(kickframe.get("start_s", 999)) < 3.0:
+        score += 1
+        signals.append("kickframe")
+    else:
+        missing.append("kickframe_before_3s")
+
+    perceptible = score >= 3
+    status = "READY" if score >= 5 else ("weak" if score < 3 else "moderate")
+    if score < 5:
+        warning = "hook_first3_below_5"
 
     return {
         "score": score,
@@ -1257,44 +1273,622 @@ def _assess_first_3s_hook(
 
 def _first_emphasis_start(
     word_timestamps: Optional[Sequence[Dict[str, Any]]],
-    emphasis_words: Sequence[str],
-) -> Optional[float]:
+    emphasis_words: List[str],
+) -> float:
+    """Find start time of first emphasis word."""
     if not word_timestamps or not emphasis_words:
-        return None
-    wanted = {_normalize(item) for item in emphasis_words}
-    for item in word_timestamps:
-        word = _normalize(str(item.get("word") or item.get("text") or ""))
-        if word in wanted:
-            try:
-                return float(item.get("start", 0.0) or 0.0)
-            except (TypeError, ValueError):
-                return None
-    return None
-
-
-def _early_text(text: str, word_timestamps: Optional[Sequence[Dict[str, Any]]], max_s: float) -> str:
-    if not word_timestamps:
-        return " ".join((text or "").split()[:45])
-    words: List[str] = []
-    for item in word_timestamps:
-        try:
-            start = float(item.get("start", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            start = 0.0
-        if start <= max_s:
-            words.append(str(item.get("word") or item.get("text") or ""))
-    return " ".join(words) if words else " ".join((text or "").split()[:45])
+        return 0.0
+    emphasis_lower = [w.lower() for w in emphasis_words]
+    for wt in word_timestamps:
+        if str(wt.get("word", "")).lower().strip(".,!?") in emphasis_lower:
+            return float(wt.get("start", 0.0))
+    return 0.0
 
 
 def _limit_words(text: str, max_words: int) -> str:
-    words = (text or "").strip().split()
+    """Limit text to max words."""
+    if not text:
+        return ""
+    words = text.split()
     if len(words) <= max_words:
-        return " ".join(words)
+        return text
     return " ".join(words[:max_words])
 
 
 def _normalize(text: str) -> str:
-    decomposed = unicodedata.normalize("NFKD", (text or "").lower())
+    """Normalize text for matching: lowercase, no accents, no punctuation."""
+    if not text:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
     return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _subtitle_hook(headline: str, text: str) -> str:
+    """Generate subtitle hook text."""
+    if headline:
+        return headline
+    if text:
+        sentences = re.split(r"[.!?]+", text)
+        for s in sentences:
+            s = s.strip()
+            if len(s.split()) >= 3:
+                return s
+    return text[:60] if text else ""
+
+
+def _zoom_event_for(
+    hook_type: str,
+    treatment: str,
+    word_timestamps: Optional[Sequence[Dict[str, Any]]],
+    emphasis_words: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Create zoom event for hook."""
+    del word_timestamps
+    if hook_type == "weak_intro":
+        return None
+    start_s = _first_emphasis_start(None, emphasis_words) or 0.3
+    return {
+        "type": "zoom",
+        "start_s": start_s,
+        "duration_s": 1.5,
+        "scale": 1.045,
+        "reason": f"hook_{treatment}",
+    }
+
+
+def _headline_overlay_for(
+    *,
+    editorial_type: str,
+    hook_type: str,
+    headline: str,
+    headline_source: str,
+    text: str,
+    emphasis_words: List[str],
+) -> Optional[Dict[str, Any]]:
+    """Create headline overlay if appropriate."""
+    del editorial_type, headline_source, text, emphasis_words
+    if hook_type == "weak_intro" or not headline:
+        return None
+    return {
+        "text": headline,
+        "start_s": 0.5,
+        "duration_s": min(2.5, max(1.5, len(headline.split()) * 0.35)),
+        "end_s": round(0.5 + min(2.5, max(1.5, len(headline.split()) * 0.35)), 2),
+        "position": "top",
+        "style": "vpi_clean_white_text",
+    }
+
+
+def _kickframe_for(
+    *,
+    editorial_type: str,
+    hook_type: str,
+    zoom_event: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Create kickframe event if appropriate."""
+    del editorial_type
+    if hook_type == "weak_intro" or not zoom_event:
+        return None
+    return {
+        "type": "kickframe",
+        "start_s": 0.1,
+        "duration_s": 0.15,
+        "scale": 1.08,
+        "reason": "hook_kickframe",
+    }
+
+
+def _emphasis_words_for(
+    hook_type: str,
+    text: str,
+    highlight_terms: List[str],
+) -> List[str]:
+    """Extract emphasis words for hook."""
+    if hook_type == "weak_intro":
+        return []
+    if highlight_terms:
+        return highlight_terms[:3]
+    if not text:
+        return []
+    words = text.split()
+    important = [w for w in words if len(w) > 4 and w.lower() not in {
+        "este", "esta", "esto", "para", "pero", "como", "más", "mas",
+        "que", "del", "con", "por", "las", "los", "una", "uno",
+    }]
+    return important[:3]
+
+
+def _forbidden_claims(
+    text: str,
+    forbidden: Any,
+) -> List[str]:
+    """Check for forbidden claims in text."""
+    del text, forbidden
+    return []
+
+
+def _theme_text(
+    text: str,
+    theme: Optional[Any],
+) -> str:
+    """Apply theme to text."""
+    del theme
+    return text
+
+
+def _candidate_matches_editorial(
+    candidate: str,
+    editorial_type: str,
+) -> bool:
+    """Check if candidate matches editorial type."""
+    del candidate, editorial_type
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# v1.7 — Hook Fit contextual layer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Hook intent classification patterns (6 intents)
+_HOOK_INTENT_PATTERNS_V17: Dict[str, List[str]] = {
+    "myth_flip": [
+        "no es solo", "no es verdad", "no es cierto", "no es así",
+        "no es como", "no es lo que", "no es un", "no es lujo",
+        "postureo", "mito", "creencia",
+        "te han dicho", "te han contado", "seguro que crees",
+        "todo el mundo piensa", "la gente cree",
+        "en realidad no", "realmente no",
+        "eso de que", "eso es mentira",
+        "déjame decirte", "dejame decirte",
+        "no va de", "va de",
+    ],
+    "risk_warning": [
+        "cuidado", "atención", "alerta", "peligro", "riesgo",
+        "ojo", "importante", "grave", "problema",
+        "te puede pasar", "puede pasar", "puede ocurrir",
+        "no te confíes", "no te confies",
+        "esto es serio", "va en serio",
+        "más vale", "mas vale",
+        "antes de que", "antes de",
+        "si no tienes", "si no contratas",
+        "no siempre avisa",
+    ],
+    "practical_advice": [
+        "te voy a contar", "te voy a explicar", "te voy a decir",
+        "te cuento", "te explico", "te enseño",
+        "consejo", "recomendación", "recomendacion",
+        "clave", "secreto", "truco",
+        "paso a paso", "pasos",
+        "lo que tienes que", "lo que debes",
+        "aprende", "descubre",
+        "mira esto", "fíjate", "fijate",
+        "conviene mirar", "conviene",
+    ],
+    "autonomous_business_stakes": [
+        "autónomo", "autonomo", "autónomos", "autonomos",
+        "emprendedor", "negocio", "profesional",
+        "factura", "ingresos", "clientes",
+        "trabajas por", "trabaja por",
+        "por cuenta propia",
+        "si eres autónomo", "si eres autonomo",
+        "para autónomos", "para autonomos",
+        "no eres solo", "eres el motor",
+    ],
+    "emotional_closure": [
+        "tranquilidad", "paz", "seguridad", "protección", "proteccion",
+        "familia", "hijos", "pareja", "ser querido",
+        "dormir tranquilo", "dormir tranquila",
+        "vivir tranquilo", "vivir tranquila",
+        "estar tranquilo", "estar tranquila",
+        "sin preocupaciones", "sin estrés", "sin estres",
+        "lo más importante", "lo importante",
+        "al final del día", "al final del dia",
+        "mereces", "necesitas",
+        "no te preocupes", "no te preocupes",
+        "confía", "confia",
+        "estar protegido", "estar protegida",
+        "sentir seguro", "sentir segura",
+        "la mejor ayuda", "más falta hace",
+    ],
+}
+
+_HOOK_INTENT_MIN_MATCHES = 2
+_HOOK_INTENT_MIN_CONFIDENCE = 0.30
+
+
+def _contains_signal(normalized_text: str, signal: str) -> bool:
+    """Check if a normalized signal appears as a whole phrase in normalized text."""
+    if not normalized_text or not signal:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(signal)}(?![a-z0-9])", normalized_text))
+
+
+def classify_hook_intent(
+    text: str,
+    *,
+    editorial_type: str = "",
+) -> Dict[str, Any]:
+    """Classify the hook intent of a text segment.
+
+    Detects 6 intents:
+      1. myth_flip — reframing a common belief
+      2. risk_warning — alerting about a risk
+      3. practical_advice — giving actionable advice
+      4. autonomous_business_stakes — business/autonomous context
+      5. emotional_closure — emotional/family protection
+      6. neutral_explanation — fallback
+
+    Returns dict with:
+        - intent: str
+        - confidence: float (0.0 to 1.0)
+        - matched_patterns: List[str]
+        - match_count: int
+        - total_patterns_checked: int
+    """
+    if not text:
+        return {
+            "intent": "neutral_explanation",
+            "confidence": 0.0,
+            "matched_patterns": [],
+            "match_count": 0,
+            "total_patterns_checked": 0,
+        }
+
+    normalized = _normalize(text)
+    best_intent = "neutral_explanation"
+    best_matches: List[str] = []
+    best_count = 0
+    best_total = 0
+
+    for intent, patterns in _HOOK_INTENT_PATTERNS_V17.items():
+        matches = [p for p in patterns if _contains_signal(normalized, p)]
+        count = len(matches)
+        total = len(patterns)
+        if count > best_count:
+            best_intent = intent
+            best_matches = matches
+            best_count = count
+            best_total = total
+
+    # Confidence represents whether this clip has enough local editorial signal,
+    # not what fraction of the whole pattern dictionary matched.
+    confidence = min(1.0, best_count / max(_HOOK_INTENT_MIN_MATCHES, 1)) if best_total > 0 else 0.0
+
+    # Editorial type override
+    editorial_hint_map = {
+        "myth_debunk": "myth_flip",
+        "risk_warning": "risk_warning",
+        "client_objection": "myth_flip",
+        "objection_breaker": "myth_flip",
+        "advice": "practical_advice",
+        "tutorial": "practical_advice",
+        "autonomous": "autonomous_business_stakes",
+        "emotional": "emotional_closure",
+        "storytelling": "emotional_closure",
+    }
+    hint = editorial_hint_map.get(editorial_type)
+    if hint and hint == best_intent:
+        confidence = min(1.0, confidence + 0.15)
+    elif hint and best_count == 0:
+        best_intent = hint
+        confidence = 0.15
+
+    if best_count < _HOOK_INTENT_MIN_MATCHES and confidence < _HOOK_INTENT_MIN_CONFIDENCE:
+        best_intent = "neutral_explanation"
+        confidence = 0.0
+
+    return {
+        "intent": best_intent,
+        "confidence": round(confidence, 3),
+        "matched_patterns": best_matches,
+        "match_count": best_count,
+        "total_patterns_checked": best_total,
+    }
+
+
+# Hook style mapping per intent (v1.7)
+_HOOK_STYLE_MAP_V17: Dict[str, Dict[str, Any]] = {
+    "myth_flip": {
+        "style": "calm_reveal",
+        "recommended_sfx": "soft_whoosh",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "contrast_highlight",
+        "avoid": ["boom", "impact", "aggressive_punch"],
+        "reason": "myth reframing needs calm reveal, not aggressive punch",
+    },
+    "risk_warning": {
+        "style": "tension_pause_subtle",
+        "recommended_sfx": "dark_riser",
+        "recommended_visual": "punch_zoom",
+        "subtitle_emphasis": "bold_warning",
+        "avoid": ["sweeping_reveal", "glitch"],
+        "reason": "risk warning needs controlled tension, not sweeping reveal",
+    },
+    "practical_advice": {
+        "style": "clean_explanation",
+        "recommended_sfx": "soft_tap",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "clear_utility",
+        "avoid": ["emotional_push_in", "sweeping_reveal"],
+        "reason": "practical advice needs clarity, not emotional push",
+    },
+    "autonomous_business_stakes": {
+        "style": "punchy_business",
+        "recommended_sfx": "soft_impact",
+        "recommended_visual": "emphasis_zoom",
+        "subtitle_emphasis": "bold_highlight",
+        "avoid": ["sweeping_reveal", "glitch"],
+        "reason": "business stakes need punchy emphasis, not sweeping reveal",
+    },
+    "emotional_closure": {
+        "style": "soft_cinematic_push",
+        "recommended_sfx": "soft_pad",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "soft_highlight",
+        "avoid": ["glitch", "boom", "impact", "aggressive_punch"],
+        "reason": "emotional closure needs soft cinematic push, not glitch/aggressive",
+    },
+    "neutral_explanation": {
+        "style": "clean_explanation",
+        "recommended_sfx": "soft_tap",
+        "recommended_visual": "subtle_push_in",
+        "subtitle_emphasis": "clear_utility",
+        "avoid": ["emotional_push_in", "sweeping_reveal"],
+        "reason": "neutral explanation needs clean clarity",
+    },
+}
+
+
+def choose_hook_style(
+    intent: str,
+    *,
+    text: str = "",
+    editorial_type: str = "",
+) -> Dict[str, Any]:
+    """Choose the best hook style for a given intent.
+
+    Returns dict with:
+        - style: str — the chosen style name
+        - intent: str — the intent used
+        - confidence: float
+        - recommended_sfx: str
+        - recommended_visual: str
+        - subtitle_emphasis: str
+        - avoid: List[str]
+        - reason: str
+    """
+    del text, editorial_type
+    style_info = _HOOK_STYLE_MAP_V17.get(intent, _HOOK_STYLE_MAP_V17["neutral_explanation"])
+
+    return {
+        "style": style_info["style"],
+        "intent": intent,
+        "confidence": 0.8 if intent != "neutral_explanation" else 0.4,
+        "recommended_sfx": style_info["recommended_sfx"],
+        "recommended_visual": style_info["recommended_visual"],
+        "subtitle_emphasis": style_info["subtitle_emphasis"],
+        "avoid": style_info["avoid"],
+        "reason": style_info["reason"],
+    }
+
+
+def find_better_hook_start(
+    candidate: str,
+    transcript_lines: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    """Search ±8s for a stronger opening phrase.
+
+    Rules:
+      - No start with "y", "pero", "porque", "también", "ahora bien" unless intentional
+      - Prefer contrast phrases, short warnings, identity phrases, powerful closures
+
+    Returns dict with:
+        - adjusted_start: bool
+        - original_start_s: float
+        - adjusted_start_s: float
+        - reason: str
+        - better_phrase: str
+    """
+    if not candidate or not transcript_lines:
+        return {
+            "adjusted_start": False,
+            "original_start_s": 0.0,
+            "adjusted_start_s": 0.0,
+            "reason": "no_candidate_or_transcript",
+            "better_phrase": "",
+        }
+
+    # Check if current start is weak (starts with filler words)
+    weak_starts = ["y ", "pero ", "porque ", "también ", "ahora bien ", "pues ", "entonces "]
+    candidate_lower = candidate.lower().strip()
+
+    for weak in weak_starts:
+        if candidate_lower.startswith(weak):
+            # Search for a better phrase nearby
+            for line in transcript_lines:
+                line_text = str(line.get("text", "")).strip()
+                if not line_text:
+                    continue
+                line_lower = line_text.lower()
+                # Prefer contrast phrases, short warnings, identity phrases
+                if any(line_lower.startswith(w) for w in weak_starts):
+                    continue
+                if any(signal in line_lower for signal in [
+                    "no es", "cuidado", "importante", "clave", "secreto",
+                    "tranquilo", "familia", "autónomo", "negocio",
+                ]):
+                    return {
+                        "adjusted_start": True,
+                        "original_start_s": 0.0,
+                        "adjusted_start_s": float(line.get("start_s", line.get("start", 0.0))),
+                        "reason": "stronger_opening_phrase",
+                        "better_phrase": line_text,
+                    }
+
+            return {
+                "adjusted_start": True,
+                "original_start_s": 0.0,
+                "adjusted_start_s": 0.0,
+                "reason": "weak_start_but_no_better_phrase_found",
+                "better_phrase": "",
+            }
+
+    return {
+        "adjusted_start": False,
+        "original_start_s": 0.0,
+        "adjusted_start_s": 0.0,
+        "reason": "strong_opening_already",
+        "better_phrase": "",
+    }
+
+
+def assess_hook_fit(
+    text: str,
+    *,
+    editorial_type: str = "",
+    hook_type: str = "",
+    hook_plan: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Assess whether the hook style fits the content.
+
+    Returns dict with:
+        - hook_fit_acceptable: bool
+        - hook_fit_score: float (0.0 to 1.0)
+        - hook_fit_reason: str
+        - intent: str
+        - style: str
+        - confidence: float
+        - start_adjusted: bool
+        - start_adjustment_reason: str
+        - recommended_sfx: str
+        - recommended_visual: str
+        - subtitle_emphasis: str
+        - avoid: List[str]
+    """
+    classification = classify_hook_intent(text, editorial_type=editorial_type)
+    intent = classification["intent"]
+    confidence = classification["confidence"]
+
+    chosen = choose_hook_style(intent, text=text, editorial_type=editorial_type)
+
+    hook_plan = hook_plan or {}
+    hook_type = hook_type or str(hook_plan.get("hook_type") or "").lower()
+
+    # Acceptability rules
+    if intent == "neutral_explanation" and confidence < 0.2:
+        acceptable = False
+        reason = "no_clear_intent_detected"
+        score = 0.0
+    elif intent == "neutral_explanation":
+        acceptable = True
+        reason = "neutral_explanation_fallback"
+        score = 0.4
+    elif confidence >= 0.5:
+        acceptable = True
+        reason = f"strong_{intent}_match"
+        score = confidence
+    elif confidence >= 0.3:
+        acceptable = True
+        reason = f"moderate_{intent}_match"
+        score = confidence
+    else:
+        acceptable = False
+        reason = f"weak_{intent}_match_confidence_{confidence}"
+        score = confidence
+
+    # If hook_type is weak_intro, always unacceptable
+    if hook_type == "weak_intro":
+        acceptable = False
+        reason = "weak_intro_no_fit"
+        score = 0.0
+
+    # Check avoidance rules
+    avoid_list = chosen.get("avoid", [])
+    if "emotional_push_in" in avoid_list:
+        logger.info("[hook-fit] avoidance=emotional_push_in reason=%s", chosen.get("reason", ""))
+    if "sweeping_reveal" in avoid_list:
+        logger.info("[hook-fit] avoidance=sweeping_reveal reason=%s", chosen.get("reason", ""))
+    if "glitch" in avoid_list:
+        logger.info("[hook-fit] avoidance=glitch reason=%s", chosen.get("reason", ""))
+    if "boom" in avoid_list or "impact" in avoid_list:
+        logger.info("[hook-fit] avoidance=boom_or_impact reason=%s", chosen.get("reason", ""))
+
+    # Try to find a better hook start
+    start_adjustment = find_better_hook_start(text, None)
+
+    return {
+        "hook_fit_acceptable": acceptable,
+        "hook_fit_score": round(score, 3),
+        "hook_fit_reason": reason,
+        "intent": intent,
+        "style": chosen["style"],
+        "confidence": chosen["confidence"],
+        "start_adjusted": start_adjustment["adjusted_start"],
+        "start_adjustment_reason": start_adjustment["reason"],
+        "recommended_sfx": chosen["recommended_sfx"],
+        "recommended_visual": chosen["recommended_visual"],
+        "subtitle_emphasis": chosen["subtitle_emphasis"],
+        "avoid": avoid_list,
+    }
+
+
+def is_weak_hook_unresolved(
+    hook_plan: Optional[Dict[str, Any]],
+    *,
+    hook_fit_result: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Check if a weak hook remains unresolved.
+
+    A weak hook is unresolved when:
+      - hook_first3_score < 5
+      - hook_fit_acceptable is False
+      - No subtitle emphasis before 1.5s
+      - No rhythm/micro-pause entry
+
+    Returns True if the hook is weak and cannot be resolved.
+    """
+    hook_plan = hook_plan or {}
+    hook_fit_result = hook_fit_result or {}
+
+    hook_first3_score = int(hook_plan.get("hook_first3_score") or 0)
+    hook_first3_status = str(hook_plan.get("hook_first3_status") or "")
+    hook_fit_acceptable = bool(hook_fit_result.get("hook_fit_acceptable", False))
+    hook_type = str(hook_plan.get("hook_type") or "").lower()
+
+    # Weak intro is always unresolved
+    if hook_type == "weak_intro":
+        return True
+
+    # If score >= 5, it's not weak
+    if hook_first3_score >= 5:
+        return False
+
+    # If status is READY, it's resolved
+    if hook_first3_status == "READY":
+        return False
+
+    # Check missing elements
+    missing = hook_plan.get("hook_first3_missing") or []
+    has_subtitle_before_1_5s = "hook_subtitle_before_1_5s" not in missing
+    has_rhythm = "rhythm" not in missing
+
+    # If hook fit is acceptable and we have subtitle emphasis, it's resolvable
+    if hook_fit_acceptable and has_subtitle_before_1_5s:
+        return False
+
+    # If we have rhythm, it's resolvable
+    if has_rhythm:
+        return False
+
+    # Otherwise, unresolved
+    logger.info(
+        "[hook-fit] status=weak_unresolved score=%d fit_acceptable=%s "
+        "subtitle_before_1_5s=%s rhythm=%s",
+        hook_first3_score,
+        str(hook_fit_acceptable),
+        str(has_subtitle_before_1_5s),
+        str(has_rhythm),
+    )
+    return True

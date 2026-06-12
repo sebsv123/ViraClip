@@ -1,0 +1,62 @@
+{
+  "version": "1.0",
+  "inputs": [
+    "editorial_type",
+    "vpi_score",
+    "matched_patterns",
+    "transcript_first_8s",
+    "clip_text",
+    "theme.central_topic",
+    "weak_intro"
+  ],
+  "scoring": {
+    "transcript_phrase_match": 35,
+    "editorial_type_match": 25,
+    "theme_match": 20,
+    "short_and_clear": 15,
+    "high_vpi": 5,
+    "contains_forbidden_claim": -100,
+    "too_clickbait": -40,
+    "too_generic": -30,
+    "not_supported_by_transcript": -35
+  },
+  "rules": {
+    "prefer_transcript_phrase_first_8s": true,
+    "template_only_as_metadata_if_not_in_transcript": true,
+    "do_not_fabricate_aggressive_hook_for_weak_intro": true,
+    "avoid_unsupported_claims": true,
+    "max_headline_words": 12,
+    "min_headline_words": 3
+  },
+  "editorial_preferences": {
+    "emotional_protection": {
+      "prefer": ["responsibility", "family", "protection", "people_depending_on_you"],
+      "visual_treatment": "emotional_push_in"
+    },
+    "client_objection": {
+      "prefer": ["contrast", "myth", "not_only", "responsibility"],
+      "visual_treatment": "punch_subtitle"
+    },
+    "myth_debunk": {
+      "prefer": ["myth", "misunderstanding", "late_realization"],
+      "visual_treatment": "punch_subtitle"
+    },
+    "risk_warning": {
+      "prefer": ["imprevisto", "before_it_happens", "controlled_tension"],
+      "visual_treatment": "risk_punch"
+    },
+    "coverage_explanation": {
+      "prefer": ["clarity", "before_signing", "what_it_covers"],
+      "visual_treatment": "clean_explanation"
+    },
+    "actionable_advice": {
+      "prefer": ["before_choosing", "review_this", "ask_this"],
+      "visual_treatment": "clean_explanation"
+    },
+    "weak_intro": {
+      "prefer": ["speaker_focus"],
+      "visual_treatment": "speaker_focus",
+      "do_not_generate_aggressive_hook": true
+    }
+  }
+}

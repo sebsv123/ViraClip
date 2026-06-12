@@ -12,8 +12,13 @@ from pathlib import Path
 from typing import Optional
 import httpx
 from .broll_compositor import compose_overlay
+from .vpi_production_safe_edit import production_safe_mode_active, production_safe_route_allowed
 
 logger = logging.getLogger(__name__)
+
+
+def _production_safe_blocked(route_name: str) -> bool:
+    return bool(production_safe_mode_active() and not production_safe_route_allowed(route_name))
 
 PEXELS_VIDEO_SEARCH = "https://api.pexels.com/videos/search"
 _TIMEOUT = httpx.Timeout(30.0)
@@ -28,6 +33,9 @@ async def search_pexels_broll(
     Search Pexels for portrait-friendly video clips matching keyword.
     Returns list of dicts with 'id', 'url', 'duration', 'width', 'height'.
     """
+    if _production_safe_blocked("external_pexels"):
+        logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+        return []
     params = {
         "query": keyword,
         "orientation": "portrait",
@@ -81,6 +89,9 @@ async def download_and_crop_broll(
     and trim to target_duration seconds.
     Returns True on success.
     """
+    if _production_safe_blocked("external_pexels"):
+        logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+        return False
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = Path(tmp.name)
 
@@ -135,6 +146,9 @@ async def prefetch_broll_for_clip(
     High-level: search Pexels for `theme`, download first working clip.
     Returns Path to the cropped 9:16 B-Roll file, or None if unavailable.
     """
+    if _production_safe_blocked("external_pexels"):
+        logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=external_pexels reason=premium_local_stability")
+        return None
     output_dir.mkdir(parents=True, exist_ok=True)
     candidates = await search_pexels_broll(theme, api_key, max_results=3)
 
@@ -164,6 +178,9 @@ def overlay_broll_on_clip(
 
     Delegates to broll_compositor.compose_overlay for format-adaptive scaling.
     """
+    if _production_safe_blocked("pexels_overlay"):
+        logger.info("PRODUCTION_SAFE_ROUTE_BLOCKED route=pexels_overlay reason=premium_local_stability")
+        return False
     try:
         probe = subprocess.run(
             ["ffprobe", "-v", "error", "-show_entries", "format=duration",

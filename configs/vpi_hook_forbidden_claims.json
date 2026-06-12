@@ -1,0 +1,45 @@
+{
+  "version": "1.0",
+  "forbidden_claims": [
+    "el mejor seguro",
+    "garantizado",
+    "siempre cubre",
+    "te cubre todo",
+    "sin condiciones",
+    "100% seguro",
+    "obligatorio",
+    "cobertura total garantizada",
+    "nunca tendrás problemas",
+    "nadie te lo cuenta"
+  ],
+  "penalized_terms": [
+    "barato",
+    "gratis",
+    "urgente",
+    "última oportunidad",
+    "hazlo ya",
+    "miedo extremo",
+    "funeral",
+    "hospital",
+    "catástrofe",
+    "arruinado"
+  ],
+  "allowed_terms": [
+    "revisar tu caso",
+    "entender qué estás protegiendo",
+    "planificar",
+    "responsabilidad",
+    "familia",
+    "personas que dependen de ti",
+    "protección",
+    "organización",
+    "antes de contratar",
+    "mirarlo con calma"
+  ],
+  "rules": {
+    "no_legal_or_medical_promises": true,
+    "no_absolute_coverage_claims": true,
+    "avoid_aggressive_clickbait": true,
+    "prefer_supported_by_transcript": true
+  }
+}

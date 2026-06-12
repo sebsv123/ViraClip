@@ -1,0 +1,132 @@
+{
+  "version": "1.0",
+  "before_keywords": [
+    "no es solo",
+    "responsabilidad",
+    "proteger",
+    "miedo",
+    "dependen de ti",
+    "personas mayores",
+    "más adelante",
+    "mas adelante",
+    "la realidad es",
+    "ojo",
+    "importante",
+    "antes de contratar",
+    "si mañana",
+    "si manana",
+    "imprevisto"
+  ],
+  "after_keywords": [
+    "responsabilidad",
+    "proteger",
+    "personas que dependen",
+    "no es solo",
+    "la realidad es",
+    "imprevisto",
+    "pero",
+    "no siempre",
+    "esto importa",
+    "conviene",
+    "cuidado",
+    "antes de",
+    "porque"
+  ],
+  "filler_before_keywords": [
+    "eh",
+    "eh...",
+    "mmm",
+    "um",
+    "bueno",
+    "bueno pues",
+    "pues"
+  ],
+  "cta_after_keywords": [
+    "lo revisamos",
+    "hablamos",
+    "si quieres",
+    "escríbeme",
+    "escribeme",
+    "te ayudo"
+  ],
+  "between_examples_keywords": [
+    "pareja",
+    "hijos",
+    "hipoteca",
+    "familia",
+    "cobertura",
+    "precio",
+    "edad"
+  ],
+  "rules": [
+    {
+      "id": "before_strong_phrase",
+      "condition": "pause before after_keywords",
+      "pause_type": "emphasis_pause",
+      "action": "preserve_and_emphasize",
+      "target_duration_range_s": [0.25, 0.6]
+    },
+    {
+      "id": "after_strong_phrase",
+      "condition": "pause after before_keywords",
+      "pause_type": "let_it_land_pause",
+      "action": "preserve",
+      "target_duration_range_s": [0.3, 0.55]
+    },
+    {
+      "id": "between_examples",
+      "condition": "before and after are examples or list items",
+      "pause_type": "transition_pause",
+      "action": "use_as_transition",
+      "target_duration_range_s": [0.2, 0.5]
+    },
+    {
+      "id": "inside_syntax",
+      "condition": "pause inside a syntactic phrase",
+      "pause_type": "breath_pause",
+      "action": "avoid_cut",
+      "target_duration_range_s": [0.12, 0.35]
+    },
+    {
+      "id": "post_filler",
+      "condition": "pause after filler_before_keywords",
+      "pause_type": "awkward_pause",
+      "action": "shorten",
+      "target_duration_s": 0.15
+    },
+    {
+      "id": "broll_transition",
+      "condition": "pause near planned B-roll",
+      "pause_type": "transition_pause",
+      "action": "use_as_transition",
+      "target_duration_range_s": [0.25, 0.45]
+    },
+    {
+      "id": "subtitle_hook_breath",
+      "condition": "pause before subtitle hook",
+      "pause_type": "subtitle_breath_pause",
+      "action": "avoid_cut",
+      "target_duration_range_s": [0.2, 0.45]
+    }
+  ],
+  "examples": [
+    {
+      "before_text": "eso ya me lo miraré más adelante",
+      "after_text": "y la realidad es que",
+      "pause_type": "emphasis_pause",
+      "action": "preserve_and_emphasize"
+    },
+    {
+      "before_text": "personas que dependen de ti",
+      "after_text": "ya no estás pensando solo en ti",
+      "pause_type": "let_it_land_pause",
+      "action": "preserve"
+    },
+    {
+      "before_text": "eh...",
+      "after_text": "bueno, pues",
+      "pause_type": "awkward_pause",
+      "action": "shorten"
+    }
+  ]
+}

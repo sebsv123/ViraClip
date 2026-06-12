@@ -624,19 +624,49 @@ class CreativePipeline:
             logger.debug("  [Creative] Importing smart_audio...")
             from .smart_audio import get_smart_audio, find_bgm_track
             logger.debug("  [Creative] smart_audio import OK")
+            # OUTPUT RESCUE: in VPI daily / production-safe mode this legacy route must
+            # never inject per-event SFX — hundreds of click/glitch hits sound like a
+            # typewriter on the final clip. Loudnorm-only mastering is still allowed.
+            _sfx_injection_blocked = False
+            try:
+                from .vpi_production_safe_edit import (
+                    vpi_daily_mode_enabled as _vpi_daily,
+                    production_safe_mode_active as _prod_safe,
+                    typewriter_sfx_disabled_by_default as _tw_disabled,
+                )
+                _sfx_injection_blocked = _vpi_daily() or _prod_safe() or _tw_disabled()
+            except Exception:
+                _sfx_injection_blocked = True
+            _sfx_timeline = timeline
+            if _sfx_injection_blocked:
+                _sfx_timeline = []
+                logger.info(
+                    "VPI_OUTPUT_RESCUE_SFX_SKIPPED_DAILY_MODE task_id=%s clip_index=%s "
+                    "route=creative_pipeline_smart_audio events_blocked=%d",
+                    task_id, clip_index, len(timeline or []),
+                )
+                logger.info(
+                    "VPI_OUTPUT_RESCUE_TYPEWRITER_DISABLED task_id=%s clip_index=%s route=creative_pipeline_smart_audio",
+                    task_id, clip_index,
+                )
             mastered = clip_path.with_name(f"mastered_{clip_path.name}")
             bgm = find_bgm_track()
             result_path = await get_smart_audio().master(
                 input_path=clip_path,
                 output_path=mastered,
-                timeline_events=timeline,
+                timeline_events=_sfx_timeline,
                 bgm_path=bgm,
             )
             if result_path == mastered and mastered.exists() and mastered.stat().st_size > 0:
                 clip_path.unlink(missing_ok=True)
                 mastered.rename(clip_path)
                 loudnorm_applied = True
-                sfx_count = sum(1 for e in timeline if e.strength >= 0.6)
+                sfx_count = 0 if _sfx_injection_blocked else sum(1 for e in timeline if e.strength >= 0.6)
+                if _sfx_injection_blocked:
+                    logger.info(
+                        "VPI_OUTPUT_RESCUE_AUDIO_NO_TYPEWRITER_CONFIRMED task_id=%s clip_index=%s sfx_injected=0",
+                        task_id, clip_index,
+                    )
                 
                 # Apply audio ducking if enabled and we have word timings
                 if bgm and words:

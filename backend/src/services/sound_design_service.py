@@ -4,12 +4,25 @@ Inyecta sonidos condicionados psicológicamente para maximizar retención
 """
 import asyncio
 import logging
+import re
 from pathlib import Path
 from typing import List, Dict, Optional
 import subprocess
 import os
 
 logger = logging.getLogger(__name__)
+_TYPEWRITER_DEFAULT_LOGGED = False
+_BLOCKED_SFX_TERMS = (
+    "typewriter",
+    "typing",
+    "keyboard",
+    "click",
+    "clicks",
+    "tick",
+    "ticker",
+    "mechanical_click",
+    "keypress",
+)
 
 
 def _get_ffmpeg_exe() -> str:
@@ -82,6 +95,24 @@ def _find_best_sfx(keyword: str) -> Optional[Path]:
     return None
 
 
+def _normalize_text(text: str) -> str:
+    import unicodedata
+    normalized = unicodedata.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _is_blocked_sfx_term(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(term in normalized for term in _BLOCKED_SFX_TERMS)
+
+
+def _typewriter_sfx_disabled() -> bool:
+    value = os.environ.get("VPI_DISABLE_TYPEWRITER_SFX", "true")
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
 class SoundDesignService:
     """
     Servicio de diseño sonoro viral
@@ -117,7 +148,9 @@ class SoundDesignService:
     
     def get_sound_cues_from_virality(
         self,
-        virality_segments: List[Dict]
+        virality_segments: List[Dict],
+        task_id: str = "",
+        clip_order: int = 0,
     ) -> List[Dict]:
         """
         Convierte segmentos virales en cues de sonido concretos
@@ -135,6 +168,16 @@ class SoundDesignService:
             seg_end = segment.get("end", 0)
             
             hook_type = segment.get("hook_type", "")
+            normalized_text = _normalize_text(str(segment.get("text", "") or ""))
+            typewriter_guard = _typewriter_sfx_disabled()
+            global _TYPEWRITER_DEFAULT_LOGGED
+            if typewriter_guard and not _TYPEWRITER_DEFAULT_LOGGED:
+                logger.info(
+                    "TYPEWRITER_SFX_DISABLED_DEFAULT task_id=%s clip_order=%s enabled=true",
+                    task_id or "",
+                    clip_order,
+                )
+                _TYPEWRITER_DEFAULT_LOGGED = True
 
             if i > 0:
                 # Whoosh transition between segments
@@ -146,15 +189,39 @@ class SoundDesignService:
             
             # Hook-type sound: slight delay so it doesn't clash with the first frame
             if hook_type in VIRAL_SOUND_MAP:
-                offset = 0.5 if i == 0 else 0.3
-                cues.append({
-                    "timestamp": seg_start + offset,
-                    "type": hook_type,
-                    "intensity": 0.9
-                })
+                if typewriter_guard and _is_blocked_sfx_term(hook_type):
+                    logger.info(
+                        "TYPEWRITER_SFX_DISABLED_DEFAULT task_id=%s clip_order=%s reason=blocked_asset_or_cue cue=%s",
+                        task_id or "",
+                        clip_order,
+                        hook_type,
+                    )
+                    continue
+                strong_reveal = any(
+                    cue in normalized_text
+                    for cue in ("esto mucha gente no lo sabe", "la realidad es", "lo importante", "diferencia clave", "cuidado con")
+                )
+                if typewriter_guard and hook_type == "insight_reveal" and not strong_reveal:
+                    logger.info(
+                        "TYPEWRITER_SFX_DISABLED_DEFAULT task_id=%s clip_order=%s reason=blocked_asset_or_cue asset=%s",
+                        task_id or "",
+                        clip_order,
+                        VIRAL_SOUND_MAP.get(hook_type, hook_type),
+                    )
+                else:
+                    offset = 0.5 if i == 0 else 0.3
+                    cues.append({
+                        "timestamp": seg_start + offset,
+                        "type": hook_type,
+                        "intensity": 0.9
+                    })
             
             # Emphasis hits en palabras clave
+            emphasis_added = 0
+            emphasis_limit = 1 if typewriter_guard else 3
             for word_ts in segment.get("emphasis_words", []):
+                if emphasis_added >= emphasis_limit:
+                    break
                 if isinstance(word_ts, dict):
                     ts = word_ts.get("start", 0)
                 else:
@@ -164,6 +231,7 @@ class SoundDesignService:
                     "type": "emphasis_word",
                     "intensity": 0.6
                 })
+                emphasis_added += 1
         
         # Ordenar por timestamp
         cues.sort(key=lambda x: x["timestamp"])
@@ -216,7 +284,9 @@ class SoundDesignService:
         self,
         video_path: str,
         output_path: str,
-        sound_cues: List[Dict]
+        sound_cues: List[Dict],
+        task_id: str = "",
+        clip_order: int = 0,
     ) -> Optional[str]:
         """
         Inserta sound effects en timestamps específicos usando FFmpeg
@@ -242,8 +312,26 @@ class SoundDesignService:
             valid_cues = []
             for cue in sound_cues:
                 sound_type = cue.get("type", "")
+                if _is_blocked_sfx_term(sound_type):
+                    logger.info(
+                        "TYPEWRITER_SFX_DISABLED_DEFAULT task_id=%s clip_order=%s reason=blocked_asset_or_cue cue=%s",
+                        task_id or "",
+                        clip_order,
+                        sound_type,
+                    )
+                    continue
                 sound_path = _find_best_sfx(sound_type)
                 if sound_path and sound_path.exists():
+                    if _typewriter_sfx_disabled():
+                        stem = sound_path.stem.lower()
+                        if _is_blocked_sfx_term(stem):
+                            logger.info(
+                                "TYPEWRITER_SFX_DISABLED_DEFAULT task_id=%s clip_order=%s reason=blocked_asset_or_cue asset=%s",
+                                task_id or "",
+                                clip_order,
+                                sound_path.name,
+                            )
+                            continue
                     valid_cues.append((cue, sound_path))
             
             if not valid_cues:
@@ -333,7 +421,9 @@ class SoundDesignService:
 async def add_viral_sound_effects(
     video_path: str,
     output_path: str,
-    virality_segments: List[Dict]
+    virality_segments: List[Dict],
+    task_id: str = "",
+    clip_order: int = 0,
 ) -> str:
     """
     Función simple para añadir efectos de sonido virales
@@ -346,6 +436,6 @@ async def add_viral_sound_effects(
         await add_viral_sound_effects("clip.mp4", "output.mp4", segments)
     """
     service = SoundDesignService()
-    cues = service.get_sound_cues_from_virality(virality_segments)
-    result = await service.inject_sound_effects(video_path, output_path, cues)
+    cues = service.get_sound_cues_from_virality(virality_segments, task_id=task_id, clip_order=clip_order)
+    result = await service.inject_sound_effects(video_path, output_path, cues, task_id=task_id, clip_order=clip_order)
     return result or video_path

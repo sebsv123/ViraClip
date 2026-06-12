@@ -1,0 +1,140 @@
+{
+  "version": "1.0",
+  "global": {
+    "min_pause_detect_s": 0.18,
+    "dead_air_cut_threshold_s": 0.85,
+    "max_preserved_pause_s": 0.65,
+    "micro_pause_keep_range_s": [0.12, 0.35],
+    "emphasis_pause_keep_range_s": [0.25, 0.6],
+    "transition_pause_keep_range_s": [0.2, 0.5],
+    "cta_pause_keep_range_s": [0.25, 0.7]
+  },
+  "pause_types": {
+    "dead_air": {
+      "description": "Long silence without editorial intention.",
+      "default_action": "cut",
+      "target_duration_s": 0.0,
+      "signals": ["long_gap", "lost_look", "mistake_recovery", "post_filler"]
+    },
+    "breath_pause": {
+      "description": "Natural breath or phrase boundary.",
+      "default_action": "preserve",
+      "target_duration_range_s": [0.12, 0.35],
+      "signals": ["short_gap", "sentence_boundary", "natural_delivery"]
+    },
+    "emphasis_pause": {
+      "description": "Pause before or after a strong phrase.",
+      "default_action": "preserve_and_emphasize",
+      "target_duration_range_s": [0.25, 0.6],
+      "signals": ["strong_before", "strong_after", "hook_phrase"]
+    },
+    "dramatic_pause": {
+      "description": "Pause before reveal, myth correction, or risk warning.",
+      "default_action": "preserve_and_emphasize",
+      "target_duration_range_s": [0.25, 0.6],
+      "signals": ["reveal_after", "myth_debunk_after", "risk_after"]
+    },
+    "thinking_pause": {
+      "description": "Pause while speaker searches for thought.",
+      "default_action": "shorten",
+      "target_duration_s": 0.25,
+      "signals": ["mid_explanation", "hesitation", "not_phrase_boundary"]
+    },
+    "transition_pause": {
+      "description": "Separation between two ideas.",
+      "default_action": "use_as_transition",
+      "target_duration_range_s": [0.2, 0.5],
+      "signals": ["topic_boundary", "broll_nearby", "visual_reset"]
+    },
+    "cta_pause": {
+      "description": "Pause before closing or CTA.",
+      "default_action": "preserve",
+      "target_duration_range_s": [0.25, 0.7],
+      "signals": ["cta_after", "closing_before"]
+    },
+    "awkward_pause": {
+      "description": "Pause with odd gesture, noise, filler, or discomfort.",
+      "default_action": "shorten",
+      "target_duration_s": 0.15,
+      "signals": ["post_filler", "noise", "visible_discomfort"]
+    },
+    "let_it_land_pause": {
+      "description": "Pause after a strong phrase.",
+      "default_action": "preserve",
+      "target_duration_range_s": [0.3, 0.55],
+      "signals": ["strong_before", "completed_thought"]
+    },
+    "subtitle_breath_pause": {
+      "description": "Pause that improves caption readability.",
+      "default_action": "avoid_cut",
+      "target_duration_range_s": [0.2, 0.5],
+      "signals": ["subtitle_nearby", "dense_caption_line"]
+    }
+  },
+  "editorial_types": {
+    "emotional_protection": {
+      "target_pace": "calm_focused",
+      "preferred_actions": ["preserve", "avoid_cut", "preserve_and_emphasize"],
+      "preserve_keywords": ["proteger", "dependen de ti", "miedo", "responsabilidad"],
+      "notes": "Preserve emotional and breath pauses that create humanity."
+    },
+    "client_objection": {
+      "target_pace": "sharp_but_natural",
+      "preferred_actions": ["cut", "shorten", "preserve_and_emphasize"],
+      "preserve_before_phrases": ["no es solo", "pero", "la realidad es"],
+      "notes": "Cut dead air but preserve micro pauses before contrast."
+    },
+    "myth_debunk": {
+      "target_pace": "sharp",
+      "preferred_actions": ["shorten", "preserve_and_emphasize"],
+      "preserve_before_phrases": ["no es solo", "la realidad es", "esto no va de"],
+      "notes": "A punch visual can coincide with the pause before debunking."
+    },
+    "risk_warning": {
+      "target_pace": "tense_controlled",
+      "preferred_actions": ["shorten", "preserve_and_emphasize", "preserve"],
+      "preserve_keywords": ["imprevisto", "cuidado", "si mañana", "riesgo"],
+      "notes": "Preserve tension without creating melodrama."
+    },
+    "coverage_explanation": {
+      "target_pace": "clear",
+      "preferred_actions": ["preserve", "shorten", "use_as_transition"],
+      "preserve_keywords": ["antes de contratar", "cobertura", "conviene", "importante"],
+      "notes": "Preserve comprehension pauses and shorten long thinking."
+    },
+    "weak_intro": {
+      "target_pace": "clean_speaker",
+      "preferred_actions": ["cut", "shorten"],
+      "preserve_keywords": [],
+      "notes": "Cut or shorten dead pauses; do not dramatize."
+    }
+  },
+  "actions": {
+    "cut": {
+      "description": "Remove silence.",
+      "target_duration_s": 0.0
+    },
+    "shorten": {
+      "description": "Reduce to a target duration.",
+      "default_target_duration_s": 0.2
+    },
+    "preserve": {
+      "description": "Keep pause, capped by max preserved duration."
+    },
+    "preserve_and_emphasize": {
+      "description": "Keep pause and allow zoom/subtitle emphasis.",
+      "allowed_visuals": ["punch_subtitle", "subtle_zoom", "speaker_hold"]
+    },
+    "cover_with_broll": {
+      "description": "Use visual coverage if audio and rhythm allow.",
+      "allowed_when": ["broll_nearby", "awkward_visual_only", "transition_pause"]
+    },
+    "use_as_transition": {
+      "description": "Use pause for B-roll entry, exit, or visual reset.",
+      "allowed_when": ["broll_nearby", "topic_boundary"]
+    },
+    "avoid_cut": {
+      "description": "Do not cut because it would hurt emotion, trust, or caption readability."
+    }
+  }
+}

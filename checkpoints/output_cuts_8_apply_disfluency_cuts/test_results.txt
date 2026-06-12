@@ -1,0 +1,19 @@
+PASS case1_repetition_cut_exists
+PASS case1_first_take_cut_good_take_kept
+PASS case1_keep_segments_continuous
+PASS case2_false_start_cut
+PASS case3_dead_air_compressed
+PASS case3_leaves_short_pause
+PASS case3_cut_ends_at_next_word
+PASS case3_classifier_dead_air_priority
+PASS case4_short_editorial_pause_kept
+PASS case4_classifier_preserves
+PASS case5_removed_text_absent
+PASS case5_timeline_continuous_no_big_gaps
+PASS case5_first_word_near_zero
+PASS case5_no_overlaps
+PASS case6_backstage_not_rescued
+PASS case6_marked_blocked_or_rejected
+PASS case6_no_override_flag
+
+RESULT: 17 passed, 0 failed

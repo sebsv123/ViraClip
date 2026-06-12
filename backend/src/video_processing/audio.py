@@ -50,10 +50,11 @@ def _get_background_music_path(config_obj=None) -> Optional[Path]:
 
     _cfg = config_obj or _get_cfg_inner()
     search_dirs = [
-        Path("/app/assets/sounds/bgm"),   # Docker volume: ./backend/music:/app/assets/sounds
+        Path("/app/assets/sounds/bgm"),   # Docker volume: ./assets:/app/assets:ro
         Path("/app/assets/sounds/music"),
         Path(_cfg.temp_dir) / "music",
         Path("/app/music"),
+        Path("/app/music_legacy"),
         Path("/app/backend/music"),
         Path("/tmp/viraclip_music_cache"),
     ]

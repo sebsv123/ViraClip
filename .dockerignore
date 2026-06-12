@@ -2,6 +2,10 @@
 **/*.webm
 **/*.m4a
 **/*.wav
+!assets/**/*.mp4
+!assets/**/*.webm
+!assets/**/*.m4a
+!assets/**/*.wav
 **/temp/**
 **/clips/**
 **/.venv/**

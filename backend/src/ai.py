@@ -57,6 +57,41 @@ class ViralityAnalysis(BaseModel):
     )
     virality_reasoning: str = Field(description="Explanation of the virality score")
 
+    # --- Insurance/editorial editorial fields (all optional, backward-compatible) ---
+    standalone_clarity_score: Optional[int] = Field(
+        default=None, description="How well this segment works as a standalone clip without context (0-25)", ge=0, le=25
+    )
+    insurance_relevance_score: Optional[int] = Field(
+        default=None, description="Relevance to insurance/finance domain (0-25)", ge=0, le=25
+    )
+    commercial_value_score: Optional[int] = Field(
+        default=None, description="Commercial/educational value for a prospect (0-25)", ge=0, le=25
+    )
+    specificity_score: Optional[int] = Field(
+        default=None, description="How concrete and specific the content is vs. vague generalities (0-25)", ge=0, le=25
+    )
+    emotional_trust_score: Optional[int] = Field(
+        default=None, description="Builds trust, authority, or emotional connection (0-25)", ge=0, le=25
+    )
+    completion_score: Optional[int] = Field(
+        default=None, description="How complete the argument is — has setup, development, and resolution (0-25)", ge=0, le=25
+    )
+    filler_penalty: Optional[int] = Field(
+        default=None, description="Penalty for filler words, greetings, throat-clearing (0 to -15)", ge=-15, le=0
+    )
+    generic_motivation_penalty: Optional[int] = Field(
+        default=None, description="Penalty for generic motivational phrases without substance (0 to -15)", ge=-15, le=0
+    )
+    incomplete_argument_penalty: Optional[int] = Field(
+        default=None, description="Penalty for cutting off mid-argument or lacking resolution (0 to -15)", ge=-15, le=0
+    )
+    long_context_penalty: Optional[int] = Field(
+        default=None, description="Penalty for requiring too much outside context to understand (0 to -15)", ge=-15, le=0
+    )
+    duplicate_theme_key: Optional[str] = Field(
+        default=None, description="Theme dedup key — segments sharing the same key compete; only the best one is kept"
+    )
+
     @model_validator(mode="after")
     def compute_total_score(self) -> "ViralityAnalysis":
         if self.total_score is None:
@@ -137,6 +172,51 @@ class TranscriptSegment(BaseModel):
     hook_title: str = Field(
         default="",
         description="Short viral-optimized hook title for the segment"
+    )
+
+    # --- Insurance/editorial fields (all optional, backward-compatible) ---
+    moment_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "Type of moment: objecion_cliente, mito_desmentido, advertencia_riesgo, "
+            "ejemplo_cotidiano, cobertura, consejo, comparacion, no_lo_sabe, "
+            "microhistoria, pregunta_respuesta, autoridad, hook_natural, mini_cta, "
+            "transicion, cierre, or null if none applies"
+        )
+    )
+    hook_quote: Optional[str] = Field(
+        default=None,
+        description="The exact hook sentence or phrase that makes this segment compelling"
+    )
+    standalone_clarity_score: Optional[int] = Field(
+        default=None, description="How well this segment works standalone without context (0-25)", ge=0, le=25
+    )
+    completion_score: Optional[int] = Field(
+        default=None, description="How complete the argument is — setup, development, resolution (0-25)", ge=0, le=25
+    )
+    insurance_relevance_score: Optional[int] = Field(
+        default=None, description="Relevance to insurance/finance domain (0-25)", ge=0, le=25
+    )
+    commercial_value_score: Optional[int] = Field(
+        default=None, description="Commercial/educational value for a prospect (0-25)", ge=0, le=25
+    )
+    editorial_score: Optional[float] = Field(
+        default=None, description="Composite editorial quality score 0.0-1.0 combining all editorial criteria", ge=0.0, le=1.0
+    )
+    filler_penalty: Optional[int] = Field(
+        default=None, description="Penalty for filler words, greetings, throat-clearing (0 to -15)", ge=-15, le=0
+    )
+    generic_motivation_penalty: Optional[int] = Field(
+        default=None, description="Penalty for generic motivational phrases without substance (0 to -15)", ge=-15, le=0
+    )
+    incomplete_argument_penalty: Optional[int] = Field(
+        default=None, description="Penalty for cutting off mid-argument or lacking resolution (0 to -15)", ge=-15, le=0
+    )
+    long_context_penalty: Optional[int] = Field(
+        default=None, description="Penalty for requiring too much outside context to understand (0 to -15)", ge=-15, le=0
+    )
+    duplicate_theme_key: Optional[str] = Field(
+        default=None, description="Theme dedup key — segments sharing the same key compete; only the best one is kept"
     )
 
     @field_validator("start_time", "end_time", mode="after")
@@ -234,10 +314,10 @@ class TranscriptAnalysis(BaseModel):
     campaign_strategy: Optional[CampaignStrategy] = Field(None, description="Global campaign blueprint (Phase 5)")
 
 
-# Enhanced system prompt with virality scoring and B-roll detection
-transcript_analysis_system_prompt = """You are an expert transcript analyst for short-form video editing.
+# Enhanced system prompt with virality scoring, B-roll detection, and insurance-first editorial criteria
+transcript_analysis_system_prompt = """You are an expert transcript analyst for short-form video editing, specialized in insurance/finance content in Spanish.
 
-Your job is extraction and ranking, not creative rewriting. You must stay fully grounded in the transcript and choose the best clip candidates that already exist in the source material.
+Your job is extraction and ranking, not creative rewriting. You must stay fully grounded in the transcript and choose the best clip candidates that already exist in the source material. You think like a good human editor: prioritize editorial/commercial value over generic virality.
 
 CORE OBJECTIVES:
 1. Identify segments that would be compelling on social media platforms
@@ -245,6 +325,7 @@ CORE OBJECTIVES:
 3. Prioritize content with hooks, emotional moments, or valuable information
 4. Each segment should be engaging and worth watching
 5. Score each segment's viral potential with detailed breakdown
+6. For insurance/finance content: prioritize educational value, trust-building, and commercial relevance
 
 GROUNDING RULES:
 1. Use only the provided transcript lines and timestamps
@@ -270,6 +351,81 @@ SEGMENT SELECTION CRITERIA:
 5. ENTERTAINING: Content people would want to share
 6. HIGH SIGNAL: Prefer specific, concrete language over vague discussion
 7. LOW FILLER: Avoid greetings, sponsor reads, repeated setup, throat-clearing, and housekeeping unless they are unusually compelling
+
+--- INSURANCE/FINANCE EDITORIAL CRITERIA (apply when content is about seguros, finanzas, inversiones) ---
+
+MOMENT TYPES — classify each segment with the most specific type:
+- "objecion_cliente": A common client objection being addressed (e.g. "es muy caro", "yo soy joven y sano")
+- "mito_desmentido": Debunking a myth or misconception (e.g. "esto mucha gente no lo sabe")
+- "advertencia_riesgo": Warning about a specific risk or consequence
+- "ejemplo_cotidiano": Relatable everyday example that makes a concept concrete
+- "cobertura": Clear explanation of coverage, exclusion, premium, deductible, capital, beneficiary, or claim
+- "consejo": Actionable advice the viewer can apply
+- "comparacion": Comparison between two options (e.g. term vs whole life, deductible levels)
+- "no_lo_sabe": Phrase like "esto mucha gente no lo sabe" or "lo que nadie te dice"
+- "microhistoria": A short real-life story or case study
+- "pregunta_respuesta": Question + answer with commercial value
+- "autoridad": Moment where the advisor establishes authority or trust
+- "hook_natural": A natural hook that arises from the content itself
+- "mini_cta": A mini call-to-action within the content
+- "transicion": Transition or bridge between topics
+- "cierre": Natural closing or conclusion
+- null: None of the above apply
+
+EDITORIAL SCORING (all optional, provide when applicable):
+For each segment, provide these additional editorial scores alongside the standard virality scores:
+
+1. standalone_clarity_score (0-25): Can this segment be understood without watching the rest of the video?
+   20-25: Fully self-contained — a stranger would get the full point
+   10-19: Mostly clear but needs minimal context
+   0-9: Requires significant outside context
+
+2. completion_score (0-25): Does the argument have a clear setup, development, and resolution?
+   20-25: Complete arc — premise → development → conclusion
+   10-19: Partial arc — missing one element
+   0-9: Fragment — cuts off mid-argument or has no resolution
+
+3. insurance_relevance_score (0-25): How relevant is this to insurance/finance decision-making?
+   20-25: Directly about coverage, claims, premiums, deductibles, beneficiaries
+   10-19: Related but not central
+   0-9: Generic content that could be about any topic
+
+4. commercial_value_score (0-25): Would a prospect find this useful for making a purchasing decision?
+   20-25: Directly helps someone decide what to buy or how to choose
+   10-19: Informative but not decision-driving
+   0-9: Entertainment or general knowledge only
+
+5. specificity_score (0-25): How concrete and specific is the content?
+   20-25: Uses specific numbers, examples, scenarios, or comparisons
+   10-19: Somewhat specific but still general
+   0-9: Vague generalities, platitudes, or motivational phrases
+
+6. emotional_trust_score (0-25): Does this build trust, authority, or emotional connection?
+   20-25: Advisor sounds knowledgeable, honest, and relatable
+   10-19: Neutral professional tone
+   0-9: Sounds salesy, pushy, or untrustworthy
+
+PENALTIES (negative values, 0 to -15):
+- filler_penalty: Deduct for greetings ("hola soy..."), throat-clearing, filler words
+- generic_motivation_penalty: Deduct for empty motivational phrases without substance
+- incomplete_argument_penalty: Deduct if the segment cuts off before the key point
+- long_context_penalty: Deduct if the segment requires too much outside context
+
+duplicate_theme_key: Assign a theme key for deduplication. Segments sharing the same key compete; only the best one should be kept. Examples: "mito_vida", "objecion_precio", "explicacion_cobertura", "consejo_ahorro", "ejemplo_hipoteca".
+
+hook_quote: Extract the exact sentence or phrase that serves as the hook for this segment.
+
+editorial_score: Composite score 0.0-1.0 combining all editorial criteria. A good editorial clip scores >= 0.7.
+
+SELECTION RULES FOR INSURANCE/FINANCE CONTENT:
+1. PREFER segments with high completion_score and standalone_clarity_score — a complete, self-contained argument is more valuable than a viral fragment
+2. AVOID segments that start with greetings ("Hola soy...", "Bienvenidos...") — these waste the first 3-6 seconds
+3. AVOID segments that end mid-argument or before the key takeaway
+4. AVOID duplicate themes — if two segments cover the same concept (same duplicate_theme_key), keep only the one with the highest editorial_score
+5. PREFER segments with specific numbers, examples, or comparisons over vague statements
+6. PREFER segments that address a common client objection or misconception
+7. PREFER segments where the speaker sounds authoritative and trustworthy
+8. DO NOT select segments that are purely transitional, purely greetings, or purely filler
 
 VIRALITY SCORING (0-100 total, from four 0-25 subscores):
 For each segment, provide a detailed virality breakdown:
@@ -320,6 +476,8 @@ TIMING RULES — MANDATORY, NON-NEGOTIABLE:
 - RULE 4: You MUST return between 6 and 12 segments. Never return 0 segments.
 - RULE 5: If the transcript seems short or low quality, still return the best available segments (minimum 3).
 - RULE 6: STOP the segment at the natural end of the spoken thought. Do NOT extend past a topic change or silence just to hit the minimum — instead choose a longer span that starts earlier.
+- RULE 7: For insurance/finance content, the ideal segment duration is 25-60 seconds. Segments shorter than 25s rarely have enough substance. Segments longer than 60s risk losing viewer attention.
+- RULE 8: Be aware of silences in the transcript. If there is a gap (no speech for 2+ seconds), consider whether the silence is editorial (pausing for effect), basura (dead air), or respiración (breathing). Avoid segments that contain basura silences.
 
 TIMESTAMP FORMAT REQUIREMENTS:
 - Format MUST be MM:SS (examples: "00:12", "03:45", "12:05")
@@ -351,7 +509,10 @@ FINAL CHECKLIST before returning your answer:
 ☑ I returned at least 6 segments (mandatory minimum)
 ☑ Every segment has end_time - start_time >= 30 seconds
 ☑ No two segments have identical start_time and end_time
-☑ All timestamps use MM:SS format and exist in the transcript"""
+☑ All timestamps use MM:SS format and exist in the transcript
+☑ For insurance/finance content: I applied editorial scoring and selection rules
+☑ I avoided segments starting with greetings or ending mid-argument
+☑ I checked for duplicate themes and kept only the best per theme"""
 
 # Lazy-loaded agent to avoid import-time failures when API keys aren't set
 _transcript_agent: Optional[Agent[None, TranscriptAnalysis]] = None
@@ -445,72 +606,131 @@ def build_transcript_analysis_prompt(
 - VALID:   start_time='01:30', end_time='01:55'  → 25s ✅
 - INVALID: start_time='01:30', end_time='01:38'  → 8s ❌ must extend end_time to at least '01:40'"""
 
-    return f"""You are an expert viral content curator trained by top social media algorithm experts. Your job is to identify the MOST viral-worthy segments from video transcripts.
+    return f"""You are an expert transcript analyst for short-form video editing, specialized in insurance/finance content in Spanish.
 
-VIRAL CONTENT PATTERNS TO DETECT (in priority order):
-1. HOOK PATTERNS (High Priority):
-   - "You won't believe what happened when..."
-   - "The truth about [controversial topic]"
-   - "I was today years old when I learned..."
-   - "Stop doing [common mistake]"
-   - "The secret [experts] don't want you to know"
-   - "This changed everything for me"
-   - "[Number] things I wish I knew before..."
+Your job is extraction and ranking, not creative rewriting. You must stay fully grounded in the transcript and choose the best clip candidates that already exist in the source material. You think like a good human editor: prioritize editorial/commercial value over generic virality.
 
-2. EMOTIONAL ARC PATTERNS:
-   - Surprise twists or revelations
-   - Before/after transformations
-   - Overcoming obstacles/adversity
-   - Heartwarming moments
-   - Shocking facts or statistics
-   - Controversial takes or hot opinions
+CORE OBJECTIVES:
+1. Identify segments that would be compelling as standalone short-form clips
+2. Focus on complete thoughts, insights, or valuable moments
+3. Prioritize content with hooks, educational value, trust-building, and commercial relevance
+4. Each segment should be self-contained and worth watching without context
+5. For insurance/finance content: prioritize educational value, trust-building, and commercial relevance over generic entertainment
 
-3. VALUE DELIVERY PATTERNS:
-   - "Here's how to..." (tutorials)
-   - "The reason why..." (explanations)
-   - "What nobody tells you about..."
-   - Life hacks or productivity tips
-   - Money-saving or time-saving advice
+GROUNDING RULES:
+1. Use only the provided transcript lines and timestamps
+2. Never invent facts, tone, context, or transitions that are not present
+3. Treat this as span selection over a timestamped transcript, not open-ended summarization
+4. Each selected segment must map to one contiguous range in the transcript
+5. segment.text must match the chosen span closely and must not include content from outside the chosen range
+6. Do not stitch together distant moments into one clip
 
-4. RETENTION MECHANISMS:
-   - Open loops ("Wait for the end...")
-   - Pattern interrupts (sudden topic changes)
-   - Cliffhangers ("But then something unexpected happened...")
-   - Visual descriptions that evoke curiosity
+MOMENT TYPES — classify each segment with the most specific type:
+- "objecion_cliente": A common client objection being addressed (e.g. "es muy caro", "yo soy joven y sano")
+- "mito_desmentido": Debunking a myth or misconception (e.g. "esto mucha gente no lo sabe")
+- "advertencia_riesgo": Warning about a specific risk or consequence
+- "ejemplo_cotidiano": Relatable everyday example that makes a concept concrete
+- "cobertura": Clear explanation of coverage, exclusion, premium, deductible, capital, beneficiary, or claim
+- "consejo": Actionable advice the viewer can apply
+- "comparacion": Comparison between two options (e.g. term vs whole life, deductible levels)
+- "no_lo_sabe": Phrase like "esto mucha gente no lo sabe" or "lo que nadie te dice"
+- "microhistoria": A short real-life story or case study
+- "pregunta_respuesta": Question + answer with commercial value
+- "autoridad": Moment where the advisor establishes authority or trust
+- "hook_natural": A natural hook that arises from the content itself
+- "mini_cta": A mini call-to-action within the content
+- "transicion": Transition or bridge between topics
+- "cierre": Natural closing or conclusion
+- null: None of the above apply
 
-SCORING CRITERIA (0-10 each):
-- hook_score: How strong is the opening? Does it stop the scroll?
-- engagement_score: Will viewers watch to the end? Any dead spots?
-- value_score: Is there concrete value (educational, entertaining, emotional)?
-- shareability_score: Will viewers share this with friends?
+EDITORIAL SCORING (apply alongside standard virality scores):
+For each segment, provide these additional editorial scores:
+
+1. standalone_clarity_score (0-25): Can this segment be understood without watching the rest of the video?
+   20-25: Fully self-contained — a stranger would get the full point
+   10-19: Mostly clear but needs minimal context
+   0-9: Requires significant outside context
+
+2. completion_score (0-25): Does the argument have a clear setup, development, and resolution?
+   20-25: Complete arc — premise → development → conclusion
+   10-19: Partial arc — missing one element
+   0-9: Fragment — cuts off mid-argument or has no resolution
+
+3. insurance_relevance_score (0-25): How relevant is this to insurance/finance decision-making?
+   20-25: Directly about coverage, claims, premiums, deductibles, beneficiaries
+   10-19: Related but not central
+   0-9: Generic content that could be about any topic
+
+4. commercial_value_score (0-25): Would a prospect find this useful for making a purchasing decision?
+   20-25: Directly helps someone decide what to buy or how to choose
+   10-19: Informative but not decision-driving
+   0-9: Entertainment or general knowledge only
+
+5. specificity_score (0-25): How concrete and specific is the content?
+   20-25: Uses specific numbers, examples, scenarios, or comparisons
+   10-19: Somewhat specific but still general
+   0-9: Vague generalities, platitudes, or motivational phrases
+
+6. emotional_trust_score (0-25): Does this build trust, authority, or emotional connection?
+   20-25: Advisor sounds knowledgeable, honest, and relatable
+   10-19: Neutral professional tone
+   0-9: Sounds salesy, pushy, or untrustworthy
+
+PENALTIES (negative values, 0 to -15):
+- filler_penalty: Deduct for greetings ("hola soy..."), throat-clearing, filler words
+- generic_motivation_penalty: Deduct for empty motivational phrases without substance
+- incomplete_argument_penalty: Deduct if the segment cuts off before the key point
+- long_context_penalty: Deduct if the segment requires too much outside context
+
+duplicate_theme_key: Assign a theme key for deduplication. Segments sharing the same key compete; only the best one should be kept. Examples: "mito_vida", "objecion_precio", "explicacion_cobertura", "consejo_ahorro", "ejemplo_hipoteca".
+
+hook_quote: Extract the exact sentence or phrase that serves as the hook for this segment.
+
+editorial_score: Composite score 0.0-1.0 combining all editorial criteria. A good editorial clip scores >= 0.7.
+
+SELECTION RULES FOR INSURANCE/FINANCE CONTENT:
+1. PREFER segments with high completion_score and standalone_clarity_score — a complete, self-contained argument is more valuable than a viral fragment
+2. AVOID segments that start with greetings ("Hola soy...", "Bienvenidos...") — these waste the first 3-6 seconds
+3. AVOID segments that end mid-argument or before the key takeaway
+4. AVOID duplicate themes — if two segments cover the same concept (same duplicate_theme_key), keep only the one with the highest editorial_score
+5. PREFER segments with specific numbers, examples, or comparisons over vague statements
+6. PREFER segments that address a common client objection or misconception
+7. PREFER segments where the speaker sounds authoritative and trustworthy
+8. DO NOT select segments that are purely transitional, purely greetings, or purely filler
+
+STANDARD VIRALITY SCORING (0-100 total, from four 0-25 subscores):
+1. HOOK STRENGTH (0-25): How strong is the opening hook?
+2. ENGAGEMENT (0-25): How engaging/entertaining is the content?
+3. VALUE (0-25): Educational/informational value
+4. SHAREABILITY (0-25): Likelihood of being shared
 
 The transcript is formatted as one line per timestamped span, for example:
 [00:12 - 00:21] Spoken text here
 [00:21 - 00:35] More spoken text here
 
 Follow this workflow:
-1. Scan the entire transcript for the patterns above.
-2. Identify 3-7 potential segments with viral potential.
-3. Score each segment on the 4 criteria (0-10 each). SCORES MUST BE DIFFERENTIATED — do NOT give the same score to multiple segments. The best segment must score at least 15 points higher than the weakest selected segment.
-4. Select the TOP 3-5 segments with highest total virality scores. RANK them explicitly: segment 1 is the most viral, segment 2 is second best, etc.
-5. Ensure segments have strong hooks in the first 3 seconds.
-6. Verify each segment has a clear payoff/resolution by the end.
+1. Scan the entire transcript for strong editorial moments (not just viral patterns).
+2. Identify 3-7 potential segments with high editorial value.
+3. Score each segment on both standard virality (0-25 each) AND editorial criteria (0-25 each).
+4. Apply penalties for filler, generic motivation, incomplete arguments, and long context.
+5. Assign duplicate_theme_key and deduplicate — keep only the best segment per theme.
+6. Select the TOP 3-5 segments with highest combined editorial + virality value.
 7. MANDATORY CHECK: verify every selected segment has end_time - start_time >= 10 seconds. If not, extend end_time.
-8. CRITICAL: If all segments seem equally boring, still pick the RELATIVELY best ones and score them differently. The top segment should always score 65+ out of 100.
+8. CRITICAL: If all segments seem equally weak, still pick the RELATIVELY best ones and differentiate scores.
 
 {broll_instruction}
 
 {timing_instructions}
 
-CRITICAL VIRAL OPTIMIZATION RULES:
-- The first 3 seconds MUST contain a hook (question, bold statement, visual action)
-- Avoid slow starts - cut directly to the interesting part
-- Each segment should be a complete story arc (setup → tension → payoff)
-- Look for moments where the speaker's energy/volume increases (passion)
-- Detect "mic drop" moments - powerful ending statements
-- Prefer segments with visual language ("look at this", "watch what happens")
+CRITICAL EDITORIAL OPTIMIZATION RULES:
+- The first 3 seconds MUST contain a hook (question, bold statement, surprising fact, or "esto mucha gente no lo sabe")
+- Avoid slow starts — cut directly to the interesting part
+- Each segment should be a complete argument (setup → development → conclusion)
+- Prefer segments with specific numbers, examples, or comparisons
+- Prefer segments that address common client objections or misconceptions
 - Avoid segments with long pauses, filler words, or off-topic tangents
-- If there is a tradeoff between "complete" and "engaging", choose engaging
+- If there is a tradeoff between "complete" and "engaging", choose complete — a complete argument has more commercial value
+- For insurance/finance: a clear explanation of a coverage concept beats a generic motivational phrase every time
 
 ACCURACY REQUIREMENTS:
 - Do not fabricate or embellish content.
@@ -569,6 +789,9 @@ def _text_based_transcript_analysis(
     Fallback analysis when the LLM is unavailable (rate limit / no API key).
     Parses timestamped lines from the transcript, groups them into candidate
     segments, scores them heuristically, and returns the top results.
+
+    Enhanced with insurance/finance keyword weights and editorial scoring
+    to match the LLM-based prompt improvements.
     """
     logger.warning("[FALLBACK] LLM unavailable — using text-based transcript analysis")
 
@@ -599,7 +822,7 @@ def _text_based_transcript_analysis(
             key_topics=[], broll_opportunities=None, campaign_strategy=None,
         )
 
-    # Viral keyword weights (Spanish + English)
+    # Viral keyword weights (Spanish + English) — original categories
     VIRAL_KW: Dict[str, tuple] = {
         "money":   (["dinero", "ganar", "ingreso", "$", "euros", "pagar", "cobrar", "precio",
                      "money", "earn", "income", "pay", "cost", "price", "profit"], 4, 3),
@@ -616,10 +839,242 @@ def _text_based_transcript_analysis(
                      "years", "days", "million", "thousands", "times", "people"], 3, 2),
     }
 
+    # --- Insurance/finance keyword categories (new for editorial scoring) ---
+    INSURANCE_KW: Dict[str, tuple] = {
+        "seguros":     (["seguro", "seguros", "aseguradora", "póliza", "poliza", "cobertura",
+                         "asegurado", "asegurados"], 5, 4),
+        "terminos":    (["prima", "capital", "beneficiario", "siniestro", "indemnización",
+                         "indemnizacion", "franquicia", "exclusión", "exclusion", "deducible"], 5, 4),
+        "proteccion":  (["proteger", "protección", "proteccion", "cubrir", "cubre", "amparar",
+                         "respaldo", "garantía", "garantia", "tranquilidad"], 4, 3),
+        "familia":     (["familia", "hijos", "esposa", "esposo", "pareja", "padres", "madre",
+                         "padre", "hermanos", "dependientes", "hogar", "casa"], 4, 3),
+        "finanzas":    (["hipoteca", "deudas", "ingresos", "gastos", "ahorrar", "invertir",
+                         "inversión", "inversion", "patrimonio", "mensual", "anual", "plazo",
+                         "cuota", "capital"], 4, 3),
+        "riesgo":      (["riesgo", "peligro", "grave", "urgencia", "emergencia", "imprevisto",
+                         "inesperado", "catástrofe", "catastrofe", "accidente", "enfermedad",
+                         "fallecimiento", "muerte", "incapacidad"], 5, 4),
+        "consejo":     (["consejo", "recomendación", "recomendacion", "clave", "importante",
+                         "fundamental", "necesario", "deberías", "deberias", "tienes que",
+                         "hay que", "lo correcto", "error común", "error comun",
+                         "equivocado", "equivocada"], 4, 3),
+        "autoridad":   (["esto mucha gente no lo sabe", "mucha gente no sabe", "poca gente sabe",
+                         "lo que nadie te dice", "la verdad sobre", "realidad",
+                         "experto", "especialista", "años de experiencia"], 5, 4),
+        "ganancia":    (["ahorrar", "ahorro", "beneficio", "ventaja", "rentable", "conviene",
+                         "compensa", "merece", "merece la pena", "merece la pena"], 3, 3),
+    }
+
+    # --- Helper: detect moment type from text ---
+    def _detect_moment_type(text: str) -> Optional[str]:
+        t = text.lower()
+        # Check in priority order
+        if any(p in t for p in ["esto mucha gente no lo sabe", "mucha gente no sabe",
+                                 "poca gente sabe", "lo que nadie te dice"]):
+            return "no_lo_sabe"
+        if any(p in t for p in ["error común", "error comun", "equivocado", "equivocada",
+                                 "mito", "falso", "no es cierto", "no es verdad"]):
+            return "mito_desmentido"
+        if any(p in t for p in ["riesgo", "peligro", "grave", "urgencia", "emergencia",
+                                 "cuidado", "atención", "importante saber"]):
+            return "advertencia_riesgo"
+        if any(p in t for p in ["por ejemplo", "imagina", "supón", "supon", "caso real",
+                                 "cliente", "conocido", "amigo"]):
+            return "ejemplo_cotidiano"
+        if any(p in t for p in ["cubre", "cobertura", "incluye", "ampara", "protege",
+                                 "exclusión", "exclusion", "franquicia", "deducible"]):
+            return "cobertura"
+        if any(p in t for p in ["consejo", "recomendación", "recomendacion", "clave",
+                                 "deberías", "deberias", "tienes que", "hay que",
+                                 "lo correcto", "revisa", "calcula"]):
+            return "consejo"
+        if any(p in t for p in ["comparación", "comparacion", "diferencia", "mejor",
+                                 "peor", "opción", "opcion", "alternativa"]):
+            return "comparacion"
+        if any(p in t for p in ["pregunta", "respuesta", "qué pasa si", "que pasa si",
+                                 "sabías", "sabias", "te has preguntado"]):
+            return "pregunta_respuesta"
+        if any(p in t for p in ["experto", "especialista", "años de experiencia",
+                                 "te explico", "vamos a ver", "hoy vamos a hablar"]):
+            return "autoridad"
+        if any(p in t for p in ["suscríbete", "suscribete", "dale like", "comparte",
+                                 "sígueme", "sigueme", "no te pierdas"]):
+            return "mini_cta"
+        if any(p in t for p in ["hola", "buenas", "bienvenido", "qué tal", "que tal"]):
+            return None  # Greetings are not moments
+        return None
+
+    # --- Helper: detect hook quote ---
+    def _detect_hook_quote(text: str) -> Optional[str]:
+        t = text.lower()
+        # Priority: "Esto mucha gente no lo sabe" type phrases
+        for phrase in ["esto mucha gente no lo sabe", "mucha gente no sabe",
+                       "poca gente sabe", "lo que nadie te dice",
+                       "la verdad sobre", "el secreto que"]:
+            idx = t.find(phrase)
+            if idx >= 0:
+                # Return the sentence containing this phrase
+                start = text.rfind(".", 0, idx)
+                if start == -1:
+                    start = 0
+                else:
+                    start += 2  # skip ". "
+                end = text.find(".", idx)
+                if end == -1:
+                    end = len(text)
+                else:
+                    end += 1
+                return text[start:end].strip()
+        # Fallback: first sentence if it's a question or strong statement
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        if sentences:
+            first = sentences[0].strip()
+            if len(first) > 15 and ("?" in first or "!" in first):
+                return first
+        return None
+
+    # --- Helper: compute editorial scores ---
+    def _compute_editorial_scores(text: str) -> dict:
+        t = text.lower()
+        wc = len(text.split())
+
+        # insurance_relevance_score (0-25)
+        ins_score = 10
+        for _, (kws, dh, _) in INSURANCE_KW.items():
+            matches = sum(1 for kw in kws if kw in t)
+            ins_score += matches * dh
+        ins_score = max(0, min(25, ins_score))
+
+        # standalone_clarity_score (0-25)
+        # Higher if it has clear subject, doesn't start mid-sentence, has complete thought
+        clarity = 15
+        if any(t.startswith(p) for p in ["hola", "buenas", "bienvenido"]):
+            clarity -= 5  # Greeting intro hurts standalone clarity
+        if any(p in t for p in ["esto mucha gente no lo sabe", "mucha gente no sabe",
+                                 "la verdad", "el secreto"]):
+            clarity += 5  # Strong hook helps standalone clarity
+        if wc < 15:
+            clarity -= 3  # Too short to stand alone
+        if wc > 80:
+            clarity += 3  # Enough context
+        if "?" in text:
+            clarity += 2  # Question engages
+        clarity = max(0, min(25, clarity))
+
+        # completion_score (0-25)
+        # Higher if it has setup + development + resolution
+        completion = 10
+        if any(p in t for p in ["porque", "por qué", "ya que", "debido a", "puesto que"]):
+            completion += 3  # Causal explanation
+        if any(p in t for p in ["por eso", "por lo tanto", "así que", "entonces",
+                                 "en conclusión", "en resumen"]):
+            completion += 5  # Resolution/conclusion
+        if any(p in t for p in ["lo correcto", "la clave", "el mejor", "recomiendo"]):
+            completion += 3  # Actionable advice
+        if wc < 20:
+            completion -= 5  # Too short for complete argument
+        if wc > 100:
+            completion += 3  # Enough development
+        completion = max(0, min(25, completion))
+
+        # commercial_value_score (0-25)
+        commercial = 10
+        if any(p in t for p in ["ahorrar", "ahorro", "beneficio", "ventaja", "conviene",
+                                 "compensa", "merece la pena"]):
+            commercial += 5  # Direct value proposition
+        if any(p in t for p in ["cubre", "cobertura", "protege", "ampara"]):
+            commercial += 4  # Coverage explanation
+        if any(p in t for p in ["consejo", "recomendación", "recomendacion", "clave"]):
+            commercial += 3  # Actionable advice
+        if any(p in t for p in ["contratar", "comprar", "adquirir", "solicitar"]):
+            commercial += 3  # Purchase intent
+        commercial = max(0, min(25, commercial))
+
+        # specificity_score (0-25)
+        specificity = 10
+        if any(p in t for p in ["%", "euros", "$", "millón", "millones", "miles",
+                                 "años", "días", "número", "cifra", "cantidad"]):
+            specificity += 5  # Concrete numbers
+        if any(p in t for p in ["por ejemplo", "imagina", "supón", "supon", "caso"]):
+            specificity += 4  # Concrete example
+        if any(p in t for p in ["hipoteca", "deudas", "ingresos", "gastos",
+                                 "cuota", "capital", "prima"]):
+            specificity += 3  # Specific financial terms
+        if wc < 15:
+            specificity -= 3  # Too vague
+        specificity = max(0, min(25, specificity))
+
+        # emotional_trust_score (0-25)
+        trust = 10
+        if any(p in t for p in ["familia", "hijos", "esposa", "esposo", "padres",
+                                 "madre", "padre", "hogar", "casa"]):
+            trust += 5  # Family emotional connection
+        if any(p in t for p in ["tranquilidad", "paz", "seguridad", "protección",
+                                 "proteccion", "respaldo"]):
+            trust += 4  # Trust/security language
+        if any(p in t for p in ["experto", "especialista", "años de experiencia",
+                                 "te explico", "recomiendo"]):
+            trust += 3  # Authority
+        if any(p in t for p in ["miedo", "preocupación", "preocupacion", "temor",
+                                 "incertidumbre"]):
+            trust += 2  # Addresses fears
+        trust = max(0, min(25, trust))
+
+        # Penalties
+        filler_penalty = 0
+        if any(t.startswith(p) for p in ["hola", "buenas", "bienvenido", "qué tal", "que tal"]):
+            filler_penalty -= 5
+        if any(p in t for p in ["este", "eh", "mmm", "o sea", "digamos", "como que"]):
+            filler_penalty -= 3
+
+        generic_motivation_penalty = 0
+        if any(p in t for p in ["tú puedes", "tu puedes", "sigue adelante", "nunca te rindas",
+                                 "todo es posible", "cree en ti"]):
+            generic_motivation_penalty -= 5
+
+        incomplete_argument_penalty = 0
+        if wc < 15:
+            incomplete_argument_penalty -= 5
+        if not any(p in t for p in ["porque", "por eso", "así que", "entonces",
+                                     "lo correcto", "la clave", "recomiendo"]):
+            incomplete_argument_penalty -= 3
+
+        long_context_penalty = 0
+        if any(t.startswith(p) for p in ["entonces", "por eso", "así que", "además",
+                                          "también", "sin embargo", "no obstante"]):
+            long_context_penalty -= 5  # Starts with connector — needs prior context
+        if wc < 20:
+            long_context_penalty -= 3  # Too short to stand alone
+
+        # editorial_score composite (0.0-1.0)
+        raw = (clarity + completion + ins_score + commercial + specificity + trust
+               + filler_penalty + generic_motivation_penalty
+               + incomplete_argument_penalty + long_context_penalty)
+        editorial = max(0.0, min(1.0, raw / 150.0))
+
+        return {
+            "standalone_clarity_score": clarity,
+            "completion_score": completion,
+            "insurance_relevance_score": ins_score,
+            "commercial_value_score": commercial,
+            "specificity_score": specificity,
+            "emotional_trust_score": trust,
+            "filler_penalty": filler_penalty,
+            "generic_motivation_penalty": generic_motivation_penalty,
+            "incomplete_argument_penalty": incomplete_argument_penalty,
+            "long_context_penalty": long_context_penalty,
+            "editorial_score": editorial,
+        }
+
     def _score_text(text: str) -> ViralityAnalysis:
         t = text.lower()
         h, e, v, s = 10, 10, 10, 10
         for _, (kws, dh, ds) in VIRAL_KW.items():
+            if any(kw in t for kw in kws):
+                h += dh; s += ds
+        # Also boost from insurance keywords
+        for _, (kws, dh, ds) in INSURANCE_KW.items():
             if any(kw in t for kw in kws):
                 h += dh; s += ds
         if "?" in text: h += 3; e += 2
@@ -628,8 +1083,23 @@ def _text_based_transcript_analysis(
         elif wc > 120: e -= 2
         h = max(0, min(25, h)); e = max(0, min(25, e))
         v = max(0, min(25, v)); s = max(0, min(25, s))
-        return ViralityAnalysis(hook_score=h, engagement_score=e, value_score=v,
-                                shareability_score=s, virality_reasoning="Heuristic fallback scoring")
+
+        # Compute editorial scores for the ViralityAnalysis
+        ed = _compute_editorial_scores(text)
+        return ViralityAnalysis(
+            hook_score=h, engagement_score=e, value_score=v,
+            shareability_score=s, virality_reasoning="Heuristic fallback scoring",
+            standalone_clarity_score=ed["standalone_clarity_score"],
+            completion_score=ed["completion_score"],
+            insurance_relevance_score=ed["insurance_relevance_score"],
+            commercial_value_score=ed["commercial_value_score"],
+            specificity_score=ed["specificity_score"],
+            emotional_trust_score=ed["emotional_trust_score"],
+            filler_penalty=ed["filler_penalty"],
+            generic_motivation_penalty=ed["generic_motivation_penalty"],
+            incomplete_argument_penalty=ed["incomplete_argument_penalty"],
+            long_context_penalty=ed["long_context_penalty"],
+        )
 
     # Build ~30-45s windows by grouping consecutive parsed lines
     TARGET_DURATION = 35.0
@@ -655,29 +1125,53 @@ def _text_based_transcript_analysis(
         })
         i = j
 
-    # Score each window
+    # Score each window — use editorial composite as primary sort, virality as tiebreaker
     scored = []
     for w in windows:
         va = _score_text(w["text"])
-        total = (va.total_score or 0)
-        scored.append((total, w, va))
+        ed = _compute_editorial_scores(w["text"])
+        # Editorial composite weight: 60% editorial, 40% virality
+        editorial_weight = ed["editorial_score"] * 60.0
+        virality_weight = (va.total_score or 50) * 0.4
+        combined_score = editorial_weight + virality_weight
+        scored.append((combined_score, w, va, ed))
     scored.sort(key=lambda x: x[0], reverse=True)
 
     # Build TranscriptSegment objects for the top N unique non-overlapping windows
     segments: List[TranscriptSegment] = []
     used_ranges: List[tuple] = []
-    for _, w, va in scored:
+    for combined_score, w, va, ed in scored:
         ws = _ts_to_secs(w["start"]); we = _ts_to_secs(w["end"])
         # Skip overlapping windows
         if any(not (we <= us or ws >= ue) for us, ue in used_ranges):
             continue
         used_ranges.append((ws, we))
+
+        # Detect moment type and hook quote
+        moment_type = _detect_moment_type(w["text"])
+        hook_quote = _detect_hook_quote(w["text"])
+
+        # Determine duplicate_theme_key from moment_type
+        dup_key = moment_type if moment_type else None
+
         segments.append(TranscriptSegment(
             start_time=w["start"], end_time=w["end"],
             text=w["text"][:400],
-            relevance_score=min(1.0, (va.total_score or 40) / 100.0),
-            reasoning=f"Selected by text-based heuristic (score {va.total_score})",
+            relevance_score=min(1.0, combined_score / 100.0),
+            reasoning=f"Selected by text-based heuristic (editorial {ed['editorial_score']:.2f}, virality {va.total_score})",
             virality=va,
+            moment_type=moment_type,
+            hook_quote=hook_quote,
+            standalone_clarity_score=ed["standalone_clarity_score"],
+            completion_score=ed["completion_score"],
+            insurance_relevance_score=ed["insurance_relevance_score"],
+            commercial_value_score=ed["commercial_value_score"],
+            editorial_score=ed["editorial_score"],
+            filler_penalty=ed["filler_penalty"],
+            generic_motivation_penalty=ed["generic_motivation_penalty"],
+            incomplete_argument_penalty=ed["incomplete_argument_penalty"],
+            long_context_penalty=ed["long_context_penalty"],
+            duplicate_theme_key=dup_key,
         ))
         if len(segments) >= num_segments:
             break
@@ -695,7 +1189,7 @@ def _text_based_transcript_analysis(
                                       virality_reasoning="Fallback heuristic"),
         )]
 
-    logger.info(f"[FALLBACK] Generated {len(segments)} segments via text heuristic")
+    logger.info(f"[FALLBACK] Generated {len(segments)} segments via text heuristic (insurance-enhanced)")
     return TranscriptAnalysis(
         most_relevant_segments=segments,
         summary="Auto-generated (LLM unavailable — text heuristic used)",
@@ -928,10 +1422,10 @@ async def get_most_relevant_parts_by_transcript(
                 if segment.virality:
                     # Ensure total score is sum of subscores
                     calculated_total = (
-                        segment.virality.hook_score
-                        + segment.virality.engagement_score
-                        + segment.virality.value_score
-                        + segment.virality.shareability_score
+                        (segment.virality.hook_score or 0)
+                        + (segment.virality.engagement_score or 0)
+                        + (segment.virality.value_score or 0)
+                        + (segment.virality.shareability_score or 0)
                     )
                     if segment.virality.total_score != calculated_total:
                         logger.warning(

@@ -47,6 +47,18 @@ def _base(**overrides):
         "sfx_metadata": {"sfx_asset_applied_match": True, "voice_conflict": False},
         "cinematic_finish": {"visual_finish": True, "finish_applied": True},
         "shot_rhythm": {"applied": True, "microcuts": [{"start_s": 1.1}], "pacing_score_before": 0.60, "pacing_score_after_estimate": 0.70},
+        "motion_overlay_metadata": {
+            "motion_overlay_selected": False,
+            "motion_overlay_applied": False,
+            "final_output_uses_motion_overlay": False,
+            "motion_overlay_manifest_verified": False,
+            "motion_overlay_asset_path": "",
+            "dynamic_overlay_text_applied": False,
+            "dynamic_overlay_text_rendered": False,
+            "dynamic_overlay_text_needs_claim_review": False,
+            "dynamic_overlay_text_safe_to_render": False,
+            "claim_verified": False,
+        },
         "audio_metadata": {"voice_buried": False, "music_too_loud": False},
         "subtitle_metadata": {"captions_rendered": True, "hook_first3_score": 6},
         "segment_text": "Texto editorial sólido y completo.",
@@ -115,15 +127,110 @@ def main() -> int:
     )
     check("fake_motion_pack_penalized", c14["final_qc_status"] in {"REVIEW", "FAIL"}, str(c14))
 
-    c15_base = build_final_qc_report(**_base())
-    c15_opp = build_final_qc_report(
+    c15 = build_final_qc_report(
+        **_base(
+            editing_richness={"motion_overlay_pack": True},
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": True,
+                "final_output_uses_motion_overlay": True,
+                "motion_overlay_manifest_verified": False,
+                "motion_overlay_asset_path": "assets/overlays/missing_overlay.webm",
+            },
+        )
+    )
+    check("fake_motion_overlay_penalized", c15["final_qc_status"] in {"REVIEW", "FAIL"}, str(c15))
+
+    c16 = build_final_qc_report(
+        **_base(
+            editing_richness={"motion_overlay_pack": False},
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": False,
+                "final_output_uses_motion_overlay": False,
+                "motion_overlay_manifest_verified": True,
+                "motion_overlay_asset_path": "assets/overlays/planned_only.webm",
+            },
+        )
+    )
+    check("selected_not_applied_not_fake", c16["checks"]["premium_truth"] is True, str(c16))
+
+    c17_base = build_final_qc_report(**_base())
+    c17_opp = build_final_qc_report(
         **_base(
             editing_richness={"broll": False, "sfx": False, "broll_editorial_opportunity": True, "sfx_editorial_opportunity": True},
             broll_metadata={"broll_asset_applied_match": False},
             sfx_metadata={"sfx_asset_applied_match": False, "voice_conflict": False},
         )
     )
-    check("opportunity_does_not_improve_truth", c15_opp["premium_truth_score"] <= c15_base["premium_truth_score"], f"base={c15_base['premium_truth_score']} opp={c15_opp['premium_truth_score']}")
+    check("opportunity_does_not_improve_truth", c17_opp["premium_truth_score"] <= c17_base["premium_truth_score"], f"base={c17_base['premium_truth_score']} opp={c17_opp['premium_truth_score']}")
+
+    c18 = build_final_qc_report(
+        **_base(
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": False,
+                "final_output_uses_motion_overlay": False,
+                "motion_overlay_manifest_verified": True,
+                "motion_overlay_asset_path": "assets/overlays/hook_card/test.webm",
+                "dynamic_overlay_text_applied": True,
+                "dynamic_overlay_text_rendered": False,
+                "dynamic_overlay_text_needs_claim_review": False,
+                "dynamic_overlay_text_safe_to_render": True,
+            },
+        )
+    )
+    check("dynamic_text_applied_without_overlay_flagged", c18["final_qc_status"] in {"REVIEW", "FAIL"}, str(c18))
+
+    c19 = build_final_qc_report(
+        **_base(
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": True,
+                "final_output_uses_motion_overlay": True,
+                "motion_overlay_manifest_verified": True,
+                "motion_overlay_asset_path": "assets/overlays/hook_card/test.webm",
+                "dynamic_overlay_text_applied": False,
+                "dynamic_overlay_text_rendered": True,
+                "dynamic_overlay_text_asset_path": "assets/overlays/missing_text_asset.png",
+                "dynamic_overlay_text_needs_claim_review": False,
+                "dynamic_overlay_text_safe_to_render": True,
+            },
+        )
+    )
+    check("dynamic_text_rendered_missing_asset_flagged", c19["final_qc_status"] in {"REVIEW", "FAIL"}, str(c19))
+
+    c20 = build_final_qc_report(
+        **_base(
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": True,
+                "final_output_uses_motion_overlay": True,
+                "motion_overlay_manifest_verified": True,
+                "motion_overlay_asset_path": "assets/overlays/hook_card/test.webm",
+                "dynamic_overlay_text_applied": False,
+                "dynamic_overlay_text_rendered": True,
+                "dynamic_overlay_text_asset_path": "assets/overlays/hook_card/test_text.png",
+                "dynamic_overlay_text_needs_claim_review": True,
+                "dynamic_overlay_text_safe_to_render": True,
+                "claim_verified": False,
+            },
+        )
+    )
+    check("dynamic_claim_rendered_unverified_flagged", c20["final_qc_status"] in {"REVIEW", "FAIL"}, str(c20))
+
+    c21 = build_final_qc_report(
+        **_base(
+            motion_overlay_metadata={
+                "motion_overlay_selected": True,
+                "motion_overlay_applied": False,
+                "final_output_uses_motion_overlay": True,
+                "motion_overlay_manifest_verified": True,
+                "motion_overlay_asset_path": "assets/overlays/hook_card/test.webm",
+            },
+        )
+    )
+    check("motion_overlay_final_without_apply_flagged", c21["final_qc_status"] in {"REVIEW", "FAIL"}, str(c21))
 
     print(f"[debug-final-qc-pack] results={PASS} PASS / {FAIL} FAIL")
     return 0 if FAIL == 0 else 1

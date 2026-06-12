@@ -566,10 +566,46 @@ async def get_task_clips(
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
 
+        clips = task.get("clips", [])
+        total_clips = len(clips)
+
+        _progress_msg = str(task.get("progress_message") or "").lower()
+        _error_code = str(task.get("error_code") or "").upper()
+        if total_clips == 0 and task.get("status") == "completed":
+            if _progress_msg == "completed_no_clips":
+                logger.warning(
+                    "API_RETURNED_ZERO_CLIPS task_id=%s status=completed progress_message=completed_no_clips "
+                    "clips_count=0 — honest zero-clip state",
+                    task_id,
+                )
+            else:
+                logger.warning(
+                    "API_RETURNED_ZERO_CLIPS task_id=%s status=completed clips_count=0 "
+                    "progress_message=%s task_has_clips_key=%s task_keys=%s",
+                    task_id,
+                    _progress_msg,
+                    "clips" in task,
+                    list(task.keys()),
+                )
+        elif total_clips == 0 and task.get("status") == "error":
+            logger.warning(
+                "API_RETURNED_ZERO_CLIPS task_id=%s status=error error_code=%s progress_message=%s",
+                task_id,
+                _error_code,
+                _progress_msg,
+            )
+        elif total_clips == 0 and _progress_msg in ("completed_no_clips", "post_render_delivery_failed", "failed_render"):
+            logger.warning(
+                "API_RETURNED_ZERO_CLIPS task_id=%s status=%s progress_message=%s — semantic zero-clip state",
+                task_id,
+                task.get("status"),
+                _progress_msg,
+            )
+
         return {
             "task_id": task_id,
-            "clips": task.get("clips", []),
-            "total_clips": len(task.get("clips", [])),
+            "clips": clips,
+            "total_clips": total_clips,
         }
 
     except HTTPException:
@@ -577,6 +613,7 @@ async def get_task_clips(
     except Exception as e:
         logger.error(f"Error retrieving clips: {e}")
         raise HTTPException(status_code=500, detail=f"Error retrieving clips: {str(e)}")
+
 
 
 @router.get("/{task_id}/progress")
@@ -859,7 +896,7 @@ async def compile_clips_into_reel(
             clip = valid_clips[0]
             return {
                 "compiled_path": clip["file_path"],
-                "compiled_url": f"/clips/{clip['filename']}",
+                "compiled_url": clip.get("video_url") or clip.get("public_url") or f"/clips/{clip['filename']}",
                 "clip_count": 1,
                 "message": "Single clip returned as compilation",
             }

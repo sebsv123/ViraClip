@@ -19,96 +19,6 @@ logger = logging.getLogger(__name__)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".avif"}
 VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
 
-_LOCAL_BROLL_SEARCH_ROOTS: Tuple[str, ...] = (
-    "/app/assets/broll",
-    "/app/assets/videos/broll",
-    "assets/broll",
-    "backend/assets/broll",
-    "frontend/public/broll",
-)
-
-_BROLL_INTENT_KEYWORDS: Dict[str, Tuple[str, ...]] = {
-    "family_relief": ("alivio", "familia", "menos carga", "acompanamiento", "acompañamiento", "respaldo"),
-    "health_access": ("salud", "especialistas", "pruebas", "acceso rapido", "acceso rápido", "consulta"),
-    "autonomous_work_stability": ("autonomo", "autónomo", "motor", "ingresos", "estabilidad", "negocio", "continuidad"),
-    "risk_warning_context": ("no siempre avisa", "imprevisto", "riesgo", "si manana", "si mañana"),
-    "practical_explanation": ("antes de", "mira tu vida real", "organizacion", "organización", "consejo"),
-    "emotional_support": ("cuando mas falta hace", "cuando más falta hace", "apoyo", "tranquilidad", "familia"),
-}
-
-_BROLL_FILENAME_TERMS: Dict[str, Tuple[str, ...]] = {
-    "family_relief": ("family", "familia", "home", "couple", "parents", "child", "support"),
-    "health_access": ("health", "salud", "doctor", "clinic", "medical", "specialist", "consulta"),
-    "autonomous_work_stability": ("autonom", "business", "work", "office", "laptop", "entrepreneur", "income"),
-    "risk_warning_context": ("risk", "warning", "concern", "worry", "insurance", "planning"),
-    "practical_explanation": ("advisor", "consultation", "explaining", "documents", "plan", "strategy"),
-    "emotional_support": ("support", "family", "embrace", "care", "home", "calm"),
-}
-
-_SENSITIVE_DECESOS_BLOCKLIST: Tuple[str, ...] = (
-    "cement",
-    "cemeter",
-    "grave",
-    "coffin",
-    "ataud",
-    "ataúd",
-    "funeral",
-    "mortuary",
-    "morgue",
-)
-
-_LOCAL_BROLL_CACHE: Optional[List[Path]] = None
-
-_FORBIDDEN_BROLL_TERMS: Dict[str, Tuple[str, ...]] = {
-    "tea_or_wellness": (
-        "tea",
-        "té",
-        "cup",
-        "taza",
-        "coffee",
-        "cafe",
-        "café",
-        "mug",
-        "meditation",
-        "meditacion",
-        "meditación",
-        "yoga",
-        "wellness",
-        "bienestar",
-        "calm",
-        "relaxation",
-        "spa",
-    ),
-    "severe_risk_cliche": (
-        "funeral",
-        "hospital bed",
-        "hospital",
-        "ambulance",
-        "ambulancia",
-    ),
-    "finance_cliche": (
-        "stock market",
-        "stock_market",
-        "bolsa",
-        "trading",
-        "luxury",
-        "lujo",
-        "luxury money",
-    ),
-    "generic_office": (
-        "handshake only",
-        "generic office",
-        "random office",
-        "business handshake",
-        "sad alone person",
-        "sad alone",
-    ),
-}
-
-_KNOWN_FORBIDDEN_LOCAL_ASSETS = {
-    "emotional_reassurance/02.mp4": "known_tea_wellness_asset",
-}
-
 
 VPI_ASSET_PENALTIES: Dict[str, int] = {
     ".jpg": -40,
@@ -122,9 +32,9 @@ VPI_ASSET_PENALTIES: Dict[str, int] = {
 }
 
 EDITORIAL_CUE_PRIORITY: Dict[str, List[str]] = {
-    "emotional_protection": ["advisor_consultation", "family_protection", "financial_planning", "home_responsibility", "documents_admin"],
-    "client_objection": ["advisor_consultation", "financial_planning", "family_protection", "documents_admin"],
-    "myth_debunk": ["advisor_consultation", "financial_planning", "family_protection", "documents_admin"],
+    "emotional_protection": ["family_protection", "emotional_reassurance", "financial_planning"],
+    "client_objection": ["documents_admin", "financial_planning", "advisor_consultation"],
+    "myth_debunk": ["documents_admin", "financial_planning", "advisor_consultation"],
     "coverage_explanation": ["documents_admin", "financial_planning"],
     "risk_warning": ["risk_warning", "family_protection", "financial_planning"],
     "actionable_advice": ["documents_admin", "financial_planning"],
@@ -140,161 +50,6 @@ CUE_ALIASES: Dict[str, str] = {
     "explain_coverage": "documents_admin",
     "advisor_meeting": "advisor_consultation",
 }
-
-
-def assess_broll_relevance(
-    *,
-    phrase: str,
-    category: str,
-    intent_type: str = "",
-    central_topic: str = "",
-) -> Tuple[bool, float, str]:
-    phrase_norm = normalize_text(" ".join(str(item or "") for item in [phrase]))
-    category_key = str(category or "").lower()
-    intent_key = str(intent_type or "").lower()
-    topic = str(central_topic or "").lower()
-
-    def has_any(terms: Tuple[str, ...]) -> bool:
-        return any(normalize_text(term) in phrase_norm for term in terms)
-
-    if topic == "life_insurance_family_protection":
-        emotional_intent = intent_key in {"emotional_protection", "family_responsibility"} or has_any(
-            ("dependen de ti", "hijos", "pareja", "familia", "responsabilidad")
-        )
-        if emotional_intent and category_key == "documents_admin":
-            return False, 18.0, "documents_admin_not_primary_for_emotional_family"
-
-    allowed: Optional[set[str]] = None
-    reason = "general_context_match"
-    if has_any(("dependen de ti", "hijos", "pareja", "familia")):
-        allowed = {"family_protection", "home_responsibility", "advisor_consultation", "financial_planning"}
-        reason = "family_phrase_requires_human_or_home_context"
-    elif has_any(("hipoteca", "casa")):
-        allowed = {"home_responsibility", "financial_planning", "advisor_consultation"}
-        reason = "home_financial_phrase"
-    elif "responsabilidad" in phrase_norm:
-        allowed = {"family_protection", "financial_planning", "advisor_consultation", "home_responsibility"}
-        reason = "responsibility_phrase_requires_family_or_advisor"
-    elif has_any(("no es solo", "personas mayores", "mayores", "edad")):
-        allowed = {"advisor_consultation", "young_family", "financial_planning", "family_protection"}
-        reason = "age_myth_phrase_requires_advisor_or_younger_family"
-    elif has_any(("cobertura", "póliza", "poliza", "contratar", "contrato")):
-        allowed = {"documents_admin", "advisor_consultation", "financial_planning"}
-        reason = "coverage_phrase_allows_documents_as_support"
-
-    if allowed is not None and category_key not in allowed:
-        return False, 25.0, f"not_related_to_phrase:{reason}"
-    if category_key == "documents_admin" and reason != "coverage_phrase_allows_documents_as_support":
-        return False, 30.0, "documents_admin_only_support_not_primary"
-    if category_key == "documents_admin":
-        return True, 68.0, reason
-    if category_key in {"family_protection", "home_responsibility", "advisor_consultation"}:
-        return True, 92.0, reason
-    if category_key in {"financial_planning", "young_family"}:
-        return True, 84.0, reason
-    return True, 60.0, reason
-
-
-def score_broll_phrase_fit(
-    asset: Any,
-    phrase_context: str,
-    clip_theme: Optional[ClipTheme] = None,
-    intent_type: str = "",
-) -> Dict[str, Any]:
-    """Score fine-grained editorial fit between active phrase and B-roll asset."""
-    phrase_norm = normalize_text(phrase_context)
-    if isinstance(clip_theme, dict):
-        topic = str(clip_theme.get("central_topic") or "").lower()
-    else:
-        topic = str(getattr(clip_theme, "central_topic", "") or "").lower()
-    intent_key = str(intent_type or "").lower()
-    path, raw_text, normalized = _candidate_text_for_guard(asset, {"intent_type": intent_type})
-    category = normalize_text(str((asset or {}).get("category") if isinstance(asset, dict) else ""))
-    if not category and isinstance(asset, dict):
-        category = normalize_text(str(asset.get("cue_type") or ""))
-    combined = " ".join([raw_text, normalized, category])
-
-    def has_phrase(terms: Tuple[str, ...]) -> bool:
-        return any(normalize_text(term) in phrase_norm for term in terms)
-
-    def has_asset(terms: Tuple[str, ...]) -> bool:
-        return any(normalize_text(term) in combined for term in terms)
-
-    family_phrase = has_phrase((
-        "personas que dependen de ti",
-        "dependen de ti",
-        "hijos",
-        "pareja",
-        "familia",
-        "sosteniendo una estructura",
-        "proteger",
-        "responsabilidad",
-    ))
-    paper_only = category == "documents_admin" or has_asset(("document", "documents", "papel", "paper", "contract", "contrato", "policy", "poliza"))
-    human_home = has_asset(("family", "familia", "home", "hogar", "child", "hijos", "parents", "pareja", "couple"))
-    advisor = category == "advisor_consultation" or has_asset(("advisor", "asesor", "consultation", "consulta"))
-    financial = category == "financial_planning" or has_asset(("financial", "planning", "budget", "mortgage", "hipoteca"))
-
-    score = 55.0
-    reason = "general_support"
-    allowed_primary = True
-    allowed_support = True
-
-    if topic == "life_insurance_family_protection" and family_phrase:
-        if category in {"family_protection", "home_responsibility"} or (human_home and not paper_only):
-            score, reason = 92.0, "family_dependency_phrase_matches_family_or_home"
-        elif advisor and human_home:
-            score, reason = 78.0, "family_dependency_phrase_supported_by_human_advisor_context"
-        elif financial and human_home and not paper_only:
-            score, reason = 70.0, "family_dependency_phrase_supported_by_family_financial_context"
-        elif paper_only:
-            score, reason = 35.0, "documents_do_not_express_dependency_or_care"
-            allowed_primary = False
-            allowed_support = category in {"documents_admin", "advisor_consultation"}
-        else:
-            score, reason = 45.0, "weak_family_dependency_visual_context"
-            allowed_primary = False
-    elif has_phrase(("cobertura", "poliza", "póliza", "contratar", "contrato")):
-        if category == "documents_admin":
-            score, reason = 68.0, "coverage_phrase_allows_documents_support"
-            allowed_primary = intent_key in {"coverage_explanation", "actionable_advice"}
-        elif advisor:
-            score, reason = 82.0, "coverage_phrase_supported_by_advisor_context"
-        else:
-            score, reason = 58.0, "coverage_phrase_general_support"
-    elif has_phrase(("no es solo", "personas mayores", "edad", "mas adelante", "más adelante")):
-        if advisor or (financial and not paper_only) or category == "family_protection":
-            score, reason = 80.0, "objection_phrase_matches_advisor_or_planning"
-        elif paper_only:
-            score, reason = 48.0, "objection_phrase_documents_only_support"
-            allowed_primary = False
-        else:
-            score, reason = 52.0, "objection_phrase_weak_context"
-
-    if score >= 85:
-        label = "exact"
-    elif score >= 70:
-        label = "good"
-    elif score >= 55:
-        label = "support"
-    elif score >= 40:
-        label = "weak"
-    else:
-        label = "mismatch"
-
-    if label in {"weak", "mismatch"}:
-        allowed_primary = False
-    if label == "mismatch":
-        allowed_support = False
-
-    return {
-        "phrase_fit_score": round(score, 1),
-        "phrase_fit_label": label,
-        "phrase_fit_reason": reason,
-        "allowed_as_primary": bool(allowed_primary),
-        "allowed_as_support": bool(allowed_support),
-        "asset_path": str(path),
-    }
 
 
 @dataclass
@@ -361,113 +116,6 @@ def normalize_text(text: str) -> str:
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
     ascii_text = re.sub(r"[^a-z0-9\s]", " ", ascii_text)
     return re.sub(r"\s+", " ", ascii_text).strip()
-
-
-def _candidate_text_for_guard(asset: Any, context: Optional[Dict[str, Any]] = None) -> Tuple[str, str, str]:
-    context = context or {}
-    if isinstance(asset, dict):
-        path = asset.get("path") or asset.get("asset_path") or asset.get("url") or ""
-        fields = [
-            path,
-            asset.get("query"),
-            asset.get("title"),
-            asset.get("category") or asset.get("cue"),
-            asset.get("visual_texture"),
-            asset.get("visual_fingerprint"),
-            asset.get("provider_video_id"),
-            " ".join(str(tag) for tag in asset.get("tags", []) or []),
-            asset.get("metadata"),
-        ]
-    else:
-        path = str(asset or "")
-        fields = [path]
-
-    context_fields = [
-        context.get("query"),
-        context.get("title"),
-        context.get("category"),
-        context.get("cue_type"),
-        context.get("visual_texture"),
-        context.get("visual_fingerprint"),
-        context.get("provider_video_id"),
-        context.get("asset_id"),
-        " ".join(str(term) for term in context.get("tags", []) or []),
-        context.get("metadata"),
-        context.get("theme_topic"),
-        context.get("central_topic"),
-    ]
-    combined = " ".join(str(item or "") for item in fields + context_fields)
-    normalized = normalize_text(combined)
-    raw_lower = combined.lower()
-    return path, raw_lower, normalized
-
-
-def _guard_contains(raw_text: str, normalized_text: str, term: str) -> bool:
-    term_norm = normalize_text(term)
-    if len(term_norm) <= 2:
-        return term.lower() in raw_text
-    return (term.lower() in raw_text) or (term_norm and term_norm in normalized_text)
-
-
-def is_broll_asset_forbidden(asset: Any, context: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[str]]:
-    """Hard VPI B-roll guard. Forbidden assets must not reach final scoring."""
-    context = context or {}
-    path, raw_text, normalized = _candidate_text_for_guard(asset, context)
-    path_norm = str(path or "").replace("\\", "/").lower()
-    reasons: List[str] = []
-
-    for known_path, reason in _KNOWN_FORBIDDEN_LOCAL_ASSETS.items():
-        if known_path in path_norm:
-            reasons.append(reason)
-
-    for group, terms in _FORBIDDEN_BROLL_TERMS.items():
-        for term in terms:
-            if _guard_contains(raw_text, normalized, term):
-                reasons.append(f"{group}:{normalize_text(term) or term.lower()}")
-                break
-
-    central_topic = str(context.get("central_topic") or context.get("theme_topic") or "").lower()
-    category = normalize_text(str(context.get("category") or context.get("cue_type") or ""))
-    risk_context = any(_guard_contains(raw_text, normalized, term) for term in ("funeral", "hospital", "hospital bed", "ambulance", "ambulancia"))
-    explicit_risk = str(context.get("intent_type") or "") in {"risk_warning", "risk_warning_family"} or _guard_contains(
-        raw_text,
-        normalized,
-        "imprevisto",
-    )
-    if explicit_risk:
-        reasons = [reason for reason in reasons if not reason.startswith("severe_risk_cliche:")]
-    if central_topic == "life_insurance_family_protection":
-        if any(_guard_contains(raw_text, normalized, term) for term in ("wellness", "tea", "té", "meditation", "meditación", "yoga", "coffee", "taza")):
-            reasons.append("life_insurance_forbidden_wellness")
-        if category == "documents_admin" and context.get("documents_already_used"):
-            reasons.append("life_insurance_paper_only_repeated")
-        if category == "documents_admin" and not any(
-            _guard_contains(raw_text, normalized, term)
-            for term in ("advisor", "asesor", "couple", "family", "familia", "parents", "home", "hogar", "young")
-        ):
-            reasons.append("life_insurance_cold_documents_primary")
-        if risk_context and not explicit_risk:
-            reasons.append("life_insurance_risk_cliche_without_context")
-        if any(_guard_contains(raw_text, normalized, term) for term in ("stock market", "bolsa", "trading", "luxury", "lujo")):
-            reasons.append("life_insurance_stock_luxury_money")
-
-    asset_id = str(context.get("asset_id") or "")
-    provider_video_id = str(context.get("provider_video_id") or "")
-    visual_fingerprint = str(context.get("visual_fingerprint") or "")
-    filename_stem = Path(str(path or "")).stem.lower()
-    if asset_id and asset_id in set(str(item) for item in context.get("task_seen_asset_ids", []) or []):
-        reasons.append("exact_asset_repeat")
-    if provider_video_id and provider_video_id in set(str(item) for item in context.get("task_seen_provider_video_ids", []) or []):
-        reasons.append("provider_video_repeat")
-    if filename_stem and filename_stem in set(str(item).lower() for item in context.get("task_seen_filename_stems", []) or []):
-        reasons.append("filename_stem_repeat")
-    if context.get("strict_fingerprint_repeat") and visual_fingerprint and visual_fingerprint in set(
-        str(item) for item in context.get("task_seen_visual_fingerprints", []) or []
-    ):
-        reasons.append("visual_fingerprint_repeat")
-
-    unique_reasons = list(dict.fromkeys(reasons))
-    return bool(unique_reasons), unique_reasons
 
 
 def _contains(text: str, terms: Sequence[str]) -> bool:
@@ -615,7 +263,7 @@ def detect_intent(
             intent_type="family_responsibility",
             confidence=0.88,
             primary_cue="family_protection",
-            preferred_categories=["advisor_consultation", "family_protection", "financial_planning", "home_responsibility", "documents_admin"],
+            preferred_categories=["family_protection", "emotional_reassurance", "financial_planning"],
             pexels_queries=[
                 "family financial planning at home",
                 "parents child home paperwork",
@@ -818,6 +466,182 @@ def build_pexels_queries(intent: VisualIntent) -> List[str]:
     return build_stock_queries(intent, limit=5)
 
 
+# ── Known weak/generic cue patterns ──────────────────────────────────────────
+_WEAK_CUE_FILENAMES: List[str] = [
+    "abstract", "generic", "cinematic", "stock", "placeholder",
+    "filler", "motion_background", "bokeh", "blur_background",
+    "particles", "transition", "loop", "background_loop",
+]
+_KNOWN_BAD_GENERIC_CUES: List[str] = [
+    "cinematic abstract", "generic abstract", "abstract background",
+    "motion graphics", "animated background", "generic transition",
+]
+
+
+def _is_weak_cue_asset(candidate: Dict[str, Any]) -> bool:
+    """Check if an asset filename or cue suggests it was generated from a weak cue."""
+    path = str(candidate.get("path") or candidate.get("url") or "").lower()
+    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    query = str(candidate.get("query") or "").lower()
+    title = str(candidate.get("title") or "").lower()
+    text = " ".join([path, category, query, title])
+    for pattern in _WEAK_CUE_FILENAMES:
+        if pattern in text:
+            return True
+    for pattern in _KNOWN_BAD_GENERIC_CUES:
+        if pattern in text:
+            return True
+    return False
+
+
+def _check_taxonomy_match(
+    candidate: Dict[str, Any],
+    intent: VisualIntent,
+) -> Tuple[bool, str]:
+    """Check if candidate's category matches the expected VPI taxonomy."""
+    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    if not category:
+        return False, "no_category"
+    # Must be in preferred categories or match primary cue
+    if intent.primary_cue and category == intent.primary_cue:
+        return True, "primary_cue_match"
+    if category in intent.preferred_categories:
+        return True, "preferred_category_match"
+    return False, "taxonomy_mismatch"
+
+
+def _check_brand_fit(
+    candidate: Dict[str, Any],
+    intent: VisualIntent,
+) -> Tuple[bool, str]:
+    """Check if asset has explicit brand_fit flag or matches brand context."""
+    brand_fit = candidate.get("brand_fit")
+    if brand_fit is False:
+        return False, "brand_fit_false"
+    if brand_fit is True:
+        return True, "brand_fit_true"
+    # No explicit flag: check domain alignment
+    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    domain = intent.domain
+    if domain == "insurance_finance" and category in {
+        "family_protection", "financial_planning", "documents_admin",
+        "advisor_consultation", "risk_warning", "emotional_reassurance",
+    }:
+        return True, "domain_aligned_category"
+    if domain == "legal_admin" and category in {"documents_admin", "advisor_consultation"}:
+        return True, "domain_aligned_category"
+    return True, "no_brand_fit_flag"  # neutral — not a rejection
+
+
+def _check_avoid_context(
+    candidate: Dict[str, Any],
+    intent: VisualIntent,
+) -> Tuple[bool, str]:
+    """Check if asset matches any avoid_context from intent."""
+    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    path = str(candidate.get("path") or candidate.get("url") or "").lower()
+    query = str(candidate.get("query") or "").lower()
+    title = str(candidate.get("title") or "").lower()
+    tags = " ".join(str(t) for t in (candidate.get("tags") or [])).lower()
+    text = " ".join([path, category, query, title, tags])
+    for avoid in intent.avoid_terms:
+        avoid_norm = avoid.lower()
+        if avoid_norm and avoid_norm in text:
+            return True, f"avoid_context_match:{avoid_norm}"
+    return False, ""
+
+
+def _score_category_match(category: str, intent: VisualIntent) -> Tuple[float, List[str]]:
+    """Score how well the category matches the intent's preferred categories."""
+    reasons: List[str] = []
+    score = 0.0
+    preferred = intent.preferred_categories
+    if preferred and category == preferred[0]:
+        score += 35
+        reasons.append("category_match_primary:+35")
+    elif category in preferred:
+        score += 25
+        reasons.append("category_match_preferred:+25")
+    if intent.primary_cue and category == intent.primary_cue:
+        score += 20
+        reasons.append("category_match_primary_cue:+20")
+    return score, reasons
+
+
+def _score_allowed_context(candidate: Dict[str, Any], intent: VisualIntent) -> Tuple[float, List[str]]:
+    """Score based on allowed_context metadata."""
+    reasons: List[str] = []
+    score = 0.0
+    allowed = candidate.get("allowed_context") or []
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    if allowed:
+        intent_narrative = intent.narrative_function
+        if intent_narrative in allowed:
+            score += 20
+            reasons.append(f"allowed_context_match:{intent_narrative}:+20")
+        else:
+            score -= 10
+            reasons.append("allowed_context_mismatch:-10")
+    return score, reasons
+
+
+def _score_intensity_match(candidate: Dict[str, Any], intent: VisualIntent) -> Tuple[float, List[str]]:
+    """Score based on intensity metadata alignment with intent."""
+    reasons: List[str] = []
+    score = 0.0
+    intensity = candidate.get("intensity") or ""
+    if isinstance(intensity, str):
+        intensity = intensity.lower()
+    else:
+        return score, reasons
+    # Map intent types to expected intensity
+    if intent.intent_type in {"risk_warning_family", "myth_debunk_age"}:
+        if intensity in {"moderate", "serious"}:
+            score += 15
+            reasons.append(f"intensity_match:{intensity}:+15")
+        elif intensity == "light":
+            score -= 10
+            reasons.append(f"intensity_too_light:{intensity}:-10")
+    elif intent.intent_type in {"family_responsibility", "emotional_reassurance"}:
+        if intensity in {"warm", "light", "moderate"}:
+            score += 10
+            reasons.append(f"intensity_match:{intensity}:+10")
+        elif intensity == "serious":
+            score -= 5
+            reasons.append(f"intensity_too_serious:{intensity}:-5")
+    return score, reasons
+
+
+def _score_visual_relevance(candidate: Dict[str, Any], intent: VisualIntent) -> Tuple[float, List[str]]:
+    """Score visual relevance based on concrete visual terms in candidate metadata."""
+    reasons: List[str] = []
+    score = 0.0
+    path = str(candidate.get("path") or candidate.get("url") or "").lower()
+    query = str(candidate.get("query") or "").lower()
+    title = str(candidate.get("title") or "").lower()
+    tags = " ".join(str(t) for t in (candidate.get("tags") or [])).lower()
+    text = " ".join([path, query, title, tags])
+    concrete_terms = {
+        "family", "parents", "child", "home", "couple", "advisor",
+        "documents", "planning", "consultation", "contract", "signing",
+        "mortgage", "budget", "protection", "office", "desk",
+        "discussing", "reviewing", "explaining", "meeting",
+    }
+    matched = [t for t in concrete_terms if t in text]
+    if matched:
+        bonus = min(len(matched) * 8, 25)
+        score += bonus
+        reasons.append(f"visual_relevance_terms:{','.join(matched)}:+{bonus}")
+    # Penalty for abstract/no-visual-hook text
+    if not matched and not any(
+        term in text for term in ("people", "person", "man", "woman", "group", "office", "home", "table")
+    ):
+        score -= 15
+        reasons.append("abstract_no_visual_hook:-15")
+    return score, reasons
+
+
 def score_broll_candidate(
     candidate: Dict[str, Any],
     intent: VisualIntent,
@@ -853,6 +677,86 @@ def score_broll_candidate(
     selected_visual_types = list(context.get("selected_visual_types") or [])
     visual_type = _visual_type_for_category(category, text)
 
+    # ── Reject/skip checks ──────────────────────────────────────────────────
+    # Taxonomy mismatch
+    tax_match, tax_reason = _check_taxonomy_match(candidate, intent)
+    if not tax_match:
+        logger.info(
+            "EDITORIAL_BROLL_SKIPPED reason=taxonomy_mismatch category=%s intent_primary=%s preferred=%s",
+            category, intent.primary_cue, intent.preferred_categories,
+        )
+        return -999.0, [f"taxonomy_mismatch:{tax_reason}"]
+
+    # Brand fit check
+    brand_ok, brand_reason = _check_brand_fit(candidate, intent)
+    if not brand_ok:
+        logger.info(
+            "EDITORIAL_BROLL_SKIPPED reason=brand_fit_false category=%s asset=%s",
+            category, path_text,
+        )
+        return -999.0, [f"brand_fit_false:{brand_reason}"]
+
+    # Avoid context match
+    avoid_match, avoid_reason = _check_avoid_context(candidate, intent)
+    if avoid_match:
+        logger.info(
+            "EDITORIAL_BROLL_SKIPPED reason=avoid_context_match category=%s asset=%s context=%s",
+            category, path_text, avoid_reason,
+        )
+        return -999.0, [f"avoid_context_match:{avoid_reason}"]
+
+    # Weak cue / generic asset check
+    if _is_weak_cue_asset(candidate):
+        logger.info(
+            "EDITORIAL_BROLL_SKIPPED reason=weak_cue_asset category=%s asset=%s",
+            category, path_text,
+        )
+        return -999.0, [f"weak_cue_asset:{path_text}"]
+
+    # ── Scoring dimensions ──────────────────────────────────────────────────
+    # 1. Category match
+    cat_score, cat_reasons = _score_category_match(category, intent)
+    score += cat_score
+    reasons.extend(cat_reasons)
+
+    # 2. Allowed context match
+    ctx_score, ctx_reasons = _score_allowed_context(candidate, intent)
+    score += ctx_score
+    reasons.extend(ctx_reasons)
+
+    # 3. Brand fit scoring (positive signal)
+    if brand_reason == "brand_fit_true":
+        score += 20
+        reasons.append("brand_fit_explicit:+20")
+    elif brand_reason == "domain_aligned_category":
+        score += 10
+        reasons.append("brand_fit_domain_aligned:+10")
+
+    # 4. Intensity match
+    int_score, int_reasons = _score_intensity_match(candidate, intent)
+    score += int_score
+    reasons.extend(int_reasons)
+
+    # 5. Visual relevance
+    vis_score, vis_reasons = _score_visual_relevance(candidate, intent)
+    score += vis_score
+    reasons.extend(vis_reasons)
+
+    # 6. Recency / usage diversity
+    if not used_in_task:
+        score += 15
+        reasons.append("fresh_task_asset:+15")
+    else:
+        score -= 45
+        reasons.append("repeated_asset:-45")
+    if recent_use_count <= 1:
+        score += 10
+        reasons.append("low_recent_use:+10")
+    elif recent_use_count >= 3:
+        score -= 10
+        reasons.append("recent_overuse:-10")
+
+    # ── Legacy scoring (preserved) ──────────────────────────────────────────
     preferred = intent.preferred_categories
     if preferred and category == preferred[0]:
         score += 35
@@ -886,20 +790,6 @@ def score_broll_candidate(
     if orientation in {"portrait", "vertical"} or any(token in text for token in ("portrait", "vertical", "1080x1920", "9:16")):
         score += 15
         reasons.append("vertical_friendly:+15")
-
-    if not used_in_task:
-        score += 15
-        reasons.append("fresh_task_asset:+15")
-    else:
-        score -= 45
-        reasons.append("repeated_asset:-45")
-
-    if recent_use_count <= 1:
-        score += 10
-        reasons.append("low_recent_use:+10")
-    elif recent_use_count >= 3:
-        score -= 10
-        reasons.append("recent_overuse:-10")
 
     if intent.intent_type == "family_responsibility" and category == "family_protection":
         score += 30
@@ -971,16 +861,26 @@ def score_broll_candidate(
             score -= 35
             reasons.append(f"avoid:{avoid_norm}:-35")
 
+    # ── Log selected candidate ──────────────────────────────────────────────
+    logger.info(
+        "EDITORIAL_BROLL_SELECTED category=%s asset=%s confidence=%.2f "
+        "timing_anchor=%s score=%.2f reason=%s",
+        category, path_text, intent.confidence,
+        intent.primary_cue or "none", score,
+        ",".join(reasons),
+    )
+
     return score, reasons
 
 
+
 def _visual_type_for_category(category: str, text: str) -> str:
+    if category == "documents_admin" or any(term in text for term in ("document", "paperwork", "contract", "policy", "close up", "signing")):
+        return "documents_paper_closeup"
     if category in {"family_protection", "emotional_reassurance", "home_responsibility"}:
         return "human_family_home"
     if category in {"advisor_consultation", "financial_planning"} or "advisor" in text:
         return "advisor_planning"
-    if category == "documents_admin" or any(term in text for term in ("document", "paperwork", "contract", "policy", "close up", "signing")):
-        return "documents_paper_closeup"
     if category == "risk_warning":
         return "risk_context"
     return category or "unknown"
@@ -1087,6 +987,288 @@ def score_broll_candidate_legacy(
     )
 
 
+def assess_broll_relevance(
+    phrase: str,
+    category: str,
+    intent_type: str,
+    central_topic: str,
+) -> Tuple[bool, float, str]:
+    """
+    Assess whether a B-roll candidate phrase is relevant to the current editorial intent.
+
+    Returns (is_relevant, score, reason) where score is a heuristic relevance
+    score (0-100) and reason is a short human-readable explanation.
+    """
+    if not phrase or not phrase.strip():
+        return False, 0.0, "empty_phrase"
+
+    phrase_lower = phrase.lower()
+    score = 0.0
+    reasons: List[str] = []
+
+    # Category match against central topic
+    if central_topic and category:
+        topic_lower = central_topic.lower()
+        if category in topic_lower or topic_lower in category:
+            score += 30
+            reasons.append("category_topic_match:+30")
+
+    # Intent-specific boosts
+    if intent_type == "family_responsibility" and any(
+        term in phrase_lower for term in ("family", "parents", "child", "home", "couple", "protection")
+    ):
+        score += 35
+        reasons.append("family_phrase:+35")
+    elif intent_type in ("myth_debunk_age", "client_objection") and any(
+        term in phrase_lower for term in ("advisor", "consultation", "documents", "contract", "young", "couple")
+    ):
+        score += 30
+        reasons.append("objection_phrase:+30")
+    elif intent_type == "risk_warning_family" and any(
+        term in phrase_lower for term in ("worried", "serious", "protection", "family", "finances")
+    ):
+        score += 30
+        reasons.append("risk_phrase:+30")
+    elif intent_type == "financial_planning" and any(
+        term in phrase_lower for term in ("mortgage", "budget", "planning", "family", "home", "advisor")
+    ):
+        score += 25
+        reasons.append("financial_phrase:+25")
+    elif intent_type == "insurance_documents" and any(
+        term in phrase_lower for term in ("insurance", "policy", "documents", "signing", "contract")
+    ):
+        score += 25
+        reasons.append("insurance_phrase:+25")
+
+    # Generic positive signal: phrase has concrete visual terms
+    if any(
+        term in phrase_lower
+        for term in ("family", "home", "office", "advisor", "documents", "planning", "consultation", "contract", "couple", "parents", "child")
+    ):
+        score += 15
+        reasons.append("concrete_visual:+15")
+
+    # Penalty for generic/abstract phrases with no visual hook
+    if not any(
+        term in phrase_lower
+        for term in ("family", "home", "office", "advisor", "documents", "planning", "consultation", "contract", "couple", "parents", "child", "money", "protection", "risk", "insurance", "mortgage", "budget", "future", "health", "travel", "hospital", "patient", "doctor", "clinic", "luggage", "airport", "destination", "hotel")
+    ):
+        score -= 20
+        reasons.append("abstract_no_visual:-20")
+
+    # Strong penalty for wellness/meditation mismatches in finance context
+    if any(term in phrase_lower for term in ("tea", "coffee", "meditation", "yoga", "wellness", "spa", "zen")):
+        score -= 40
+        reasons.append("wellness_mismatch:-40")
+
+    is_relevant = score >= 20.0
+    reason_str = ",".join(reasons) if reasons else "neutral"
+    return is_relevant, score, reason_str
+
+
+def is_broll_asset_forbidden(
+    asset: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, List[str]]:
+    """
+    Determine whether a B-roll asset is forbidden for use based on its metadata
+    and the current editorial context.
+
+    Returns (is_forbidden, reasons) where reasons is a list of human-readable
+    strings explaining why the asset is forbidden (empty if not forbidden).
+    """
+    if not asset:
+        return False, []
+
+    reasons: List[str] = []
+    context = context or {}
+
+    path = str(asset.get("path") or asset.get("url") or "").lower()
+    category = str(asset.get("category") or "").lower()
+    query = str(asset.get("query") or "").lower()
+    title = str(asset.get("title") or "").lower()
+    tags = " ".join(str(t) for t in (asset.get("tags") or [])).lower()
+    metadata = str(asset.get("metadata") or "").lower()
+    text = " ".join([path, category, query, title, tags, metadata])
+
+    # Explicit forbidden flag
+    if asset.get("forbidden"):
+        reason = str(asset.get("forbidden_reason") or "explicit_forbidden_flag")
+        reasons.append(reason)
+        return True, reasons
+
+    # Wellness/meditation mismatches for insurance/finance context
+    ctx_category = str(context.get("category") or "").lower()
+    ctx_intent = str(context.get("intent_type") or "").lower()
+    is_finance_context = any(
+        term in ctx_category or term in ctx_intent
+        for term in ("insurance", "finance", "financial", "mortgage", "risk")
+    )
+    if is_finance_context and any(
+        term in text for term in ("tea", "coffee", "meditation", "yoga", "wellness", "spa", "zen")
+    ):
+        reasons.append("wellness_mismatch_in_finance_context")
+        return True, reasons
+
+    # Severe risk imagery not appropriate for non-risk contexts
+    if "risk" not in ctx_intent and any(
+        term in text for term in ("funeral", "hospital bed", "nursing home", "ambulance", "violence")
+    ):
+        reasons.append("severe_risk_imagery_in_non_risk_context")
+        return True, reasons
+
+    # Sad/alone imagery not appropriate for most contexts
+    if "sad alone" in text and "risk" not in ctx_intent:
+        reasons.append("sad_alone_imagery")
+        return True, reasons
+
+    # Finance cliches
+    if any(term in text for term in ("stock market", "trading", "luxury cash", "skyscraper")):
+        reasons.append("finance_cliche")
+        return True, reasons
+
+    # Generic office cliches
+    if any(term in text for term in ("random office", "business handshake")):
+        reasons.append("generic_office_cliche")
+        return True, reasons
+
+    return False, reasons
+
+
+def score_broll_phrase_fit(
+    asset: Dict[str, Any],
+    context: Optional[Dict[str, Any]] = None,
+    theme: Optional[ClipTheme | Dict[str, Any]] = None,
+    intent_type: str = "",
+) -> Dict[str, Any]:
+    """
+    Score how well a B-roll asset's phrase/description fits the current editorial context.
+
+    Returns a dict with keys:
+        phrase_fit_score (float, 0-100)
+        phrase_fit_label (str)
+        phrase_fit_reason (str)
+        allowed_as_primary (bool)
+        allowed_as_support (bool)
+    """
+    if not asset:
+        return {
+            "phrase_fit_score": 0.0,
+            "phrase_fit_label": "no_asset",
+            "phrase_fit_reason": "empty_asset",
+            "allowed_as_primary": False,
+            "allowed_as_support": False,
+        }
+
+    context = context or {}
+    path = str(asset.get("path") or "").lower()
+    category = str(asset.get("category") or "").lower()
+    cue_type = str(asset.get("cue_type") or "").lower()
+    query = str(asset.get("query") or "").lower()
+    is_image = bool(asset.get("is_image"))
+    title = str(asset.get("title") or "").lower()
+    tags = " ".join(str(t) for t in (asset.get("tags") or [])).lower()
+    text = " ".join([path, category, cue_type, query, title, tags])
+
+    score = 50.0  # baseline neutral
+    reasons: List[str] = []
+
+    # Category match with context
+    ctx_category = str(context.get("category") or "").lower()
+    ctx_cue_type = str(context.get("cue_type") or "").lower()
+    if category and (category == ctx_category or category == ctx_cue_type):
+        score += 20
+        reasons.append("category_match:+20")
+
+    # Query match
+    ctx_query = str(context.get("query") or "").lower()
+    if ctx_query and (ctx_query in text or any(word in text for word in ctx_query.split() if len(word) > 3)):
+        score += 15
+        reasons.append("query_match:+15")
+
+    # Intent-type specific boosts
+    if intent_type == "family_responsibility" and any(
+        term in text for term in ("family", "parents", "child", "home", "couple", "protection")
+    ):
+        score += 20
+        reasons.append("family_phrase:+20")
+    elif intent_type in ("myth_debunk_age", "client_objection") and any(
+        term in text for term in ("advisor", "consultation", "documents", "contract", "young", "couple")
+    ):
+        score += 15
+        reasons.append("objection_phrase:+15")
+    elif intent_type == "risk_warning_family" and any(
+        term in text for term in ("worried", "serious", "protection", "family", "finances")
+    ):
+        score += 15
+        reasons.append("risk_phrase:+15")
+    elif intent_type == "financial_planning" and any(
+        term in text for term in ("mortgage", "budget", "planning", "family", "home", "advisor")
+    ):
+        score += 15
+        reasons.append("financial_phrase:+15")
+
+    # Concrete visual terms bonus
+    if any(
+        term in text
+        for term in ("family", "home", "office", "advisor", "documents", "planning", "consultation", "contract", "couple", "parents", "child")
+    ):
+        score += 10
+        reasons.append("concrete_visual:+10")
+
+    # Penalties for mismatches
+    if any(term in text for term in ("tea", "coffee", "meditation", "yoga", "wellness", "spa", "zen")):
+        score -= 30
+        reasons.append("wellness_mismatch:-30")
+    if any(term in text for term in ("funeral", "hospital bed", "nursing home", "ambulance")):
+        score -= 40
+        reasons.append("severe_imagery:-40")
+    if any(term in text for term in ("stock market", "trading", "luxury cash", "skyscraper")):
+        score -= 25
+        reasons.append("finance_cliche:-25")
+    if any(term in text for term in ("random office", "business handshake")):
+        score -= 20
+        reasons.append("generic_office:-20")
+
+    # Static image penalty
+    if is_image:
+        score -= 15
+        reasons.append("static_image:-15")
+
+    # Clamp score
+    score = max(0.0, min(100.0, score))
+
+    # Determine labels
+    if score >= 75:
+        label = "strong_fit"
+        reason = ",".join(reasons) if reasons else "strong_phrase_fit"
+        primary = True
+        support = True
+    elif score >= 50:
+        label = "moderate_fit"
+        reason = ",".join(reasons) if reasons else "moderate_phrase_fit"
+        primary = True
+        support = True
+    elif score >= 30:
+        label = "weak_fit"
+        reason = ",".join(reasons) if reasons else "weak_phrase_fit"
+        primary = False
+        support = True
+    else:
+        label = "poor_fit"
+        reason = ",".join(reasons) if reasons else "poor_phrase_fit"
+        primary = False
+        support = False
+
+    return {
+        "phrase_fit_score": score,
+        "phrase_fit_label": label,
+        "phrase_fit_reason": reason,
+        "allowed_as_primary": primary,
+        "allowed_as_support": support,
+    }
+
+
 def select_best_candidates(
     candidates: List[Tuple[str, Optional[Path], float, List[str]]],
     intent: VisualIntent,
@@ -1111,274 +1293,748 @@ def select_best_candidates(
     return selected
 
 
-def _list_local_broll_assets() -> List[Path]:
-    global _LOCAL_BROLL_CACHE
-    if _LOCAL_BROLL_CACHE is not None:
-        return list(_LOCAL_BROLL_CACHE)
-    assets: List[Path] = []
-    seen: set[str] = set()
-    for root_str in _LOCAL_BROLL_SEARCH_ROOTS:
-        root = Path(root_str)
-        if not root.exists():
-            continue
-        for path in root.rglob("*"):
-            if not path.is_file():
-                continue
-            if path.suffix.lower() not in IMAGE_EXTS.union(VIDEO_EXTS):
-                continue
-            key = str(path.resolve())
-            if key in seen:
-                continue
-            seen.add(key)
-            assets.append(path)
-    _LOCAL_BROLL_CACHE = assets
-    return list(assets)
+def _decesos_sensitive(text: str, editorial_type: str) -> bool:
+    normalized = normalize_text(" ".join([text or "", editorial_type or ""]))
+    return any(
+        token in normalized
+        for token in (
+            "decesos",
+            "funeral",
+            "fallecimiento",
+            "muerte",
+            "mourning",
+            "cemetery",
+        )
+    )
 
 
-def build_broll_editorial_decision(
+def _resolve_local_asset_candidates(
+    available_local_assets: Optional[Any],
+) -> List[Dict[str, Any]]:
+    candidates: List[Dict[str, Any]] = []
+    if available_local_assets is None:
+        try:
+            from .vpi_asset_library_service import build_asset_index as _build_asset_index
+
+            index = _build_asset_index()
+            verified_broll = list((index.get("verified") or {}).get("broll") or [])
+            for item in verified_broll:
+                if isinstance(item, dict):
+                    candidates.append(dict(item))
+                elif item:
+                    candidates.append({"path": str(item), "type": "broll", "source_name": "local"})
+        except Exception as exc:
+            logger.debug("[broll-decision] asset discovery skipped: %s", exc)
+        return candidates
+
+    for item in list(available_local_assets or []):
+        if isinstance(item, dict):
+            candidates.append(dict(item))
+        elif isinstance(item, Path):
+            candidates.append({"path": str(item), "type": "broll", "source_name": "local"})
+        elif isinstance(item, str) and item.strip():
+            candidates.append({"path": item, "type": "broll", "source_name": "local"})
+    return candidates
+
+
+def choose_broll_editorial_decision(
     *,
     segment_text: str,
-    hook_intent: str = "",
-    topic: str = "",
-    private_premium_status: str = "",
-    composition_decision: Optional[Dict[str, Any]] = None,
-    first3_visual_contract: Optional[Dict[str, Any]] = None,
-    visual_profile: str = "",
+    editorial_type: str = "",
+    vpi_score: Optional[float] = None,
+    suggested_broll_cue_type: Optional[str] = None,
+    words_with_timestamps: Optional[Sequence[Dict[str, Any]]] = None,
+    clip_duration: float = 0.0,
+    hook_strategy_final: str = "",
+    hook_visual_applied: bool = False,
+    visual_layer_budget: Optional[Dict[str, Any]] = None,
+    visual_support_layer_selected: str = "",
+    visual_reinforcement_applied: bool = False,
+    captions_active: bool = False,
+    face_bbox: Optional[Dict[str, Any]] = None,
+    speaker_bbox: Optional[Dict[str, Any]] = None,
+    available_local_assets: Optional[Any] = None,
+    provider_diagnostics: Optional[Dict[str, Any]] = None,
+    hook_text_redundant_with_captions: bool = False,
 ) -> Dict[str, Any]:
-    text_norm = normalize_text(segment_text or "")
-    hook_intent_norm = normalize_text(hook_intent or "")
-    topic_norm = normalize_text(topic or "")
-    comp_mode = str((composition_decision or {}).get("composition_mode") or "")
-    first3_status = str((first3_visual_contract or {}).get("status") or "")
+    """Single source of truth for editorial B-roll decisioning."""
+    del words_with_timestamps
+    normalized_text = normalize_text(" ".join([segment_text or "", editorial_type or "", suggested_broll_cue_type or ""]))
+    intent = detect_intent(
+        segment_text,
+        editorial_type=editorial_type,
+        suggested_broll_cue_type=suggested_broll_cue_type,
+        vpi_score=vpi_score,
+        segment_duration=clip_duration,
+    )
+    theme = detect_clip_theme(
+        segment_text,
+        editorial_type=editorial_type,
+        suggested_broll_cue_type=suggested_broll_cue_type,
+        vpi_score=vpi_score,
+    )
+    clip_duration = max(0.0, float(clip_duration or 0.0))
+    safe_edit = False
+    try:
+        from .vpi_production_safe_edit import production_safe_edit_enabled as _production_safe_edit_enabled
 
-    if str(private_premium_status or "") == "DO_NOT_UPLOAD":
-        decision = {
-            "should_use_broll": False,
-            "broll_intent": "no_broll_needed",
-            "moment_type": "none",
-            "start_offset": 0.0,
-            "duration": 0.0,
-            "reason": "private_premium_do_not_upload",
-            "confidence": 0.0,
-            "fallback": "none",
-            "composition_allowed": False,
-            "skip_reason": "sensitive_tone",
-        }
-        logger.info("[broll-editorial] should_use=false intent=no_broll_needed confidence=0.00 reason=private_premium_do_not_upload")
-        logger.info("[broll-editorial] skipped reason=sensitive_tone")
-        return decision
+        safe_edit = _production_safe_edit_enabled()
+    except Exception:
+        safe_edit = True
 
-    broll_intent = "no_broll_needed"
-    confidence = 0.2
-    reason = "no_editorial_gain"
-    moment_type = "none"
-    start_offset = 1.8
-    duration = 1.4
-    fallback = "none"
+    death_sensitive = _decesos_sensitive(segment_text, editorial_type)
+    threshold = 0.85 if death_sensitive else (0.72 if safe_edit else 0.62)
+    confidence = float(max(intent.confidence or 0.0, (float(vpi_score or 0.0) / 100.0) if vpi_score is not None else 0.0))
+    confidence = round(min(1.0, confidence), 3)
 
-    _has_family_relief = _contains(text_norm, _BROLL_INTENT_KEYWORDS["family_relief"])
-    _has_health_access = _contains(text_norm, _BROLL_INTENT_KEYWORDS["health_access"])
-    _has_autonomous = _contains(text_norm, _BROLL_INTENT_KEYWORDS["autonomous_work_stability"])
-    _has_risk_context = _contains(text_norm, _BROLL_INTENT_KEYWORDS["risk_warning_context"])
-    _has_practical = _contains(text_norm, _BROLL_INTENT_KEYWORDS["practical_explanation"])
-    _has_emotional_support = _contains(text_norm, _BROLL_INTENT_KEYWORDS["emotional_support"])
+    budget = visual_layer_budget if isinstance(visual_layer_budget, dict) else {}
+    visual_layers_allowed = list(budget.get("visual_layers_allowed") or budget.get("allowed_layers") or [])
+    visual_layers_dropped = list(budget.get("visual_layers_dropped") or budget.get("dropped_layers") or [])
+    temporal_density_budget_applied = bool(budget.get("temporal_density_budget_applied"))
+    collision_guard_applied = bool(budget.get("collision_guard_applied"))
+    visual_density = float(budget.get("visual_density") or 0.0)
+    support_selected = str(visual_support_layer_selected or budget.get("visual_support_layer_selected") or "")
+    support_reason = str(budget.get("visual_support_layer_reason") or "")
+    budget_reason = ""
+    budget_allowed = True
+    if temporal_density_budget_applied or collision_guard_applied:
+        if captions_active or hook_visual_applied or visual_reinforcement_applied or visual_density >= 8.0:
+            budget_allowed = False
+            budget_reason = "visual_density_budget_blocked"
+    if captions_active and hook_visual_applied and support_selected in {"semantic_card", "motion_overlay", "branding", "cta"} and clip_duration < 12.0:
+        budget_allowed = False
+        budget_reason = "screen_already_loaded"
+    if hook_strategy_final == "text_hook" and captions_active and support_selected in {"semantic_card", "lower_third"}:
+        budget_allowed = False
+        budget_reason = "hook_caption_collision"
+    if death_sensitive and not budget_reason:
+        budget_reason = "decesos_sobrio"
 
-    if hook_intent_norm == "risk_warning" or _has_risk_context:
-        broll_intent = "risk_warning_context"
-        confidence = 0.76
-        reason = "risk_context_support"
-        moment_type = "risk_phrase"
-        start_offset = 1.6
-        duration = 1.2
-    elif hook_intent_norm == "autonomous_business_stakes" or _has_autonomous:
-        broll_intent = "autonomous_work_stability"
-        confidence = 0.82
-        reason = "business_stability_context"
-        moment_type = "topic_shift"
-        start_offset = 1.7
-        duration = 1.6
-    elif hook_intent_norm == "practical_advice" or _has_practical:
-        broll_intent = "practical_explanation"
-        confidence = 0.72
-        reason = "abstract_explanation_needs_visual_clarity"
-        moment_type = "explanation_example"
-        start_offset = 2.0
-        duration = 1.5
-    elif hook_intent_norm == "emotional_closure" or _has_emotional_support:
-        broll_intent = "emotional_support"
-        confidence = 0.65
-        reason = "soft_emotional_support"
-        moment_type = "emotional_pause"
-        start_offset = 2.4
-        duration = 1.0
-    elif _has_health_access:
-        broll_intent = "health_access"
-        confidence = 0.73
-        reason = "health_access_example"
-        moment_type = "clarity_example"
-        start_offset = 1.8
-        duration = 1.4
-    elif _has_family_relief or (topic_norm == "decesos" and _has_emotional_support):
-        broll_intent = "family_relief"
-        confidence = 0.7
-        reason = "family_relief_metaphor"
-        moment_type = "emotional_pause"
-        start_offset = 1.9
-        duration = 1.3
+    local_assets = _resolve_local_asset_candidates(available_local_assets)
+    local_only = True
+    provider_preference = "local_only" if safe_edit else "local_preferred"
 
-    should_use = broll_intent != "no_broll_needed" and confidence >= 0.62
-    composition_allowed = True
-    skip_reason = ""
+    # Determine a conservative editorial mode.
+    intent_type = str(intent.intent_type or "").lower()
+    if death_sensitive:
+        broll_mode = "no_broll"
+        mode_reason = "death_sensitive_requires_sobriety"
+    elif intent_type in {"family_responsibility", "emotional_protection"}:
+        broll_mode = "cutaway_fullscreen"
+        mode_reason = "family_protection_context"
+    elif intent_type in {"risk_warning_family", "risk_warning"}:
+        broll_mode = "overlay_insert"
+        mode_reason = "risk_warning_context"
+    elif intent_type in {"insurance_documents", "financial_planning"}:
+        broll_mode = "picture_in_picture"
+        mode_reason = "coverage_explanation"
+    elif intent_type in {"myth_debunk_age", "client_objection"}:
+        broll_mode = "picture_in_picture"
+        mode_reason = "objection_context"
+    elif intent_type == "weak_intro":
+        # OUTPUT-QUALITY-7: a presentation opener no longer disables b-roll for the
+        # WHOLE clip — the timing strategy already keeps the cutaway out of the
+        # first seconds. High-confidence content with local assets gets the daily
+        # full-frame cutaway; everything else stays protected.
+        if confidence >= 0.75 and safe_edit and local_assets:
+            broll_mode = "daily_fullframe_cutaway"
+            mode_reason = "weak_intro_with_clear_content_match"
+        else:
+            broll_mode = "no_broll"
+            mode_reason = "weak_intro_protected"
+    elif intent_type in {"generic", "speaker_focus", "generic_context"}:
+        broll_mode = "no_broll"
+        mode_reason = "generic_context_unstable"
+    else:
+        broll_mode = "background_soft"
+        mode_reason = "editorial_contextual_support"
 
-    if comp_mode == "minimal_safe":
-        should_use = False
-        composition_allowed = False
-        skip_reason = "composition_conflict"
-    elif comp_mode == "emotional_soft" and broll_intent not in {"emotional_support", "family_relief"}:
-        should_use = False
-        composition_allowed = False
-        skip_reason = "sensitive_tone"
-    elif first3_status in {"review", "fail"} and (first3_visual_contract or {}).get("first3_visual_contract", {}).get("no_layer_overload") is False:
-        should_use = False
-        composition_allowed = False
-        skip_reason = "composition_conflict"
+    if visual_reinforcement_applied and support_selected in {"semantic_card", "motion_overlay"}:
+        mode_reason = "reinforcement_present"
+        if broll_mode in {"cutaway_fullscreen", "overlay_insert"}:
+            broll_mode = "picture_in_picture"
 
-    if should_use and start_offset < 1.5:
-        old_start = start_offset
-        start_offset = 1.5
+    if clip_duration < 3.0:
+        broll_mode = "no_broll"
+        mode_reason = "clip_too_short"
+
+    if confidence < threshold:
+        broll_mode = "no_broll"
+        mode_reason = "low_confidence"
+
+    # Hook-first opening protection.
+    hook_protected = clip_duration >= 3.0 and (
+        hook_visual_applied
+        or hook_strategy_final in {"text_hook", "non_text_push_hook", "silence_tension_hook"}
+        or captions_active
+    )
+    if safe_edit and broll_mode == "picture_in_picture":
+        # OUTPUT-QUALITY-3: PiP boxes conflict with captions, but a FULL-FRAME cutaway
+        # does not — captions are burned after the b-roll step and render on top.
+        # High-confidence matches with local assets become a sober full-frame cutaway;
+        # PiP itself stays forbidden in daily mode.
+        if confidence >= 0.75 and local_assets:
+            broll_mode = "daily_fullframe_cutaway"
+            mode_reason = "daily_fullframe_cutaway_high_confidence"
+            logger.info(
+                "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_ELIGIBLE intent=%s confidence=%.2f local_assets=%d",
+                intent_type, confidence, len(local_assets),
+            )
+        elif captions_active or hook_protected:
+            broll_mode = "no_broll"
+            mode_reason = "daily_mode_no_picture_in_picture"
+        else:
+            broll_mode = "cutaway_fullscreen"
+            mode_reason = "daily_mode_fullscreen_cutaway_only"
+    start_time = 3.0 if hook_protected else max(0.0, min(clip_duration, 0.75))
+    if hook_protected and start_time < 3.0:
+        start_time = 3.0
+    if start_time < 3.0:
+        if confidence >= 0.90 and not hook_text_redundant_with_captions and not captions_active:
+            start_time = 3.0
+            mode_reason = "hook_protected_first3"
+        else:
+            broll_mode = "no_broll"
+            mode_reason = "hook_protected_first3"
+    duration = 1.2 if clip_duration < 12.0 else 1.8
+    duration = min(2.8, max(1.2, duration))
+    if broll_mode == "daily_fullframe_cutaway":
+        duration = 2.0
+    max_insertions = 1 if clip_duration < 20.0 else 2
+    if visual_reinforcement_applied or support_selected in {"semantic_card", "motion_overlay"}:
+        max_insertions = min(max_insertions, 1)
+    if death_sensitive:
+        max_insertions = 1
+
+    face_safe = True
+    if isinstance(face_bbox, dict):
+        try:
+            face_y = float(face_bbox.get("y") or face_bbox.get("top") or 0.0)
+            face_safe = face_y >= 0.42 or broll_mode != "cutaway_fullscreen"
+        except Exception:
+            face_safe = True
+    if isinstance(speaker_bbox, dict):
+        try:
+            speaker_y = float(speaker_bbox.get("y") or speaker_bbox.get("top") or 0.0)
+            if speaker_y < 0.42 and broll_mode in {"cutaway_fullscreen", "daily_fullframe_cutaway", "overlay_insert"}:
+                face_safe = False
+        except Exception:
+            pass
+    caption_safe = bool(captions_active or broll_mode in {"cutaway_fullscreen", "daily_fullframe_cutaway", "background_soft", "picture_in_picture"})
+
+    if not budget_allowed:
+        broll_mode = "no_broll"
+    if not local_assets:
+        broll_mode = "no_broll"
+    if death_sensitive and not local_assets:
+        broll_mode = "no_broll"
+    if not face_safe:
+        mode_reason = "face_not_safe"
+    if not caption_safe:
+        mode_reason = "caption_not_safe"
+
+    asset_query = ""
+    if intent.preferred_queries:
+        asset_query = str(intent.preferred_queries[0] or "")
+    if not asset_query:
+        asset_query = build_stock_queries(intent, limit=1)[0] if build_stock_queries(intent, limit=1) else ""
+    asset_category = str(intent.primary_cue or (intent.preferred_categories[0] if intent.preferred_categories else "") or "")
+
+    if provider_diagnostics is not None:
         logger.info(
-            "[broll-editorial] timing_adjusted=true old=%.2f new=%.2f reason=avoid_hook_or_caption",
-            old_start,
-            start_offset,
+            "BROLL_PROVIDER_DIAGNOSTICS local_only=%s available=%s",
+            str(local_only).lower(),
+            ",".join(str(k) for k in sorted((provider_diagnostics or {}).keys())) or "none",
         )
 
-    duration = max(0.8, min(2.2, duration))
-    if should_use:
-        fallback = "motion_only" if visual_profile else "caption_overlay"
-        if comp_mode in {"hook_driven", "business_punch"}:
-            fallback = "sweeping_reveal"
-    elif skip_reason:
-        fallback = "none"
+    if broll_mode == "no_broll":
+        reason = mode_reason or "no_editorial_gain"
+    else:
+        reason = mode_reason or "editorial_match"
 
     decision = {
-        "should_use_broll": bool(should_use),
-        "broll_intent": broll_intent,
-        "moment_type": moment_type,
-        "start_offset": round(start_offset, 2),
-        "duration": round(duration, 2),
+        "broll_decision": "use_broll" if broll_mode != "no_broll" else "no_broll",
+        "broll_mode": broll_mode,
+        "intent": intent,
+        "intent_type": intent.intent_type,
+        "confidence": confidence,
         "reason": reason,
-        "confidence": round(confidence, 3),
-        "fallback": fallback,
-        "composition_allowed": bool(composition_allowed),
-        "skip_reason": skip_reason or ("no_editorial_gain" if not should_use else ""),
+        "start_time": round(float(start_time), 2),
+        "duration": round(float(duration), 2),
+        "max_insertions": int(max_insertions),
+        "asset_query": asset_query,
+        "asset_category": asset_category,
+        "provider_preference": provider_preference,
+        "budget_allowed": bool(budget_allowed),
+        "face_safe": bool(face_safe),
+        "caption_safe": bool(caption_safe),
+        "hook_protected_first3": bool(hook_protected),
+        "visual_support_layer_selected": support_selected,
+        "visual_support_layer_reason": support_reason,
+        "visual_layers_allowed": visual_layers_allowed,
+        "visual_layers_dropped": visual_layers_dropped,
+        "local_asset_count": len(local_assets),
+        "safe_edit": bool(safe_edit),
+        "local_only": bool(local_only),
+        "provider_diagnostics": provider_diagnostics or {},
     }
-
     logger.info(
-        "[broll-editorial] should_use=%s intent=%s confidence=%.2f reason=%s",
-        str(bool(should_use)).lower(),
-        broll_intent,
+        "BROLL_EDITORIAL_DECISION decision=%s mode=%s confidence=%.2f reason=%s asset_query=%s start=%.2f dur=%.2f max=%d budget=%s face_safe=%s caption_safe=%s",
+        decision["broll_decision"],
+        decision["broll_mode"],
         confidence,
         reason,
+        asset_query,
+        decision["start_time"],
+        decision["duration"],
+        decision["max_insertions"],
+        str(budget_allowed).lower(),
+        str(face_safe).lower(),
+        str(caption_safe).lower(),
     )
-    if not should_use:
-        logger.info("[broll-editorial] skipped reason=%s", decision["skip_reason"] or "no_editorial_gain")
-    else:
-        logger.info(
-            "[broll-editorial] timing start_offset=%.2f duration=%.2f reason=%s",
-            decision["start_offset"],
-            decision["duration"],
-            moment_type or "editorial",
-        )
     return decision
+
+
+def build_broll_editorial_decision(**kwargs: Any) -> Dict[str, Any]:
+    # Callers pass a wider context than choose_broll_editorial_decision accepts;
+    # filter to its signature so extra keys don't raise TypeError (which used to
+    # silently disable the whole editorial b-roll route as "decision_failed").
+    import inspect
+    _accepted = set(inspect.signature(choose_broll_editorial_decision).parameters)
+    decision = choose_broll_editorial_decision(
+        **{k: v for k, v in kwargs.items() if k in _accepted}
+    )
+    should_use_broll = decision.get("broll_decision") == "use_broll"
+    result = {
+        "should_use_broll": should_use_broll,
+        "broll_decision": decision.get("broll_decision"),
+        "broll_mode": decision.get("broll_mode"),
+        "broll_intent": str(decision.get("intent_type") or ""),
+        "confidence": float(decision.get("confidence") or 0.0),
+        "reason": str(decision.get("reason") or ""),
+        "start_offset": float(decision.get("start_time") or 0.0),
+        "duration": float(decision.get("duration") or 0.0),
+        "max_insertions": int(decision.get("max_insertions") or 0),
+        "asset_query": str(decision.get("asset_query") or ""),
+        "asset_category": str(decision.get("asset_category") or ""),
+        "provider_preference": str(decision.get("provider_preference") or "local_only"),
+        "budget_allowed": bool(decision.get("budget_allowed")),
+        "face_safe": bool(decision.get("face_safe")),
+        "caption_safe": bool(decision.get("caption_safe")),
+        "hook_protected_first3": bool(decision.get("hook_protected_first3")),
+        "visual_support_layer_selected": str(decision.get("visual_support_layer_selected") or ""),
+        "visual_support_layer_reason": str(decision.get("visual_support_layer_reason") or ""),
+        "fallback": "none" if should_use_broll else str(decision.get("reason") or "no_broll"),
+        "skip_reason": "" if should_use_broll else str(decision.get("reason") or "no_broll"),
+        "route_used": "editorial_local",
+        "duplicate_routes_blocked": True,
+        "local_only": bool(decision.get("local_only")),
+    }
+    logger.info(
+        "BROLL_SELECTED use_broll=%s mode=%s reason=%s",
+        str(should_use_broll).lower(),
+        result["broll_mode"],
+        result["reason"],
+    )
+    if not should_use_broll:
+        logger.info("BROLL_SKIPPED_REASON reason=%s", result["skip_reason"])
+    return result
 
 
 def match_broll_asset(
     *,
     broll_intent: str,
-    topic: str = "",
-    segment_text: str = "",
+    topic: str,
+    segment_text: str,
+    available_local_assets: Optional[Any] = None,
+    provider_diagnostics: Optional[Dict[str, Any]] = None,
+    decision: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    intent = str(broll_intent or "no_broll_needed")
-    topic_norm = normalize_text(topic or "")
-    text_norm = normalize_text(segment_text or "")
-    if intent == "no_broll_needed":
-        return {"matched": False, "asset": None, "reason": "no_editorial_gain"}
+    """Match an editorial B-roll asset using local/verified assets only."""
+    from .broll_asset_memory import asset_id_for
+
+    base_decision = decision or choose_broll_editorial_decision(
+        segment_text=segment_text,
+        editorial_type=topic or broll_intent,
+        suggested_broll_cue_type=broll_intent,
+        available_local_assets=available_local_assets,
+        provider_diagnostics=provider_diagnostics,
+    )
+    if base_decision.get("broll_decision") != "use_broll":
+        return {
+            "matched": False,
+            "asset": "",
+            "source": "none",
+            "score": 0.0,
+            "reasons": [str(base_decision.get("reason") or "no_broll")],
+            "category": "",
+            "asset_id": "",
+            "provider_video_id": "",
+            "route_used": str(base_decision.get("route_used") or "editorial_local"),
+            "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+        }
 
     try:
-        from .vpi_asset_library_service import build_asset_index
-        _asset_index = build_asset_index()
+        from .vpi_asset_library_service import build_asset_index as _build_asset_index
+        from .local_broll_asset_bank import list_assets as _list_local_assets
+        from .vpi_asset_library_service import _classify_broll_by_filename as _classify_broll_by_filename
     except Exception as exc:
-        logger.debug("[broll-asset] asset_library_unavailable reason=%s", exc)
-        _asset_index = {}
+        logger.debug("[broll-match] asset helpers unavailable: %s", exc)
+        return {
+            "matched": False,
+            "asset": "",
+            "source": "none",
+            "score": 0.0,
+            "reasons": ["asset_helpers_unavailable"],
+            "category": "",
+            "asset_id": "",
+            "provider_video_id": "",
+            "route_used": str(base_decision.get("route_used") or "editorial_local"),
+            "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+        }
 
-    _verified_broll = list((_asset_index.get("verified") or {}).get("broll") or [])
-    _manifest_found = bool(_asset_index.get("manifest_found"))
-    assets = _list_local_broll_assets()
-    verified_by_path: Dict[str, Dict[str, Any]] = {
-        str(Path(str(item.get("path") or "")).resolve()): item for item in _verified_broll if isinstance(item, dict) and str(item.get("path") or "").strip()
-    }
-    terms = _BROLL_FILENAME_TERMS.get(intent, tuple())
-    best_match: Optional[Path] = None
-    best_score = -1
-    for asset in assets:
-        blob = normalize_text(str(asset))
-        if topic_norm == "decesos" and any(block in blob for block in _SENSITIVE_DECESOS_BLOCKLIST):
+    intent = detect_intent(
+        segment_text,
+        editorial_type=topic or broll_intent,
+        suggested_broll_cue_type=broll_intent,
+    )
+    theme = detect_clip_theme(
+        segment_text,
+        editorial_type=topic or broll_intent,
+        suggested_broll_cue_type=broll_intent,
+    )
+
+    local_candidates: List[Dict[str, Any]] = []
+    if available_local_assets is not None:
+        local_candidates = _resolve_local_asset_candidates(available_local_assets)
+    else:
+        index = _build_asset_index()
+        verified_broll = list((index.get("verified") or {}).get("broll") or [])
+        local_candidates = [dict(item) for item in verified_broll if isinstance(item, dict)]
+        if not local_candidates:
+            # Fall back to the local bank by category
+            preferred = []
+            for category in intent.preferred_categories or ([intent.primary_cue] if intent.primary_cue else []):
+                if not category:
+                    continue
+                preferred.extend(list(_list_local_assets(category)))
+            local_candidates = [{"path": str(path), "type": "broll", "source_name": "local"} for path in preferred]
+
+    if not local_candidates:
+        logger.info("BROLL_SKIPPED_REASON reason=no_local_asset_match")
+        return {
+            "matched": False,
+            "asset": "",
+            "source": "none",
+            "score": 0.0,
+            "reasons": ["no_local_asset_match"],
+            "category": "",
+            "asset_id": "",
+            "provider_video_id": "",
+            "route_used": str(base_decision.get("route_used") or "editorial_local"),
+            "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+        }
+
+    decision_threshold = 85.0 if _decesos_sensitive(segment_text, topic) else (72.0 if bool(base_decision.get("safe_edit", True)) else 65.0)
+    scored: List[Tuple[str, Optional[Path], float, List[str], str, str]] = []
+    for candidate in local_candidates:
+        path_str = str(candidate.get("path") or "").strip()
+        if not path_str:
             continue
-        score = 0
-        for term in terms:
-            if normalize_text(term) in blob:
-                score += 2
-        if topic_norm and topic_norm in blob:
-            score += 2
-        if any(token in text_norm for token in ("familia", "salud", "autonomo", "autónomo", "riesgo")) and any(token in blob for token in ("family", "health", "autonom", "risk", "support")):
-            score += 1
-        if score > best_score:
-            best_score = score
-            best_match = asset
+        asset = Path(path_str)
+        if not asset.exists():
+            continue
+        category = str(candidate.get("category") or candidate.get("taxonomy") or "").strip().lower()
+        if not category:
+            category, tags = _classify_broll_by_filename(asset)
+            candidate["category"] = category
+            candidate["taxonomy"] = category
+            candidate.setdefault("tags", tags)
+        candidate["query"] = base_decision.get("asset_query") or ""
+        candidate["cue"] = base_decision.get("asset_category") or broll_intent or ""
+        candidate["source"] = str(candidate.get("source_name") or "local")
+        candidate["is_video"] = asset.suffix.lower() in VIDEO_EXTS
+        candidate["is_image"] = asset.suffix.lower() in IMAGE_EXTS
+        score, reasons = score_broll_candidate(
+            candidate,
+            intent,
+            theme,
+            {
+                "suggested_broll_cue_type": broll_intent,
+                "category_seen": {},
+                "selected_categories": [],
+                "selected_visual_types": [],
+            },
+        )
+        fit = score_broll_phrase_fit(candidate, {"query": base_decision.get("asset_query") or ""}, theme, intent.intent_type)
+        score += float(fit.get("phrase_fit_score") or 0.0) * 0.2
+        reasons.extend([
+            f"phrase_fit_score:{fit.get('phrase_fit_score')}",
+            f"phrase_fit_label:{fit.get('phrase_fit_label')}",
+            f"phrase_fit_reason:{fit.get('phrase_fit_reason')}",
+            f"allowed_as_primary:{str(bool(fit.get('allowed_as_primary'))).lower()}",
+            f"allowed_as_support:{str(bool(fit.get('allowed_as_support'))).lower()}",
+        ])
+        if not fit.get("allowed_as_support") and not fit.get("allowed_as_primary"):
+            continue
+        if _decesos_sensitive(segment_text, topic) and not any(term in normalize_text(path_str) for term in ("family", "home", "document", "shield", "calm", "peace", "health")):
+            continue
+        scored.append((str(candidate.get("cue") or broll_intent or ""), asset, score, reasons, category, str(candidate.get("source_name") or "local")))
 
-    if not best_match or best_score <= 0:
-        logger.info("[broll-asset] intent=%s matched=false asset=", intent)
-        logger.info("[broll-asset] skipped reason=no_local_asset")
-        return {"matched": False, "asset": None, "reason": "no_local_asset", "score": 0}
+    selected = select_best_candidates(
+        [(cue, asset, score, reasons) for cue, asset, score, reasons, _, _ in scored],
+        intent,
+        max_overlays=1,
+    )
+    if not selected:
+        # Feed the daily-cutaway text-category fallback below instead of returning:
+        # weak_intro-style intents produce zero selectable candidates by design.
+        selected = [("", None, 0.0, ["no_scored_selection"])]
 
-    _best_key = str(best_match.resolve())
-    _verified_entry = verified_by_path.get(_best_key)
-    _verified = bool(_verified_entry)
-    _source = str((_verified_entry or {}).get("source_name") or ("unverified_local" if not _manifest_found else ""))
-    _license = str((_verified_entry or {}).get("license_name") or "")
-    _commercial_use_ok = bool((_verified_entry or {}).get("commercial_use_ok"))
-    _attribution_required = bool((_verified_entry or {}).get("attribution_required"))
-    _tags = list((_verified_entry or {}).get("tags") or [])
-    _topics = list((_verified_entry or {}).get("topics") or [])
+    selected_cue, selected_asset, selected_score, selected_reasons = selected[0]
+    selected_category = ""
+    selected_source = "local"
+    for cue, asset, score, reasons, category, source in scored:
+        if asset == selected_asset and cue == selected_cue:
+            selected_category = category
+            selected_source = source
+            break
 
-    if _manifest_found and not _verified:
-        logger.info("[broll-asset] verified=false source=unverified_local license=")
-        logger.info("[broll-asset] skipped reason=unverified_local")
-        return {"matched": False, "asset": None, "reason": "unverified_local", "score": 0}
-    if _verified and not _commercial_use_ok:
-        logger.info("[broll-asset] verified=false source=%s license=%s", _source, _license)
-        logger.info("[broll-asset] skipped reason=commercial_use_not_ok")
-        return {"matched": False, "asset": None, "reason": "commercial_use_not_ok", "score": 0}
-    if _verified and not _license:
-        logger.info("[broll-asset] verified=false source=%s license=", _source)
-        logger.info("[broll-asset] skipped reason=license_missing")
-        return {"matched": False, "asset": None, "reason": "license_missing", "score": 0}
-
-    logger.info("[broll-asset] intent=%s matched=true asset=%s", intent, str(best_match))
-    logger.info("[broll-asset] verified=%s source=%s license=%s", str(_verified).lower(), _source or "unverified_local", _license or "none")
+    asset_id = asset_id_for(selected_source, str(selected_asset), None)
+    matched = bool(selected_asset and selected_score >= decision_threshold)
+    if not matched and str(base_decision.get("broll_mode") or "") in {"daily_fullframe_cutaway", "cutaway_fullscreen"} and float(base_decision.get("confidence") or 0.0) >= 0.75:
+        # OUTPUT-QUALITY-7: weak_intro-style intents carry no preferred categories so
+        # score_broll_candidate hard-rejects every asset (-999). For the high-confidence
+        # daily cutaway path, fall back to a CLEAR text→category mapping over the
+        # verified local assets — never generic stock.
+        _TEXT_CATEGORY_FALLBACK = (
+            (("familia", "tuyos", "hijos", "pareja"), ("family_protection", "family_relief")),
+            (("documento", "documentos", "tramite", "poliza", "contrato", "firmar"), ("documents_admin",)),
+            (("precio", "prima", "pago", "pagos", "ahorro", "ahorrar"), ("financial_planning",)),
+            (("tranquilidad", "calma", "proteger", "proteccion", "protege"), ("emotional_reassurance", "family_relief", "family_protection")),
+            (("salud", "medico", "hospital"), ("health_access",)),
+            (("cobertura", "seguro", "seguros", "vida"), ("practical_explanation", "family_protection")),
+        )
+        _norm_text = normalize_text(segment_text)
+        _fallback_categories: Tuple[str, ...] = tuple()
+        for _terms, _cats in _TEXT_CATEGORY_FALLBACK:
+            if any(term in _norm_text for term in _terms):
+                _fallback_categories = _cats
+                break
+        if _fallback_categories:
+            for _cue, _asset, _score, _reasons, _category, _source in scored:
+                if _asset is not None and str(_category or "").lower() in _fallback_categories and Path(str(_asset)).exists():
+                    selected_asset = _asset
+                    selected_score = max(float(decision_threshold), 75.0)
+                    selected_reasons = list(_reasons) + [f"text_category_fallback:{_category}"]
+                    selected_category = _category
+                    selected_source = _source
+                    asset_id = asset_id_for(selected_source, str(selected_asset), None)
+                    matched = True
+                    logger.info(
+                        "VPI_OUTPUT_QUALITY_BROLL_TEXT_CATEGORY_FALLBACK category=%s asset=%s",
+                        _category, str(_asset),
+                    )
+                    break
+    if not matched:
+        logger.info("BROLL_SKIPPED_REASON reason=low_confidence")
+    else:
+        logger.info(
+            "BROLL_SELECTED asset=%s source=%s score=%.2f category=%s",
+            selected_asset,
+            selected_source,
+            selected_score,
+            selected_category or selected_cue,
+        )
     return {
-        "matched": True,
-        "asset": str(best_match),
-        "asset_path": best_match,
-        "score": best_score,
-        "reason": "local_asset_match",
-        "verified": _verified,
-        "broll_asset_verified": _verified,
-        "broll_asset_source": _source or "unverified_local",
-        "broll_asset_license": _license,
-        "broll_asset_tags": _tags,
-        "broll_asset_topics": _topics,
-        "broll_asset_commercial_use_ok": bool(_commercial_use_ok if _verified else False),
-        "broll_asset_attribution_required": _attribution_required,
-        "verification_status": "verified_manifest" if _verified else "unverified_local",
+        "matched": matched,
+        "asset": str(selected_asset) if matched else "",
+        "source": selected_source if matched else "none",
+        "score": float(selected_score if matched else 0.0),
+        "reasons": selected_reasons if matched else ["low_confidence"],
+        "category": selected_category or selected_cue,
+        "asset_id": asset_id if matched else "",
+        "provider_video_id": "",
+        "route_used": str(base_decision.get("route_used") or "editorial_local"),
+        "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+    }
+
+
+def choose_vpi_broll_timing_strategy(
+    broll_decision: Optional[Dict[str, Any]] = None,
+    editorial_type: str = "",
+    segment_text: str = "",
+    words_with_timestamps: Optional[Sequence[Dict[str, Any]]] = None,
+    hook_strategy_final: str = "",
+    first_second_strength: float = 0.0,
+    caption_density: float = 0.0,
+    premium_restraint_mode: str = "",
+    motion_profile: str = "",
+    clip_duration: float = 0.0,
+    sensitive_topic: bool = False,
+) -> Dict[str, Any]:
+    decision = dict(broll_decision or {})
+    normalized_text = normalize_text(segment_text)
+    words: List[Dict[str, float]] = []
+    for item in words_with_timestamps or []:
+        if not isinstance(item, dict):
+            continue
+        words.append(
+            {
+                "word": normalize_text(str(item.get("word") or "")),
+                "start": float(item.get("start") or 0.0),
+                "end": float(item.get("end") or item.get("start") or 0.0),
+            }
+        )
+
+    # OUTPUT-QUALITY-7: the original 9-term list missed the core insurance vocabulary
+    # (seguro/proteccion/poliza/vida...), so the phrase matcher never fired and the
+    # relevance gate killed every b-roll on real VPI content.
+    _PHRASE_MATCH_TERMS = (
+        "familia", "hospital", "tramite", "documento", "documentos", "viaje", "ahorro",
+        "riesgo", "cobertura", "tranquilidad", "seguro", "seguros", "proteccion",
+        "proteger", "protege", "poliza", "prima", "vida", "salud", "decesos",
+        "contratar", "asesor", "prever", "claridad", "calma",
+    )
+    match_terms = [term for term in _PHRASE_MATCH_TERMS if term in normalized_text]
+    match_confidence = 0.0
+    timing_strategy = "no_broll"
+    start_time = 0.0
+    end_time = 0.0
+    duration = 0.0
+    entry_style = "no_transition"
+    exit_style = "no_transition"
+    should_return = False
+    reason = "default_no_broll"
+
+    restraint = normalize_text(premium_restraint_mode)
+    motion = normalize_text(motion_profile)
+    hook = normalize_text(hook_strategy_final)
+    has_strong_hook = float(first_second_strength or 0.0) >= 72.0 or "strong" in hook or "visual" in hook
+
+    if sensitive_topic or restraint == "sensitive_minimal" or motion == "sensitive_soft":
+        reason = "sensitive_or_sensitive_soft"
+    elif restraint == "no_extra_visual" and float(decision.get("confidence") or 0.0) < 0.8:
+        reason = "suppressed_by_restraint"
+    else:
+        phrase_match = None
+        if words and match_terms:
+            # Never land the cutaway inside the first-3s hook window: prefer the first
+            # match at >=4.0s; fall back to any match only if none exists later.
+            for word in words:
+                if float(word.get("start") or 0.0) >= 4.0 and any(term in word["word"] for term in match_terms):
+                    phrase_match = word
+                    break
+            if phrase_match is None:
+                for word in words:
+                    if any(term in word["word"] for term in match_terms):
+                        phrase_match = word
+                        break
+        if phrase_match:
+            phrase_start = max(0.0, float(phrase_match.get("start") or 0.0) - 0.12)
+            phrase_end = min(float(clip_duration or 0.0), float(phrase_match.get("end") or phrase_start) + 0.32)
+            timing_strategy = "phrase_matched_insert"
+            start_time = phrase_start
+            end_time = max(phrase_end, start_time + 1.8)
+            # Recommended perceptible cutaway length (1.8-2.4s); the daily gate
+            # requires >= 1.8s.
+            duration = min(2.4, max(1.8, end_time - start_time))
+            entry_style = "cut" if motion == "punchy" else "soft_fade"
+            exit_style = "cut" if motion == "punchy" else "soft_fade"
+            should_return = True
+            match_confidence = 0.9
+            reason = "matched_phrase_context"
+            logger.info("VPI_BROLL_PHRASE_MATCHED terms=%s start=%.2f end=%.2f", "|".join(match_terms), start_time, end_time)
+        elif clip_duration <= 15.0 and float(decision.get("confidence") or 0.0) >= 0.8 and not has_strong_hook:
+            timing_strategy = "short_cutaway"
+            start_time = max(3.0, min(float(clip_duration) * 0.30, float(clip_duration) - 2.0))
+            duration = min(1.8, max(1.0, float(clip_duration) * 0.10))
+            end_time = min(float(clip_duration), start_time + duration)
+            entry_style = "cut"
+            exit_style = "cut"
+            should_return = True
+            match_confidence = 0.55
+            reason = "short_clip_conservative_broll"
+        elif clip_duration > 15.0 and not has_strong_hook and caption_density < 7.0:
+            timing_strategy = "late_context_insert"
+            start_time = max(3.2, min(float(clip_duration) * 0.38, float(clip_duration) - 4.0))
+            duration = min(3.2, max(1.5, float(clip_duration) * 0.12))
+            end_time = min(float(clip_duration), start_time + duration)
+            entry_style = "soft_fade"
+            exit_style = "soft_fade"
+            should_return = True
+            match_confidence = 0.45
+            reason = "late_context_without_clear_phrase_match"
+
+    broll_relevance_score = round(float(match_confidence or 0.0), 2)
+    broll_relevance_gate_passed = bool(timing_strategy != "no_broll" and broll_relevance_score >= 0.65)
+    broll_skipped_unrelated = False
+    if timing_strategy != "no_broll" and not broll_relevance_gate_passed:
+        broll_skipped_unrelated = True
+        timing_strategy = "no_broll"
+        start_time = 0.0
+        end_time = 0.0
+        duration = 0.0
+        entry_style = "no_transition"
+        exit_style = "no_transition"
+        should_return = False
+        reason = "skipped_unrelated_low_relevance"
+        logger.info("VPI_BROLL_RELEVANCE_GATE_FAILED score=%.2f reason=%s", broll_relevance_score, reason)
+        logger.info("VPI_BROLL_SKIPPED_UNRELATED score=%.2f reason=%s", broll_relevance_score, reason)
+
+    if timing_strategy != "no_broll" and float(clip_duration or 0.0) > 0.0:
+        max_share = 0.35 * float(clip_duration or 0.0)
+        if duration > max_share > 0.0:
+            duration = max_share
+            end_time = min(float(clip_duration), start_time + duration)
+            reason = f"{reason}_capped_by_share"
+        if start_time < 3.0 and has_strong_hook:
+            start_time = max(start_time, 3.0)
+            end_time = min(float(clip_duration), start_time + duration)
+            if end_time <= start_time:
+                timing_strategy = "no_broll"
+                duration = 0.0
+                should_return = False
+                reason = "hook_strong_forced_no_broll"
+
+    if timing_strategy == "no_broll":
+        start_time = 0.0
+        end_time = 0.0
+        duration = 0.0
+        should_return = False
+        if sensitive_topic or restraint in {"sensitive_minimal", "no_extra_visual"}:
+            logger.info("VPI_BROLL_SKIPPED_BY_RESTRAINT reason=%s", reason)
+        else:
+            logger.info("VPI_BROLL_SKIPPED_NO_PHRASE_MATCH reason=%s", reason)
+        logger.info("VPI_BROLL_POLISH_WARNING reason=%s", reason)
+    else:
+        logger.info("VPI_BROLL_RETURN_TO_SPEAKER reason=%s", "payoff_or_cta_requires_speaker" if should_return else "no_return_needed")
+
+    logger.info(
+        "VPI_BROLL_TIMING_SELECTED strategy=%s start=%.2f end=%.2f duration=%.2f reason=%s",
+        timing_strategy,
+        start_time,
+        end_time,
+        duration,
+        reason,
+    )
+    return {
+        "broll_timing_strategy": timing_strategy,
+        "broll_start_time": round(float(start_time or 0.0), 2),
+        "broll_end_time": round(float(end_time or 0.0), 2),
+        "broll_duration": round(float(duration or 0.0), 2),
+        "broll_entry_style": entry_style,
+        "broll_exit_style": exit_style,
+        "broll_timing_reason": reason,
+        "broll_should_return_to_speaker": bool(should_return),
+        "broll_phrase_matched": bool(match_terms and timing_strategy != "no_broll"),
+        "broll_phrase_match_terms": match_terms,
+        "broll_phrase_match_confidence": round(float(match_confidence or 0.0), 2),
+        "broll_relevance_gate_passed": bool(broll_relevance_gate_passed),
+        "broll_relevance_score": float(broll_relevance_score),
+        "broll_skipped_unrelated": bool(broll_skipped_unrelated),
+        "broll_transition_sober": entry_style in {"cut", "soft_fade", "subtle_push"} and exit_style in {"cut", "soft_fade"},
+        "broll_return_to_speaker": bool(should_return),
+        "broll_return_reason": "payoff_or_cta_requires_speaker" if should_return else "no_return_needed",
+        "broll_status": "skipped_no_clear_phrase_match" if timing_strategy == "no_broll" and not match_terms else ("skipped_unrelated" if timing_strategy == "no_broll" and broll_skipped_unrelated else timing_strategy),
     }

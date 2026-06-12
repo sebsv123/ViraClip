@@ -217,6 +217,10 @@ def create_app(
     clips_dir = Path(runtime_config.temp_dir) / "clips"
     clips_dir.mkdir(parents=True, exist_ok=True)
     app.mount("/clips", StaticFiles(directory=str(clips_dir)), name="clips")
+    generated_dir = Path("/app/outputs/generated")
+    generated_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/generated", StaticFiles(directory=str(generated_dir), html=False), name="generated")
+    logger.info("GENERATED_STATIC_ROUTE_READY directory=%s exists=%s mounted=%s", generated_dir, generated_dir.exists(), True)
 
     app.include_router(tasks.router)
     app.include_router(admin_router)

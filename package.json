@@ -1,5 +1,15 @@
 {
+  "scripts": {
+    "remotion:preview": "remotion preview remotion/Root.tsx",
+    "remotion:render-overlay": "remotion render remotion/Root.tsx ViraClipOverlay out/remotion-overlay.webm"
+  },
   "devDependencies": {
+    "@remotion/cli": "^4.0.340",
     "@types/node": "^25.5.0"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "remotion": "^4.0.340"
   }
 }

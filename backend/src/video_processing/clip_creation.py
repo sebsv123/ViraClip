@@ -6,25 +6,22 @@ Handles video clip extraction, cropping, zoom effects, and final composition.
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
 import logging
+import json
 import subprocess
 import uuid
 import os
 import shutil
+import inspect
 import numpy as np
+import socket
 
 logger = logging.getLogger(__name__)
 
 
 def _get_ffmpeg_exe() -> str:
-    """Return ffmpeg binary path (imageio_ffmpeg if not in system PATH)."""
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        return system_ffmpeg
-    try:
-        import imageio_ffmpeg as _iio
-        return _iio.get_ffmpeg_exe()
-    except Exception:
-        return "ffmpeg"
+    """Return ffmpeg binary path, preferring system ffmpeg with NVENC."""
+    from src.utils.gpu_utils import get_ffmpeg_exe
+    return get_ffmpeg_exe()
 
 
 def _ffmpeg_codec_flags(quality: str = "high") -> List[str]:
@@ -52,6 +49,114 @@ def _run_ffmpeg_with_nvenc_fallback(
     logger.warning("[gpu] NVENC failed; retrying with libx264")
     logger.debug("[clip_creation] NVENC stderr: %s", result.stderr[-500:])
     return subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def _append_bt709_output_tags(cmd: List[str]) -> List[str]:
+    """
+    Preserve BT.709 / TV range metadata on FFmpeg outputs.
+
+    The base clip is created from a cropped/scaled pre-extraction segment and
+    then re-encoded by MoviePy. Without explicit tags, the output can lose color
+    metadata and drift into a visible red wash on some players.
+    """
+    return [
+        *cmd,
+        "-pix_fmt", "yuv420p",
+        "-colorspace", "bt709",
+        "-color_primaries", "bt709",
+        "-color_trc", "bt709",
+        "-color_range", "tv",
+    ]
+
+
+def _probe_color_metadata(path: Path) -> Dict[str, Any]:
+    """Best-effort FFprobe color metadata lookup for logging only."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=pix_fmt,color_range,color_space,color_transfer,color_primaries",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return {}
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams") or []
+        if not streams:
+            return {}
+        return {
+            key: streams[0].get(key)
+            for key in ("pix_fmt", "color_range", "color_space", "color_transfer", "color_primaries")
+        }
+    except Exception as exc:
+        logger.debug("[clip_creation] ffprobe color probe failed for %s: %s", path, exc)
+        return {}
+
+
+def _probe_first_frame_red_ratio(path: Path, sample_second: float = 2.0) -> Optional[float]:
+    """Best-effort red/green ratio probe for the first usable frame."""
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-of", "json",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if probe.returncode != 0 or not probe.stdout.strip():
+            return None
+        payload = json.loads(probe.stdout)
+        streams = payload.get("streams") or []
+        if not streams:
+            return None
+        width = int(streams[0].get("width") or 0)
+        height = int(streams[0].get("height") or 0)
+        if width <= 0 or height <= 0:
+            return None
+        frame = subprocess.run(
+            [
+                _get_ffmpeg_exe(),
+                "-ss", str(sample_second),
+                "-i", str(path),
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "-pix_fmt", "rgb24",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if frame.returncode != 0 or not frame.stdout:
+            return None
+        try:
+            import numpy as _np
+            arr = _np.frombuffer(frame.stdout, dtype=_np.uint8)
+            if arr.size < width * height * 3:
+                return None
+            arr = arr[: width * height * 3].reshape((-1, 3))
+            r = float(arr[:, 0].mean())
+            g = float(arr[:, 1].mean())
+            if g <= 0:
+                return None
+            return r / g
+        except Exception:
+            return None
+    except Exception:
+        return None
 
 _PLATFORM_VF: dict = {
     "tiktok":   "crop=ih*9/16:ih:(iw-ih*9/16)/2:0,scale=1080:1920",
@@ -223,6 +328,7 @@ def create_optimized_clip(
 
     if segment is None:
         segment = {}
+    _caller = inspect.stack()[1].function if len(inspect.stack()) > 1 else "unknown"
 
     # ── GUARD: video file must exist before ANY processing ──────────────────
     video_path = Path(video_path)
@@ -249,8 +355,21 @@ def create_optimized_clip(
 
     guard = ResourceGuard()
     temp_segment_path = None
+    _runtime_host = socket.gethostname()
     try:
         with guard.manage():
+            logger.info(
+                "VPI_CREATE_OPTIMIZED_CLIP_ENTER host=%s file=%s caller=%s input=%s output=%s start=%s end=%s add_subtitles=%s target_platform=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(video_path),
+                str(output_path),
+                str(start_time),
+                str(end_time),
+                str(add_subtitles).lower(),
+                target_platform,
+            )
             # 1. Word Boundary Snapping
             start_time, end_time = snap_to_word_boundary(video_path, start_time, end_time)
             duration = end_time - start_time
@@ -281,6 +400,13 @@ def create_optimized_clip(
             temp_segment_path = video_path.parent / f"temp_segment_{uuid.uuid4().hex}.mp4"
 
             logger.info(f"🔧 FFmpeg pre-extraction: {duration:.1f}s segment from {video_path.name}")
+            logger.info(
+                "VPI_BASE_CLIP_RUNTIME_FILE host=%s file=%s input=%s output=%s",
+                _runtime_host,
+                __file__,
+                str(video_path),
+                str(output_path),
+            )
             _vf = _PLATFORM_VF.get(target_platform, _PLATFORM_VF["tiktok"])
             _ffmpeg_base = [
                 _get_ffmpeg_exe(), "-y",
@@ -291,22 +417,54 @@ def create_optimized_clip(
                 "-map", "0:a?",
             ]
             if _vf:
-                _ffmpeg_base += ["-vf", _vf]
+                _ffmpeg_base += ["-vf", f"{_vf},format=yuv420p"]
+            else:
+                _ffmpeg_base += ["-vf", "format=yuv420p"]
             _codec_flags = _ffmpeg_codec_flags("medium")
-            ffmpeg_cmd = _ffmpeg_base + [
+            ffmpeg_cmd = _append_bt709_output_tags(_ffmpeg_base + [
                 *_codec_flags,
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(temp_segment_path)
-            ]
-            ffmpeg_fallback_cmd = _ffmpeg_base + [
+            ])
+            ffmpeg_fallback_cmd = _append_bt709_output_tags(_ffmpeg_base + [
                 *_libx264_flags("medium"),
                 "-c:a", "aac",
                 "-b:a", "128k",
                 "-movflags", "+faststart",
                 str(temp_segment_path)
-            ]
+            ])
+            logger.info(
+                "VPI_BASE_CLIP_FILTER_CHAIN host=%s input=%s output=%s filter=%s",
+                _runtime_host,
+                str(video_path),
+                str(temp_segment_path),
+                str(_vf or "format=yuv420p"),
+            )
+            logger.info(
+                "VPI_TEMP_GENERAL_WRITE_TRACE host=%s file=%s caller=%s input_path=%s output_path=%s filter=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(video_path),
+                str(temp_segment_path),
+                str(_vf or "format=yuv420p"),
+            )
+            logger.info(
+                "VPI_BASE_CLIP_FFMPEG_COMMAND host=%s cmd=%s",
+                _runtime_host,
+                " ".join(ffmpeg_cmd),
+            )
+            logger.info(
+                "VPI_TEMP_GENERAL_FFMPEG_COMMAND host=%s file=%s caller=%s input_path=%s output_path=%s cmd=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(video_path),
+                str(temp_segment_path),
+                " ".join(ffmpeg_cmd),
+            )
 
             ffmpeg_result = _run_ffmpeg_with_nvenc_fallback(
                 ffmpeg_cmd,
@@ -321,6 +479,13 @@ def create_optimized_clip(
 
             segment_size = temp_segment_path.stat().st_size / (1024*1024)
             logger.info(f"✅ FFmpeg extracted {segment_size:.1f}MB segment → MoviePy")
+            logger.info(
+                "VPI_BASE_COLOR_TAGS_PRESERVED host=%s input=%s output=%s metadata=%s",
+                _runtime_host,
+                str(video_path),
+                str(temp_segment_path),
+                _probe_color_metadata(temp_segment_path),
+            )
 
             # MoviePy now loads only the small pre-extracted segment
             video_for_moviepy = temp_segment_path
@@ -438,10 +603,7 @@ def create_optimized_clip(
                 final_stack[0] = processed_clip
 
             # Hook Title
-            if hook_title and beta_clean:
-                logger.info("[beta-clean] title/headline overlay skipped")
-                logger.info("[beta-clean] top text overlay skipped")
-            elif hook_title:
+            if hook_title:
                 _hook_resolved = _font_path
                 if not _hook_resolved:
                     try:
@@ -525,6 +687,24 @@ def create_optimized_clip(
 
             # Remove audio_codec from encoding_settings to avoid duplicate with explicit arg
             encoding_settings.pop("audio_codec", None)
+            _color_tags = [
+                "-pix_fmt", "yuv420p",
+                "-colorspace", "bt709",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709",
+                "-color_range", "tv",
+            ]
+            encoding_settings["ffmpeg_params"] = list(encoding_settings.get("ffmpeg_params") or []) + _color_tags
+            logger.info(
+                "VPI_TEMP_GENERAL_MOVIEPY_WRITE host=%s file=%s caller=%s output=%s codec=%s preset=%s fps=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(output_path),
+                str(encoding_settings.get("codec")),
+                str(encoding_settings.get("preset")),
+                str(_fps_used),
+            )
             try:
                 final_clip.write_videofile(
                     str(output_path),
@@ -546,9 +726,54 @@ def create_optimized_clip(
                     fps=_fps_used,
                     codec="libx264",
                     preset="fast",
-                    ffmpeg_params=["-crf", "22"],
+                    ffmpeg_params=[
+                        "-crf", "22",
+                        "-pix_fmt", "yuv420p",
+                        "-colorspace", "bt709",
+                        "-color_primaries", "bt709",
+                        "-color_trc", "bt709",
+                        "-color_range", "tv",
+                    ],
                 )
 
+            logger.info(
+                "VPI_BASE_OUTPUT_COLOR_PROBE host=%s output=%s metadata=%s",
+                _runtime_host,
+                str(output_path),
+                _probe_color_metadata(output_path),
+            )
+            logger.info(
+                "VPI_TEMP_GENERAL_OUTPUT_PROBE host=%s file=%s caller=%s output=%s metadata=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(output_path),
+                _probe_color_metadata(output_path),
+            )
+            _temp_red_ratio = _probe_first_frame_red_ratio(output_path)
+            if _temp_red_ratio is not None:
+                logger.info(
+                    "VPI_TEMP_GENERAL_RED_RATIO host=%s file=%s caller=%s output=%s red_ratio=%.4f",
+                    _runtime_host,
+                    __file__,
+                    _caller,
+                    str(output_path),
+                    _temp_red_ratio,
+                )
+            logger.info(
+                "VPI_CREATE_OPTIMIZED_CLIP_OUTPUT host=%s file=%s caller=%s output=%s temp_segment=%s",
+                _runtime_host,
+                __file__,
+                _caller,
+                str(output_path),
+                str(temp_segment_path),
+            )
+            logger.info(
+                "VPI_CREATE_OPTIMIZED_CLIP_OUTPUT_PROBE host=%s output=%s metadata=%s",
+                _runtime_host,
+                str(output_path),
+                _probe_color_metadata(output_path),
+            )
             logger.info(f"✅ Render Complete: {output_path}")
             return True
 
