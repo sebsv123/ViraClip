@@ -1,0 +1,8 @@
+add '.gitignore'
+add 'checkpoints/gitignore_cleanup_baseline_9/dry_run_add.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/gitignore_before.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/large_untracked_before.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/status_after_gitignore.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/status_before.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/untracked_after_gitignore.txt'
+add 'checkpoints/gitignore_cleanup_baseline_9/untracked_before.txt'

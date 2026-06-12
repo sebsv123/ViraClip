@@ -91,3 +91,42 @@ backend/test_output.txt
 # Lockfiles (regenerate on install)
 frontend/bun.lockb
 backend/uv.lock
+
+# ViraClip generated outputs / heavy local media
+outputs/
+outputs/generated/
+outputs/tasks/
+outputs/temp/
+outputs/tmp/
+
+# Local heavy asset banks not committed in this repo snapshot
+assets/broll/
+assets/overlays_staging/
+assets/fonts/
+
+# Accidental frontend trash / local copies
+frontend/~/
+
+# Checkpoint heavy artifacts
+checkpoints/**/frames/
+checkpoints/**/*.jpg
+checkpoints/**/*.jpeg
+checkpoints/**/*.png
+checkpoints/**/*.mp4
+checkpoints/**/*.mov
+checkpoints/**/*.mkv
+checkpoints/**/worker_trace.txt
+checkpoints/**/backend_trace.txt
+checkpoints/**/worker_trace_full.txt
+checkpoints/**/backend_trace_full.txt
+
+# Reports and generated diagnostics
+reports/
+task_progress.md
+*debug**.py
+fix_*.py
+
+# Python/Jupyter noise
+**pycache**/
+*.py[cod]
+.ipynb_checkpoints/

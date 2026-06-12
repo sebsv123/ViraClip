@@ -1,0 +1,7 @@
+3.0G	outputs
+640M	assets/broll
+229M	assets/overlays_staging
+21M	assets/fonts
+1.7G	frontend/~
+403M	checkpoints
+13M	reports
