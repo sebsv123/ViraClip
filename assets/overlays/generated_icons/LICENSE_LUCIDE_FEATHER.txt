@@ -1,0 +1,98 @@
+Generated Icons — License & Attribution Notice
+===============================================
+
+These generated animated icon overlays are derived from local SVG icon sources.
+
+Generated icon MP4s were derived from local Lucide SVG assets.
+Keep this license file with generated icon assets when distributing/copying the asset package.
+No visible on-video attribution is required by this metadata policy.
+
+Primary sources:
+- Lucide icons — ISC License
+- Feather icon lineage where applicable — MIT License terms compatible with commercial use
+
+Repository policy for these generated overlays:
+- commercial_use_ok: true
+- attribution_required: false
+- notice_preservation_required: true
+
+Keep this notice file with distributed asset packs.
+
+===============================================================================
+ISC License (Lucide)
+===============================================================================
+
+ISC License
+
+Copyright (c) 2024, Lucide Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+===============================================================================
+MIT License (Feather — upstream lineage)
+===============================================================================
+
+MIT License
+
+Copyright (c) 2013-2024 Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+===============================================================================
+Attribution Table — Source SVGs
+===============================================================================
+
+| # | Family         | Source SVG Path                                        | Lucide Class                          | Fallback? |
+|---|----------------|--------------------------------------------------------|---------------------------------------|-----------|
+| 1 | checkmark      | assets/icons/checklist/check-check.svg                 | lucide-check-check                    | No        |
+| 2 | shield         | assets/icons/shield/shield-plus.svg                    | lucide-shield-plus                    | No        |
+| 3 | heart          | assets/icons/health/heart-pulse.svg                    | lucide-heart-pulse                    | No        |
+| 4 | warning        | assets/icons/warning/octagon-alert.svg                 | lucide-octagon-alert                  | No        |
+| 5 | document_check | assets/icons/document/file-search-corner.svg           | lucide-file-search-corner             | No        |
+| 6 | medical_cross  | assets/icons/hospital/hospital.svg                     | lucide-hospital                       | No        |
+| 7 | phone          | assets/icons/phone/smartphone.svg                      | lucide-smartphone                     | No        |
+| 8 | calendar       | assets/icons/calendar/calendar-search.svg              | lucide-calendar-search                | No        |
+| 9 | map_pin        | assets/icons/home/house.svg                            | lucide-house                          | Yes       |
+|10 | chat_bubble    | assets/icons/family/contact.svg                        | lucide-contact                        | Yes       |
+|11 | euro           | assets/icons/euro/badge-euro.svg                       | lucide-badge-euro                     | No        |
+|12 | briefcase      | assets/icons/briefcase/briefcase-business.svg          | lucide-briefcase-business             | No        |
+
+===============================================================================
+Commercial Use Statement
+===============================================================================
+
+All 12 source SVGs are Lucide icons licensed under the ISC License, which
+explicitly permits commercial use, modification, and distribution with
+attribution. The 2 fallback SVGs (house.svg, contact.svg) are also Lucide
+icons under the same ISC license.
+
+ISC is a permissive open-source license functionally equivalent to MIT.
+Both licenses are compatible with commercial use in ViraClip Beta Clean VPI.
+
+Generated animated icon overlays inherit the same permissive terms.

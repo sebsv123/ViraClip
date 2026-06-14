@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Spotlight cone -->
+  <polygon points="50,10 20,90 80,90" stroke="#F1C40F" stroke-width="2.5" fill="none" opacity="0.5"/>
+  <!-- Light source -->
+  <circle cx="50" cy="10" r="6" fill="#F1C40F" opacity="0.8"/>
+  <!-- Highlighted area -->
+  <ellipse cx="50" cy="85" rx="25" ry="6" stroke="#F1C40F" stroke-width="2" fill="none"/>
+  <!-- Rays -->
+  <line x1="50" y1="10" x2="35" y2="50" stroke="#F1C40F" stroke-width="1" opacity="0.3"/>
+  <line x1="50" y1="10" x2="50" y2="55" stroke="#F1C40F" stroke-width="1" opacity="0.3"/>
+  <line x1="50" y1="10" x2="65" y2="50" stroke="#F1C40F" stroke-width="1" opacity="0.3"/>
+</svg>

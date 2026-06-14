@@ -1,0 +1,12 @@
+PASS p1_duration_floor_1_4
+PASS p2_duration_ceil_2_2
+PASS p3_default_in_range
+PASS p4_crossfade_in_range
+PASS p5_output_1080x1920_no_deform
+PASS p6_audio_main_intact
+PASS p7_caption_layer_order_structural
+PASS p8_hook_not_overlapped
+PASS p9_flagged_skip
+PASS p10_corrupt_asset_fallback
+
+RESULT: 10 passed, 0 failed

@@ -1,0 +1,15 @@
+PASS c1_single_shift
+PASS c2_cumulative
+PASS c3_word_dropped
+PASS c4_cut_adjusted_or_rejected
+PASS c5_dead_air_before_closure_kept
+PASS c6_closure_contained
+PASS c7_captions_from_post_words
+PASS c8_ass_inside_master
+PASS c9_monotonic
+PASS c10_A0_closure_not_truncated
+PASS c11_contract_present
+PASS c14_pure_no_side_effect
+PASS c15_no_sfx_typewriter
+
+RESULT: 13 passed, 0 failed

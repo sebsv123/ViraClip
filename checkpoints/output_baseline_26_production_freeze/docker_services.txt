@@ -1,0 +1,6 @@
+NAMES               STATUS                    IMAGE
+viraclip-frontend   Up 32 hours (healthy)     viraclip-frontend
+viraclip-worker     Up 30 minutes (healthy)   viraclip-worker
+viraclip-backend    Up 32 hours (healthy)     viraclip-backend
+viraclip-postgres   Up 4 days (healthy)       postgres:16-alpine
+viraclip-redis      Up 4 days (healthy)       redis:7-alpine

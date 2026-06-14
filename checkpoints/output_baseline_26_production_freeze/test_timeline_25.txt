@@ -1,0 +1,14 @@
+PASS c1_canonical_full_coverage
+PASS c1b_stale_would_truncate
+PASS c2_tail_appended
+PASS c3_coverage
+PASS c4_closure_in_keep
+PASS c5_sum_matches
+PASS c6_remap_single
+PASS c8_ass_inside
+PASS c11_legit_tail
+PASS c12_overrun_clamp
+PASS c13_uncovered_blocked
+PASS c15_gate
+
+RESULT: 12 passed, 0 failed

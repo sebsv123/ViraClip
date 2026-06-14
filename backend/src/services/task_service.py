@@ -3167,6 +3167,8 @@ _BACKSTAGE_PHRASES = (
     "me queda por decir", "no tengo tanto material", "puedes hablar tambien de",
     "esta grabando", "estamos grabando", "lo repito", "repite eso", "quita eso",
     "editalo", "quitalo", "corten", "y ya esta bueno",
+    # OUTPUT-SELECTION-10B: meta-reading / camera-aware lines (vídeo 3 stress)
+    "estoy leyendo", "no se ve que",
 )
 _BACKSTAGE_WEAK_WORDS = (
     "camara", "grabando", "toma", "plano", "micro", "microfono", "repite",
@@ -3182,7 +3184,9 @@ _EXTRA_VALUE_STEMS = (
 
 def _classify_transcript_line_for_publishing(text: str) -> str:
     """Classify a transcript line as backstage / valuable / neutral."""
-    normalized = _normalize_text_loose(text)
+    # OUTPUT-SELECTION-10B: hard normalizer — veto lists are unaccented and
+    # punctuation-free; the loose normalizer silently missed "Perdón."/"cámara".
+    normalized = _normalize_text_hard(text)
     if not normalized:
         return "neutral"
     has_value = (
@@ -3754,11 +3758,11 @@ def _apply_speech_closure_guard(
         return
 
     last = in_window[-1]
-    last_norm = _normalize_text_loose(last["t"]).strip()
+    last_norm = _normalize_text_hard(last["t"])
     last_has_punct = str(last["t"]).rstrip().endswith(_STRONG_CLOSE_PUNCT)
     next_after = next((w for w in words if w["s"] >= last["e"] - 0.01 and w["s"] > last["s"]), None)
     gap_after_last = (next_after["s"] - last["e"]) if next_after else 10.0
-    tail_tokens = [_normalize_text_loose(w["t"]).strip() for w in in_window[-3:]]
+    tail_tokens = [_normalize_text_hard(w["t"]) for w in in_window[-3:]]
     open_ending = last_norm in _OPEN_STRUCTURE_ENDINGS or (
         len(tail_tokens) >= 2 and tail_tokens[-2] in ("proteger", "es", "lo", "la") and last_norm in _OPEN_STRUCTURE_ENDINGS
     )
@@ -3794,7 +3798,7 @@ def _apply_speech_closure_guard(
     forward = [w for w in words if end_s - 0.6 <= w["s"] <= hard_max_end]
 
     # Backstage screening of the extension zone.
-    forward_blob = " ".join(_normalize_text_loose(w["t"]).strip() for w in forward)
+    forward_blob = " ".join(_normalize_text_hard(w["t"]) for w in forward)
     forward_backstage = any(ph in forward_blob for ph in _BACKSTAGE_PHRASES)
 
     best_end = None
@@ -3953,11 +3957,11 @@ def _apply_narrative_closure_planner(
         return
 
     last = in_window[-1]
-    last_norm = _normalize_text_loose(last["t"]).strip()
+    last_norm = _normalize_text_hard(last["t"])
     last_has_punct = str(last["t"]).rstrip().endswith(_STRONG_CLOSE_PUNCT)
-    tail_norm = " ".join(_normalize_text_loose(w["t"]).strip() for w in in_window[-14:])
+    tail_norm = " ".join(_normalize_text_hard(w["t"]) for w in in_window[-14:])
     after = [w for w in words if end_s - 0.05 <= w["s"] <= end_s + 9.0]
-    next3_norm = " ".join(_normalize_text_loose(w["t"]).strip() for w in after[:3])
+    next3_norm = " ".join(_normalize_text_hard(w["t"]) for w in after[:3])
 
     open_connector_end = (last_norm in _OPEN_STRUCTURE_ENDINGS) or not last_has_punct
     contrast_setup = any(ph in tail_norm for ph in _NARRATIVE_CONTRAST_SETUPS)
@@ -3998,7 +4002,7 @@ def _apply_narrative_closure_planner(
     zone = [w for w in words if end_s - 0.3 <= w["s"] <= hard_max_end]
     # Cap the zone at the first backstage / meta-production phrase.
     bts_cap = None
-    zone_norms = [_normalize_text_loose(w["t"]).strip() for w in zone]
+    zone_norms = [_normalize_text_hard(w["t"]) for w in zone]
     for i in range(len(zone)):
         window_blob = " ".join(zone_norms[i:i + 5])
         if any(ph in window_blob for ph in _BACKSTAGE_PHRASES) or any(
@@ -4092,6 +4096,237 @@ def _apply_narrative_closure_planner(
     logger.info(
         "VPI_OUTPUT_NARRATIVE_FINAL_CLOSE_SELECTED task_id=%s clip_order=%s end=%.2f changed=false reason=narrative_closure_weak",
         task_id, clip_order, end_s,
+    )
+
+
+# ── OUTPUT-SELECTION-10: clean opening planner ────────────────────────────────
+_NARRATIVE_WEAK_START_CONNECTORS = (
+    "y", "pero", "porque", "por eso", "precisamente", "entonces", "ahi",
+    "eso", "este tipo", "tambien", "sino", "que", "es decir", "ademas",
+)
+_NARRATIVE_OPENING_BLOCK_PHRASES = (
+    "hola", "hoy vengo a hablarte", "hoy vengo a hablar", "bienvenidos",
+    "perdon", "me equivoque", "otra vez", "no no", "vamos de nuevo",
+    "lo digo otra vez", "repito",
+)
+
+
+def _normalize_text_hard(text: str) -> str:
+    """Accent- and punctuation-stripping normalizer: 'Perdón.' -> 'perdon'.
+
+    _normalize_text_loose keeps accents and punctuation, so phrase screens
+    against unaccented phrase lists silently fail on real Whisper tokens.
+    """
+    import re as _re
+    import unicodedata as _ud
+    decomposed = _ud.normalize("NFKD", (text or "").lower())
+    ascii_text = "".join(ch for ch in decomposed if not _ud.combining(ch))
+    ascii_text = _re.sub(r"[^a-z0-9\s]", " ", ascii_text)
+    return _re.sub(r"\s+", " ", ascii_text).strip()
+
+
+def _apply_narrative_opening_planner(
+    *,
+    task_id: str,
+    segment: Dict[str, Any],
+    cached_words: Optional[List[Dict[str, Any]]],
+    clip_order: int = 0,
+    video_duration_s: Optional[float] = None,
+) -> None:
+    """Symmetric counterpart of the narrative closure planner for the OPENING.
+
+    A clip must not start mid-sentence or on an open connector ("Y…", "Por
+    eso…", "del pasaje, para que…").  When the start is weak it extends
+    backwards 0.3-8.5s to the nearest autonomous sentence start — unless the
+    backward zone contains backstage/meta/greeting/retake material — and falls
+    back to a forward trim to the next clean sentence start.  If neither works
+    the segment is flagged needs_review reason=opening_context_weak.  Runs
+    BEFORE the post-trim caption contract so captions stay aligned, and the
+    hook is burned relative to the final start so it stays in the first 3s.
+    """
+    start_s = parse_timestamp_to_seconds(str(segment.get("start_time") or "00:00"))
+    end_s = parse_timestamp_to_seconds(str(segment.get("end_time") or "00:00"))
+    if end_s <= start_s:
+        return
+    words: List[Dict[str, Any]] = []
+    for w in cached_words or []:
+        ws = _word_time_seconds(w, "start")
+        we = _word_time_seconds(w, "end")
+        token = str(w.get("text") or "").strip()
+        if ws is None or we is None or not token:
+            continue
+        words.append({"s": ws, "e": we, "t": token})
+    if not words:
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_OPENING_AUDIT task_id=%s clip_order=%s result=skipped reason=no_word_timings",
+            task_id, clip_order,
+        )
+        return
+    words.sort(key=lambda x: x["s"])
+    in_window = [w for w in words if w["s"] >= start_s - 0.02 and w["s"] < end_s]
+    if not in_window:
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_OPENING_AUDIT task_id=%s clip_order=%s result=skipped reason=no_words_in_window",
+            task_id, clip_order,
+        )
+        return
+
+    first = in_window[0]
+    first_raw = str(first["t"]).strip().lstrip("¿¡\"'(")
+    first_norm = _normalize_text_hard(first["t"])
+    head_norm = " ".join(_normalize_text_hard(w["t"]) for w in in_window[:3])
+    prev = next((w for w in reversed(words) if w["e"] <= first["s"] + 0.01 and w["s"] < first["s"]), None)
+    prev_has_punct = bool(prev) and str(prev["t"]).rstrip().endswith(_STRONG_CLOSE_PUNCT)
+    gap_before = (first["s"] - prev["e"]) if prev else 10.0
+
+    lowercase_start = bool(first_raw) and first_raw[0].isalpha() and first_raw[0].islower()
+    midsentence_before = bool(prev) and not prev_has_punct and gap_before < 0.6
+    connector_start = any(
+        head_norm.startswith(ph) for ph in _NARRATIVE_WEAK_START_CONNECTORS
+    ) and first_norm not in ("yo",)
+    weak_start = lowercase_start or midsentence_before or connector_start
+
+    logger.info(
+        "VPI_OUTPUT_SELECTION_10B_HARD_NORMALIZER_APPLIED screens=classify_line|s6_tail|s6_forward|closure_tail|closure_zone|opening_zone"
+    )
+    logger.info(
+        "VPI_OUTPUT_NARRATIVE_OPENING_AUDIT task_id=%s clip_order=%s start=%.2f first_word=%s lowercase=%s midsentence_before=%s connector=%s weak=%s",
+        task_id, clip_order, start_s, first["t"][:24],
+        str(lowercase_start).lower(), str(midsentence_before).lower(),
+        str(connector_start).lower(), str(weak_start).lower(),
+    )
+    segment["narrative_pre_start_s"] = round(start_s, 2)
+    if not weak_start:
+        segment["narrative_final_start_s"] = round(start_s, 2)
+        segment["narrative_opening_shift_seconds"] = 0.0
+        segment["narrative_opening_reason"] = "already_clean"
+        segment["narrative_opening_confidence"] = 0.9
+        segment["opening_context_weak"] = False
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_FINAL_OPENING_SELECTED task_id=%s clip_order=%s start=%.2f changed=false reason=already_clean",
+            task_id, clip_order, start_s,
+        )
+        return
+
+    logger.info(
+        "VPI_OUTPUT_NARRATIVE_OPEN_START_DETECTED task_id=%s clip_order=%s head=%s",
+        task_id, clip_order, " ".join(w["t"] for w in in_window[:6])[:80],
+    )
+
+    def _zone_blocked(z_start: float, z_end: float) -> bool:
+        zone_norm = " ".join(
+            _normalize_text_hard(w["t"])
+            for w in words if z_start - 0.05 <= w["s"] < z_end
+        )
+        padded = f" {zone_norm} "
+        return any(f" {ph} " in padded or padded.strip().startswith(ph) for ph in _NARRATIVE_OPENING_BLOCK_PHRASES) or any(
+            ph in zone_norm for ph in _BACKSTAGE_PHRASES
+        ) or any(ph in zone_norm for ph in _NARRATIVE_META_PHRASES)
+
+    def _is_sentence_start(idx_word: Dict[str, Any]) -> bool:
+        w_prev = next((w for w in reversed(words) if w["e"] <= idx_word["s"] + 0.01 and w["s"] < idx_word["s"]), None)
+        if w_prev is None:
+            return True
+        w_gap = idx_word["s"] - w_prev["e"]
+        return (str(w_prev["t"]).rstrip().endswith(_STRONG_CLOSE_PUNCT) and w_gap >= 0.05) or w_gap >= 0.7
+
+    def _starts_weak(idx: int, seq: List[Dict[str, Any]]) -> bool:
+        head = " ".join(_normalize_text_hard(w["t"]) for w in seq[idx:idx + 3])
+        return any(head.startswith(ph) for ph in _NARRATIVE_WEAK_START_CONNECTORS)
+
+    # 1) Backward extension: nearest autonomous sentence start within 0.3-8.5s.
+    back_zone = [w for w in words if start_s - 8.5 <= w["s"] < start_s - 0.25]
+    new_start = None
+    candidate_reason = ""
+    confidence = 0.0
+    for idx in range(len(back_zone) - 1, -1, -1):
+        w = back_zone[idx]
+        if not _is_sentence_start(w):
+            continue
+        if _starts_weak(idx, back_zone):
+            continue
+        if _zone_blocked(w["s"], start_s):
+            logger.info(
+                "VPI_OUTPUT_NARRATIVE_OPENING_BLOCKED_BY_BTS task_id=%s clip_order=%s zone=%.2f-%.2f",
+                task_id, clip_order, w["s"], start_s,
+            )
+            break
+        new_start = max(0.0, w["s"] - 0.15)
+        candidate_reason = "backward_extension_to_sentence_start"
+        confidence = 0.85
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_OPENING_BACKWARD_EXTENSION_FOUND task_id=%s clip_order=%s new_start=%.2f shift=%.2f first=%s",
+            task_id, clip_order, new_start, start_s - new_start, w["t"][:24],
+        )
+        break
+
+    # 2) Forward trim fallback: drop the orphan fragment up to the next clean start.
+    if new_start is None:
+        clip_dur = end_s - start_s
+        # OUTPUT-SELECTION-10B: cap raised 6s/40% -> 8s/45% (a clean opening a
+        # couple of seconds further in beats keeping a mid-sentence fragment);
+        # the >=8s remaining-clip guard below still protects short clips.
+        fwd_cap = min(8.0, clip_dur * 0.45)
+        fwd_limit = start_s + fwd_cap
+        segment["opening_forward_trim_cap_s"] = round(fwd_cap, 2)
+        logger.info(
+            "VPI_OUTPUT_SELECTION_10B_FORWARD_TRIM_CAP task_id=%s clip_order=%s cap=%.2f clip_dur=%.2f",
+            task_id, clip_order, fwd_cap, clip_dur,
+        )
+        fwd_zone = [w for w in in_window if w["s"] > start_s + 0.2 and w["s"] <= fwd_limit]
+        for idx, w in enumerate(fwd_zone):
+            if not _is_sentence_start(w):
+                continue
+            if _starts_weak(idx, fwd_zone):
+                continue
+            if end_s - w["s"] < 8.0:
+                break
+            new_start = max(start_s, w["s"] - 0.15)
+            candidate_reason = "forward_trim_to_sentence_start"
+            confidence = 0.75
+            segment["opening_forward_trim_applied_s"] = round(new_start - start_s, 2)
+            segment["opening_forward_trim_reason"] = "orphan_fragment_dropped_to_sentence_start"
+            logger.info(
+                "VPI_OUTPUT_NARRATIVE_OPENING_FORWARD_TRIM_EXTENDED task_id=%s clip_order=%s trim=%.2f new_start=%.2f first=%s",
+                task_id, clip_order, new_start - start_s, new_start, w["t"][:24],
+            )
+            break
+
+    if new_start is None:
+        segment["narrative_final_start_s"] = round(start_s, 2)
+        segment["narrative_opening_shift_seconds"] = 0.0
+        segment["narrative_opening_reason"] = "opening_context_weak"
+        segment["narrative_opening_confidence"] = 0.3
+        segment["opening_context_weak"] = True
+        segment["needs_review_reason"] = "opening_context_weak"
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_OPENING_CONTEXT_WEAK task_id=%s clip_order=%s start=%.2f",
+            task_id, clip_order, start_s,
+        )
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_FINAL_OPENING_SELECTED task_id=%s clip_order=%s start=%.2f changed=false reason=opening_context_weak",
+            task_id, clip_order, start_s,
+        )
+        return
+
+    shift = new_start - start_s
+    preview = " ".join(w["t"] for w in words if new_start - 0.05 <= w["s"] <= new_start + 4.0)[:120]
+    segment["narrative_final_start_s"] = round(new_start, 2)
+    segment["narrative_opening_shift_seconds"] = round(shift, 2)
+    segment["narrative_opening_reason"] = candidate_reason
+    segment["narrative_opening_preview"] = preview
+    segment["narrative_opening_confidence"] = round(confidence, 2)
+    segment["opening_context_weak"] = False
+    segment["start_time"] = _format_mmss_precise(new_start)
+    segment["refined_start_time"] = segment["start_time"]
+    segment["clean_final_start_s"] = round(new_start, 2)
+    logger.info(
+        "VPI_OUTPUT_NARRATIVE_OPENING_EXTENDED task_id=%s clip_order=%s old_start=%.2f new_start=%.2f shift=%.2f reason=%s",
+        task_id, clip_order, start_s, new_start, shift, candidate_reason,
+    )
+    logger.info(
+        "VPI_OUTPUT_NARRATIVE_FINAL_OPENING_SELECTED task_id=%s clip_order=%s start=%.2f changed=true reason=%s preview=%s",
+        task_id, clip_order, new_start, candidate_reason, preview[:90],
     )
 
 
@@ -7152,6 +7387,22 @@ class TaskService:
                     logger.warning(
                         "VPI_OUTPUT_NARRATIVE_FINAL_CLOSE_SELECTED task_id=%s clip_order=%d changed=false reason=exception:%s",
                         task_id, _clean_idx + 1, _narrative_e,
+                    )
+                try:
+                    _pre_opening_start_marker = str(_seg.get("start_time") or "")
+                    _apply_narrative_opening_planner(
+                        task_id=task_id,
+                        segment=_seg,
+                        cached_words=_cached_words_for_output_selection,
+                        clip_order=_clean_idx + 1,
+                        video_duration_s=_video_dur,
+                    )
+                    if str(_seg.get("start_time") or "") != _pre_opening_start_marker:
+                        _closure_changed_end = True
+                except Exception as _opening_e:
+                    logger.warning(
+                        "VPI_OUTPUT_NARRATIVE_FINAL_OPENING_SELECTED task_id=%s clip_order=%d changed=false reason=exception:%s",
+                        task_id, _clean_idx + 1, _opening_e,
                     )
                 try:
                     _build_post_trim_caption_contract(

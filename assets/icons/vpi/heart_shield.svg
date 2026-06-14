@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Shield outline -->
+  <path d="M50 8 L18 22 L18 48 C18 68 32 82 50 90 C68 82 82 68 82 48 L82 22 Z"
+        stroke="#4A90D9" stroke-width="3" fill="none"/>
+  <!-- Heart inside -->
+  <path d="M50 38 C50 38 38 30 38 38 C38 46 50 54 50 54 C50 54 62 46 62 38 C62 30 50 38 50 38 Z"
+        fill="#4A90D9" opacity="0.8"/>
+</svg>

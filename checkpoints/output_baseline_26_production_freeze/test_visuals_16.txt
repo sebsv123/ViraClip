@@ -1,0 +1,13 @@
+PASS c1_folder_paperwork_resolves
+PASS c0_plan_planned
+PASS c2_icon_rendered_true
+PASS c2b_icon_size_in_range
+PASS c6_single_icon
+PASS c9_icon_fields_present
+PASS c3_invalid_svg_safe_fallback
+PASS c4_missing_icon_card_ok
+PASS c5_card_top_band_above_captions
+PASS c7_flagged_no_fallback
+PASS c8_broll_priority_no_card
+
+RESULT: 11 passed, 0 failed

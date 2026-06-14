@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Alert bar -->
+  <rect x="15" y="35" width="70" height="30" rx="4" stroke="#FF4444" stroke-width="3" fill="none"/>
+  <!-- Exclamation -->
+  <line x1="50" y1="40" x2="50" y2="55" stroke="#FF4444" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="50" cy="62" r="2.5" fill="#FF4444"/>
+  <!-- Signal waves -->
+  <path d="M20 50 Q25 45 30 50" stroke="#FF4444" stroke-width="1.5" fill="none" opacity="0.5"/>
+  <path d="M70 50 Q75 45 80 50" stroke="#FF4444" stroke-width="1.5" fill="none" opacity="0.5"/>
+</svg>

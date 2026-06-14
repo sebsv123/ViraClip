@@ -1,0 +1,11 @@
+PASS n1_refrain_not_cut
+PASS n1_refrain_metadata
+PASS n2_extends_past_tenerlas
+PASS n3_sino_de_extends_or_review
+PASS n4_contrast_payoff_extended
+PASS n5_adjacent_junk_repetition_cut
+PASS n6_explicit_retake_still_cut
+PASS n7_no_extension_into_bts
+PASS n8_simulation_passed_metadata
+
+RESULT: 9 passed, 0 failed

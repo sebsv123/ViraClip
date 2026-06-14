@@ -462,7 +462,38 @@ def apply_silence_edit_plan(video_path: Path, output_path: Path, plan: SilenceEd
     if not plan.cuts:
         logger.info("[silence-apply] skipped reason=no_safe_cuts")
         return {"rendered": False, "output_path": str(video_path), "reason": "no_safe_cuts", "warnings": list(plan.warnings)}
-    intervals = _keep_intervals(float(clip_duration or 0.0), plan.cuts)
+    # OUTPUT-TIMELINE-25 (instrumentation): probe real input media duration vs clip_duration arg.
+    try:
+        _t25_probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(video_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        _t25_input_dur = float((_t25_probe.stdout or "0").strip() or 0.0)
+    except Exception:
+        _t25_input_dur = 0.0
+    _t25_clip_arg = float(clip_duration or 0.0)
+    logger.info("VPI_TIMELINE25_INPUT_DURATION path=%s probed=%.3f clip_duration_arg=%.3f", video_path.name, _t25_input_dur, _t25_clip_arg)
+    logger.info("VPI_TIMELINE25_CLIP_DURATION_ARGUMENT value=%.3f shorter_than_input=%s", _t25_clip_arg, str(_t25_clip_arg + 0.05 < _t25_input_dur).lower())
+    # OUTPUT-TIMELINE-25 FIX: canonical duration = real input media (ffprobe), never the
+    # stale segment-nominal clip_duration. Prevents last-segment over-reach + A/V desync.
+    if _t25_input_dur and _t25_input_dur > 0.0:
+        _canonical_dur = round(_t25_input_dur, 3)
+    else:
+        logger.warning("[silence-apply] skipped reason=duration_probe_failed")
+        return {"rendered": False, "output_path": str(video_path), "reason": "duration_probe_failed", "warnings": list(plan.warnings) + ["duration_probe_failed"], "silence_duration_probe_ok": False}
+    logger.info("VPI_TIMELINE25_CLIP_DURATION_USED canonical=%.3f source=ffprobe_input_media stale_arg=%.3f", _canonical_dur, _t25_clip_arg)
+    intervals = _keep_intervals(_canonical_dur, plan.cuts)
+    if intervals and (_canonical_dur - intervals[-1][1] > 0.05):
+        intervals.append((round(intervals[-1][1], 3), _canonical_dur))
+        logger.info("VPI_KEEP_SEGMENTS_TAIL_APPENDED to=%.3f", _canonical_dur)
+    try:
+        _t25_last_keep = intervals[-1][1] if intervals else 0.0
+        _t25_sum = round(sum(e - s for s, e in intervals), 3)
+        logger.info("VPI_TIMELINE25_KEEP_SEGMENTS count=%d segments=%s", len(intervals), intervals)
+        logger.info("VPI_TIMELINE25_LAST_KEEP_END value=%.3f input_dur=%.3f tail_omitted=%s", _t25_last_keep, _t25_input_dur, str(_t25_input_dur - _t25_last_keep > 0.05).lower())
+        logger.info("VPI_TIMELINE25_EXPECTED_OUTPUT_DURATION sum_keep=%.3f", _t25_sum)
+    except Exception:
+        pass
     if not intervals:
         logger.info("[silence-apply] skipped reason=no_keep_intervals")
         return {"rendered": False, "output_path": str(video_path), "reason": "no_keep_intervals", "warnings": list(plan.warnings) + ["no_keep_intervals"]}
@@ -495,6 +526,7 @@ def apply_silence_edit_plan(video_path: Path, output_path: Path, plan: SilenceEd
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         if result.returncode == 0 and output_path.exists():
+            logger.info("VPI_TIMELINE25_SILENCE_RENDERED removed=%.3f input_media=%.3f", plan.total_removed_s, _t25_input_dur)
             logger.info("[silence-apply] rendered=true total_removed=%.2f", plan.total_removed_s)
             return {"rendered": True, "output_path": str(output_path), "total_removed_s": plan.total_removed_s, "warnings": list(plan.warnings)}
         reason = (result.stderr or "ffmpeg_failed")[-300:]

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Circular arrow -->
+  <path d="M50 15 A35 35 0 1 1 25 75" stroke="#2ECC71" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <!-- Arrowhead -->
+  <polyline points="25,75 35,68 30,78" stroke="#2ECC71" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Action spark -->
+  <circle cx="70" cy="30" r="3" fill="#2ECC71" opacity="0.6"/>
+  <circle cx="78" cy="22" r="2" fill="#2ECC71" opacity="0.4"/>
+</svg>

@@ -1,0 +1,13 @@
+PASS c1_speech_truncated
+PASS c2_master_follows_voice_sfx
+PASS c3_master_follows_voice_music
+PASS c4_overrun_040_clamp
+PASS c5_overrun_064_clamp
+PASS c6_legit_music_tail
+PASS c7_uncovered_speech
+PASS c8_contained
+PASS c9_clamp_safe
+PASS c10_no_side_effects
+PASS real_A0_truncated
+
+RESULT: 11 passed, 0 failed

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Storm cloud -->
+  <path d="M25 60 Q25 40 40 40 Q40 25 55 25 Q70 25 70 40 Q85 40 85 55 Q85 65 75 65 L30 65 Q20 65 25 60 Z"
+        stroke="#FF4444" stroke-width="3" fill="none"/>
+  <!-- Lightning bolt -->
+  <polyline points="55,40 45,55 52,55 42,72"
+            stroke="#FF4444" stroke-width="3" fill="none" stroke-linejoin="round" stroke-linecap="round"/>
+</svg>

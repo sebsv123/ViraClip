@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Badge shape (rounded shield) -->
+  <path d="M50 8 L20 20 L20 50 Q20 75 50 92 Q80 75 80 50 L80 20 Z"
+        stroke="#F1C40F" stroke-width="3" fill="none"/>
+  <!-- Hook icon (anchor-like) -->
+  <path d="M50 30 L50 60" stroke="#F1C40F" stroke-width="3" stroke-linecap="round"/>
+  <path d="M35 60 Q35 72 50 72 Q65 72 65 60" stroke="#F1C40F" stroke-width="3" fill="none" stroke-linecap="round"/>
+  <!-- Exclamation -->
+  <line x1="50" y1="35" x2="50" y2="48" stroke="#F1C40F" stroke-width="2.5" stroke-linecap="round"/>
+  <circle cx="50" cy="55" r="2" fill="#F1C40F"/>
+</svg>

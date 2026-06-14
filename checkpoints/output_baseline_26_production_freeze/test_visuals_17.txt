@@ -1,0 +1,13 @@
+PASS c1_travel_best_local
+PASS c2_travel_advances_when_top_missing
+PASS c3_student_education
+PASS c4_coverage_checklist
+PASS c5_risk_alert
+PASS c6_protection_heart
+PASS c7_broken_icon_never_selected
+PASS c8_text_only
+PASS c9_broll_priority_no_card
+PASS c10_flagged_no_card
+PASS c11_plan_mapping_metadata
+
+RESULT: 11 passed, 0 failed

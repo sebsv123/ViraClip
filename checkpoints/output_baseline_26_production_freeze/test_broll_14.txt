@@ -1,0 +1,13 @@
+PASS i1_travel_empty_skip
+PASS i2_student_empty_skip
+PASS i3_filename_maps_travel
+PASS i4_filename_maps_student
+PASS i5_injected_asset_ready
+PASS i5b_selected_travel_family
+PASS i6_no_family_relief_fallback_for_travel
+PASS i7_student_intent_detected
+PASS i8_travel_intent_detected
+PASS i9_aliases_self
+PASS i10_taxonomy_self_first
+
+RESULT: 11 passed, 0 failed

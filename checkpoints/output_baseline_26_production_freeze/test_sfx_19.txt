@@ -1,0 +1,18 @@
+PASS c1_risk_salud
+PASS c1b_risk_rendered
+PASS c2_risk_mucha_gente
+PASS c3_risk_no_todos
+PASS c4_payoff_contexto
+PASS c5_payoff_cuidado
+PASS c6_flagged_zero
+PASS c7_truncated_zero
+PASS c8_short_visual_only
+PASS c9_long_two
+PASS c10_collision_priority
+PASS c11_sensitive_no_boom
+PASS c12_forbidden
+PASS c13_legacy
+PASS c14_manifest_signal
+PASS c15_mix_failure
+
+RESULT: 16 passed, 0 failed

@@ -240,6 +240,9 @@ _BROLL_TAXONOMY_KEYWORDS: Dict[str, Tuple[str, ...]] = {
     "office_work": ("office", "oficina", "desk", "escritorio", "computer", "computadora", "laptop"),
     "medical_care": ("medical", "medico", "nurse", "enfermera", "patient", "paciente", "medicine", "medicina"),
     "family_home": ("family", "familia", "home", "hogar", "house", "casa", "living", "salon"),
+    # OUTPUT-BROLL-14: travel/student intake families
+    "travel_assistance": ("travel", "viaje", "airport", "aeropuerto", "passport", "pasaporte", "boarding", "luggage", "equipaje", "maleta", "trip", "pasaje"),
+    "student_abroad": ("student", "estudiante", "campus", "university", "universidad", "study", "estudios", "visa", "visado", "abroad", "extranjero", "estancia"),
 }
 
 _SFX_TAXONOMY_KEYWORDS: Dict[str, Tuple[str, ...]] = {

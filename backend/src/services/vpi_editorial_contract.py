@@ -729,6 +729,68 @@ def build_vpi_output_manifest(
             "final_mp4_contract_truncated": True,
             "final_mp4_contract_summary_source": "lightweight_projection",
         }
+        # OUTPUT-VISUALS-15B: the visual-fallback contract must reach the REAL
+        # manifest (the clip_entry whitelist dropped it). Source of truth is the
+        # per-clip editing plan carried in the render result, with top-level
+        # render-result keys as fallback.
+        _vf_plan = clip.get("editing_plan") if isinstance(clip.get("editing_plan"), dict) else {}
+        for _vf_key, _vf_default in (
+            ("visual_fallback_planned", False),
+            ("visual_fallback_rendered", False),
+            ("visual_fallback_type", ""),
+            ("visual_fallback_intent", ""),
+            ("visual_fallback_text", ""),
+            ("visual_fallback_icon", ""),
+            ("visual_fallback_start_s", 0.0),
+            ("visual_fallback_end_s", 0.0),
+            ("visual_fallback_skip_reason", ""),
+            # OUTPUT-VISUALS-16: icon contract must reach the REAL manifest too.
+            ("visual_fallback_icon_requested", ""),
+            ("visual_fallback_icon_resolved", ""),
+            ("visual_fallback_icon_rendered", False),
+            ("visual_fallback_icon_width", 0),
+            ("visual_fallback_icon_height", 0),
+            ("visual_fallback_icon_position", ""),
+            ("visual_fallback_icon_visibility_probe", False),
+            # OUTPUT-VISUALS-17: semantic mapping metadata.
+            ("visual_fallback_icon_family", ""),
+            ("visual_fallback_icon_match_reason", ""),
+            ("visual_fallback_icon_match_confidence", 0.0),
+            ("visual_fallback_icon_candidates", []),
+            # OUTPUT-SFX-18: editorial SFX contract.
+            ("editorial_sfx_planned", False),
+            ("editorial_sfx_rendered", False),
+            ("editorial_sfx_count", 0),
+            ("editorial_sfx_events", []),
+            ("editorial_sfx_asset", ""),
+            ("editorial_sfx_type", ""),
+            ("editorial_sfx_family", ""),
+            ("editorial_sfx_start_s", 0.0),
+            ("editorial_sfx_gain", 0.0),
+            ("editorial_sfx_trigger_reason", ""),
+            ("editorial_sfx_skip_reason", ""),
+            ("editorial_sfx_legacy_route_disabled", True),
+            # OUTPUT-TIMELINE-25: final timeline gate contract.
+            ("final_master_duration_s", 0.0),
+            ("final_last_caption_end_s", 0.0),
+            ("final_timeline_issue_class", ""),
+            ("final_closure_contained", False),
+            ("final_timeline_reconciliation", ""),
+            ("audio_sync_verified", False),
+            ("publishability_timeline_gate_passed", False),
+            # OUTPUT-SFX-19: payoff/risk signal contract.
+            ("editorial_sfx_signal_type", ""),
+            ("editorial_sfx_signal_text", ""),
+            ("editorial_sfx_signal_confidence", 0.0),
+            ("editorial_sfx_signal_source", ""),
+            ("editorial_sfx_priority", 0),
+            ("editorial_sfx_collision_reason", ""),
+            ("editorial_sfx_confidence", 0.0),
+        ):
+            _vf_value = clip.get(_vf_key)
+            if _vf_value is None:
+                _vf_value = _vf_plan.get(_vf_key, _vf_default)
+            clip_entry[_vf_key] = _vf_value
         clips.append(_json_safe(clip_entry))
 
     package_summary = _json_safe({

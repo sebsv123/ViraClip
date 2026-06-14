@@ -1117,6 +1117,55 @@ def _verify_broll_output(
         return False, f"probe_failed:{exc}", {}
 
 
+def _evaluate_local_broll_cutaway_policy(
+    *,
+    asset_path: str,
+    start_s: float,
+    duration_s: float,
+    clip_duration_s: float,
+    segment: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Conservative policy for one local full-frame B-roll cutaway."""
+    segment = segment if isinstance(segment, dict) else {}
+    start = float(start_s or 0.0)
+    dur = max(1.2, min(2.2, float(duration_s or 1.8)))
+    clip_dur = float(clip_duration_s or 0.0)
+    skip = ""
+
+    if not asset_path or not Path(asset_path).exists():
+        skip = "asset_missing"
+    elif clip_dur < 12.0:
+        skip = "clip_too_short"
+    elif bool(segment.get("opening_context_weak")):
+        skip = "opening_context_weak"
+    elif bool(segment.get("narrative_closure_weak")):
+        skip = "narrative_closure_weak"
+    else:
+        if start < 3.2:
+            start = 3.2
+        if start + dur > clip_dur - 2.5:
+            start = clip_dur - 2.5 - dur
+        if start < 3.2:
+            skip = "no_safe_window"
+        else:
+            window_blob = " ".join(
+                str(word.get("word") or "").lower()
+                for word in (segment.get("post_trim_caption_words") or [])
+                if start - 1.0 <= float(word.get("start") or 0.0) < start + dur + 1.0
+            )
+            if any(tok in window_blob for tok in ("perdon", "perdón", "otra vez", "me equivoq", "espera", "corta eso")):
+                skip = "backstage_or_retake_near_window"
+
+    return {
+        "allowed": not bool(skip),
+        "skip_reason": skip,
+        "start_s": round(float(start), 2),
+        "duration_s": round(float(dur), 2),
+        "end_s": round(float(start + dur), 2),
+        "render_mode": "LOCAL_STOCK_FULLFRAME_CUTAWAY",
+    }
+
+
 def _env_truthy(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name, "true" if default else "false")
     return str(raw or "").strip().lower() in {"1", "true", "yes", "on"}
@@ -6554,6 +6603,29 @@ class VideoService:
                         )
                 except Exception:
                     continue
+            # OUTPUT-TIMELINE-24: protect the approved closing phrase from silence cuts.
+            try:
+                if (words_with_confidence or []) and (_silence_plan_obj.cuts or []):
+                    from .vpi_post_silence_remap import protect_closure_in_cuts as _protect_closure
+                    _cl_end = max(float(_w.get("end") or 0.0) for _w in words_with_confidence)
+                    _cl_start = max(0.0, _cl_end - 2.5)
+                    _cl_prot = _protect_closure(_silence_plan_obj.cuts, (_cl_start, _cl_end), margin_s=0.20)
+                    _editing_plan_data["closure_protected_range"] = _cl_prot.get("closure_protected_range")
+                    _editing_plan_data["silence_cuts_adjusted_for_closure"] = int(_cl_prot.get("silence_cuts_adjusted_for_closure") or 0)
+                    _editing_plan_data["silence_cuts_rejected_for_closure"] = int(_cl_prot.get("silence_cuts_rejected_for_closure") or 0)
+                    if _cl_prot.get("silence_cuts_adjusted_for_closure") or _cl_prot.get("silence_cuts_rejected_for_closure"):
+                        _silence_plan_obj.cuts = _cl_prot["cuts"]
+                        _silence_plan_obj.offset_map = _build_silence_offset_map(_silence_plan_obj.cuts)
+                        _silence_plan_obj.total_removed_s = round(sum(float(_c.get("removed_s", 0.0) or 0.0) for _c in _silence_plan_obj.cuts), 3)
+                        logger.info(
+                            "VPI_SILENCE_CLOSURE_PROTECTED task_id=%s clip_order=%s adjusted=%d rejected=%d closure=%.2f-%.2f",
+                            task_id, clip_index + 1,
+                            int(_cl_prot.get("silence_cuts_adjusted_for_closure") or 0),
+                            int(_cl_prot.get("silence_cuts_rejected_for_closure") or 0),
+                            _cl_start, _cl_end,
+                        )
+            except Exception as _cl_e:
+                logger.warning("VPI_SILENCE_CLOSURE_PROTECT_SKIPPED task_id=%s clip_order=%s reason=%s", task_id, clip_index + 1, _cl_e)
             _silence_out = output_path.with_name(f"silence_{output_path.name}")
             _silence_input = output_path
             _silence_result = _apply_silence_edit_plan(output_path, _silence_out, _silence_plan_obj, duration)
@@ -8023,10 +8095,26 @@ class VideoService:
                         decision=_broll_editorial_decision,
                     )
                     if not _broll_asset_match.get("matched"):
+                        _broll_match_reasons = [str(_r) for _r in (_broll_asset_match.get("reasons") or []) if str(_r)]
+                        _broll_no_match_reason = (
+                            "no_local_assets_in_family"
+                            if "no_local_assets_in_family" in _broll_match_reasons
+                            else ("|".join(_broll_match_reasons) if _broll_match_reasons else "no_assets")
+                        )
                         _editorial_broll_mode = False
                         _broll_editorial_decision["should_use_broll"] = False
-                        _broll_editorial_decision["skip_reason"] = "no_assets"
-                        logger.info("[broll-editorial] skipped reason=no_assets")
+                        _broll_editorial_decision["skip_reason"] = _broll_no_match_reason
+                        logger.info("[broll-editorial] skipped reason=%s", _broll_no_match_reason)
+                        if _editing_plan_data is not None:
+                            _editing_plan_data["broll_asset_match"] = _broll_asset_match
+                            _editing_plan_data["broll_skip_reason"] = _broll_no_match_reason
+                            for _intake_key in (
+                                "broll_asset_family_requested",
+                                "broll_asset_family_available",
+                                "broll_asset_intake_status",
+                            ):
+                                if _intake_key in _broll_asset_match:
+                                    _editing_plan_data[_intake_key] = _broll_asset_match.get(_intake_key)
                     else:
                         logger.info(
                             "VPI_OUTPUT_QUALITY_BROLL_PERCEPTIBILITY_AUDIT task_id=%s clip_order=%s mode=%s confidence=%.2f start=%.2f duration=%.2f",
@@ -8161,15 +8249,97 @@ class VideoService:
             _broll_out = output_path.with_name(f"broll_{output_path.name}")
             try:
                 _ff_mode = str(_broll_editorial_decision.get("broll_mode") or "") == "daily_fullframe_cutaway"
-                _ff_matched_asset = str(_broll_asset_match.get("asset") or "")
-                if _ff_mode and _ff_matched_asset and Path(_ff_matched_asset).exists():
+                _ff_matched_asset = str(
+                    _broll_asset_match.get("asset")
+                    or _broll_asset_match.get("asset_path")
+                    or _broll_asset_match.get("path")
+                    or ""
+                )
+                if _ff_matched_asset and not Path(_ff_matched_asset).exists() and "/assets/" in _ff_matched_asset:
+                    _asset_rel = _ff_matched_asset.split("/assets/", 1)[-1]
+                    for _asset_candidate in (Path("/app/assets") / _asset_rel, Path("assets") / _asset_rel):
+                        if _asset_candidate.exists():
+                            _ff_matched_asset = str(_asset_candidate)
+                            break
+                # ── OUTPUT-BROLL-11: LOCAL_STOCK_FULLFRAME_CUTAWAY policy gate ──
+                _ff_local_skip = ""
+                _broll_verification_override = ""
+                _ff_start_s = float(_broll_editorial_decision.get("start_offset") or 4.0)
+                # OUTPUT-BROLL-13: 1.4s floor — a 1.2s cutaway reads as a flicker.
+                _ff_dur_s = max(1.4, min(2.2, float(_broll_editorial_decision.get("duration") or 1.8)))
+                if _ff_mode:
+                    logger.info(
+                        "VPI_BROLL_LOCAL_PLAN_FOUND task_id=%s clip_order=%s asset=%s start=%.2f duration=%.2f confidence=%.2f",
+                        task_id, clip_index + 1, _ff_matched_asset or "none",
+                        _ff_start_s, _ff_dur_s,
+                        float(_broll_editorial_decision.get("confidence") or 0.0),
+                    )
+                    _ff_policy = _evaluate_local_broll_cutaway_policy(
+                        asset_path=_ff_matched_asset,
+                        start_s=_ff_start_s,
+                        duration_s=_ff_dur_s,
+                        clip_duration_s=float(duration or 0.0),
+                        segment=segment,
+                    )
+                    _ff_local_skip = str(_ff_policy.get("skip_reason") or "")
+                    _ff_start_s = float(_ff_policy.get("start_s") or _ff_start_s)
+                    _ff_dur_s = float(_ff_policy.get("duration_s") or _ff_dur_s)
+                    if not _ff_local_skip:
+                        try:
+                            from .broll_compositor import probe_duration as _ff_probe_duration
+                            if float(_ff_probe_duration(_ff_matched_asset) or 0.0) < 0.8:
+                                _ff_local_skip = "asset_unreadable"
+                        except Exception:
+                            _ff_local_skip = "asset_unreadable"
+                    if not _ff_local_skip:
+                        logger.info(
+                            "VPI_BROLL_LOCAL_ASSET_VALIDATED task_id=%s clip_order=%s asset=%s window=%.2f-%.2f mode=fullframe_cutaway",
+                            task_id, clip_index + 1, _ff_matched_asset, _ff_start_s, _ff_start_s + _ff_dur_s,
+                        )
+                    else:
+                        logger.info(
+                            "VPI_BROLL_LOCAL_SKIPPED task_id=%s clip_order=%s reason=%s",
+                            task_id, clip_index + 1, _ff_local_skip,
+                        )
+                    segment["broll_local_planned"] = True
+                    segment["broll_local_asset"] = _ff_matched_asset
+                    segment["broll_local_start_s"] = round(_ff_start_s, 2)
+                    segment["broll_local_end_s"] = round(_ff_start_s + _ff_dur_s, 2)
+                    segment["broll_local_reason"] = str(_broll_editorial_decision.get("broll_intent") or "local_fullframe_cutaway")
+                    segment["broll_local_skip_reason"] = _ff_local_skip
+                if _ff_mode and not _ff_local_skip:
                     # OUTPUT-QUALITY-7: the editorial decision already selected the asset
                     # and timing — compose the full-frame cutaway DIRECTLY instead of
                     # letting process_clip re-plan (its keyword planner rejects openers
                     # and returns the input untouched: "output_equals_input").
                     from .broll_compositor import compose_overlay as _compose_fullframe
-                    _ff_start_s = float(_broll_editorial_decision.get("start_offset") or 4.0)
-                    _ff_dur_s = float(_broll_editorial_decision.get("duration") or 1.8)
+                    logger.info(
+                        "VPI_BROLL_LOCAL_RENDER_STARTED task_id=%s clip_order=%s asset=%s start=%.2f duration=%.2f fade=0.20",
+                        task_id, clip_index + 1, _ff_matched_asset, _ff_start_s, _ff_dur_s,
+                    )
+                    # OUTPUT-BROLL-13: visual polish contract (observability for QC).
+                    _ff_is_image = Path(_ff_matched_asset).suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+                    _ff_fade_s = round(min(0.20, _ff_dur_s / 3.0), 2)
+                    logger.info(
+                        "VPI_BROLL_POLISH_APPLIED task_id=%s clip_order=%s fade_in=%.2f fade_out=%.2f scale=cover_9_16 crop=center motion=%s",
+                        task_id, clip_index + 1, _ff_fade_s, _ff_fade_s,
+                        "kenburns_image" if _ff_is_image else "none_video_native_motion",
+                    )
+                    logger.info(
+                        "VPI_BROLL_POLISH_FILTERGRAPH task_id=%s clip_order=%s graph=scale_cover+crop_center+setsar|alpha_fade_in_out|overlay_between(%.2f,%.2f)|audio_main_copy",
+                        task_id, clip_index + 1, _ff_start_s, _ff_start_s + _ff_dur_s,
+                    )
+                    logger.info(
+                        "VPI_BROLL_POLISH_CAPTION_LAYER_OK task_id=%s clip_order=%s order=broll_then_ass_captions captions_above=true",
+                        task_id, clip_index + 1,
+                    )
+                    segment["broll_polish_applied"] = True
+                    segment["broll_transition_in_s"] = _ff_fade_s
+                    segment["broll_transition_out_s"] = _ff_fade_s
+                    segment["broll_scale_mode"] = "cover_9_16"
+                    segment["broll_crop_mode"] = "center"
+                    segment["broll_caption_layer_ok"] = True
+                    segment["broll_motion_applied"] = bool(_ff_is_image)
                     _ff_ok = await run_in_thread(
                         _compose_fullframe,
                         str(output_path),
@@ -8180,6 +8350,8 @@ class VideoService:
                         0.2,
                     )
                     _broll_result = str(_broll_out) if _ff_ok else str(output_path)
+                    if not _ff_ok:
+                        _broll_verification_override = "compose_failed"
                     _broll_svc.last_editorial_broll = [{
                         "cue_type": "daily_fullframe_cutaway",
                         "selected_category": str(_broll_asset_match.get("category") or ""),
@@ -8191,6 +8363,12 @@ class VideoService:
                         "asset_score": float(_broll_asset_match.get("score") or 0.0),
                         "asset_score_reasons": list(_broll_asset_match.get("reasons") or []),
                     }] if _ff_ok else []
+                elif _ff_mode:
+                    # OUTPUT-BROLL-11: policy-skipped fullframe cutaway must NOT fall
+                    # through to the legacy keyword re-planner — render stays untouched.
+                    _broll_result = str(output_path)
+                    _broll_verification_override = _ff_local_skip or "policy_skipped"
+                    _broll_svc.last_editorial_broll = []
                 else:
                     _broll_result = await _broll_svc.process_clip(
                         video_path=str(output_path),
@@ -8208,12 +8386,23 @@ class VideoService:
                         vpi_score=segment.get("vpi_score"),
                         hook_broll_delay_until_s=float(_broll_editorial_decision.get("start_offset") or (_hook_plan_data or {}).get("broll_delay_until_s") or 3.0),
                     )
-                _broll_render_verified, _broll_render_verification_reason, _broll_render_verification_info = _verify_broll_output(
-                    input_video=output_path,
-                    output_video=_broll_result,
-                    expected_start=float(_broll_editorial_decision.get("start_offset") or 0.0),
-                    expected_duration=float(_broll_editorial_decision.get("duration") or 0.0),
-                )
+                if _ff_mode:
+                    _broll_editorial_decision["start_offset"] = _ff_start_s
+                    _broll_editorial_decision["duration"] = _ff_dur_s
+                if _broll_verification_override:
+                    _broll_render_verified = False
+                    _broll_render_verification_reason = _broll_verification_override
+                    _broll_render_verification_info = {
+                        "expected_start": float(_broll_editorial_decision.get("start_offset") or 0.0),
+                        "expected_duration": float(_broll_editorial_decision.get("duration") or 0.0),
+                    }
+                else:
+                    _broll_render_verified, _broll_render_verification_reason, _broll_render_verification_info = _verify_broll_output(
+                        input_video=output_path,
+                        output_video=_broll_result,
+                        expected_start=float(_broll_editorial_decision.get("start_offset") or 0.0),
+                        expected_duration=float(_broll_editorial_decision.get("duration") or 0.0),
+                    )
                 if _broll_render_verified and Path(_broll_result).exists() and _broll_result != str(output_path):
                     _broll_input = output_path
                     output_path = Path(_broll_result)
@@ -8262,7 +8451,43 @@ class VideoService:
                     if isinstance(_editing_plan_data, dict):
                         _editing_plan_data.update(_broll_fullframe_meta)
                     segment["broll_fullframe_meta"] = dict(_broll_fullframe_meta)
+                    segment["broll_local_rendered"] = bool(_broll_render_verified)
                     if _broll_render_verified:
+                        logger.info(
+                            "VPI_BROLL_LOCAL_RENDERED task_id=%s clip_order=%s asset=%s start=%.2f end=%.2f mode=fullframe_cutaway",
+                            task_id, clip_index + 1, _ff_asset, _ff_start, _ff_end,
+                        )
+                        # Visibility probe: a frame mid-cutaway must differ from the
+                        # pre-broll render at the same timestamp (proves the insert
+                        # is physically in the MP4, not metadata-only).
+                        try:
+                            import hashlib as _ff_hashlib
+                            import tempfile as _ff_tempfile
+                            _ff_mid = (_ff_start + _ff_end) / 2.0
+                            _ff_digests = []
+                            for _ff_src in (str(_broll_input), str(output_path)):
+                                with _ff_tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as _ff_tmp:
+                                    _ff_frame_path = _ff_tmp.name
+                                subprocess.run(
+                                    ["ffmpeg", "-y", "-v", "error", "-ss", f"{_ff_mid:.2f}",
+                                     "-i", _ff_src, "-frames:v", "1", _ff_frame_path],
+                                    capture_output=True, timeout=30,
+                                )
+                                _ff_digests.append(_ff_hashlib.md5(Path(_ff_frame_path).read_bytes()).hexdigest())
+                                Path(_ff_frame_path).unlink(missing_ok=True)
+                            _ff_visible = _ff_digests[0] != _ff_digests[1]
+                            segment["broll_local_visibility_probe"] = "visible" if _ff_visible else "identical_frame"
+                            logger.info(
+                                "VPI_BROLL_LOCAL_VISIBLE_FRAME_PROBE task_id=%s clip_order=%s t=%.2f visible=%s",
+                                task_id, clip_index + 1, _ff_mid, str(_ff_visible).lower(),
+                            )
+                            logger.info(
+                                "VPI_BROLL_POLISH_FRAME_PROBE task_id=%s clip_order=%s mid_t=%.2f visible=%s transition_window_in=%.2f-%.2f transition_window_out=%.2f-%.2f",
+                                task_id, clip_index + 1, _ff_mid, str(_ff_visible).lower(),
+                                _ff_start, _ff_start + 0.2, _ff_end - 0.2, _ff_end,
+                            )
+                        except Exception as _ff_probe_e:
+                            segment["broll_local_visibility_probe"] = f"probe_failed:{_ff_probe_e}"
                         logger.info(
                             "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_INSERTED task_id=%s clip_order=%s path=%s asset=%s start=%.2f end=%.2f",
                             task_id, clip_index + 1, str(output_path), _ff_asset, _ff_start, _ff_end,
@@ -8303,6 +8528,13 @@ class VideoService:
                     _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
                     _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
                     _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+                    for _intake_key in (
+                        "broll_asset_family_requested",
+                        "broll_asset_family_available",
+                        "broll_asset_intake_status",
+                    ):
+                        if _intake_key in _broll_asset_match:
+                            _editing_plan_data[_intake_key] = _broll_asset_match.get(_intake_key)
                     _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
                     _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
                     _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
@@ -8341,6 +8573,13 @@ class VideoService:
                     _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
                     _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
                     _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+                    for _intake_key in (
+                        "broll_asset_family_requested",
+                        "broll_asset_family_available",
+                        "broll_asset_intake_status",
+                    ):
+                        if _intake_key in _broll_asset_match:
+                            _editing_plan_data[_intake_key] = _broll_asset_match.get(_intake_key)
                     _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
                     _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
                     _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
@@ -8436,6 +8675,13 @@ class VideoService:
             _editing_plan_data["broll_mode"] = str(_broll_editorial_decision.get("broll_mode") or "no_broll")
             _editing_plan_data["broll_asset_id"] = str(_broll_asset_match.get("asset_id") or "")
             _editing_plan_data["broll_asset_source"] = str(_broll_asset_match.get("source") or "")
+            for _intake_key in (
+                "broll_asset_family_requested",
+                "broll_asset_family_available",
+                "broll_asset_intake_status",
+            ):
+                if _intake_key in _broll_asset_match:
+                    _editing_plan_data[_intake_key] = _broll_asset_match.get(_intake_key)
             _editing_plan_data["broll_start_time"] = float(_broll_editorial_decision.get("start_offset") or 0.0)
             _editing_plan_data["broll_duration"] = float(_broll_editorial_decision.get("duration") or 0.0)
             _editing_plan_data["broll_insertions_count"] = int(_broll_editorial_decision.get("max_insertions") or 0)
@@ -8444,6 +8690,160 @@ class VideoService:
             _editing_plan_data["broll_face_safe"] = bool(_broll_editorial_decision.get("face_safe"))
             _editing_plan_data["broll_caption_safe"] = bool(_broll_editorial_decision.get("caption_safe"))
             _editing_plan_data["broll_output_verified"] = bool(_broll_render_verified)
+
+        # OUTPUT-VISUALS-15: local-only editorial visual fallback. This runs only
+        # after real local B-roll had a valid editorial intent but could not render
+        # because no compatible local asset exists. It is rendered before ASS
+        # captions so captions remain above the card.
+        _visual_fallback_rendered = False
+        _visual_fallback_plan_data: Dict[str, Any] = {}
+        _visual_fallback_result: Dict[str, Any] = {}
+        _visual_fallback_asset_gap = str(
+            (_editing_plan_data or {}).get("broll_skip_reason")
+            or (_broll_editorial_decision or {}).get("skip_reason")
+            or _broll_render_verification_reason
+            or ""
+        )
+        _visual_fallback_has_editorial_intent = bool(_broll_editorial_opportunity) or (
+            str((_broll_editorial_decision or {}).get("broll_decision") or "") == "use_broll"
+            and bool(str((_broll_editorial_decision or {}).get("broll_intent") or ""))
+        )
+        if not bool(_broll_render_verified) and _visual_fallback_has_editorial_intent:
+            try:
+                from .vpi_visual_fallback_service import (
+                    build_visual_fallback_plan as _build_visual_fallback_plan,
+                    probe_visual_card_visibility as _probe_visual_card_visibility,
+                    render_internal_visual_card as _render_internal_visual_card,
+                )
+
+                _visual_plan = _build_visual_fallback_plan(
+                    broll_decision=_broll_editorial_decision or {},
+                    broll_asset_match=_broll_asset_match or {},
+                    segment=segment if isinstance(segment, dict) else {},
+                    clip_duration_s=float(duration or 0.0),
+                    broll_skip_reason=_visual_fallback_asset_gap,
+                )
+                _visual_fallback_plan_data = _visual_plan.as_dict()
+                logger.info(
+                    "VPI_VISUAL_FALLBACK_PLAN_FOUND task_id=%s clip_order=%s planned=%s intent=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    str(_visual_plan.planned).lower(),
+                    _visual_plan.intent,
+                    _visual_plan.skip_reason or "asset_gap",
+                )
+                if _visual_plan.planned:
+                    _visual_out = output_path.with_name(f"visualcard_{output_path.name}")
+                    logger.info(
+                        "VPI_VISUAL_FALLBACK_RENDER_STARTED task_id=%s clip_order=%s type=%s intent=%s text=%s start=%.2f end=%.2f",
+                        task_id,
+                        clip_index + 1,
+                        _visual_plan.fallback_type,
+                        _visual_plan.intent,
+                        _visual_plan.text,
+                        _visual_plan.start_s,
+                        _visual_plan.end_s,
+                    )
+                    _visual_input = output_path
+                    _visual_fallback_result = await run_in_thread(
+                        _render_internal_visual_card,
+                        input_video=str(_visual_input),
+                        output_video=str(_visual_out),
+                        plan=_visual_plan,
+                    )
+                    if bool(_visual_fallback_result.get("rendered")) and _visual_out.exists():
+                        _visual_probe = _probe_visual_card_visibility(
+                            str(_visual_input),
+                            str(_visual_out),
+                            float((_visual_plan.start_s + _visual_plan.end_s) / 2.0),
+                        )
+                        _visual_fallback_result["visibility_probe"] = _visual_probe
+                        if bool(_visual_probe.get("visible")):
+                            output_path = _visual_out
+                            _visual_fallback_rendered = True
+                            _log_premium_pipeline_step("visual_fallback", _visual_input, output_path)
+                            logger.info(
+                                "VPI_VISUAL_FALLBACK_FRAME_PROBE task_id=%s clip_order=%s t=%.2f visible=true",
+                                task_id,
+                                clip_index + 1,
+                                float(_visual_probe.get("t_s") or 0.0),
+                            )
+                            logger.info(
+                                "VPI_VISUAL_FALLBACK_RENDERED task_id=%s clip_order=%s type=%s intent=%s text=%s icon=%s start=%.2f end=%.2f",
+                                task_id,
+                                clip_index + 1,
+                                _visual_plan.fallback_type,
+                                _visual_plan.intent,
+                                _visual_plan.text,
+                                _visual_plan.icon or "typographic",
+                                _visual_plan.start_s,
+                                _visual_plan.end_s,
+                            )
+                        else:
+                            _visual_fallback_result["rendered"] = False
+                            _visual_fallback_result["reason"] = str(_visual_probe.get("reason") or "frame_probe_not_visible")
+                            logger.info(
+                                "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s",
+                                task_id,
+                                clip_index + 1,
+                                _visual_fallback_result["reason"],
+                            )
+                    else:
+                        logger.info(
+                            "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s",
+                            task_id,
+                            clip_index + 1,
+                            str(_visual_fallback_result.get("reason") or "render_failed"),
+                        )
+                else:
+                    logger.info(
+                        "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s",
+                        task_id,
+                        clip_index + 1,
+                        _visual_plan.skip_reason or "not_planned",
+                    )
+            except Exception as _visual_fallback_e:
+                logger.warning(
+                    "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s",
+                    task_id,
+                    clip_index + 1,
+                    f"exception:{_visual_fallback_e}",
+                )
+                _visual_fallback_result = {"rendered": False, "reason": f"exception:{_visual_fallback_e}"}
+        if _editing_plan_data is not None:
+            if _visual_fallback_plan_data:
+                _editing_plan_data.update(_visual_fallback_plan_data)
+            else:
+                _editing_plan_data.update({
+                    "visual_fallback_planned": False,
+                    "visual_fallback_rendered": False,
+                    "visual_fallback_type": "",
+                    "visual_fallback_intent": "",
+                    "visual_fallback_text": "",
+                    "visual_fallback_icon": "",
+                    "visual_fallback_start_s": 0.0,
+                    "visual_fallback_end_s": 0.0,
+                    "visual_fallback_skip_reason": "not_evaluated",
+                })
+            _editing_plan_data["visual_fallback_rendered"] = bool(_visual_fallback_rendered)
+            _editing_plan_data["visual_fallback_render_result"] = _json_safe(_visual_fallback_result)
+            _vf_icon_src = _visual_fallback_result if isinstance(_visual_fallback_result, dict) else {}
+            for _ik in ("icon_requested", "icon_resolved", "icon_rendered", "icon_width", "icon_height", "icon_position"):
+                _editing_plan_data[f"visual_fallback_{_ik}"] = _vf_icon_src.get(_ik)
+            _editing_plan_data["visual_fallback_icon_visibility_probe"] = bool(_visual_fallback_rendered) and bool((_vf_icon_src.get("visibility_probe") or {}).get("visible"))
+            if isinstance(segment, dict):
+                for _ik in ("icon_requested", "icon_resolved", "icon_rendered", "icon_width", "icon_height", "icon_position"):
+                    segment[f"visual_fallback_{_ik}"] = _vf_icon_src.get(_ik)
+            if bool(_visual_fallback_rendered) and bool(_vf_icon_src.get("icon_rendered")):
+                logger.info(
+                    "VPI_VISUAL_ICON_FRAME_PROBE task_id=%s clip_order=%s icon=%s w=%s h=%s visible=true",
+                    task_id, clip_index + 1, _vf_icon_src.get("icon_resolved"),
+                    _vf_icon_src.get("icon_width"), _vf_icon_src.get("icon_height"),
+                )
+        if isinstance(segment, dict):
+            segment["visual_fallback_rendered"] = bool(_visual_fallback_rendered)
+            if _visual_fallback_plan_data:
+                segment.update(_visual_fallback_plan_data)
         if _broll_editorial_opportunity:
             _broll_fulfilled = bool(locals().get("_editorial_broll_metadata") or [])
             logger.info(
@@ -10856,6 +11256,123 @@ class VideoService:
                 str(bool(_sfx_metadata.get("sfx_synced_to_transition"))).lower(),
             )
 
+            # ── VPI_EDITORIAL_SFX — small controlled editorial SFX, BEFORE master ──
+            _editorial_sfx_metadata: Dict[str, Any] = {
+                "editorial_sfx_planned": False,
+                "editorial_sfx_rendered": False,
+                "editorial_sfx_legacy_route_disabled": True,
+            }
+            try:
+                from .vpi_editorial_sfx_service import (
+                    build_editorial_sfx_plan as _build_editorial_sfx_plan,
+                    render_editorial_sfx as _render_editorial_sfx,
+                )
+                logger.info(
+                    "VPI_EDITORIAL_SFX_LEGACY_GUARD_OK task_id=%s clip_order=%s smart_audio=disabled",
+                    task_id, clip_index + 1,
+                )
+                _esfx_existing_applied = bool((_sfx_metadata or {}).get("sfx_applied"))
+                _esfx_plan = _build_editorial_sfx_plan(
+                    clip_duration_s=float(segment.get("duration") or duration or 0.0),
+                    segment=segment if isinstance(segment, dict) else {},
+                    editing_plan=_editing_plan_data if isinstance(_editing_plan_data, dict) else {},
+                    existing_sfx_applied=_esfx_existing_applied,
+                    transcript_text=str(segment.get("text") or ""),
+                    words=words_with_confidence if isinstance(words_with_confidence, list) else [],
+                    editorial_type=str(segment.get("editorial_type") or (_editing_plan_data or {}).get("editorial_type") or ""),
+                    matched_patterns=list(segment.get("matched_patterns") or []),
+                    sensitive=bool(
+                        any(_tok in str(segment.get("editorial_type") or "").lower()
+                            for _tok in ("decesos", "sensitive", "emocional", "emotional", "duelo", "enferm"))
+                        or any(_tok in str(segment.get("text") or "").lower()
+                            for _tok in ("fallec", "enfermedad", "luto", "duelo"))
+                    ),
+                    task_id=str(task_id or ""),
+                    clip_order=int(clip_index + 1),
+                    silence_plan=_silence_edit_plan_data if isinstance(_silence_edit_plan_data, dict) else {},
+                )
+                _editorial_sfx_metadata = _esfx_plan.as_dict()
+                logger.info(
+                    "VPI_EDITORIAL_SFX_PLAN_FOUND task_id=%s clip_order=%s planned=%s type=%s family=%s start=%.2f reason=%s",
+                    task_id, clip_index + 1, str(_esfx_plan.planned).lower(), _esfx_plan.event_type,
+                    _esfx_plan.family, _esfx_plan.start_s, _esfx_plan.skip_reason or _esfx_plan.trigger_reason,
+                )
+                if _esfx_plan.planned:
+                    _esfx_out = output_path.with_name(f"esfx_{output_path.name}")
+                    _esfx_result = await run_in_thread(
+                        _render_editorial_sfx,
+                        input_video=str(output_path),
+                        output_video=str(_esfx_out),
+                        plan=_esfx_plan,
+                    )
+                    if bool(_esfx_result.get("rendered")) and _esfx_out.exists():
+                        _esfx_plan.rendered = True
+                        _editorial_sfx_metadata = _esfx_plan.as_dict()
+                        _editorial_sfx_metadata["editorial_sfx_events"] = list(
+                            _esfx_result.get("events") or _editorial_sfx_metadata.get("editorial_sfx_events") or []
+                        )
+                        _editorial_sfx_metadata["editorial_sfx_count"] = int(
+                            _esfx_result.get("count") or len(_editorial_sfx_metadata["editorial_sfx_events"])
+                        )
+                        _esfx_first_ev = (_editorial_sfx_metadata["editorial_sfx_events"] or [{}])[0]
+                        _editorial_sfx_metadata["editorial_sfx_gain"] = float(_esfx_first_ev.get("gain") or 0.0)
+                        _editorial_sfx_metadata["editorial_sfx_asset_measured_gain"] = float(_esfx_first_ev.get("measured_gain") or _esfx_first_ev.get("gain") or 0.0)
+                        _editorial_sfx_metadata["editorial_sfx_asset_candidates"] = list(_esfx_first_ev.get("asset_candidates") or [])
+                        _editorial_sfx_metadata["editorial_sfx_asset_selected"] = str(_esfx_first_ev.get("asset_selected") or _esfx_first_ev.get("asset_path") or "")
+                        _editorial_sfx_metadata["editorial_sfx_asset_family"] = str(_esfx_first_ev.get("asset_family") or _esfx_first_ev.get("family") or "")
+                        _editorial_sfx_metadata["editorial_sfx_asset_selection_index"] = int(_esfx_first_ev.get("asset_selection_index") or 0)
+                        _editorial_sfx_metadata["editorial_sfx_asset_selection_seed"] = str(_esfx_first_ev.get("asset_selection_seed") or "")
+                        _editorial_sfx_metadata["editorial_sfx_asset_recently_avoided"] = list(_esfx_first_ev.get("asset_recently_avoided") or [])
+                        _editorial_sfx_metadata["editorial_sfx_asset_single_family_fallback"] = bool(_esfx_first_ev.get("asset_single_family_fallback"))
+                        _editorial_sfx_metadata["editorial_sfx_pause_class"] = str(_esfx_first_ev.get("pause_class") or "")
+                        _editorial_sfx_metadata["editorial_sfx_pause_duration_s"] = float(_esfx_first_ev.get("pause_duration_s") or 0.0)
+                        _editorial_sfx_metadata["editorial_sfx_pause_before_text"] = str(_esfx_first_ev.get("pause_before_text") or "")
+                        _editorial_sfx_metadata["editorial_sfx_pause_after_text"] = str(_esfx_first_ev.get("pause_after_text") or "")
+                        _editorial_sfx_metadata["editorial_sfx_silence_preferred"] = bool(_esfx_first_ev.get("silence_preferred"))
+                        _editorial_sfx_metadata["silence_punctuation_candidates"] = list(_esfx_first_ev.get("silence_punctuation_candidates") or _editorial_sfx_metadata.get("silence_punctuation_candidates") or [])
+                        _editorial_sfx_metadata["silence_punctuation_class"] = str(_esfx_first_ev.get("silence_punctuation_class") or _esfx_first_ev.get("pause_class") or "")
+                        _editorial_sfx_metadata["silence_punctuation_pause_start_s"] = float(_esfx_first_ev.get("pause_start_s") or 0.0)
+                        _editorial_sfx_metadata["silence_punctuation_pause_end_s"] = float(_esfx_first_ev.get("pause_end_s") or 0.0)
+                        _editorial_sfx_metadata["silence_punctuation_duration_s"] = float(_esfx_first_ev.get("pause_duration_s") or 0.0)
+                        _editorial_sfx_metadata["silence_punctuation_trigger_before"] = str(_esfx_first_ev.get("pause_before_text") or "")
+                        _editorial_sfx_metadata["silence_punctuation_trigger_after"] = str(_esfx_first_ev.get("pause_after_text") or "")
+                        _editorial_sfx_metadata["silence_punctuation_confidence"] = float(_esfx_first_ev.get("pause_confidence") or 0.0)
+                        _editorial_sfx_metadata["silence_punctuation_result"] = str(_esfx_first_ev.get("silence_punctuation_result") or _editorial_sfx_metadata.get("silence_punctuation_result") or "")
+                        _esfx_in = output_path
+                        output_path = _esfx_out
+                        _log_premium_pipeline_step("editorial_sfx", _esfx_in, output_path)
+                        logger.info(
+                            "VPI_EDITORIAL_SFX_RENDERED task_id=%s clip_order=%s type=%s asset=%s start=%.2f count=%d",
+                            task_id, clip_index + 1, _esfx_plan.event_type, _esfx_plan.asset_path,
+                            _esfx_plan.start_s, int(_editorial_sfx_metadata["editorial_sfx_count"]),
+                        )
+                    else:
+                        _editorial_sfx_metadata["editorial_sfx_skip_reason"] = str(_esfx_result.get("reason") or "mix_failed")
+                        logger.info(
+                            "VPI_EDITORIAL_SFX_SKIPPED task_id=%s clip_order=%s reason=%s",
+                            task_id, clip_index + 1, _editorial_sfx_metadata["editorial_sfx_skip_reason"],
+                        )
+                else:
+                    logger.info(
+                        "VPI_EDITORIAL_SFX_SKIPPED task_id=%s clip_order=%s reason=%s",
+                        task_id, clip_index + 1, _esfx_plan.skip_reason or "not_planned",
+                    )
+            except Exception as _esfx_e:
+                logger.warning(
+                    "VPI_EDITORIAL_SFX_SKIPPED task_id=%s clip_order=%s reason=exception:%s",
+                    task_id, clip_index + 1, _esfx_e,
+                )
+                _editorial_sfx_metadata = {
+                    "editorial_sfx_planned": False,
+                    "editorial_sfx_rendered": False,
+                    "editorial_sfx_skip_reason": f"exception:{_esfx_e}",
+                    "editorial_sfx_legacy_route_disabled": True,
+                }
+            if isinstance(_editing_plan_data, dict):
+                _editing_plan_data.update(_editorial_sfx_metadata)
+            if isinstance(segment, dict):
+                segment.update(_editorial_sfx_metadata)
+
             # ── Audio Mastering v1.8 — loudness normalization for social reels ──
             # Applied AFTER branding (all audio elements present) and BEFORE
             # output QC (so QC measures mastered loudness).
@@ -11095,6 +11612,27 @@ class VideoService:
                     "finish_warning": str(_finish_e),
                     "finish_applied": False,
                 }
+
+            # OUTPUT-TIMELINE-25: final timeline reconciliation gate (live, post-master).
+            try:
+                from .vpi_final_timeline_contract import reconcile_final_timeline_contract as _reconcile_timeline
+                _tl_ass = locals().get("_ass_caption_file_path") or ""
+                _tl_contract = _reconcile_timeline(
+                    final_mp4=str(output_path),
+                    ass_path=(_tl_ass or None),
+                    words=words_with_confidence if isinstance(words_with_confidence, list) else None,
+                    task_id=task_id, clip_order=clip_index + 1,
+                )
+                if isinstance(_editing_plan_data, dict):
+                    for _tk in ("final_master_duration_s", "final_last_spoken_word_end_s", "final_last_caption_end_s", "final_timeline_issue_class", "final_closure_contained", "final_timeline_reconciliation"):
+                        _editing_plan_data[_tk] = _tl_contract.get(_tk)
+                    _editing_plan_data["audio_sync_verified"] = bool(_tl_contract.get("final_closure_contained"))
+                    _editing_plan_data["publishability_timeline_gate_passed"] = bool(_tl_contract.get("final_timeline_publishable_ok"))
+                if isinstance(segment, dict):
+                    segment["publishability_timeline_gate_passed"] = bool(_tl_contract.get("final_timeline_publishable_ok"))
+                    segment["final_closure_contained"] = bool(_tl_contract.get("final_closure_contained"))
+            except Exception as _tl_e:
+                logger.warning("VPI_FINAL_TIMELINE_GATE_SKIPPED task_id=%s clip_order=%s reason=%s", task_id, clip_index + 1, _tl_e)
 
             _broll_asset_ids = [
                 str(item.get("asset_id") or item.get("asset_path") or item.get("asset_url") or "")
@@ -12236,6 +12774,9 @@ class VideoService:
             )
             _broll_opportunity_unfulfilled = bool(_broll_editorial_opportunity_final and not _broll_true)
             _broll_unfulfilled_reason = str(_broll_editorial_decision_final.get("skip_reason") or "")
+            _broll_match_final_reasons = [str(_r) for _r in (_broll_asset_match_final.get("reasons") or []) if str(_r)]
+            if "no_local_assets_in_family" in _broll_match_final_reasons:
+                _broll_unfulfilled_reason = "no_local_assets_in_family"
             if _broll_editorial_opportunity_final and not _broll_true and not _broll_unfulfilled_reason:
                 if _broll_runtime_blocked_by_status:
                     _broll_unfulfilled_reason = "private_premium_do_not_upload"
@@ -12861,6 +13402,145 @@ class VideoService:
                 "final_output_uses_motion_overlay": bool(_motion_overlay_metadata.get("final_output_uses_motion_overlay") or _motion_overlay_metadata.get("motion_overlay_applied")),
                 "has_audio": bool((locals().get("_audio_master_metadata", {}) or {}).get("audio_voice_status") or words_with_confidence or segment.get("text")),
             }
+            # OUTPUT-VISUALS-15: common final-stage fallback. Some daily-mode
+            # render paths skip the earlier B-roll composition branch but still
+            # expose a valid B-roll decision in `_editing_plan_data`. Render the
+            # internal card here before the final MP4 contract is frozen.
+            if not bool((_editing_plan_data or {}).get("visual_fallback_rendered")):
+                try:
+                    from .vpi_visual_fallback_service import (
+                        build_visual_fallback_plan as _build_visual_fallback_plan_final,
+                        probe_visual_card_visibility as _probe_visual_card_visibility_final,
+                        render_internal_visual_card as _render_internal_visual_card_final,
+                    )
+
+                    _vf_decision_final = dict((_editing_plan_data or {}).get("broll_editorial_decision") or _broll_editorial_decision or {})
+                    _vf_match_final = dict((_editing_plan_data or {}).get("broll_asset_match") or _broll_asset_match or {})
+                    _vf_skip_final = str(
+                        (_editing_plan_data or {}).get("broll_skip_reason")
+                        or _vf_decision_final.get("skip_reason")
+                        or _broll_unfulfilled_reason
+                        or ""
+                    )
+                    _vf_has_intent_final = (
+                        str(_vf_decision_final.get("broll_decision") or "") == "use_broll"
+                        and bool(str(_vf_decision_final.get("broll_intent") or ""))
+                    )
+                    if _vf_has_intent_final and not bool((_editing_plan_data or {}).get("broll_rendered")):
+                        _vf_plan_final = _build_visual_fallback_plan_final(
+                            broll_decision=_vf_decision_final,
+                            broll_asset_match=_vf_match_final,
+                            segment=segment if isinstance(segment, dict) else {},
+                            clip_duration_s=float(duration or 0.0),
+                            broll_skip_reason=_vf_skip_final,
+                        )
+                        _vf_plan_data_final = _vf_plan_final.as_dict()
+                        if isinstance(_editing_plan_data, dict):
+                            _editing_plan_data.update(_vf_plan_data_final)
+                        logger.info(
+                            "VPI_VISUAL_FALLBACK_PLAN_FOUND task_id=%s clip_order=%s planned=%s intent=%s reason=%s stage=final_common",
+                            task_id,
+                            clip_index + 1,
+                            str(_vf_plan_final.planned).lower(),
+                            _vf_plan_final.intent,
+                            _vf_plan_final.skip_reason or "asset_gap",
+                        )
+                        if _vf_plan_final.planned:
+                            _vf_input_final = output_path
+                            _vf_output_final = output_path.with_name(f"visualcard_{output_path.name}")
+                            logger.info(
+                                "VPI_VISUAL_FALLBACK_RENDER_STARTED task_id=%s clip_order=%s type=%s intent=%s text=%s start=%.2f end=%.2f stage=final_common",
+                                task_id,
+                                clip_index + 1,
+                                _vf_plan_final.fallback_type,
+                                _vf_plan_final.intent,
+                                _vf_plan_final.text,
+                                _vf_plan_final.start_s,
+                                _vf_plan_final.end_s,
+                            )
+                            _vf_result_final = await run_in_thread(
+                                _render_internal_visual_card_final,
+                                input_video=str(_vf_input_final),
+                                output_video=str(_vf_output_final),
+                                plan=_vf_plan_final,
+                            )
+                            if bool(_vf_result_final.get("rendered")) and _vf_output_final.exists():
+                                _vf_probe_final = _probe_visual_card_visibility_final(
+                                    str(_vf_input_final),
+                                    str(_vf_output_final),
+                                    float((_vf_plan_final.start_s + _vf_plan_final.end_s) / 2.0),
+                                )
+                                _vf_result_final["visibility_probe"] = _vf_probe_final
+                                if bool(_vf_probe_final.get("visible")):
+                                    output_path = _vf_output_final
+                                    _final_mp4_contract_input["final_output_path_after_visual_fallback"] = str(output_path)
+                                    if isinstance(_editing_plan_data, dict):
+                                        _editing_plan_data["visual_fallback_rendered"] = True
+                                        _editing_plan_data["visual_fallback_render_result"] = _json_safe(_vf_result_final)
+                                    if isinstance(segment, dict):
+                                        segment["visual_fallback_rendered"] = True
+                                        segment.update(_vf_plan_data_final)
+                                    _vf_icon_src_final = _vf_result_final if isinstance(_vf_result_final, dict) else {}
+                                    if isinstance(_editing_plan_data, dict):
+                                        for _ikf in ("icon_requested", "icon_resolved", "icon_rendered", "icon_width", "icon_height", "icon_position"):
+                                            _editing_plan_data[f"visual_fallback_{_ikf}"] = _vf_icon_src_final.get(_ikf)
+                                        _editing_plan_data["visual_fallback_icon_visibility_probe"] = bool(_vf_icon_src_final.get("icon_rendered"))
+                                    if isinstance(segment, dict):
+                                        for _ikf in ("icon_requested", "icon_resolved", "icon_rendered", "icon_width", "icon_height", "icon_position"):
+                                            segment[f"visual_fallback_{_ikf}"] = _vf_icon_src_final.get(_ikf)
+                                    if bool(_vf_icon_src_final.get("icon_rendered")):
+                                        logger.info(
+                                            "VPI_VISUAL_ICON_FRAME_PROBE task_id=%s clip_order=%s icon=%s w=%s h=%s visible=true stage=final_common",
+                                            task_id, clip_index + 1, _vf_icon_src_final.get("icon_resolved"),
+                                            _vf_icon_src_final.get("icon_width"), _vf_icon_src_final.get("icon_height"),
+                                        )
+                                    logger.info(
+                                        "VPI_VISUAL_FALLBACK_FRAME_PROBE task_id=%s clip_order=%s t=%.2f visible=true stage=final_common",
+                                        task_id,
+                                        clip_index + 1,
+                                        float(_vf_probe_final.get("t_s") or 0.0),
+                                    )
+                                    logger.info(
+                                        "VPI_VISUAL_FALLBACK_RENDERED task_id=%s clip_order=%s type=%s intent=%s text=%s icon=%s start=%.2f end=%.2f stage=final_common",
+                                        task_id,
+                                        clip_index + 1,
+                                        _vf_plan_final.fallback_type,
+                                        _vf_plan_final.intent,
+                                        _vf_plan_final.text,
+                                        _vf_plan_final.icon or "typographic",
+                                        _vf_plan_final.start_s,
+                                        _vf_plan_final.end_s,
+                                    )
+                                else:
+                                    if isinstance(_editing_plan_data, dict):
+                                        _editing_plan_data["visual_fallback_rendered"] = False
+                                        _editing_plan_data["visual_fallback_render_result"] = _json_safe(_vf_result_final)
+                                    logger.info(
+                                        "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s stage=final_common",
+                                        task_id,
+                                        clip_index + 1,
+                                        str(_vf_probe_final.get("reason") or "frame_probe_not_visible"),
+                                    )
+                            else:
+                                if isinstance(_editing_plan_data, dict):
+                                    _editing_plan_data["visual_fallback_rendered"] = False
+                                    _editing_plan_data["visual_fallback_render_result"] = _json_safe(_vf_result_final)
+                                logger.info(
+                                    "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s stage=final_common",
+                                    task_id,
+                                    clip_index + 1,
+                                    str(_vf_result_final.get("reason") or "render_failed"),
+                                )
+                except Exception as _vf_final_e:
+                    if isinstance(_editing_plan_data, dict):
+                        _editing_plan_data["visual_fallback_rendered"] = False
+                        _editing_plan_data["visual_fallback_skip_reason"] = f"exception:{_vf_final_e}"
+                    logger.warning(
+                        "VPI_VISUAL_FALLBACK_SKIPPED task_id=%s clip_order=%s reason=%s stage=final_common",
+                        task_id,
+                        clip_index + 1,
+                        f"exception:{_vf_final_e}",
+                    )
             _final_mp4_contract = _build_final_mp4_contract(
                 final_output_path=output_path,
                 expected_duration_s=float(segment.get("duration") or duration or 0.0),

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Document outline -->
+  <rect x="15" y="10" width="70" height="80" rx="3" stroke="#2ECC71" stroke-width="3" fill="none"/>
+  <!-- Header line -->
+  <line x1="25" y1="28" x2="75" y2="28" stroke="#2ECC71" stroke-width="2" opacity="0.5"/>
+  <!-- Signature line -->
+  <line x1="25" y1="65" x2="75" y2="65" stroke="#2ECC71" stroke-width="2" stroke-dasharray="4 3"/>
+  <!-- Cursive signature -->
+  <path d="M28 60 Q35 55 40 60 Q45 65 50 58 Q55 52 60 60 Q65 68 72 58"
+        stroke="#2ECC71" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <!-- Pen -->
+  <line x1="72" y1="58" x2="80" y2="50" stroke="#2ECC71" stroke-width="2" stroke-linecap="round"/>
+</svg>

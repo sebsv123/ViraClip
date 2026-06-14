@@ -1,0 +1,5 @@
+T1: 10 first: Hola rel0: 0.0 last: final src: post_selection_clean_window
+T1 PASS: no pre-trim leak, text: Hola soy Sebastian les vengo a hablar de seguros final
+T3: post_trim_line_text | text: Hola soy Sebastian les vengo a hablar de seguros
+T5: 13 first: esta
+ALL CONTRACT TESTS PASS

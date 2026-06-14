@@ -32,24 +32,81 @@ VPI_ASSET_PENALTIES: Dict[str, int] = {
 }
 
 EDITORIAL_CUE_PRIORITY: Dict[str, List[str]] = {
-    "emotional_protection": ["family_protection", "emotional_reassurance", "financial_planning"],
-    "client_objection": ["documents_admin", "financial_planning", "advisor_consultation"],
-    "myth_debunk": ["documents_admin", "financial_planning", "advisor_consultation"],
-    "coverage_explanation": ["documents_admin", "financial_planning"],
-    "risk_warning": ["risk_warning", "family_protection", "financial_planning"],
+    "emotional_protection": ["family_relief", "family_protection", "emotional_reassurance", "financial_planning"],
+    "client_objection": ["documents_admin", "financial_planning", "practical_explanation", "advisor_consultation"],
+    "myth_debunk": ["documents_admin", "financial_planning", "practical_explanation", "advisor_consultation"],
+    "coverage_explanation": ["practical_explanation", "documents_admin", "financial_planning"],
+    "advisor_explanation": ["practical_explanation", "documents_admin", "financial_planning"],
+    "travel_assistance": ["travel_assistance", "documents_admin", "financial_planning"],
+    "student_abroad": ["student_abroad", "documents_admin", "practical_explanation"],
+    "risk_warning": ["risk_warning", "risk_warning_context", "health_access", "family_protection", "financial_planning"],
     "actionable_advice": ["documents_admin", "financial_planning"],
-    "example_story": ["family_protection", "financial_planning", "location_context"],
+    "example_story": ["family_relief", "family_protection", "financial_planning", "location_context"],
 }
 
 CUE_ALIASES: Dict[str, str] = {
     "documents_admin": "documents_admin",
+    "paperwork_support": "documents_admin",
     "emotional_reassurance": "emotional_reassurance",
+    "emotional_support": "emotional_reassurance",
+    "family_relief": "family_relief",
     "family_protection": "family_protection",
     "financial_planning": "financial_planning",
     "risk_warning": "risk_warning",
+    "risk_warning_context": "risk_warning",
+    "health_access": "health_access",
+    "healthcare": "health_access",
+    "practical_explanation": "practical_explanation",
+    "advisor_explanation": "practical_explanation",
+    "coverage_explanation": "practical_explanation",
+    "travel_assistance": "travel_assistance",
+    "student_abroad": "student_abroad",
     "explain_coverage": "documents_admin",
     "advisor_meeting": "advisor_consultation",
 }
+
+TAXONOMY_COMPATIBLE_FAMILIES: Dict[str, Tuple[str, ...]] = {
+    "emotional_protection": ("family_relief", "family_protection", "emotional_reassurance", "financial_planning"),
+    "family_responsibility": ("family_relief", "family_protection", "home_family", "emotional_reassurance", "financial_planning"),
+    "family_relief": ("family_relief", "family_protection", "emotional_reassurance"),
+    "risk_warning": ("risk_warning", "risk_warning_context", "health_access", "documents_admin", "financial_planning"),
+    "risk_warning_family": ("risk_warning", "risk_warning_context", "family_protection", "financial_planning"),
+    "travel_assistance": ("travel_assistance", "documents_admin", "financial_planning"),
+    "student_abroad": ("student_abroad", "documents_admin", "practical_explanation"),
+    "coverage_explanation": ("practical_explanation", "documents_admin", "financial_planning"),
+    "advisor_explanation": ("practical_explanation", "documents_admin", "financial_planning"),
+    "insurance_documents": ("documents_admin", "practical_explanation", "financial_planning"),
+    "financial_planning": ("financial_planning", "documents_admin", "practical_explanation"),
+    "client_objection": ("practical_explanation", "documents_admin", "financial_planning"),
+    "myth_debunk": ("practical_explanation", "documents_admin", "financial_planning"),
+    "myth_debunk_age": ("practical_explanation", "documents_admin", "financial_planning", "family_protection"),
+}
+
+
+def _canonical_broll_family(category: str) -> str:
+    category = str(category or "").strip().lower()
+    return CUE_ALIASES.get(category, category)
+
+
+def _compatible_families_for_intent(intent: VisualIntent) -> Tuple[str, ...]:
+    families: List[str] = []
+    for key in (
+        intent.intent_type,
+        intent.narrative_function,
+        intent.primary_cue or "",
+        *(intent.preferred_categories or []),
+    ):
+        canonical = _canonical_broll_family(str(key or ""))
+        if canonical:
+            families.append(canonical)
+        families.extend(TAXONOMY_COMPATIBLE_FAMILIES.get(str(key or ""), ()))
+        families.extend(TAXONOMY_COMPATIBLE_FAMILIES.get(canonical, ()))
+    out: List[str] = []
+    for family in families:
+        canonical = _canonical_broll_family(family)
+        if canonical and canonical not in out:
+            out.append(canonical)
+    return tuple(out)
 
 
 @dataclass
@@ -333,6 +390,84 @@ def detect_intent(
             narrative_function="risk_warning",
         )
 
+    if _contains(normalized, ["la salud no siempre avisa", "salud no siempre avisa", "por si acaso", "cuando ya es tarde", "antes de que pase", "no siempre avisa"]) and not _contains(
+        normalized,
+        # OUTPUT-VISUALS-15B: an incidental "por si acaso" must not hijack the
+        # visual intent of a text dominated by explicit travel/student subject
+        # matter — the specific domain wins and falls through to those branches.
+        ["viaje", "pasaje", "asistencia en viaje", "aeropuerto", "equipaje", "estudiante", "estudios", "visado", "campus"],
+    ):
+        return VisualIntent(
+            intent_type="risk_warning",
+            confidence=0.8,
+            primary_cue="risk_warning",
+            preferred_categories=["risk_warning", "risk_warning_context", "health_access", "documents_admin"],
+            pexels_queries=[
+                "doctor patient consultation serious",
+                "health documents consultation",
+                "person reviewing health paperwork",
+                "sober planning documents",
+            ],
+            avoid_terms=["violence", "horror", "ambulance", "hospital bed", "funeral", "sad alone", "dramatic crying"],
+            positive_terms=["health", "patient", "doctor", "documents", "planning", "risk", "warning"],
+            visual_style="sober_health_warning_video",
+            max_overlays=normal_max,
+            min_candidate_score=64.0,
+            allow_stock=True,
+            allow_static_images=False,
+            reasoning="health risk warning: use sober healthcare/planning context only",
+            domain=domain,
+            narrative_function="risk_warning",
+        )
+
+    if _contains(normalized, ["estudiante", "estudios", "study visa", "campus", "universidad", "visado", "estancia de estudios"]):
+        # OUTPUT-BROLL-14: student-abroad family (folder may be empty until the
+        # user drops local clips; the matcher then skips with a clear reason).
+        return VisualIntent(
+            intent_type="student_abroad",
+            confidence=0.78,
+            primary_cue="student_abroad",
+            preferred_categories=["student_abroad", "documents_admin", "practical_explanation"],
+            pexels_queries=[
+                "student reviewing documents on campus",
+                "student with backpack at university",
+                "study visa paperwork",
+            ],
+            avoid_terms=["party", "dorm party", "dramatic exam stress"],
+            positive_terms=["student", "campus", "university", "documents", "visa", "abroad"],
+            visual_style="student_documents_campus_video",
+            max_overlays=normal_max,
+            min_candidate_score=66.0,
+            allow_stock=True,
+            allow_static_images=False,
+            reasoning="student abroad: prefer local student_abroad family, documents as support",
+            domain=domain,
+            narrative_function="student_abroad",
+        )
+
+    if _contains(normalized, ["viaje", "pasaje", "asistencia en viaje", "extranjero", "fuera de casa", "aeropuerto"]):
+        return VisualIntent(
+            intent_type="travel_assistance",
+            confidence=0.78,
+            primary_cue="travel_assistance",
+            preferred_categories=["travel_assistance", "documents_admin", "financial_planning"],
+            pexels_queries=[
+                "traveler reviewing travel documents",
+                "person planning trip with documents",
+                "travel insurance documents",
+            ],
+            avoid_terms=["luxury hotel", "party travel", "random beach", "dramatic airport delay"],
+            positive_terms=["travel", "documents", "planning", "luggage", "airport", "passport"],
+            visual_style="travel_documents_planning_video",
+            max_overlays=normal_max,
+            min_candidate_score=66.0,
+            allow_stock=True,
+            allow_static_images=False,
+            reasoning="travel assistance: prefer local travel_assistance family, documents/planning as support",
+            domain=domain,
+            narrative_function="travel_assistance",
+        )
+
     if _contains(normalized, ["hipoteca", "proyecto", "responsabilidad", "capital", "prima", "planificacion", "ahorro", "presupuesto"]):
         return VisualIntent(
             intent_type="financial_planning",
@@ -361,9 +496,9 @@ def detect_intent(
     if _contains(normalized, ["seguro de vida", "seguros de vida", "poliza", "cobertura", "contratar", "documentos", "contrato", "documentacion"]):
         return VisualIntent(
             intent_type="insurance_documents",
-            confidence=0.74,
+            confidence=0.76,
             primary_cue="documents_admin",
-            preferred_categories=["documents_admin", "financial_planning"],
+            preferred_categories=["documents_admin", "practical_explanation", "financial_planning"],
             pexels_queries=[
                 "insurance policy documents",
                 "signing insurance paperwork",
@@ -386,9 +521,21 @@ def detect_intent(
     if editorial_type in EDITORIAL_CUE_PRIORITY:
         categories = EDITORIAL_CUE_PRIORITY[editorial_type or ""]
         primary = cue or (categories[0] if categories else None)
+        _editorial_confidence = 0.62
+        if any(
+            term in normalized
+            for term in (
+                "seguro", "seguros", "poliza", "cobertura", "proteccion",
+                "proteger", "calma", "tranquilidad", "salud", "decesos",
+                "prima", "ahorro", "documentos", "contratar",
+            )
+        ):
+            # Local B-roll still needs phrase timing + asset matching later; this
+            # only prevents clear insurance clips from dying at the generic 0.62.
+            _editorial_confidence = 0.76
         return VisualIntent(
             intent_type=str(editorial_type),
-            confidence=0.62,
+            confidence=_editorial_confidence,
             primary_cue=primary,
             preferred_categories=categories,
             pexels_queries=_generic_queries_for_domain(domain, primary),
@@ -499,14 +646,30 @@ def _check_taxonomy_match(
     intent: VisualIntent,
 ) -> Tuple[bool, str]:
     """Check if candidate's category matches the expected VPI taxonomy."""
-    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    category = _canonical_broll_family(str(candidate.get("category") or candidate.get("cue") or "").lower())
     if not category:
         return False, "no_category"
+    compatible = _compatible_families_for_intent(intent)
     # Must be in preferred categories or match primary cue
-    if intent.primary_cue and category == intent.primary_cue:
+    if intent.primary_cue and category == _canonical_broll_family(intent.primary_cue):
         return True, "primary_cue_match"
-    if category in intent.preferred_categories:
+    preferred = {_canonical_broll_family(item) for item in intent.preferred_categories}
+    if category in preferred:
         return True, "preferred_category_match"
+    if category in compatible:
+        logger.info(
+            "VPI_BROLL_TAXONOMY_MATCH intent=%s category=%s reason=compatible_family families=%s",
+            intent.intent_type,
+            category,
+            ",".join(compatible),
+        )
+        return True, "compatible_family_match"
+    logger.info(
+        "VPI_BROLL_TAXONOMY_NO_MATCH intent=%s category=%s families=%s",
+        intent.intent_type,
+        category,
+        ",".join(compatible),
+    )
     return False, "taxonomy_mismatch"
 
 
@@ -521,11 +684,13 @@ def _check_brand_fit(
     if brand_fit is True:
         return True, "brand_fit_true"
     # No explicit flag: check domain alignment
-    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    category = _canonical_broll_family(str(candidate.get("category") or candidate.get("cue") or "").lower())
     domain = intent.domain
     if domain == "insurance_finance" and category in {
         "family_protection", "financial_planning", "documents_admin",
-        "advisor_consultation", "risk_warning", "emotional_reassurance",
+        "advisor_consultation", "risk_warning", "risk_warning_context",
+        "emotional_reassurance", "family_relief", "practical_explanation",
+        "health_access",
     }:
         return True, "domain_aligned_category"
     if domain == "legal_admin" and category in {"documents_admin", "advisor_consultation"}:
@@ -538,7 +703,7 @@ def _check_avoid_context(
     intent: VisualIntent,
 ) -> Tuple[bool, str]:
     """Check if asset matches any avoid_context from intent."""
-    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    category = _canonical_broll_family(str(candidate.get("category") or candidate.get("cue") or "").lower())
     path = str(candidate.get("path") or candidate.get("url") or "").lower()
     query = str(candidate.get("query") or "").lower()
     title = str(candidate.get("title") or "").lower()
@@ -555,14 +720,19 @@ def _score_category_match(category: str, intent: VisualIntent) -> Tuple[float, L
     """Score how well the category matches the intent's preferred categories."""
     reasons: List[str] = []
     score = 0.0
-    preferred = intent.preferred_categories
+    category = _canonical_broll_family(category)
+    preferred = [_canonical_broll_family(item) for item in intent.preferred_categories]
+    compatible = _compatible_families_for_intent(intent)
     if preferred and category == preferred[0]:
         score += 35
         reasons.append("category_match_primary:+35")
     elif category in preferred:
         score += 25
         reasons.append("category_match_preferred:+25")
-    if intent.primary_cue and category == intent.primary_cue:
+    elif category in compatible:
+        score += 18
+        reasons.append("category_match_compatible:+18")
+    if intent.primary_cue and category == _canonical_broll_family(intent.primary_cue):
         score += 20
         reasons.append("category_match_primary_cue:+20")
     return score, reasons
@@ -603,7 +773,7 @@ def _score_intensity_match(candidate: Dict[str, Any], intent: VisualIntent) -> T
         elif intensity == "light":
             score -= 10
             reasons.append(f"intensity_too_light:{intensity}:-10")
-    elif intent.intent_type in {"family_responsibility", "emotional_reassurance"}:
+    elif intent.intent_type in {"family_responsibility", "emotional_reassurance", "emotional_protection"}:
         if intensity in {"warm", "light", "moderate"}:
             score += 10
             reasons.append(f"intensity_match:{intensity}:+10")
@@ -657,7 +827,7 @@ def score_broll_candidate(
     reasons: List[str] = []
     score = 0.0
 
-    category = str(candidate.get("category") or candidate.get("cue") or "").lower()
+    category = _canonical_broll_family(str(candidate.get("category") or candidate.get("cue") or "").lower())
     source = str(candidate.get("source") or "").lower()
     path = candidate.get("path") or candidate.get("url") or ""
     path_text = str(path).lower()
@@ -794,6 +964,12 @@ def score_broll_candidate(
     if intent.intent_type == "family_responsibility" and category == "family_protection":
         score += 30
         reasons.append("family_responsibility_match:+30")
+    if intent.intent_type == "emotional_protection" and category in {"family_relief", "family_protection", "emotional_reassurance"}:
+        score += 32
+        reasons.append("emotional_protection_family_match:+32")
+    if intent.intent_type in {"coverage_explanation", "advisor_explanation", "insurance_documents"} and category == "practical_explanation":
+        score += 28
+        reasons.append("coverage_practical_explanation_match:+28")
     if intent.intent_type in {"myth_debunk_age", "client_objection"} and category == "advisor_consultation":
         score += 30
         reasons.append("objection_advisor_match:+30")
@@ -806,6 +982,9 @@ def score_broll_candidate(
     if intent.intent_type == "risk_warning_family" and category == "risk_warning":
         score += 30
         reasons.append("risk_warning_match:+30")
+    if intent.intent_type in {"risk_warning", "risk_warning_family"} and category in {"risk_warning", "health_access"}:
+        score += 24
+        reasons.append("risk_warning_compatible_match:+24")
     if source in {"pexels", "stock"} and query in {q.lower() for q in intent.pexels_queries}:
         score += 15
         reasons.append("intent_query_match:+15")
@@ -1383,7 +1562,15 @@ def choose_broll_editorial_decision(
         safe_edit = True
 
     death_sensitive = _decesos_sensitive(segment_text, editorial_type)
-    threshold = 0.85 if death_sensitive else (0.72 if safe_edit else 0.62)
+    death_sober_family_context = death_sensitive and _contains(
+        normalized_text,
+        [
+            "familia", "acompanamiento", "acompañamiento", "cuidado",
+            "menos peso", "serenidad", "organizacion", "organización",
+            "tranquilidad",
+        ],
+    )
+    threshold = 0.78 if death_sober_family_context else (0.85 if death_sensitive else (0.72 if safe_edit else 0.62))
     confidence = float(max(intent.confidence or 0.0, (float(vpi_score or 0.0) / 100.0) if vpi_score is not None else 0.0))
     confidence = round(min(1.0, confidence), 3)
 
@@ -1416,7 +1603,10 @@ def choose_broll_editorial_decision(
 
     # Determine a conservative editorial mode.
     intent_type = str(intent.intent_type or "").lower()
-    if death_sensitive:
+    if death_sober_family_context:
+        broll_mode = "cutaway_fullscreen"
+        mode_reason = "decesos_sober_family_relief"
+    elif death_sensitive:
         broll_mode = "no_broll"
         mode_reason = "death_sensitive_requires_sobriety"
     elif intent_type in {"family_responsibility", "emotional_protection"}:
@@ -1486,6 +1676,18 @@ def choose_broll_editorial_decision(
         else:
             broll_mode = "cutaway_fullscreen"
             mode_reason = "daily_mode_fullscreen_cutaway_only"
+    if safe_edit and broll_mode == "cutaway_fullscreen" and confidence >= 0.75 and local_assets:
+        # OUTPUT-BROLL-11: "cutaway_fullscreen" is the same sober full-frame
+        # insert under its legacy name — but the composition resolver (Rule 9)
+        # only exempts "daily_fullframe_cutaway" in minimal_safe, so the legacy
+        # name died as composition_conflict. High-confidence + local assets gets
+        # the canonical daily route, identical render path.
+        broll_mode = "daily_fullframe_cutaway"
+        mode_reason = "daily_fullframe_cutaway_high_confidence"
+        logger.info(
+            "VPI_OUTPUT_QUALITY_BROLL_FULLFRAME_ELIGIBLE intent=%s confidence=%.2f local_assets=%d reason=legacy_cutaway_promoted",
+            intent_type, confidence, len(local_assets),
+        )
     start_time = 3.0 if hook_protected else max(0.0, min(clip_duration, 0.75))
     if hook_protected and start_time < 3.0:
         start_time = 3.0
@@ -1539,6 +1741,13 @@ def choose_broll_editorial_decision(
     if not asset_query:
         asset_query = build_stock_queries(intent, limit=1)[0] if build_stock_queries(intent, limit=1) else ""
     asset_category = str(intent.primary_cue or (intent.preferred_categories[0] if intent.preferred_categories else "") or "")
+    taxonomy_families = _compatible_families_for_intent(intent)
+    logger.info(
+        "VPI_BROLL_TAXONOMY_ASSET_COVERAGE intent=%s families=%s local_assets=%d",
+        intent.intent_type,
+        ",".join(taxonomy_families) or "none",
+        len(local_assets),
+    )
 
     if provider_diagnostics is not None:
         logger.info(
@@ -1577,6 +1786,10 @@ def choose_broll_editorial_decision(
         "safe_edit": bool(safe_edit),
         "local_only": bool(local_only),
         "provider_diagnostics": provider_diagnostics or {},
+        "broll_taxonomy_intent": str(intent.intent_type or ""),
+        "broll_taxonomy_asset_family": asset_category,
+        "broll_taxonomy_match_confidence": confidence if broll_mode != "no_broll" else 0.0,
+        "broll_taxonomy_match_reason": reason if broll_mode != "no_broll" else f"skip:{reason}",
     }
     logger.info(
         "BROLL_EDITORIAL_DECISION decision=%s mode=%s confidence=%.2f reason=%s asset_query=%s start=%.2f dur=%.2f max=%d budget=%s face_safe=%s caption_safe=%s",
@@ -1629,6 +1842,10 @@ def build_broll_editorial_decision(**kwargs: Any) -> Dict[str, Any]:
         "route_used": "editorial_local",
         "duplicate_routes_blocked": True,
         "local_only": bool(decision.get("local_only")),
+        "broll_taxonomy_intent": str(decision.get("broll_taxonomy_intent") or ""),
+        "broll_taxonomy_asset_family": str(decision.get("broll_taxonomy_asset_family") or ""),
+        "broll_taxonomy_match_confidence": float(decision.get("broll_taxonomy_match_confidence") or 0.0),
+        "broll_taxonomy_match_reason": str(decision.get("broll_taxonomy_match_reason") or ""),
     }
     logger.info(
         "BROLL_SELECTED use_broll=%s mode=%s reason=%s",
@@ -1660,18 +1877,74 @@ def match_broll_asset(
         available_local_assets=available_local_assets,
         provider_diagnostics=provider_diagnostics,
     )
-    if base_decision.get("broll_decision") != "use_broll":
+    # ── OUTPUT-BROLL-14: local intake status for the requested family ─────────
+    _intake_intent = detect_intent(
+        segment_text,
+        editorial_type=topic or broll_intent,
+        suggested_broll_cue_type=broll_intent,
+    )
+    _intake_requested = _canonical_broll_family(
+        str(_intake_intent.primary_cue or (_intake_intent.preferred_categories[0] if _intake_intent.preferred_categories else "") or broll_intent or "")
+    )
+    _intake_available = 0
+    _intake_status = "unknown_family"
+    if _intake_requested:
+        for _base in (Path("/app/assets/broll"), Path("assets/broll")):
+            _fam_dir = _base / _intake_requested
+            if _fam_dir.is_dir():
+                _intake_available = sum(
+                    1 for _f in _fam_dir.iterdir()
+                    if _f.suffix.lower() in VIDEO_EXTS or _f.suffix.lower() in IMAGE_EXTS
+                )
+                _intake_status = "ready" if _intake_available else "no_local_assets_in_family"
+                break
+        else:
+            _intake_status = "family_folder_missing"
+        if _intake_status == "ready":
+            logger.info(
+                "VPI_BROLL_ASSET_INTAKE_FAMILY_READY family=%s assets=%d",
+                _intake_requested, _intake_available,
+            )
+        elif _intake_status == "no_local_assets_in_family":
+            logger.info("VPI_BROLL_ASSET_INTAKE_FAMILY_EMPTY family=%s", _intake_requested)
+    _intake_fields = {
+        "broll_asset_family_requested": _intake_requested,
+        "broll_asset_family_available": _intake_available,
+        "broll_asset_intake_status": _intake_status,
+    }
+    if _intake_requested in {"travel_assistance", "student_abroad"} and _intake_status == "no_local_assets_in_family":
+        logger.info("BROLL_SKIPPED_REASON reason=no_local_assets_in_family family=%s", _intake_requested)
         return {
             "matched": False,
             "asset": "",
             "source": "none",
             "score": 0.0,
-            "reasons": [str(base_decision.get("reason") or "no_broll")],
+            "reasons": ["no_local_assets_in_family"],
             "category": "",
             "asset_id": "",
             "provider_video_id": "",
             "route_used": str(base_decision.get("route_used") or "editorial_local"),
             "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+            **_intake_fields,
+        }
+    if base_decision.get("broll_decision") != "use_broll":
+        _early_reasons = (
+            ["no_local_assets_in_family"]
+            if _intake_status == "no_local_assets_in_family"
+            else [str(base_decision.get("reason") or "no_broll")]
+        )
+        return {
+            "matched": False,
+            "asset": "",
+            "source": "none",
+            "score": 0.0,
+            "reasons": _early_reasons,
+            "category": "",
+            "asset_id": "",
+            "provider_video_id": "",
+            "route_used": str(base_decision.get("route_used") or "editorial_local"),
+            "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+            **_intake_fields,
         }
 
     try:
@@ -1691,6 +1964,7 @@ def match_broll_asset(
             "provider_video_id": "",
             "route_used": str(base_decision.get("route_used") or "editorial_local"),
             "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+            **_intake_fields,
         }
 
     intent = detect_intent(
@@ -1704,6 +1978,7 @@ def match_broll_asset(
         suggested_broll_cue_type=broll_intent,
     )
 
+    # (intake status computed earlier, right after base_decision)
     local_candidates: List[Dict[str, Any]] = []
     if available_local_assets is not None:
         local_candidates = _resolve_local_asset_candidates(available_local_assets)
@@ -1727,12 +2002,13 @@ def match_broll_asset(
             "asset": "",
             "source": "none",
             "score": 0.0,
-            "reasons": ["no_local_asset_match"],
+            "reasons": ["no_local_assets_in_family"] if _intake_status == "no_local_assets_in_family" else ["no_local_asset_match"],
             "category": "",
             "asset_id": "",
             "provider_video_id": "",
             "route_used": str(base_decision.get("route_used") or "editorial_local"),
             "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+            **_intake_fields,
         }
 
     decision_threshold = 85.0 if _decesos_sensitive(segment_text, topic) else (72.0 if bool(base_decision.get("safe_edit", True)) else 65.0)
@@ -1744,7 +2020,7 @@ def match_broll_asset(
         asset = Path(path_str)
         if not asset.exists():
             continue
-        category = str(candidate.get("category") or candidate.get("taxonomy") or "").strip().lower()
+        category = _canonical_broll_family(str(candidate.get("category") or candidate.get("taxonomy") or "").strip().lower())
         if not category:
             category, tags = _classify_broll_by_filename(asset)
             candidate["category"] = category
@@ -1808,12 +2084,17 @@ def match_broll_asset(
         # daily cutaway path, fall back to a CLEAR text→category mapping over the
         # verified local assets — never generic stock.
         _TEXT_CATEGORY_FALLBACK = (
-            (("familia", "tuyos", "hijos", "pareja"), ("family_protection", "family_relief")),
+            # OUTPUT-BROLL-14: travel/student text NEVER falls back to emotional
+            # families — first-match-break lands here before the emotional rows.
+            (("viaje", "viajar", "pasaje", "aeropuerto", "equipaje", "maleta", "asistencia en viaje"), ("travel_assistance",)),
+            (("estudiante", "estudios", "visado", "campus", "universidad", "estancia"), ("student_abroad",)),
+            (("familia", "tuyos", "hijos", "pareja", "acompanamiento", "cuidado", "serenidad"), ("family_relief", "family_protection", "emotional_reassurance")),
             (("documento", "documentos", "tramite", "poliza", "contrato", "firmar"), ("documents_admin",)),
             (("precio", "prima", "pago", "pagos", "ahorro", "ahorrar"), ("financial_planning",)),
-            (("tranquilidad", "calma", "proteger", "proteccion", "protege"), ("emotional_reassurance", "family_relief", "family_protection")),
-            (("salud", "medico", "hospital"), ("health_access",)),
-            (("cobertura", "seguro", "seguros", "vida"), ("practical_explanation", "family_protection")),
+            (("tranquilidad", "calma", "proteger", "proteccion", "protege", "menos peso"), ("family_relief", "emotional_reassurance", "family_protection")),
+            (("salud", "medico", "hospital", "imprevisto", "avisa"), ("health_access", "risk_warning")),
+            (("cobertura", "seguro", "seguros", "vida", "contratar", "revisar"), ("practical_explanation", "documents_admin", "financial_planning")),
+            (("viaje", "pasaje", "extranjero", "aeropuerto"), ("documents_admin", "financial_planning")),
         )
         _norm_text = normalize_text(segment_text)
         _fallback_categories: Tuple[str, ...] = tuple()
@@ -1837,8 +2118,16 @@ def match_broll_asset(
                     )
                     break
     if not matched:
-        logger.info("BROLL_SKIPPED_REASON reason=low_confidence")
+        if _intake_status == "no_local_assets_in_family":
+            logger.info("BROLL_SKIPPED_REASON reason=no_local_assets_in_family family=%s", _intake_requested)
+        else:
+            logger.info("BROLL_SKIPPED_REASON reason=low_confidence")
     else:
+        logger.info(
+            "VPI_BROLL_ASSET_INTAKE_SELECTED family_requested=%s family_selected=%s asset=%s intake_status=%s",
+            _intake_requested, selected_category or selected_cue, selected_asset, _intake_status,
+        )
+        taxonomy_confidence = round(min(1.0, max(0.0, float(selected_score or 0.0) / 100.0)), 3)
         logger.info(
             "BROLL_SELECTED asset=%s source=%s score=%.2f category=%s",
             selected_asset,
@@ -1846,17 +2135,33 @@ def match_broll_asset(
             selected_score,
             selected_category or selected_cue,
         )
+        logger.info(
+            "VPI_BROLL_TAXONOMY_MATCH intent=%s asset_family=%s confidence=%.2f reason=%s",
+            intent.intent_type,
+            selected_category or selected_cue,
+            taxonomy_confidence,
+            ",".join(selected_reasons[:4]),
+        )
     return {
         "matched": matched,
         "asset": str(selected_asset) if matched else "",
         "source": selected_source if matched else "none",
         "score": float(selected_score if matched else 0.0),
-        "reasons": selected_reasons if matched else ["low_confidence"],
+        "reasons": selected_reasons if matched else (
+            ["no_local_assets_in_family"] if _intake_status == "no_local_assets_in_family" else ["low_confidence"]
+        ),
         "category": selected_category or selected_cue,
         "asset_id": asset_id if matched else "",
         "provider_video_id": "",
         "route_used": str(base_decision.get("route_used") or "editorial_local"),
         "duplicate_routes_blocked": bool(base_decision.get("duplicate_routes_blocked", True)),
+        "broll_asset_family_requested": _intake_requested,
+        "broll_asset_family_available": _intake_available,
+        "broll_asset_intake_status": _intake_status,
+        "broll_taxonomy_intent": str(intent.intent_type or broll_intent or ""),
+        "broll_taxonomy_asset_family": str(selected_category or selected_cue or ""),
+        "broll_taxonomy_match_confidence": round(min(1.0, max(0.0, float(selected_score if matched else 0.0) / 100.0)), 3),
+        "broll_taxonomy_match_reason": ",".join(selected_reasons[:6]) if matched else "no_compatible_local_asset",
     }
 
 

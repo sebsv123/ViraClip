@@ -668,10 +668,10 @@ def apply_music_bed(
             f"ratio={MIX_POLICY_DUCKING_RATIO}:"
             f"attack={MIX_POLICY_DUCKING_ATTACK}:"
             f"release={MIX_POLICY_DUCKING_RELEASE}[md];"
-            "[0:a][md]amix=inputs=2:duration=first:dropout_transition=0[a]"
+            "[0:a][md]amix=inputs=2:duration=first:dropout_transition=0[amx];[amx]apad[a]"
         )
     else:
-        music_filter = base_music_filter + "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        music_filter = base_music_filter + "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[amx];[amx]apad[a]"
 
     def _build_cmd(filter_complex: str) -> list[str]:
         return [
@@ -731,7 +731,7 @@ def apply_music_bed(
 
     result = subprocess.run(_build_cmd(music_filter), capture_output=True, text=True, check=False)
     if result.returncode != 0 and actual_ducking_enabled:
-        fallback_filter = base_music_filter + "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]"
+        fallback_filter = base_music_filter + "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[amx];[amx]apad[a]"
         logger.warning("[music] ducking_fallback reason=%s", (result.stderr or "ffmpeg_failed").strip()[-300:])
         result = subprocess.run(_build_cmd(fallback_filter), capture_output=True, text=True, check=False)
         actual_ducking_enabled = False

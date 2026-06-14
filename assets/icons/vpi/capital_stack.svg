@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Stack of coins/bars -->
+  <rect x="25" y="60" width="50" height="12" rx="3" stroke="#1ABC9C" stroke-width="2.5" fill="none"/>
+  <rect x="28" y="48" width="44" height="12" rx="3" stroke="#1ABC9C" stroke-width="2.5" fill="none"/>
+  <rect x="32" y="36" width="36" height="12" rx="3" stroke="#1ABC9C" stroke-width="2.5" fill="none"/>
+  <rect x="36" y="24" width="28" height="12" rx="3" stroke="#1ABC9C" stroke-width="2.5" fill="none"/>
+  <!-- Upward arrow -->
+  <polyline points="50,72 50,85 42,80" stroke="#1ABC9C" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <polyline points="50,85 58,80" stroke="#1ABC9C" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Dollar sign -->
+  <text x="50" y="69" text-anchor="middle" font-family="sans-serif" font-size="10" font-weight="bold" fill="#1ABC9C">$</text>
+</svg>

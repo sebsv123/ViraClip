@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Clipboard -->
+  <rect x="25" y="15" width="50" height="70" rx="4" stroke="#2ECC71" stroke-width="3" fill="none"/>
+  <!-- Clipboard top -->
+  <rect x="35" y="10" width="30" height="10" rx="2" stroke="#2ECC71" stroke-width="2.5" fill="none"/>
+  <!-- Checkbox 1 -->
+  <rect x="32" y="32" width="10" height="10" rx="1" stroke="#2ECC71" stroke-width="2" fill="none"/>
+  <polyline points="34,37 37,40 42,33" stroke="#2ECC71" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Checkbox 2 -->
+  <rect x="32" y="50" width="10" height="10" rx="1" stroke="#2ECC71" stroke-width="2" fill="none"/>
+  <polyline points="34,55 37,58 42,51" stroke="#2ECC71" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Checkbox 3 -->
+  <rect x="32" y="68" width="10" height="10" rx="1" stroke="#2ECC71" stroke-width="2" fill="none"/>
+  <!-- Lines next to checkboxes -->
+  <line x1="48" y1="37" x2="68" y2="37" stroke="#2ECC71" stroke-width="2" opacity="0.6"/>
+  <line x1="48" y1="55" x2="65" y2="55" stroke="#2ECC71" stroke-width="2" opacity="0.6"/>
+  <line x1="48" y1="73" x2="60" y2="73" stroke="#2ECC71" stroke-width="2" opacity="0.6"/>
+</svg>
