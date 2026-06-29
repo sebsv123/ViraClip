@@ -1662,22 +1662,28 @@ def _materialize_final_qc_state(
         else:
             status = "rejected_technical"
             final_reasons = list(dict.fromkeys(real_reasons))  # concrete technical reasons only
+        # FOLLOW-UP-QC-DELIVERY-REASON-COSMETIC: derive the public delivery reason from the SAME
+        # final contract, so it never keeps a stale provisional label incompatible with the state.
         return {"qc_status": status, "qc_reasons": final_reasons, "do_not_upload": True,
-                "ready": False, "advisory_qc_reasons": advisory}
+                "ready": False, "advisory_qc_reasons": advisory,
+                "delivery_decision_reason": (final_reasons[0] if final_reasons else status)}
 
     # C. Editorial failure / delivery REVIEW (technical ok) -> editorial review, NOT rejected_technical.
     if (not editorial_passed) or decision == "REVIEW":
         return {"qc_status": "needs_review", "qc_reasons": list(dict.fromkeys(real_reasons)),
-                "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory}
+                "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory,
+                "delivery_decision_reason": "needs_review"}
 
     # A. Publishable: delivery READY + reconciled publishable contract + gates passed.
     if decision == "READY" and bool(final_publishable):
         return {"qc_status": "ready", "qc_reasons": [], "do_not_upload": False,
-                "ready": True, "advisory_qc_reasons": advisory}
+                "ready": True, "advisory_qc_reasons": advisory,
+                "delivery_decision_reason": "ready"}
 
     # Conservative fallback (ambiguous final state) -> review, never silent ready.
     return {"qc_status": "needs_review", "qc_reasons": list(dict.fromkeys(real_reasons)),
-            "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory}
+            "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory,
+            "delivery_decision_reason": "needs_review"}
 
 
 def classify_premium_output_quality(
@@ -9293,6 +9299,9 @@ class TaskService:
                 clip_info["qc_reasons"] = _final_qc_state["qc_reasons"]
                 clip_info["do_not_upload"] = bool(_final_qc_state["do_not_upload"])
                 clip_info["ready"] = bool(_final_qc_state["ready"])
+                # FOLLOW-UP-QC-DELIVERY-REASON-COSMETIC: overwrite the provisional delivery reason
+                # (set earlier from the advisory provisional qc_status) with the canonical final one.
+                clip_info["delivery_decision_reason"] = _final_qc_state["delivery_decision_reason"]
                 logger.info(
                     "VPI_FINAL_QC_STATE_MATERIALIZED task_id=%s clip_order=%d qc_status=%s ready=%s do_not_upload=%s delivery=%s advisory=%s",
                     task_id, i + 1, clip_info["qc_status"], str(clip_info["ready"]).lower(),
