@@ -1,0 +1,174 @@
+{
+  "version": "assets-41",
+  "created_by": "OUTPUT-ASSETS-41",
+  "assets": [
+    {
+      "asset_id": "travel_suitcase",
+      "path": "assets/icons/vpi/travel_suitcase.svg",
+      "intents": [
+        "travel_assistance"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 11720,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "dee75cf279292e26"
+    },
+    {
+      "asset_id": "travel_passport",
+      "path": "assets/icons/vpi/travel_passport.svg",
+      "intents": [
+        "travel_assistance"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 13139,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "1c76cf3e2b2c8c61"
+    },
+    {
+      "asset_id": "family_shield",
+      "path": "assets/icons/vpi/family_shield.svg",
+      "intents": [
+        "emotional_protection",
+        "family_protection"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 13872,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "d229e0c4bbab87e9"
+    },
+    {
+      "asset_id": "budget_document",
+      "path": "assets/icons/vpi/budget_document.svg",
+      "intents": [
+        "financial_planning"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 12588,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "e7b8f80b4e56c01a"
+    },
+    {
+      "asset_id": "advisor_chat",
+      "path": "assets/icons/vpi/advisor_chat.svg",
+      "intents": [
+        "advisor_explanation"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 10100,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "570662d126a3a038"
+    },
+    {
+      "asset_id": "shield_life",
+      "path": "assets/icons/vpi/shield_life.svg",
+      "intents": [
+        "emotional_protection"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 8648,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "bb31204e39964b2b"
+    },
+    {
+      "asset_id": "family_home",
+      "path": "assets/icons/vpi/family_home.svg",
+      "intents": [
+        "emotional_protection",
+        "family_protection"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 9645,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "cd5f1b4e5976d3cc"
+    },
+    {
+      "asset_id": "heart_shield",
+      "path": "assets/icons/vpi/heart_shield.svg",
+      "intents": [
+        "emotional_protection"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 9039,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "20ebe66be6c9860a"
+    },
+    {
+      "asset_id": "capital_stack",
+      "path": "assets/icons/vpi/capital_stack.svg",
+      "intents": [
+        "financial_planning"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 8639,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "0838deb5b19185a4"
+    },
+    {
+      "asset_id": "folder_paperwork",
+      "path": "assets/icons/vpi/folder_paperwork.svg",
+      "intents": [
+        "documents_admin"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 11618,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "8877914ead391abd"
+    },
+    {
+      "asset_id": "signature_form",
+      "path": "assets/icons/vpi/signature_form.svg",
+      "intents": [
+        "documents_admin"
+      ],
+      "source": "local_svg",
+      "license": "internal_simple_svg / existing local icon set",
+      "format": "svg",
+      "rasterizes": true,
+      "bbox_non_empty": true,
+      "visible_pixels": 12087,
+      "notes": "No nested SVG, external refs, or embedded fonts expected.",
+      "sha256": "2436c7c90457766e"
+    }
+  ],
+  "rejected": []
+}

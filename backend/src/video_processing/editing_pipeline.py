@@ -338,6 +338,7 @@ def _build_filter_complex(
     grain_override: int = 0,
     lut_vf: str = "",
     denoise_audio: bool = True,
+    last_word_end_s: Optional[float] = None,
 ) -> Tuple[str, str, Optional[str]]:
     """
     Compose the full filter_complex string for one clip.
@@ -692,10 +693,24 @@ def _build_filter_complex(
         except Exception as _ts_e:
             logger.debug(f"[EP] TransitionSelector skipped: {_ts_e}")
 
-        filters.append(
-            f"{prev_v}fade=t=in:d={fd:.3f},"
-            f"fade=t=out:st={dur - fd:.3f}:d={fd:.3f}[vfade]"
-        )
+        # OUTPUT-CLOSURE-54: the cinematic closing fade-out is anchored to the clip edge
+        # (dur-fd). When the last spoken word runs flush to that edge it would be darkened
+        # mid-syllable. In that case keep only the fade-in and DEFER the closing fade to the
+        # canonical late closure stage (apply_conditional_fades), which adds a breathing tail
+        # and fades AFTER the word. Clips that end with a real tail / music / end-card keep
+        # the normal cinematic fade-out (last_word_end_s well before dur-fd, or unknown).
+        _fo_st = dur - fd
+        if last_word_end_s is not None and float(last_word_end_s) > _fo_st:
+            filters.append(f"{prev_v}fade=t=in:d={fd:.3f}[vfade]")
+            logger.info(
+                "VPI_EP_CLOSING_FADE_DEFERRED reason=last_word_flush last_word_end=%.3f fade_start=%.3f dur=%.3f",
+                float(last_word_end_s), _fo_st, dur,
+            )
+        else:
+            filters.append(
+                f"{prev_v}fade=t=in:d={fd:.3f},"
+                f"fade=t=out:st={_fo_st:.3f}:d={fd:.3f}[vfade]"
+            )
         prev_v = "[vfade]"
 
     # ── 10.5. Cinematic LUT (merged in — eliminates a separate FFmpeg pass) ─────
@@ -781,6 +796,19 @@ class EditingPipeline:
         emphasis_ts    = [ts for ts, _ in emphasis_items]
         has_audio      = await self._check_has_audio(video_path)
 
+        # OUTPUT-CLOSURE-54: last spoken word end (clip-relative) so the cinematic closing
+        # fade-out never darkens speech that runs flush to the clip edge.
+        _last_word_end_ep: Optional[float] = None
+        try:
+            _wends = [
+                float(w.get("end"))
+                for w in (words or [])
+                if isinstance(w, dict) and w.get("end") is not None
+            ]
+            _last_word_end_ep = max(_wends) if _wends else None
+        except Exception:
+            _last_word_end_ep = None
+
         # Detect face position for face-aware zoom centering
         face_cx_norm, face_cy_norm = 0.5, 0.5
         if FACE_ZOOM_ON:
@@ -809,6 +837,7 @@ class EditingPipeline:
             grain_override=grain_override,
             lut_vf=lut_vf,
             denoise_audio=denoise_audio,
+            last_word_end_s=_last_word_end_ep,
         )
 
         vcodec = ["libx264", "-preset", "ultrafast", "-crf", "22"]  # Speed priority - 3-5x faster than fast preset

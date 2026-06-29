@@ -326,6 +326,28 @@ def _select_hook_icon_candidate(text: str, editorial_type: str, hook_type: str) 
     return {"safe": False, "concept": concept, "reason": "icon_asset_missing"}
 
 
+# Compliance-safe curiosity hooks for regulated editorial types.
+# These are claim-free framing/curiosity phrases (questions or attention cues),
+# NOT promises or assertions about the product, so they can render a visible
+# first-3s hook on risk_warning / myth_debunk / client_objection clips without
+# repeating a potentially risky transcript line.
+_COMPLIANCE_SAFE_HOOKS: Dict[str, tuple] = {
+    "risk_warning": ("ESTO CONVIENE SABERLO", "ANTES DE QUE PASE", "PRESTA ATENCIÓN A ESTO"),
+    "myth_debunk": ("¿MITO O REALIDAD?", "LO QUE SE SUELE CREER", "NO TODO ES COMO PARECE"),
+    "client_objection": ("ANTES DE DECIDIR", "LA DUDA MÁS COMÚN", "ESTO TE INTERESA"),
+}
+_COMPLIANCE_SAFE_HOOK_DEFAULT = ("ESTO TE INTERESA", "ANTES DE SEGUIR", "PARA QUE LO SEPAS")
+
+
+def _pick_compliance_safe_hook(editorial_type: str, hook_text: str) -> str:
+    """Pick a deterministic, claim-free curiosity hook for a regulated editorial type."""
+    bank = _COMPLIANCE_SAFE_HOOKS.get(str(editorial_type or ""), _COMPLIANCE_SAFE_HOOK_DEFAULT)
+    if not bank:
+        return _COMPLIANCE_SAFE_HOOK_DEFAULT[0]
+    seed = len(_normalize_hook_engine_text(hook_text or ""))
+    return bank[seed % len(bank)]
+
+
 def choose_hook_visual_strategy(
     *,
     hook_text: str,
@@ -355,6 +377,7 @@ def choose_hook_visual_strategy(
     selected_text = hook_text.strip()
     selected_visual_action = "text_overlay"
     reason = "clear_distinct_hook"
+    compliance_safe_hook = False
 
     if not hook_visual_available:
         if high_density:
@@ -375,9 +398,11 @@ def choose_hook_visual_strategy(
             reason = "fallback_distinct_without_motion"
     elif hook_text_redundant_with_captions:
         if risky_editorial:
-            strategy = "silence_tension_hook"
-            selected_visual_action = "push_zoom"
-            reason = "caption_redundancy_risky_editorial"
+            strategy = "text_hook"
+            selected_text = _pick_compliance_safe_hook(editorial_type, hook_text)
+            selected_visual_action = "text_overlay"
+            reason = "caption_redundancy_risky_editorial_safe_hook"
+            compliance_safe_hook = True
         elif icon_safe and not short_clip:
             strategy = "icon_hook"
             selected_visual_action = "icon_overlay"
@@ -388,17 +413,21 @@ def choose_hook_visual_strategy(
             reason = "caption_redundancy"
     elif dense_opening:
         if risky_editorial:
-            strategy = "silence_tension_hook"
-            selected_visual_action = "push_zoom"
-            reason = "dense_opening_risky_editorial"
+            strategy = "text_hook"
+            selected_text = _pick_compliance_safe_hook(editorial_type, hook_text)
+            selected_visual_action = "text_overlay"
+            reason = "dense_opening_risky_editorial_safe_hook"
+            compliance_safe_hook = True
         else:
             strategy = "no_extra_hook"
             selected_visual_action = "none"
             reason = "visual_density_high"
     elif risky_editorial:
-        strategy = "silence_tension_hook"
-        selected_visual_action = "push_zoom"
-        reason = "risky_editorial"
+        strategy = "text_hook"
+        selected_text = _pick_compliance_safe_hook(editorial_type, hook_text)
+        selected_visual_action = "text_overlay"
+        reason = "risky_editorial_safe_hook"
+        compliance_safe_hook = True
     elif icon_safe and not hook_is_short:
         strategy = "icon_hook"
         selected_visual_action = "icon_overlay"
@@ -435,6 +464,7 @@ def choose_hook_visual_strategy(
         "hook_icon_degraded_reason": hook_icon_degraded_reason,
         "hook_silence_tension_applied": strategy == "silence_tension_hook",
         "hook_extra_text_suppressed": strategy in {"non_text_push_hook", "icon_hook", "silence_tension_hook", "no_extra_hook"},
+        "hook_compliance_safe": bool(compliance_safe_hook),
     }
 
 

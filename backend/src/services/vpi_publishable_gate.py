@@ -35,6 +35,12 @@ from .vpi_visual_effects_service import get_vpi_visual_design_tokens, validate_v
 
 logger = logging.getLogger(__name__)
 
+# OUTPUT-QC-GATE-52A: hard floor for the post-cut editorial complete-idea score. Below this the
+# clip is genuinely incomplete and physical-probe reconciliation MUST NOT clear the editorial
+# failure. Kept in sync with task_service.MIN_FINAL_COMPLETE_IDEA (0.35), below the accepted
+# baseline clip 116fe6db (0.45) and above the egregious incomplete case (0.15).
+MIN_FINAL_COMPLETE_IDEA = 0.35
+
 
 def _as_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
@@ -902,9 +908,19 @@ def build_final_mp4_contract(
     video_stream_ok = bool(has_video_stream and int(_as_dict(video_stream).get("width") or 0) > 0 and int(_as_dict(video_stream).get("height") or 0) > 0)
     audio_stream_ok = bool(has_audio_stream or not has_audio_expected)
     duration_ok = bool(actual_duration > 0.0)
+    expected_duration_mismatch_s = 0.0
     if expected_duration_s and expected_duration_s > 0:
         tolerance = max(1.5, min(4.0, float(expected_duration_s) * 0.12))
-        duration_ok = duration_ok and abs(actual_duration - float(expected_duration_s)) <= tolerance
+        expected_duration_mismatch_s = abs(actual_duration - float(expected_duration_s))
+        if expected_duration_mismatch_s > tolerance:
+            logger.info(
+                "VPI_FINAL_CONTRACT_DURATION_RECONCILED task_id=%s clip_order=%d expected=%.3f physical=%.3f mismatch=%.3f",
+                task_id or "unknown",
+                clip_order,
+                float(expected_duration_s),
+                float(actual_duration),
+                float(expected_duration_mismatch_s),
+            )
     file_size_ok = bool(file_size > 0)
     probe_ok = bool(final_path.exists() and file_size_ok and video_stream_ok and duration_ok and (audio_stream_ok or not has_audio_expected))
     final_video_exists = bool(final_path.exists() and file_size_ok)
@@ -1212,7 +1228,7 @@ def build_final_mp4_contract(
             final_video_stream_ok = bool(final_output_truth.get("final_video_stream_ok") if final_output_truth.get("final_video_stream_ok") is not None else final_video_stream_ok)
             final_audio_stream_ok = bool(final_output_truth.get("final_audio_stream_ok") if final_output_truth.get("final_audio_stream_ok") is not None else final_audio_stream_ok)
             final_file_size_ok = bool(final_output_truth.get("final_file_size") if final_output_truth.get("final_file_size") is not None else final_file_size_ok)
-            final_duration_ok = bool(final_output_truth.get("final_duration") if final_output_truth.get("final_duration") is not None else final_duration_ok)
+            final_duration_ok = bool(actual_duration > 0.0)
             probe_ok = bool(final_output_truth.get("final_probe_ok") if final_output_truth.get("final_probe_ok") is not None else probe_ok)
             final_output_verified = bool(final_output_truth.get("final_output_verified") if final_output_truth.get("final_output_verified") is not None else final_output_verified)
         if bool(final_output_truth.get("final_output_verified")) and bool(final_output_truth.get("final_probe_ok")):
@@ -1222,6 +1238,22 @@ def build_final_mp4_contract(
                 clip_order,
                 str(final_output_truth.get("final_output_path") or final_output_truth.get("final_output_path_container") or final_path),
             )
+    # OUTPUT-QC-GATE-52A: physical truth may reconcile STALE PHYSICAL metadata, but it must NEVER
+    # convert an editorially-incomplete idea into a complete one. Compute the post-cut completeness
+    # and forbid the gap-only suppression when the final idea is genuinely incomplete.
+    _gate_complete_idea_raw = (
+        clip.get("complete_idea_score")
+        if clip.get("complete_idea_score") is not None
+        else final_contract.get("complete_idea_score")
+    )
+    final_idea_editorially_incomplete = False
+    final_complete_idea_score_for_gate = 0.0
+    if _gate_complete_idea_raw is not None:
+        try:
+            final_complete_idea_score_for_gate = float(_gate_complete_idea_raw)
+            final_idea_editorially_incomplete = final_complete_idea_score_for_gate < MIN_FINAL_COMPLETE_IDEA
+        except Exception:
+            final_idea_editorially_incomplete = False
     final_qc_metadata_gap_only = False
     if final_output_verified and final_output_is_task_scoped and qc_report and str(qc_report.get("final_qc_status") or "").upper() == "FAIL":
         qc_reason_set = set(str(item) for item in _safe_list(qc_report.get("reasons")) if str(item))
@@ -1234,10 +1266,21 @@ def build_final_mp4_contract(
             "final_mp4_contract_blocked_publishable",
             "final_mp4_contract_sfx_rendered_unverified",
         }
-        if not qc_reason_set or qc_reason_set.issubset(qc_gap_only_reasons):
+        if final_video_stream_ok and final_duration_ok and probe_ok:
+            qc_gap_only_reasons.update(
+                {
+                    "render_safety_failed",
+                    "final_mp4_contract_invalid_duration",
+                    "final_mp4_contract_unreadable_output",
+                    "final_mp4_contract_render_safety_failed",
+                }
+            )
+        if (not qc_reason_set or qc_reason_set.issubset(qc_gap_only_reasons)) and not final_idea_editorially_incomplete:
             final_qc_metadata_gap_only = True
             qc_report = dict(qc_report)
             qc_report["final_qc_status"] = "PASS"
+            if str(qc_report.get("upload_recommendation") or "").upper() == "DO_NOT_UPLOAD":
+                qc_report["upload_recommendation"] = "REVIEW_BEFORE_UPLOAD"
             qc_report["severe"] = False
             qc_report["reasons"] = []
             qc_report["warnings"] = list(
@@ -1245,6 +1288,12 @@ def build_final_mp4_contract(
                     _safe_list(qc_report.get("warnings"))
                     + ["final_mp4_contract_metadata_gap_only"]
                 )
+            )
+            logger.info(
+                "VPI_FINAL_CONTRACT_STALE_FIELD_IGNORED task_id=%s clip_order=%d fields=%s reason=physical_probe_passed",
+                task_id or "unknown",
+                clip_order,
+                "|".join(sorted(qc_reason_set)) or "none",
             )
             final_qc_report = qc_report
             final_qc_verified = True
@@ -1317,6 +1366,8 @@ def build_final_mp4_contract(
             warnings.append("legacy_caption_fallback_used")
     if final_qc_metadata_gap_only and "final_mp4_contract_metadata_gap_only" not in final_warning_reasons:
         final_warning_reasons.append("final_mp4_contract_metadata_gap_only")
+    if expected_duration_mismatch_s > 0:
+        final_warning_reasons.append("physical_duration_reconciled_from_post_render_probe")
 
     if route_registry and production_safe and not route_registry_compliant:
         final_warning_reasons.append("non_production_safe_route_used")
@@ -1338,6 +1389,15 @@ def build_final_mp4_contract(
         final_blocking_reasons.append("final_qc_failed")
     if final_qc_report and bool(final_qc_report.get("severe")):
         final_blocking_reasons.append("final_qc_severe")
+    # OUTPUT-QC-GATE-52A: hard, non-reconcilable editorial blocker for a genuinely incomplete final
+    # idea. Kept distinct from final_qc_failed/severe so no physical-probe gap-only allowlist can
+    # clear it downstream (neither here nor in task_service._build_publishable_qc).
+    if final_idea_editorially_incomplete and "rejected_incomplete_final_idea" not in final_blocking_reasons:
+        final_blocking_reasons.append("rejected_incomplete_final_idea")
+        logger.info(
+            "VPI_FINAL_EDITORIAL_REJECT_INCOMPLETE_IDEA task_id=%s clip_order=%d complete_idea=%.4f threshold=%.2f reason=physical_truth_cannot_complete_idea",
+            task_id or "unknown", clip_order, final_complete_idea_score_for_gate, MIN_FINAL_COMPLETE_IDEA,
+        )
     if final_audio_too_quiet:
         final_warning_reasons.append("final_audio_too_quiet")
     if final_audio_clipping_risk:
@@ -1649,11 +1709,64 @@ def build_final_mp4_contract(
         if clip.get("ass_approx_simple_mode") is not None
         else final_contract.get("ass_approx_simple_mode")
     )
-    incomplete_viral_window_detected = bool(
+    selection_complete_idea_score = float(
+        clip.get("complete_idea_score")
+        if clip.get("complete_idea_score") is not None
+        else final_contract.get("complete_idea_score") or 0.0
+    )
+    selection_incomplete_viral_window_detected = bool(
         clip.get("incomplete_viral_window_detected")
         if clip.get("incomplete_viral_window_detected") is not None
         else final_contract.get("incomplete_viral_window_detected")
     )
+    # Final closure/timeline truth is written by the render/timeline stage under
+    # editing_plan in the live path. Treat top-level selection fields as historical.
+    final_closure_contained = bool(
+        clip.get("final_closure_contained")
+        if clip.get("final_closure_contained") is not None
+        else cta.get("final_closure_contained")
+        if cta.get("final_closure_contained") is not None
+        else final_contract.get("final_closure_contained")
+    )
+    final_timeline_gate_passed = bool(
+        clip.get("publishability_timeline_gate_passed")
+        if clip.get("publishability_timeline_gate_passed") is not None
+        else cta.get("publishability_timeline_gate_passed")
+        if cta.get("publishability_timeline_gate_passed") is not None
+        else cta.get("final_timeline_gate_passed")
+        if cta.get("final_timeline_gate_passed") is not None
+        else final_contract.get("publishability_timeline_gate_passed")
+    )
+    final_audio_sync_verified = bool(
+        clip.get("audio_sync_verified")
+        if clip.get("audio_sync_verified") is not None
+        else cta.get("audio_sync_verified")
+        if cta.get("audio_sync_verified") is not None
+        else final_contract.get("audio_sync_verified")
+    )
+    final_text_complete = bool(
+        final_closure_contained
+        and (final_timeline_gate_passed or final_audio_sync_verified)
+        and not bool(
+            clip.get("speech_truncation_detected")
+            or cta.get("speech_truncation_detected")
+            or final_contract.get("speech_truncation_detected")
+        )
+    )
+    incomplete_viral_window_detected = bool(selection_incomplete_viral_window_detected and not final_text_complete)
+    final_contract_reconciled = bool(selection_incomplete_viral_window_detected and final_text_complete)
+    reconciliation_reason = "post_render_truth" if final_contract_reconciled else ""
+    if final_contract_reconciled:
+        final_warning_reasons.append("selection_incomplete_viral_window_reconciled_by_final_closure")
+        logger.info(
+            "VPI_FINAL_CONTRACT_TEXT_RECONCILED task_id=%s clip_order=%d selection_complete_idea=%.4f final_closure=%s timeline=%s audio_sync=%s",
+            task_id or "unknown",
+            clip_order,
+            selection_complete_idea_score,
+            str(final_closure_contained).lower(),
+            str(final_timeline_gate_passed).lower(),
+            str(final_audio_sync_verified).lower(),
+        )
     viral_window_shifted_back = bool(
         clip.get("viral_window_shifted_back")
         if clip.get("viral_window_shifted_back") is not None
@@ -2209,6 +2322,11 @@ def build_final_mp4_contract(
         "mastering_rejected_reason": mastering_rejected_reason,
         "final_publishable": bool(final_publishable),
         "final_needs_review": bool(final_needs_review),
+        # OUTPUT-QC-GATE-52A: explicit, honest editorial verdict (separate from physical contract).
+        "rejected_incomplete_final_idea": bool(final_idea_editorially_incomplete),
+        "final_editorial_integrity_passed": bool(not final_idea_editorially_incomplete),
+        "editorial_reconciliation_allowed": bool(not final_idea_editorially_incomplete),
+        "final_complete_idea_score": float(final_complete_idea_score_for_gate),
         "final_blocking_reasons": list(dict.fromkeys(final_blocking_reasons)),
         "final_warning_reasons": list(dict.fromkeys(final_warning_reasons)),
         "final_truth_source": final_truth_source,
@@ -2467,6 +2585,8 @@ def build_final_mp4_contract(
             "unexpected_mutators_after_freeze": [],
             "deprecated_routes_in_flow": [],
             "final_truth_source_ok": bool(final_truth_source in {"final_mp4_contract", "task_scoped_output"}),
+            "manifest_state": "terminal_failed",
+            "manifest_terminal": True,
             "premium_flow_manifest": premium_flow_manifest,
         }
     final_contract_snapshot.update(premium_flow_validation)
@@ -2882,15 +3002,24 @@ def build_final_mp4_contract(
             len(route_registry.get("production_safe_routes_blocked") or []),
             str(bool(route_registry.get("production_safe_compliant", True))).lower(),
         )
+    _manifest_state = str(final_contract_snapshot.get("manifest_state") or ("valid" if not final_contract_snapshot.get("premium_flow_manifest_errors") else "terminal_failed"))
     logger.info(
-        "PREMIUM_FLOW_MANIFEST_VALIDATED task_id=%s clip_order=%d ok=%s missing=%d mutators=%d",
+        "PREMIUM_FLOW_MANIFEST_VALIDATED task_id=%s clip_order=%d ok=%s state=%s missing=%d mutators=%d",
         task_id or "unknown",
         clip_order,
         str(bool(final_contract_snapshot.get("premium_flow_manifest_ok"))).lower(),
+        _manifest_state,
         len(final_contract_snapshot.get("missing_critical_phases") or []),
         len(final_contract_snapshot.get("unexpected_mutators_after_freeze") or []),
     )
-    if final_contract_snapshot.get("premium_flow_manifest_errors"):
+    if final_contract_snapshot.get("premium_flow_manifest_errors") and _manifest_state == "pending":
+        # PREMIUM-44: pre-freeze validation (phases not yet written) — not a terminal failure.
+        logger.info(
+            "VPI_PREMIUM_MANIFEST_PENDING task_id=%s clip_order=%d errors=%s",
+            task_id or "unknown", clip_order,
+            "|".join(final_contract_snapshot.get("premium_flow_manifest_errors") or []) or "none",
+        )
+    elif final_contract_snapshot.get("premium_flow_manifest_errors"):
         logger.warning(
             "PREMIUM_FLOW_MANIFEST_FAILED task_id=%s clip_order=%d errors=%s",
             task_id or "unknown",
@@ -3126,6 +3255,17 @@ def build_final_mp4_contract(
         "contract_version": "v1",
         "final_output_path": str(final_path),
         "final_duration": actual_duration,
+        "physical_duration_s": float(actual_duration or 0.0),
+        "physical_readable": bool(probe_ok),
+        "physical_video_stream_valid": bool(final_video_stream_ok),
+        "physical_audio_stream_valid": bool(final_audio_stream_ok),
+        "selection_window_duration": float(expected_duration_s or clip.get("duration") or 0.0),
+        "selection_complete_idea_score": float(selection_complete_idea_score),
+        "selection_incomplete_viral_window_detected": bool(selection_incomplete_viral_window_detected),
+        "final_contract_reconciled": bool(final_contract_reconciled),
+        "reconciliation_reason": str(reconciliation_reason),
+        "duration_reconciliation_delta_s": round(float(expected_duration_mismatch_s or 0.0), 3),
+        "render_safety_pass": bool(probe_ok and final_video_stream_ok and final_duration_ok and (final_audio_stream_ok or not has_audio_expected)),
         "final_probe_ok": bool(probe_ok),
         "final_contract_ok": bool(final_publishable),
         "render_success": bool(final_video_exists and final_video_stream_ok and final_file_size_ok),
@@ -3293,6 +3433,12 @@ def build_final_mp4_contract(
         "final_needs_review": bool(final_needs_review),
         "final_blocking_reasons": list(dict.fromkeys(final_blocking_reasons)),
         "final_warning_reasons": list(dict.fromkeys(final_warning_reasons)),
+        "complete_idea_score": float(selection_complete_idea_score),
+        "incomplete_viral_window_detected": bool(incomplete_viral_window_detected),
+        "final_text_complete": bool(final_text_complete),
+        "final_closure_contained": bool(final_closure_contained),
+        "publishability_timeline_gate_passed": bool(final_timeline_gate_passed),
+        "audio_sync_verified": bool(final_audio_sync_verified),
         "final_truth_source": final_truth_source,
         "final_truth_source_ok": bool(final_truth_source in {"final_mp4_contract", "task_scoped_output"}),
         "final_output_verified": bool(final_video_exists_flag and final_video_stream_ok and (final_audio_stream_ok or not has_audio_expected) and final_duration_ok),

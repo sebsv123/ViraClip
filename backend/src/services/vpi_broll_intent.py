@@ -1866,9 +1866,22 @@ def match_broll_asset(
     available_local_assets: Optional[Any] = None,
     provider_diagnostics: Optional[Dict[str, Any]] = None,
     decision: Optional[Dict[str, Any]] = None,
+    task_id: str = "",
+    clip_index: int = 0,
 ) -> Dict[str, Any]:
     """Match an editorial B-roll asset using local/verified assets only."""
     from .broll_asset_memory import asset_id_for
+    # OUTPUT-AUDIO-BROLL-51B: consult the existing cross-task asset-usage memory so a B-roll
+    # reused in recent tasks is penalised (asset_used_24h/3d/7d) and a fresh alternative wins.
+    # The daily local path previously never read/wrote this memory, so the same asset
+    # (family_relief_pexels_001) was re-selected in every task.
+    _xtask_mem = None
+    try:
+        from .broll_asset_memory import AssetUsageMemory as _AssetUsageMemory
+        _xtask_mem = _AssetUsageMemory()
+    except Exception as _mem_e:
+        logger.debug("broll cross-task memory unavailable: %s", _mem_e)
+    _xtask_excluded: List[Dict[str, Any]] = []
 
     base_decision = decision or choose_broll_editorial_decision(
         segment_text=segment_text,
@@ -2044,6 +2057,26 @@ def match_broll_asset(
         )
         fit = score_broll_phrase_fit(candidate, {"query": base_decision.get("asset_query") or ""}, theme, intent.intent_type)
         score += float(fit.get("phrase_fit_score") or 0.0) * 0.2
+        # OUTPUT-AUDIO-BROLL-51B: cross-task recency penalty from the shared asset memory.
+        if _xtask_mem is not None:
+            try:
+                _fr = _xtask_mem.freshness(
+                    str(candidate.get("source_name") or candidate.get("source") or "local"),
+                    path_str, category, task_id=task_id or None,
+                )
+                if _fr.penalty:
+                    score += float(_fr.penalty)
+                    reasons.extend([f"cross_task_{r}" for r in _fr.reasons])
+                    candidate["recent_use_count"] = 1 if float(_fr.penalty) <= -35.0 else 0
+                    if float(_fr.penalty) <= -35.0:
+                        _xtask_excluded.append({
+                            "asset": path_str,
+                            "penalty": float(_fr.penalty),
+                            "last_used_at": _fr.last_used_at,
+                            "reasons": list(_fr.reasons),
+                        })
+            except Exception as _fr_e:
+                logger.debug("cross-task freshness skipped: %s", _fr_e)
         reasons.extend([
             f"phrase_fit_score:{fit.get('phrase_fit_score')}",
             f"phrase_fit_label:{fit.get('phrase_fit_label')}",
@@ -2142,8 +2175,29 @@ def match_broll_asset(
             taxonomy_confidence,
             ",".join(selected_reasons[:4]),
         )
+        # OUTPUT-AUDIO-BROLL-51B: record the selection so future tasks penalise reuse.
+        if _xtask_mem is not None and selected_asset and task_id:
+            try:
+                _xtask_mem.record_use(
+                    source=selected_source,
+                    asset_path_or_url=str(selected_asset),
+                    category=str(selected_category or selected_cue or ""),
+                    task_id=task_id,
+                    clip_index=int(clip_index or 0),
+                    intent_type=str(intent.intent_type or broll_intent or ""),
+                    central_topic=str(topic or ""),
+                    score=float(selected_score or 0.0),
+                )
+                logger.info(
+                    "VPI_BROLL_CROSS_TASK_RECORDED asset=%s task=%s excluded_recent=%d",
+                    str(selected_asset), task_id, len(_xtask_excluded),
+                )
+            except Exception as _rec_e:
+                logger.debug("cross-task record_use skipped: %s", _rec_e)
     return {
         "matched": matched,
+        "recent_assets_excluded": _xtask_excluded,
+        "cross_task_recent_excluded_count": len(_xtask_excluded),
         "asset": str(selected_asset) if matched else "",
         "source": selected_source if matched else "none",
         "score": float(selected_score if matched else 0.0),

@@ -47,6 +47,8 @@ INTENT_CARD_COPY: Dict[str, Tuple[str, str]] = {
 
 ICON_CANDIDATES: Dict[str, Tuple[str, ...]] = {
     "passport": (
+        "assets/icons/vpi/travel_passport.svg",
+        "assets/icons/vpi/travel_suitcase.svg",
         "assets/icons/vpi/folder_paperwork.svg",
         "assets/icons/document/file-search-corner.svg",
     ),
@@ -160,11 +162,12 @@ def resolve_internal_icon(icon_key: str) -> str:
 # OUTPUT-VISUALS-17: conservative per-intent semantic icon hierarchy over LOCAL
 # existing icons only (no new/downloaded assets). Ordered best -> acceptable;
 # the resolver returns the first existing + renderable candidate, else text-only.
-# No dedicated travel (plane/suitcase/passport) or education (graduation/university)
-# assets exist locally, so those families fall back to documents/paperwork honestly.
+# Travel now has dedicated local icons. Student remains document-only until real
+# demand justifies adding education/passport-specific assets.
 FAMILY_ICON_HIERARCHY: Dict[str, Tuple[str, ...]] = {
     "travel_assistance": (
-        "assets/icons/vpi/folder_paperwork.svg",      # travel paperwork (best on-theme local)
+        "assets/icons/vpi/travel_suitcase.svg",
+        "assets/icons/vpi/travel_passport.svg",
         "assets/icons/document/file-search-corner.svg",
         "assets/icons/briefcase/briefcase-business.svg",
     ),
@@ -192,6 +195,7 @@ FAMILY_ICON_HIERARCHY: Dict[str, Tuple[str, ...]] = {
         "assets/icons/health/heart-pulse.svg",
     ),
     "emotional_protection": (
+        "assets/icons/vpi/family_shield.svg",
         "assets/icons/heart/heart-pulse.svg",
         "assets/icons/vpi/heart_shield.svg",
         "assets/icons/family/contact.svg",
@@ -204,6 +208,7 @@ FAMILY_ICON_HIERARCHY: Dict[str, Tuple[str, ...]] = {
         "assets/icons/shield/shield-plus.svg",
     ),
     "financial_planning": (
+        "assets/icons/vpi/budget_document.svg",
         "assets/icons/euro/badge-euro.svg",
         "assets/icons/vpi/capital_stack.svg",
         "assets/icons/checklist/check-check.svg",

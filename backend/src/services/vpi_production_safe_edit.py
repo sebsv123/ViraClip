@@ -445,6 +445,18 @@ def validate_premium_flow_manifest(route_registry: Dict[str, Any], final_metadat
         premium_flow_manifest_errors.append("final_truth_source_not_contract")
 
     premium_flow_manifest_ok = len(premium_flow_manifest_errors) == 0
+    # PREMIUM-44: the manifest is validated MULTIPLE times per clip as phases are written. A
+    # pre-freeze validation naturally lacks the late critical phases (final_qc/final_freeze) and
+    # the final contract truth source, so its errors are "not-yet-complete", NOT a terminal
+    # failure. Only a validation at the terminal state (render frozen) is a real failure.
+    # `terminal` = the render has been frozen (final_freeze reached).
+    terminal = bool(freeze_locked)
+    if not premium_flow_manifest_errors:
+        manifest_state = "valid"
+    elif not terminal:
+        manifest_state = "pending"        # phases still being written; re-validated at freeze
+    else:
+        manifest_state = "terminal_failed"
     result = {
         "premium_flow_manifest_ok": bool(premium_flow_manifest_ok),
         "premium_flow_manifest_warnings": _dedupe_strings(premium_flow_manifest_warnings),
@@ -454,18 +466,27 @@ def validate_premium_flow_manifest(route_registry: Dict[str, Any], final_metadat
         "unexpected_mutators_after_freeze": _dedupe_strings(unexpected_mutators_after_freeze),
         "deprecated_routes_in_flow": _dedupe_strings(deprecated_routes_in_flow),
         "final_truth_source_ok": bool(final_truth_source_ok),
+        "manifest_state": manifest_state,
+        "manifest_terminal": terminal,
         "premium_flow_manifest": manifest,
     }
     logger.info(
-        "PREMIUM_FLOW_MANIFEST_VALIDATED ok=%s observed=%d missing=%d mutators=%d deprecated=%d truth_ok=%s",
-        str(result["premium_flow_manifest_ok"]).lower(),
+        "PREMIUM_FLOW_MANIFEST_VALIDATED ok=%s state=%s terminal=%s observed=%d missing=%d mutators=%d deprecated=%d truth_ok=%s",
+        str(result["premium_flow_manifest_ok"]).lower(), manifest_state, str(terminal).lower(),
         len(result["observed_phases"]),
         len(result["missing_critical_phases"]),
         len(result["unexpected_mutators_after_freeze"]),
         len(result["deprecated_routes_in_flow"]),
         str(result["final_truth_source_ok"]).lower(),
     )
-    if result["premium_flow_manifest_errors"]:
+    if manifest_state == "pending":
+        # Non-terminal: phases not yet written. This is normal and is re-validated at freeze;
+        # it is NOT a terminal failure and must not trigger recovery.
+        logger.info(
+            "VPI_PREMIUM_MANIFEST_PENDING errors=%s observed=%d",
+            "|".join(result["premium_flow_manifest_errors"]), len(result["observed_phases"]),
+        )
+    elif manifest_state == "terminal_failed":
         logger.warning(
             "PREMIUM_FLOW_MANIFEST_FAILED errors=%s",
             "|".join(result["premium_flow_manifest_errors"]),
@@ -474,7 +495,7 @@ def validate_premium_flow_manifest(route_registry: Dict[str, Any], final_metadat
         logger.warning(
             "PREMIUM_FLOW_MANIFEST_WARNING warnings=%s",
             "|".join(result["premium_flow_manifest_warnings"]),
-    )
+        )
     return result
 
 
@@ -588,14 +609,48 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", ascii_text).strip()
 
 
+# OUTPUT-HOOK-RHYTHM-52D FASE 2/3: editorial-type-derived contextual hooks. These are used
+# ONLY when the verbal intro is too weak to stand alone. They must be contextual to the clip
+# theme, 3-7 words, carry no commercial claim, and NEVER be a generic attention-grabber
+# ("CUIDADO CON ESTO", "ATENCION", "NO TE LO PIERDAS", "ESTO ES IMPORTANTE").
+_CONTEXTUAL_HOOK_BY_INTENT: Dict[str, str] = {
+    "travel_assistance": "ANTES DE VIAJAR",
+    "travel": "ANTES DE VIAJAR",
+    "health_access": "CUANDO LA SALUD NO AVISA",
+    "health": "CUANDO LA SALUD NO AVISA",
+    "emotional_protection": "PROTEGER TAMBIEN ES PREVER",
+    "family_protection": "PROTEGER TAMBIEN ES PREVER",
+    "family_relief": "PROTEGER TAMBIEN ES PREVER",
+    "documents_admin": "LO QUE MUCHOS DAN POR HECHO",
+    "coverage_explanation": "ESTO CAMBIA LA COBERTURA",
+    "coverage": "ESTO CAMBIA LA COBERTURA",
+    "financial_planning": "LO QUE MUCHOS DAN POR HECHO",
+    "advisor_explanation": "LO QUE CONVIENE REVISAR",
+    "practical_explanation": "LO QUE CONVIENE REVISAR",
+}
+# token evidence -> contextual intent, when editorial_type is absent/unhelpful.
+_CONTEXTUAL_HOOK_TOKENS: List[Tuple[Tuple[str, ...], str]] = [
+    (("viaje", "viajar", "viaja", "aeropuerto", "pasaporte", "extranjero", "equipaje", "maleta", "pasaje"), "travel_assistance"),
+    (("salud", "medico", "sanitari", "hospital", "especialista"), "health_access"),
+    (("documentacion", "visado", "residencia", "tramite", "certificado"), "documents_admin"),
+    (("cobertura", "coberturas", "poliza", "asegurado"), "coverage_explanation"),
+    (("presupuesto", "ahorro", "ahorrar", "coste", "precio"), "financial_planning"),
+    (("familia", "proteger", "proteccion", "tranquilidad", "seres queridos"), "emotional_protection"),
+]
+
+
 def build_hook_fallback_text(text: str, editorial_type: str = "", hook_type: str = "") -> str:
-    normalized = _normalize(" ".join([text or "", editorial_type or "", hook_type or ""]))
-    if any(term in normalized for term in ("cuidado", "riesgo", "peligro", "no avisa", "imprevisto", "problema")):
-        return _HOOK_FALLBACK_PHRASES[1]
-    if any(term in normalized for term in ("contratar", "cobertura", "poliza", "póliza", "antes de", "seguro")):
-        return _HOOK_FALLBACK_PHRASES[2]
-    if any(term in normalized for term in ("familia", "proteger", "proteccion", "protección", "tranquilidad", "salud", "hospital")):
-        return _HOOK_FALLBACK_PHRASES[3]
+    # 1) explicit editorial_type -> contextual hook (priority; never the generic attention phrase).
+    et = _normalize(editorial_type or "")
+    for key, headline in _CONTEXTUAL_HOOK_BY_INTENT.items():
+        if key in et:
+            return headline
+    # 2) otherwise derive a contextual intent from the transcript evidence.
+    normalized_text = _normalize(text or "")
+    for tokens, intent in _CONTEXTUAL_HOOK_TOKENS:
+        if any(tok in normalized_text for tok in tokens):
+            return _CONTEXTUAL_HOOK_BY_INTENT[intent]
+    # 3) last resort: a neutral, non-generic editorial frame (never a banned attention-grabber).
     return _HOOK_FALLBACK_PHRASES[0]
 
 

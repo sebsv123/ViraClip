@@ -165,12 +165,18 @@ def get_insert_timestamps(
     # 3 — Even spacing fallback
     if clip_duration is None:
         try:
-            from .broll_compositor import probe_duration
-            clip_duration = probe_duration(video_path)
+            from .broll_compositor import probe_media_duration
+            clip_duration = probe_media_duration(video_path)
         except Exception:
-            clip_duration = 30.0
+            clip_duration = None
 
-    step = clip_duration / (max_n + 1)
+    # TIMING-38: never space B-roll over a phantom 30.0s. If the real duration is unknown,
+    # skip even-spacing (no invented window past the real clip end / no stacking at t=0).
+    if not clip_duration or float(clip_duration) <= 0.0:
+        logger.info("[SceneBroll] even-spacing skipped reason=duration_unknown")
+        return []
+
+    step = float(clip_duration) / (max_n + 1)
     fallback = [round(step * (i + 1), 2) for i in range(max_n)]
     logger.info("[SceneBroll] Even-spacing fallback timestamps: %s", fallback)
     return fallback

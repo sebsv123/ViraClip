@@ -2790,11 +2790,17 @@ def _rasterize_svg_to_png(svg_path: Path, png_path: Path, size: int = 512) -> bo
     cmd_candidates = [
         ["rsvg-convert", "-w", str(int(size)), "-h", str(int(size)), "-o", str(png_path), str(svg_path)],
         ["convert", str(svg_path), str(png_path)],
+        # VISUALS-40: ffmpeg links librsvg (svg_pipe demuxer), so it rasterizes SVG with alpha
+        # even when rsvg-convert / ImageMagick are absent (the common container case).
+        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(svg_path),
+         "-vf", f"scale={int(size)}:{int(size)}:force_original_aspect_ratio=decrease,"
+                f"pad={int(size)}:{int(size)}:(ow-iw)/2:(oh-ih)/2:color=#00000000",
+         "-frames:v", "1", str(png_path)],
     ]
     for cmd in cmd_candidates:
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            if result.returncode == 0 and png_path.exists() and png_path.is_file():
+            if result.returncode == 0 and png_path.exists() and png_path.is_file() and png_path.stat().st_size > 0:
                 return True
         except FileNotFoundError:
             continue
@@ -2839,6 +2845,16 @@ def _available_visual_renderers() -> Dict[str, Any]:
         "convert": shutil.which("convert"),
         "ffmpeg": shutil.which("ffmpeg"),
     }
+    # VISUALS-40: ffmpeg built against librsvg exposes an `svg`/`svg_pipe` demuxer and can
+    # rasterize SVG with alpha — a real rasterizer when rsvg-convert / ImageMagick are absent.
+    ffmpeg_svg = False
+    if renderers["ffmpeg"]:
+        try:
+            r = subprocess.run([renderers["ffmpeg"], "-hide_banner", "-demuxers"],
+                               capture_output=True, text=True, timeout=10)
+            ffmpeg_svg = "svg" in (r.stdout or "").lower()
+        except Exception:
+            ffmpeg_svg = False
     selected = ""
     if renderers["rsvg-convert"]:
         selected = "rsvg-convert"
@@ -2846,8 +2862,10 @@ def _available_visual_renderers() -> Dict[str, Any]:
         selected = "magick"
     elif renderers["convert"]:
         selected = "convert"
+    elif ffmpeg_svg:
+        selected = "ffmpeg_svg"      # real SVG rasterizer via librsvg
     elif renderers["ffmpeg"]:
-        selected = "ffmpeg_native"
+        selected = "ffmpeg_native"   # ffmpeg present but no SVG support -> text only
     unavailable = [name for name, path in renderers.items() if not path]
     unavailable_reason = ""
     if not renderers["ffmpeg"]:
@@ -2856,6 +2874,7 @@ def _available_visual_renderers() -> Dict[str, Any]:
         unavailable_reason = "rasterizers_missing"
     return {
         "available": renderers,
+        "ffmpeg_svg": ffmpeg_svg,
         "visual_renderer_selected": selected,
         "visual_renderer_fallback_used": bool(selected == "ffmpeg_native"),
         "visual_renderer_unavailable_reason": unavailable_reason,
@@ -3141,6 +3160,80 @@ def render_visual_reinforcement(
         return out
 
     if daily_mode_active:
+        _daily_object_strategy = strategy in {"object_2d", "semantic_icon_card"}
+        _daily_object_score = 0.0
+        try:
+            _daily_object_score = float(plan.get("object_2d_semantic_score") or plan.get("semantic_score") or 0.0)
+        except (TypeError, ValueError):
+            _daily_object_score = 0.0
+        _daily_object_asset = Path(str(plan.get("asset_path") or "")).resolve() if plan.get("asset_path") else None
+        _daily_object_start = float(plan.get("render_start") or plan.get("object_2d_start_s") or 0.0)
+        _daily_object_duration = float(plan.get("render_duration") or 0.0)
+        if not _daily_object_duration and plan.get("object_2d_end_s"):
+            _daily_object_duration = max(0.0, float(plan.get("object_2d_end_s") or 0.0) - _daily_object_start)
+        _daily_object_eligible = bool(
+            _daily_object_strategy
+            and bool(plan.get("no_broll_rendered", False))
+            and _daily_object_score >= 0.78
+            and _daily_object_asset
+            and _daily_object_asset.exists()
+            and not bool(plan.get("clip_has_reinforcement"))
+            and not bool(plan.get("window_collision"))
+            and _daily_object_duration >= 1.2
+        )
+        if _daily_object_strategy and _daily_object_eligible:
+            logger.info(
+                "VPI_DAILY_2D_OBJECT_ALLOWED strategy=%s score=%.2f asset=%s",
+                strategy,
+                _daily_object_score,
+                _daily_object_asset.name if _daily_object_asset else "",
+            )
+            try:
+                from .vpi_object_2d import render_object_2d_overlay as _render_object_2d_overlay
+
+                _object_res = _render_object_2d_overlay(
+                    input_video_path=input_video_path,
+                    output_video_path=output_video_path,
+                    icon_svg_path=_daily_object_asset,
+                    start_s=_daily_object_start,
+                    end_s=_daily_object_start + _daily_object_duration,
+                    position=str(plan.get("object_2d_position") or plan.get("position") or "upper_left"),
+                    work_dir=output_dir,
+                )
+                out.update({
+                    "rendered": bool(_object_res.get("object_2d_render_applied")),
+                    "visual_reinforcement_applied": bool(_object_res.get("object_2d_render_applied")),
+                    "visual_reinforcement_rendered": bool(_object_res.get("object_2d_render_applied")),
+                    "visual_reinforcement_backend": "object_2d_direct_icon_card",
+                    "visual_reinforcement_output_path": str(_object_res.get("object_2d_output_path") or output_video_path),
+                    "reason": str(_object_res.get("object_2d_reason") or "object_2d_direct_icon_card"),
+                    "daily_2d_object_override": bool(_object_res.get("object_2d_render_applied")),
+                    "daily_2d_object_override_reason": "daily_mode_no_broll_strong_intent_clean_window",
+                    **{k: v for k, v in _object_res.items() if str(k).startswith("object_2d_")},
+                })
+                return out
+            except Exception as _daily_object_exc:
+                logger.info("VPI_DAILY_2D_OBJECT_REJECTED reason=render_exception detail=%s", _daily_object_exc)
+                out["daily_2d_object_override"] = False
+                out["daily_2d_object_override_reason"] = f"render_exception:{_daily_object_exc}"
+        elif _daily_object_strategy:
+            _daily_reasons = []
+            if not bool(plan.get("no_broll_rendered", False)):
+                _daily_reasons.append("broll_rendered")
+            if _daily_object_score < 0.78:
+                _daily_reasons.append("weak_semantic_match")
+            if not (_daily_object_asset and _daily_object_asset.exists()):
+                _daily_reasons.append("invalid_icon")
+            if bool(plan.get("clip_has_reinforcement")):
+                _daily_reasons.append("reinforcement_already_present")
+            if bool(plan.get("window_collision")):
+                _daily_reasons.append("window_collision")
+            if _daily_object_duration < 1.2:
+                _daily_reasons.append("window_too_short")
+            _daily_reason = _daily_reasons[0] if _daily_reasons else "not_eligible"
+            logger.info("VPI_DAILY_2D_OBJECT_REJECTED strategy=%s reason=%s", strategy, _daily_reason)
+            out["daily_2d_object_override"] = False
+            out["daily_2d_object_override_reason"] = _daily_reason
         logger.info(
             "VPI_HOOK_VISUAL_BOX_DISABLED_DAILY reason=daily_mode strategy=%s",
             strategy,

@@ -1521,11 +1521,15 @@ def _verify_sfx_audio_mix(input_video: Path, output_video: Path) -> bool:
         if duration <= 0.5:
             return False
 
+        # OUTPUT-EDITORIAL-QC-52: volumedetect prints its mean_volume/max_volume summary at
+        # the ffmpeg `info` log level. The previous `-loglevel error` SUPPRESSED that output,
+        # so the `mean_volume not in stderr` check below ALWAYS failed -> every rendered SFX
+        # mix was rejected as unverified and discarded (sfx=skipped_no_event in the master).
         vol_cmd = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel",
-            "error",
+            "info",
             "-i",
             str(output_video),
             "-af",
@@ -1686,6 +1690,32 @@ def apply_sfx_bed(
                     shifted = True
                     break
                 if not shifted:
+                    # OUTPUT-EDITORIAL-QC-52: a sanctioned low-gain ENTRY sfx (hook/broll/
+                    # transition entry) is designed to sit UNDER the voice (~-14 dB) at the
+                    # clip opening, where speech starts ~0.3 s — so a ~0.6 s transient always
+                    # "collides" and was being dropped entirely (events=0 -> skipped_no_event,
+                    # no SFX in master). Keep it at its planned low gain instead of dropping:
+                    # ducked under voice it does not mask speech. Loud / non-entry sfx still
+                    # drop. No new families introduced (whoosh/impact only, per SFX-18/19/20).
+                    _trigger = str(
+                        event.get("trigger_reason") or event.get("moment") or event.get("event_type") or ""
+                    ).lower()
+                    _is_entry_sfx = (
+                        bool(event.get("is_visual"))
+                        or any(k in _trigger for k in ("hook", "broll", "transition", "entry", "reveal", "payoff", "risk", "revelation"))
+                    )
+                    try:
+                        _headroom_db = float(event.get("headroom_db") or 0.0)
+                    except Exception:
+                        _headroom_db = 0.0
+                    if _is_entry_sfx and _headroom_db >= 6.0:
+                        safe_events.append(adjusted_event)
+                        sfx_events_shifted += 0  # kept in place
+                        logger.info(
+                            "SFX_KEPT_UNDER_VOICE_LOW_GAIN event=%s start=%.2f headroom_db=%.1f trigger=%s",
+                            str(event.get("type") or "sfx"), event_start, _headroom_db, _trigger or "entry",
+                        )
+                        continue
                     sfx_word_collision_avoided = True
                     sfx_events_dropped_for_voice += 1
                     logger.warning(

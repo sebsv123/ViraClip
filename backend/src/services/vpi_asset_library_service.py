@@ -1650,6 +1650,38 @@ def build_asset_library_qc_report(index: Optional[Dict[str, Any]]) -> Dict[str, 
     }
 
 
+# OUTPUT-AUDIO-BROLL-51B: a BGM slot must hold real background music. A short SFX/riser
+# (e.g. tension_riser_short.mp3, 3.59s) chosen as BGM is looped to clip length by the music
+# path (audio.py aloop=loop=-1) -> a repeating riser + no perceptible music. Disqualify
+# riser/impact/chime/whoosh/short-SFX assets and tracks under the minimum BGM duration.
+_BGM_MIN_DURATION_S = 8.0
+_NON_BGM_AUDIO_KEYWORDS = (
+    "riser", "impact", "chime", "whoosh", "swoosh", "stinger", "boom", "glitch",
+    "ding", "clap", "_hit", "sfx", "sweep_up", "transition_",
+)
+
+
+def _bgm_asset_disqualified(asset: Dict[str, Any]) -> Tuple[bool, str]:
+    """Return (disqualified, reason) for the BGM slot. Excludes non-music SFX families and
+    tracks shorter than the minimum BGM duration. Real BGM (subtle_tension/warm_trust/
+    clean_corporate/...) is never matched by these keywords."""
+    path = str(asset.get("asset_path") or asset.get("path") or "")
+    name = Path(path).name.lower()
+    fam = str(asset.get("family") or asset.get("mood") or "").lower()
+    tags = " ".join(str(t).lower() for t in (asset.get("tags") or []))
+    hay = f"{name} {fam} {tags}"
+    for kw in _NON_BGM_AUDIO_KEYWORDS:
+        if kw in hay:
+            return True, f"non_bgm_audio_family:{kw}"
+    try:
+        dur = float(asset.get("duration") or 0.0)
+    except (TypeError, ValueError):
+        dur = 0.0
+    if 0.0 < dur < _BGM_MIN_DURATION_S:
+        return True, f"bgm_too_short:{dur:.2f}s"
+    return False, ""
+
+
 def select_verified_bgm_candidate(
     *,
     editorial_type: str = "",
@@ -1669,6 +1701,22 @@ def select_verified_bgm_candidate(
     verified_bgm = list((idx.get("verified") or {}).get("bgm") or [])
     inventory_music_assets = list((audio_inventory or {}).get("music_assets") or [])
     coverage = audio_coverage or {}
+    # OUTPUT-AUDIO-BROLL-51B: keep only real background-music candidates in the BGM slot.
+    _bgm_excluded_non_music: List[Tuple[str, str]] = []
+
+    def _keep_bgm(_a: Dict[str, Any]) -> bool:
+        _bad, _why = _bgm_asset_disqualified(_a)
+        if _bad:
+            _bgm_excluded_non_music.append((str(_a.get("asset_path") or _a.get("path") or ""), _why))
+        return not _bad
+
+    verified_bgm = [a for a in verified_bgm if _keep_bgm(a)]
+    inventory_music_assets = [a for a in inventory_music_assets if _keep_bgm(a)]
+    if _bgm_excluded_non_music:
+        logger.info(
+            "BGM_NON_MUSIC_CANDIDATES_EXCLUDED count=%d sample=%s",
+            len(_bgm_excluded_non_music), _bgm_excluded_non_music[:4],
+        )
     if inventory_music_assets:
         logger.info(
             "MUSIC_EDITORIAL_PROFILE_SELECTED profile=%s mood=%s inventory_assets=%d coverage_ok=%s",

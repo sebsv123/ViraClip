@@ -1710,9 +1710,17 @@ class BrollService:
                     Path(video_path).stem,
                 )
                 return video_path
+            # TIMING-38: resolve the clip duration once; never plan B-roll over a phantom 30.0.
+            _broll_clip_dur = float(clip_duration) if clip_duration else (probe_duration(video_path) or 0.0)
+            if _broll_clip_dur <= 0.0:
+                logger.info(
+                    "[context-no-broll] hard_stop reason=duration_unknown task=%s clip=%s",
+                    task_id or "", Path(video_path).stem,
+                )
+                return video_path
             cue_decisions = planner.plan(
                 transcript_segments=segment_text,
-                clip_duration=clip_duration or probe_duration(video_path),
+                clip_duration=_broll_clip_dur,
                 word_timestamps=words_with_timestamps,
                 max_cues=max_overlays,
                 suggested_broll_cue_type=suggested_broll_cue_type,

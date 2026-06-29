@@ -130,50 +130,183 @@ _FFMPEG_TIMEOUT  = 180  # seconds per overlay
 
 # ── Dimension probing ─────────────────────────────────────────────────────────
 
-def probe_dimensions(video_path: Path | str) -> Tuple[int, int, float]:
-    """
-    Return (width, height, fps) of *video_path* using ffprobe.
-    Falls back to (1080, 1920, 30.0) if probing fails.
-    """
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class VideoGeometry:
+    width: int
+    height: int
+    fps: float
+    sar: "str | None" = None
+    dar: "str | None" = None
+    rotation: int = 0
+
+    @property
+    def effective_size(self) -> "Tuple[int, int]":
+        """(w, h) after applying a 90/270 rotation (swap)."""
+        if self.rotation in (90, 270, -90, -270):
+            return self.height, self.width
+        return self.width, self.height
+
+
+def _parse_rate(rate: str) -> float:
+    """Parse an ffprobe frame-rate string like '30000/1001' or '25/1'. 0.0 if invalid."""
     try:
-        cmd = [
-            _get_ffmpeg_exe(), "-v", "quiet",
-            "-print_format", "json",
-            "-show_streams",
-            str(video_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_FFPROBE_TIMEOUT)
-        data = json.loads(result.stdout)
-        for stream in data.get("streams", []):
-            if stream.get("codec_type") == "video":
-                w = int(stream.get("width", 1080))
-                h = int(stream.get("height", 1920))
-                # fps expressed as "30/1" or "30000/1001"
-                fps_str = stream.get("r_frame_rate", "30/1")
-                try:
-                    num, den = fps_str.split("/")
-                    fps = round(float(num) / float(den), 3)
-                except Exception:
-                    fps = 30.0
-                return w, h, fps
-    except Exception as exc:
-        logger.debug("[BrollCompositor] probe_dimensions failed for %s: %s", video_path, exc)
-    return 1080, 1920, 30.0
+        s = (rate or "").strip()
+        if not s or s in ("0/0", "N/A"):
+            return 0.0
+        if "/" in s:
+            num, den = s.split("/", 1)
+            den_f = float(den)
+            return round(float(num) / den_f, 3) if den_f else 0.0
+        return round(float(s), 3)
+    except Exception:
+        return 0.0
+
+
+def probe_video_geometry(
+    path: "Path | str",
+    *,
+    retries: int = 3,
+    timeout_s: float = 3.0,
+) -> "VideoGeometry | None":
+    """TIMING-39: canonical video-geometry probe. Returns VideoGeometry, or None if unknown.
+
+    Uses ffprobe (NOT ffmpeg with ffprobe-only options like the old probe_dimensions, which
+    always returned a hardcoded 1080x1920x30). Reads the video stream's width/height,
+    avg_frame_rate (→ r_frame_rate fallback), sample/display aspect ratios and rotation. Never
+    fabricates a fallback — callers must treat None as 'unknown'.
+    """
+    import time as _t
+    p = str(path)
+    exe = _get_ffprobe_exe()
+    for attempt in range(max(1, retries)):
+        try:
+            r = subprocess.run(
+                [exe, "-v", "error", "-select_streams", "v:0",
+                 "-show_streams", "-of", "json", p],
+                capture_output=True, text=True, timeout=timeout_s,
+            )
+            data = json.loads(r.stdout or "{}")
+            streams = data.get("streams") or []
+            if streams:
+                s = streams[0]
+                w = int(s.get("width") or 0)
+                h = int(s.get("height") or 0)
+                fps = _parse_rate(str(s.get("avg_frame_rate") or "")) or _parse_rate(str(s.get("r_frame_rate") or ""))
+                rotation = 0
+                tags = s.get("tags") or {}
+                if tags.get("rotate"):
+                    try:
+                        rotation = int(float(tags.get("rotate")))
+                    except Exception:
+                        rotation = 0
+                for sd in (s.get("side_data_list") or []):
+                    if "rotation" in sd:
+                        try:
+                            rotation = int(float(sd.get("rotation")))
+                        except Exception:
+                            pass
+                if w > 0 and h > 0 and fps > 0.0:
+                    logger.debug("VPI_GEOMETRY_PROBE_OK path=%s %dx%d fps=%.3f rot=%d", p, w, h, fps, rotation)
+                    return VideoGeometry(
+                        width=w, height=h, fps=fps,
+                        sar=(str(s.get("sample_aspect_ratio")) if s.get("sample_aspect_ratio") else None),
+                        dar=(str(s.get("display_aspect_ratio")) if s.get("display_aspect_ratio") else None),
+                        rotation=rotation % 360,
+                    )
+        except Exception:
+            pass
+        if attempt + 1 < max(1, retries):
+            logger.debug("VPI_GEOMETRY_PROBE_RETRY path=%s attempt=%d", p, attempt + 1)
+            _t.sleep(0.15)
+    logger.warning("VPI_GEOMETRY_PROBE_FAILED path=%s reason=unreadable_or_no_geometry", p)
+    return None
+
+
+def probe_dimensions(video_path: Path | str) -> Tuple[int, int, float]:
+    """Return (width, height, fps), or (0, 0, 0.0) if unknown (NEVER 1080x1920x30).
+
+    Thin tuple wrapper over probe_video_geometry for legacy callers. Width/height are the
+    rotation-corrected effective size. Callers must treat a 0 dimension as 'unknown' and skip
+    rather than compose against a fabricated canvas (the old code ran ffmpeg with ffprobe-only
+    options and always returned a hardcoded 1080x1920x30).
+    """
+    g = probe_video_geometry(video_path)
+    if g is None:
+        logger.debug("VPI_GEOMETRY_UNKNOWN path=%s value=(0,0,0.0)", str(video_path))
+        return 0, 0, 0.0
+    ew, eh = g.effective_size
+    return ew, eh, g.fps
+
+
+def _get_ffprobe_exe() -> str:
+    """Return an ffprobe binary. ffprobe (NOT ffmpeg) is required for -show_entries."""
+    p = shutil.which("ffprobe")
+    if p:
+        return p
+    try:
+        import imageio_ffmpeg as _iio  # imageio ships ffmpeg; try sibling ffprobe
+        ff = _iio.get_ffmpeg_exe()
+        cand = ff.replace("ffmpeg", "ffprobe")
+        if cand != ff and os.path.exists(cand):
+            return cand
+    except Exception:
+        pass
+    return "ffprobe"
+
+
+def probe_media_duration(
+    path: "Path | str",
+    *,
+    retries: int = 3,
+    timeout_s: float = 3.0,
+) -> "float | None":
+    """TIMING-38: canonical media-duration probe. Returns seconds, or None if unknown.
+
+    Uses ffprobe (the video stream first, then the container format) — never ffmpeg with
+    ffprobe-only options, and NEVER fabricates a constant (the old probe_duration ran
+    `ffmpeg -show_entries ...` which always failed and returned a hardcoded 30.0). Callers
+    must treat None as 'unknown' and apply an explicit per-caller fallback, not a guess.
+    """
+    import time as _t
+    p = str(path)
+    exe = _get_ffprobe_exe()
+    for attempt in range(max(1, retries)):
+        for selector in (("-select_streams", "v:0", "-show_entries", "stream=duration"),
+                         ("-show_entries", "format=duration")):
+            try:
+                cmd = [exe, "-v", "error", *selector,
+                       "-of", "default=noprint_wrappers=1:nokey=1", p]
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+                val = (r.stdout or "").strip().splitlines()[0].strip() if (r.stdout or "").strip() else ""
+                if val and val.upper() != "N/A":
+                    d = float(val)
+                    if d > 0.0:
+                        logger.debug("VPI_DURATION_PROBE_OK path=%s dur=%.3f via=%s", p, d, selector[-1])
+                        return round(d, 3)
+            except Exception:
+                continue
+        if attempt + 1 < max(1, retries):
+            logger.debug("VPI_DURATION_PROBE_RETRY path=%s attempt=%d", p, attempt + 1)
+            _t.sleep(0.15)
+    logger.warning("VPI_DURATION_PROBE_FAILED path=%s reason=unreadable_or_no_duration", p)
+    return None
 
 
 def probe_duration(video_path: Path | str) -> float:
-    """Return duration in seconds. Falls back to 30.0."""
-    try:
-        cmd = [
-            _get_ffmpeg_exe(), "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(video_path),
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=_FFPROBE_TIMEOUT)
-        return float(result.stdout.strip())
-    except Exception:
-        return 30.0
+    """Return duration in seconds, or 0.0 if unknown (NEVER a fabricated 30.0).
+
+    Thin float-typed wrapper over probe_media_duration for legacy callers. Callers that use
+    `probe_duration(x) or <fallback>` now get correct behaviour (0.0 is falsy → their explicit
+    fallback fires) instead of the old phantom 30.0 that silently masqueraded as a real value.
+    """
+    d = probe_media_duration(video_path)
+    if d is None:
+        logger.debug("VPI_DURATION_FALLBACK_USED path=%s value=0.0 reason=unknown", str(video_path))
+        return 0.0
+    return float(d)
 
 
 # ── B-roll normalisation ──────────────────────────────────────────────────────
@@ -347,7 +480,12 @@ def compose_overlay(
     broll_path  = Path(broll_path)
     output_path = Path(output_path)
 
+    # TIMING-39: never compose against a fabricated canvas. If the main clip geometry is
+    # unknown (0), skip the overlay rather than normalise B-roll to a phantom 1080x1920.
     w, h, _fps = probe_dimensions(main_path)
+    if w <= 0 or h <= 0:
+        logger.warning("[BrollCompositor] compose_overlay skipped reason=geometry_unknown main=%s", main_path)
+        return False
 
     # Normalise B-roll — sin fade negro para no oscurecer la imagen
     norm_path = normalize_broll(broll_path, w, h, duration=duration, fade=fade)
@@ -446,7 +584,11 @@ async def compose_overlay_multi(
     main_path   = Path(main_path)
     output_path = Path(output_path)
 
+    # TIMING-39: skip composition if the main clip geometry is unknown (no phantom canvas).
     w, h, _fps = probe_dimensions(main_path)
+    if w <= 0 or h <= 0:
+        logger.warning("[BrollCompositor] compose_overlay_multi skipped reason=geometry_unknown main=%s", main_path)
+        return False
 
     # Normalise each B-roll clip
     norm_paths: list[Path] = []

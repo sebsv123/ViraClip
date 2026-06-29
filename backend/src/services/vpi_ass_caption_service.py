@@ -374,6 +374,16 @@ def _caption_word_token(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", _strip_caption_accents(text))
 
 
+def _caption_display_glyphs(word: Dict[str, Any]) -> str:
+    """OUTPUT-CAPTIONS-47: the glyphs to render — a confirmed display-only ASR
+    correction if present, otherwise the editorial ASR text. Never affects timing,
+    chunking timebase, or keyword/emphasis matching (those use `text`)."""
+    disp = word.get("caption_display_text")
+    if isinstance(disp, str) and disp.strip():
+        return disp
+    return str(word.get("text", "") or "")
+
+
 def _select_vpi_caption_keywords(words: List[Dict[str, Any]], max_terms: int = 2) -> List[str]:
     if max_terms <= 0:
         return []
@@ -559,7 +569,9 @@ def _wrap_two_lines(
     protected_phrases = _caption_phrase_tokens()
 
     def _render_word(word: Dict[str, Any]) -> str:
-        text = _ass_escape(word.get("text", ""))
+        # OUTPUT-CAPTIONS-47: display layer prefers caption_display_text (a confirmed
+        # ASR fix) but keyword/emphasis logic stays on the editorial `text`.
+        text = _ass_escape(_caption_display_glyphs(word))
         token = _caption_word_token(word.get("text", ""))
         duration_cs = max(1, int((word.get("end", 0.0) - word.get("start", 0.0)) * 100))
         score = word.get("score", 0.5)
@@ -618,15 +630,15 @@ def _wrap_plain_two_lines(
         prefix = "{\\fad(90,120)\\fs72}"
 
     if len(words) <= 3:
-        return prefix + " ".join(_ass_escape(str(w.get("text", ""))) for w in words)
+        return prefix + " ".join(_ass_escape(_caption_display_glyphs(w)) for w in words)
     split_at = _caption_split_index(
         words,
         max_words_per_line=max_words_per_line,
         max_chars_per_line=max_chars_per_line,
         protected_phrases=protected_phrases,
     )
-    first_line = " ".join(_ass_escape(str(w.get("text", ""))) for w in words[:split_at])
-    second_line = " ".join(_ass_escape(str(w.get("text", ""))) for w in words[split_at:])
+    first_line = " ".join(_ass_escape(_caption_display_glyphs(w)) for w in words[:split_at])
+    second_line = " ".join(_ass_escape(_caption_display_glyphs(w)) for w in words[split_at:])
     return prefix + first_line + ("\\N" + second_line if second_line else "")
 
 
@@ -1583,7 +1595,7 @@ def build_ass_subtitle_text(
     if caption_style == "highlight":
         parts: List[str] = []
         for i, w in enumerate(words):
-            text = _ass_escape(w.get("text", ""))
+            text = _ass_escape(_caption_display_glyphs(w))
             token = _caption_word_token(w.get("text", ""))
             score = w.get("score", 0.5)
             if score >= 0.82 or i in emphasis_set:

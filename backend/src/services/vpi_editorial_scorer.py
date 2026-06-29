@@ -1720,6 +1720,33 @@ def _package_rank_score(seg: dict[str, Any]) -> float:
     return round(_clamp_score(score), 3)
 
 
+# OUTPUT-EDITORIAL-QC-52: these helpers were referenced by _viral_window_audit but never
+# defined in this module, so the shift-back block raised NameError on EVERY incomplete
+# window. The bare `except` swallowed it and marked the window `uncorrectable`, so incomplete
+# clips (e.g. opening with an unresolved "uno de ellos") were served instead of shifted back
+# to include their antecedent. Define them with the same MM:SS(.ff)/HH:MM:SS convention used
+# elsewhere in this file (_dedupe_ts_seconds).
+def _parse_timestamp_to_seconds(value: str) -> float:
+    parts = str(value or "0").strip().split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _fmt_timestamp(seconds: float) -> str:
+    total = max(0.0, float(seconds or 0.0))
+    minutes = int(total // 60)
+    secs = total - minutes * 60
+    if abs(secs - round(secs)) < 0.005:
+        return f"{minutes:02d}:{int(round(secs)):02d}"
+    return f"{minutes:02d}:{secs:05.2f}"
+
+
 def _viral_window_audit(seg: dict[str, Any]) -> dict[str, Any]:
     original_start_time = str(seg.get("original_start_time") or seg.get("start_time") or "")
     original_end_time = str(seg.get("original_end_time") or seg.get("end_time") or "")
@@ -1767,8 +1794,10 @@ def _viral_window_audit(seg: dict[str, Any]) -> dict[str, Any]:
                 trailing_low_value_seconds = max(trailing_low_value_seconds, round(max(0.0, original_end_s - new_end_s), 3))
                 setup_context_shift_seconds = round(max(setup_context_shift_seconds, min(12.0, original_start_s - new_start_s)), 3)
                 forced_shift_back_applied = True
-                segment["forced_shift_back_applied"] = True
-                segment["viral_window_shift_reason"] = "incomplete_idea_shift_back_forced"
+                seg["forced_shift_back_applied"] = True
+                seg["refined_start_time"] = refined_start_time
+                seg["refined_end_time"] = refined_end_time
+                seg["viral_window_shift_reason"] = "incomplete_idea_shift_back_forced"
             else:
                 incomplete_window_uncorrectable = True
         except Exception:

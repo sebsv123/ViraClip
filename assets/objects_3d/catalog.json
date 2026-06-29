@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "assets": {
+    "medical_reimbursement_3d": {
+      "asset_id": "medical_reimbursement_3d",
+      "canonical_concept": "reembolso médico",
+      "aliases": [
+        "reembolso",
+        "seguro de reembolso",
+        "póliza de reembolso",
+        "gastos médicos",
+        "devolución de gastos",
+        "reembolso de gastos médicos"
+      ],
+      "domain": "health_insurance",
+      "recipe_type": "composite",
+      "components": [
+        "medical_document_mesh",
+        "medical_cross_mesh",
+        "coin_mesh",
+        "return_arrow_mesh"
+      ],
+      "remotion_composition": "MedicalReimbursement3D",
+      "approved": true,
+      "pixel_verified": true,
+      "alpha_verified": true,
+      "created_from_task": "d1ec4a6f-68f3-4abd-8a87-30f47c67a484",
+      "palette_version": "vpi-3d-v1",
+      "variants": {
+        "reveal_left": {
+          "cache_key": "medical_reimbursement_3d__reveal_left__720x720__30fps__51f__vpi-3d-v1",
+          "render_path": "assets/objects_3d/rendered/medical_reimbursement_3d__reveal_left__720x720__30fps__51f__vpi-3d-v1.webm",
+          "frame_count": 51,
+          "fps": 30,
+          "duration_s": 1.7
+        },
+        "reveal_right": {
+          "cache_key": "medical_reimbursement_3d__reveal_right__720x720__30fps__51f__vpi-3d-v1",
+          "render_path": "assets/objects_3d/rendered/medical_reimbursement_3d__reveal_right__720x720__30fps__51f__vpi-3d-v1.webm",
+          "frame_count": 51,
+          "fps": 30,
+          "duration_s": 1.7
+        }
+      }
+    }
+  }
+}

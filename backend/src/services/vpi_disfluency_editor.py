@@ -608,6 +608,9 @@ _OC_LEADING_LEAVE_S = 0.25
 _OC_MIN_LINE_CUT_S = 0.4
 _OC_MIN_WORD_CUT_S = 0.12
 _OC_MIN_FINAL_DURATION_S = 4.0
+_OC_MICRO_REPAIR_MIN_S = 0.18
+_OC_MICRO_REPAIR_MAX_S = 0.75
+_OC_MICRO_REPAIR_MAX_PER_CLIP = 2
 
 # ── OUTPUT-CUTS-8B: false-positive guard for false starts ─────────────────────
 _OC_FALSE_START_GUARD_VERSION = "8b"
@@ -842,6 +845,225 @@ def _oc_overlaps(start: float, end: float, ranges: List[Tuple[float, float]]) ->
     return any(start < r_end and end > r_start for r_start, r_end in ranges)
 
 
+def _oc_overlap_duration(start: float, end: float, ranges: List[Tuple[float, float]]) -> float:
+    total = 0.0
+    for r_start, r_end in ranges:
+        total += max(0.0, min(end, r_end) - max(start, r_start))
+    return round(total, 3)
+
+
+def _oc_is_content_word(token: str) -> bool:
+    return token not in {
+        "a", "al", "de", "del", "el", "la", "los", "las", "un", "una",
+        "unos", "unas", "y", "o", "que", "se", "es", "son", "con",
+        "por", "pero", "sino", "no", "eso",
+    }
+
+
+def _oc_find_micro_repetition_repairs(words: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Find short repeated-token repairs that line-level planning cannot cut."""
+    repairs: List[Dict[str, Any]] = []
+    accepted_ranges: List[Tuple[float, float]] = []
+    for i, word in enumerate(words[:-1]):
+        token = _oc_normalize(str(word.get("text") or ""))
+        if not token or len(token) < 2:
+            continue
+        if token not in {"por", "eso", "no", "pero", "sino"}:
+            continue
+        start = float(word.get("start") or 0.0)
+        end = float(word.get("end") or start)
+        dur = end - start
+        if dur < _OC_MICRO_REPAIR_MIN_S or dur > _OC_MICRO_REPAIR_MAX_S:
+            continue
+        later_idx: Optional[int] = None
+        for j in range(i + 1, min(len(words), i + 9)):
+            other = _oc_normalize(str(words[j].get("text") or ""))
+            if other != token:
+                continue
+            gap = float(words[j].get("start") or 0.0) - end
+            if 0.0 <= gap <= 6.0:
+                later_idx = j
+                break
+        if later_idx is None:
+            continue
+        prev_tok = _oc_normalize(str(words[i - 1].get("text") or "")) if i > 0 else ""
+        next_tok = _oc_normalize(str(words[i + 1].get("text") or "")) if i + 1 < len(words) else ""
+        later_next = _oc_normalize(str(words[later_idx + 1].get("text") or "")) if later_idx + 1 < len(words) else ""
+        phrase_restart = bool(next_tok and later_next and next_tok == later_next)
+        connector_context = prev_tok in {"sino", "de", "trata", "perdon", "perdón", "eh", "mmm", "no"}
+        connector_restart = token in {"por", "eso", "pero", "sino", "no"} and later_idx - i <= 7 and connector_context
+        if token in {"por", "eso", "pero", "sino", "no"} and not connector_context:
+            _oc_logger.info(
+                "VPI_MICRO_REPETITION_REJECTED start=%.3f token=%s reason=no_restart_context",
+                start, token,
+            )
+            continue
+        if _oc_is_content_word(token) and not phrase_restart and not connector_restart:
+            _oc_logger.info(
+                "VPI_MICRO_REPETITION_REJECTED start=%.3f token=%s reason=unique_content_risk",
+                start, token,
+            )
+            continue
+        if i >= len(words) - 8:
+            _oc_logger.info(
+                "VPI_MICRO_REPETITION_REJECTED start=%.3f token=%s reason=closure_risk",
+                start, token,
+            )
+            continue
+        gap_before = start - float(words[i - 1].get("end") or start) if i > 0 else start
+        gap_after = float(words[i + 1].get("start") or end) - end if i + 1 < len(words) else 0.0
+        expanded_start = max(0.0, start - min(0.10, max(0.0, gap_before * 0.5)))
+        expanded_end = end + min(0.10, max(0.0, gap_after * 0.5))
+        if _oc_overlaps(expanded_start, expanded_end, accepted_ranges):
+            _oc_logger.info(
+                "VPI_MICRO_REPETITION_REJECTED start=%.3f token=%s reason=overlap",
+                start, token,
+            )
+            continue
+        if len(repairs) >= _OC_MICRO_REPAIR_MAX_PER_CLIP:
+            _oc_logger.info(
+                "VPI_MICRO_REPETITION_REJECTED start=%.3f token=%s reason=budget_exceeded",
+                start, token,
+            )
+            continue
+        treatment = "MICRO_STITCH" if expanded_end - expanded_start < 0.35 else "HARD_CUT"
+        repair = {
+            "start_s": round(expanded_start, 3),
+            "end_s": round(expanded_end, 3),
+            "treatment": treatment,
+            "priority": 6,
+            "confidence": 0.86 if phrase_restart else 0.78,
+            "reason": f"micro_repetition_repair:{token[:20]}",
+            "text_preview": token[:30],
+            "micro_repetition_original_span": [round(start, 3), round(end, 3)],
+            "micro_repetition_expanded_span": [round(expanded_start, 3), round(expanded_end, 3)],
+            "micro_repetition_crossfade_frames": 5,
+            "micro_repetition_audio_crossfade_ms": 40,
+        }
+        _oc_logger.info(
+            "VPI_REPETITION_MICRO_REPAIR_CANDIDATE start=%.3f end=%.3f reason=%s",
+            float(repair["start_s"]), float(repair["end_s"]), repair["reason"],
+        )
+        _oc_logger.info(
+            "VPI_MICRO_REPETITION_REPAIR_SELECTED start=%.3f end=%.3f treatment=%s",
+            float(repair["start_s"]), float(repair["end_s"]), treatment,
+        )
+        _oc_logger.info("VPI_MICRO_REPETITION_AUDIO_CROSSFADE ms=40")
+        _oc_logger.info("VPI_MICRO_REPETITION_VIDEO_CROSSFADE frames=5")
+        repairs.append(repair)
+        accepted_ranges.append((expanded_start, expanded_end))
+    return repairs
+
+
+def _oc_micro_repair_retained_word_overlap(
+    start: float,
+    end: float,
+    words: List[Dict[str, Any]],
+) -> bool:
+    """Return true if the span clips an adjacent retained word."""
+    for word in words:
+        w_start = float(word.get("start") or 0.0)
+        w_end = float(word.get("end") or w_start)
+        if end <= w_start or start >= w_end:
+            continue
+        # The repeated word itself is expected to be fully covered.  Partial
+        # coverage indicates the repair would cut a retained word/phoneme.
+        if start <= w_start + 0.01 and end >= w_end - 0.01:
+            continue
+        return True
+    return False
+
+
+def _oc_classify_micro_repair_pause_overlap(
+    candidate: Dict[str, Any],
+    *,
+    start: float,
+    end: float,
+    preserved_ranges: List[Tuple[float, float]],
+    words: List[Dict[str, Any]],
+    tail_protect_start: float,
+) -> Tuple[bool, float, float, str, Dict[str, Any]]:
+    """Classify preserved-pause overlap for micro repairs.
+
+    Generic preserved-pause rejection is too coarse for restart-token repairs:
+    the protected pause can be the breath/restart gap that makes the duplicate
+    audible.  This keeps hard protections but allows safe, local consumption.
+    """
+    overlap_s = _oc_overlap_duration(start, end, preserved_ranges)
+    meta: Dict[str, Any] = {
+        "micro_repair_overlap_duration_s": overlap_s,
+        "micro_repair_pause_consumed": False,
+        "micro_repair_padding_shrunk": False,
+    }
+    if overlap_s <= 0:
+        meta["micro_repair_overlap_class"] = "NO_OVERLAP"
+        meta["micro_repair_acceptance_reason"] = "no_preserved_pause_overlap"
+        return True, start, end, "NO_OVERLAP", meta
+
+    if end > tail_protect_start:
+        meta["micro_repair_overlap_class"] = "CLOSURE_OR_REFRAIN_OVERLAP"
+        meta["micro_repair_acceptance_reason"] = "reject_tail_protection"
+        return False, start, end, "CLOSURE_OR_REFRAIN_OVERLAP", meta
+
+    original = candidate.get("micro_repetition_original_span") or [start, end]
+    try:
+        orig_start = float(original[0])
+        orig_end = float(original[1])
+    except Exception:
+        orig_start, orig_end = start, end
+
+    padding_only = all(
+        max(0.0, min(orig_end, r_end) - max(orig_start, r_start)) <= 0.01
+        for r_start, r_end in preserved_ranges
+        if start < r_end and end > r_start
+    )
+    if padding_only:
+        shrunk_start = max(start, orig_start)
+        shrunk_end = min(end, orig_end)
+        if shrunk_end - shrunk_start >= 0.08 and not _oc_micro_repair_retained_word_overlap(shrunk_start, shrunk_end, words):
+            meta.update({
+                "micro_repair_overlap_class": "CANDIDATE_PADDING_OVERLAP",
+                "micro_repair_padding_shrunk": True,
+                "micro_repair_acceptance_reason": "padding_shrunk_to_original_word_span",
+            })
+            _oc_logger.info(
+                "VPI_MICRO_REPAIR_PADDING_SHRUNK start=%.3f end=%.3f shrunk_start=%.3f shrunk_end=%.3f overlap=%.3f",
+                start, end, shrunk_start, shrunk_end, overlap_s,
+            )
+            return True, round(shrunk_start, 3), round(shrunk_end, 3), "CANDIDATE_PADDING_OVERLAP", meta
+        meta["micro_repair_overlap_class"] = "RETAINED_WORD_OVERLAP"
+        meta["micro_repair_acceptance_reason"] = "reject_padding_shrink_would_clip_word"
+        return False, start, end, "RETAINED_WORD_OVERLAP", meta
+
+    if _oc_micro_repair_retained_word_overlap(start, end, words):
+        meta["micro_repair_overlap_class"] = "RETAINED_WORD_OVERLAP"
+        meta["micro_repair_acceptance_reason"] = "reject_retained_word_overlap"
+        return False, start, end, "RETAINED_WORD_OVERLAP", meta
+
+    if overlap_s <= 0.12:
+        meta.update({
+            "micro_repair_overlap_class": "ADJACENT_BREATH_OVERLAP",
+            "micro_repair_pause_consumed": True,
+            "micro_repair_acceptance_reason": "consume_short_adjacent_breath",
+        })
+        _oc_logger.info(
+            "VPI_MICRO_REPAIR_PAUSE_CONSUMED start=%.3f end=%.3f overlap=%.3f class=ADJACENT_BREATH_OVERLAP",
+            start, end, overlap_s,
+        )
+        return True, start, end, "ADJACENT_BREATH_OVERLAP", meta
+
+    meta.update({
+        "micro_repair_overlap_class": "SELF_GENERATED_PAUSE_OVERLAP",
+        "micro_repair_pause_consumed": True,
+        "micro_repair_acceptance_reason": "consume_restart_group_pause",
+    })
+    _oc_logger.info(
+        "VPI_MICRO_REPAIR_PAUSE_CONSUMED start=%.3f end=%.3f overlap=%.3f class=SELF_GENERATED_PAUSE_OVERLAP",
+        start, end, overlap_s,
+    )
+    return True, start, end, "SELF_GENERATED_PAUSE_OVERLAP", meta
+
+
 def build_output_cut_plan(
     *,
     words: List[Dict[str, Any]],
@@ -880,6 +1102,22 @@ def build_output_cut_plan(
         "protected_refrain_reason": [],
         "repetition_cut_blocked_count": 0,
         "needs_review_reason": "",
+        "micro_repetition_repairs_planned": 0,
+        "micro_repetition_repairs_applied": 0,
+        "micro_repetition_original_span": [],
+        "micro_repetition_expanded_span": [],
+        "micro_repetition_crossfade_frames": 0,
+        "micro_repetition_audio_crossfade_ms": 0,
+        "micro_repetition_skip_reason": "",
+        "micro_repair_overlap_class": [],
+        "micro_repair_overlap_duration_s": [],
+        "micro_repair_pause_consumed": [],
+        "micro_repair_padding_shrunk": [],
+        "micro_repair_acceptance_reason": [],
+        "intentional_pause_inserted": False,
+        "intentional_pause_start_s": 0.0,
+        "intentional_pause_duration_s": 0.0,
+        "intentional_pause_reason": "",
     }
     if not words or duration <= 1.0:
         plan["skip_reason"] = "no_word_timestamps" if not words else "clip_too_short"
@@ -965,19 +1203,28 @@ def build_output_cut_plan(
                 for unit in units:
                     if unit is keep_unit:
                         continue
-                    for idx in unit:
-                        if idx in removed_line_idx or idx == len(lines) - 1:
-                            continue
-                        line = lines[idx]
-                        if line["end"] - line["start"] < _OC_MIN_LINE_CUT_S:
-                            continue
-                        candidates.append({
-                            "start_s": line["start"], "end_s": line["end"],
-                            "treatment": "HARD_CUT", "priority": 1, "confidence": 0.9,
-                            "reason": f"retake_repetition_keep_last:{str(group.get('type') or 'exact_repeat')}",
-                            "text_preview": line["text"][:60],
-                        })
-                        removed_line_idx.add(idx)
+                    # OUTPUT-CUTS-30: cut a non-kept duplicate instance as ONE contiguous
+                    # span instead of line-by-line. A repeat split into short (<0.4s) sub-lines
+                    # was silently left in (each sub-line failed the per-line min length); the
+                    # span (whole duplicate phrase) clears the threshold. Closure protection
+                    # (never cut the clip's last line) and overlap protection stay at unit level.
+                    unit_idx = [ix for ix in unit if ix not in removed_line_idx]
+                    if not unit_idx:
+                        continue
+                    if any(ix == len(lines) - 1 for ix in unit_idx):
+                        continue
+                    u_start = min(lines[ix]["start"] for ix in unit_idx)
+                    u_end = max(lines[ix]["end"] for ix in unit_idx)
+                    if u_end - u_start < _OC_MIN_LINE_CUT_S:
+                        continue
+                    candidates.append({
+                        "start_s": u_start, "end_s": u_end,
+                        "treatment": "HARD_CUT", "priority": 1, "confidence": 0.9,
+                        "reason": f"retake_repetition_keep_last:{str(group.get('type') or 'exact_repeat')}",
+                        "text_preview": lines[unit_idx[0]]["text"][:60],
+                    })
+                    for ix in unit_idx:
+                        removed_line_idx.add(ix)
             plan["narrative_refrain_detected"] = bool(refrain_protected_texts)
             plan["protected_refrain_text"] = refrain_protected_texts
             plan["protected_refrain_reason"] = refrain_reasons
@@ -1067,6 +1314,14 @@ def build_output_cut_plan(
                 "reason": f"word_stutter:{a[:20]}", "text_preview": a[:30],
             })
 
+    # 2b. Non-consecutive short restart tokens ("por eso ... por eso ...").
+    micro_repairs = _oc_find_micro_repetition_repairs(words)
+    plan["micro_repetition_repairs_planned"] = len(micro_repairs)
+    if micro_repairs:
+        candidates.extend(micro_repairs)
+    else:
+        plan["micro_repetition_skip_reason"] = "no_safe_micro_repetition"
+
     # 3. Silences: leading dead start + long internal dead air (COMPRESS_SILENCE).
     first_word_start = float(words[0].get("start") or 0.0)
     if first_word_start >= _OC_LEADING_SILENCE_S:
@@ -1118,8 +1373,57 @@ def build_output_cut_plan(
             end = min(end, tail_protect_start)
             if end - start < 0.08:
                 continue
-        if _oc_overlaps(start, end, existing_ranges) or _oc_overlaps(start, end, preserved_ranges):
+        is_micro_repair = str(c.get("reason") or "").startswith("micro_repetition_repair:")
+        if is_micro_repair:
+            _oc_logger.info(
+                "VPI_MICRO_REPAIR_ACCEPTANCE_ENTER start=%.3f end=%.3f reason=%s",
+                start, end, str(c.get("reason") or ""),
+            )
+        if _oc_overlaps(start, end, existing_ranges):
+            if is_micro_repair:
+                plan["micro_repetition_skip_reason"] = "overlaps_existing_cut"
+                _oc_logger.info(
+                    "VPI_MICRO_REPAIR_REJECTED start=%.3f end=%.3f reason=overlaps_existing_cut",
+                    start, end,
+                )
             continue
+        if _oc_overlaps(start, end, preserved_ranges):
+            if not is_micro_repair:
+                continue
+            accept_micro, start, end, overlap_class, overlap_meta = _oc_classify_micro_repair_pause_overlap(
+                c,
+                start=start,
+                end=end,
+                preserved_ranges=preserved_ranges,
+                words=words,
+                tail_protect_start=tail_protect_start,
+            )
+            _oc_logger.info(
+                "VPI_MICRO_REPAIR_OVERLAP_CLASSIFIED start=%.3f end=%.3f class=%s overlap=%.3f accepted=%s",
+                start, end, overlap_class, float(overlap_meta.get("micro_repair_overlap_duration_s") or 0.0), accept_micro,
+            )
+            if not accept_micro:
+                plan["micro_repetition_skip_reason"] = str(overlap_meta.get("micro_repair_acceptance_reason") or overlap_class)
+                _oc_logger.info(
+                    "VPI_MICRO_REPAIR_REJECTED start=%.3f end=%.3f reason=%s",
+                    start, end, plan["micro_repetition_skip_reason"],
+                )
+                continue
+            c = {**c, **overlap_meta}
+        elif is_micro_repair:
+            c = {
+                **c,
+                "micro_repair_overlap_class": "NO_OVERLAP",
+                "micro_repair_overlap_duration_s": 0.0,
+                "micro_repair_pause_consumed": False,
+                "micro_repair_padding_shrunk": False,
+                "micro_repair_acceptance_reason": "no_preserved_pause_overlap",
+            }
+        if is_micro_repair:
+            _oc_logger.info(
+                "VPI_MICRO_REPAIR_PHYSICAL_ACCEPTED start=%.3f end=%.3f class=%s",
+                start, end, str(c.get("micro_repair_overlap_class") or "NO_OVERLAP"),
+            )
         filtered.append({**c, "start_s": round(start, 3), "end_s": round(end, 3)})
 
     # Merge overlapping candidates (keep highest priority metadata).
@@ -1157,6 +1461,8 @@ def build_output_cut_plan(
     word_bounds = [(float(w.get("start") or 0.0), float(w.get("end") or 0.0)) for w in words]
     for c in accepted:
         if c.get("treatment") != "HARD_CUT":
+            continue
+        if str(c.get("reason") or "").startswith("micro_repetition_repair:"):
             continue
         prev_word_end = max((e for _s, e in word_bounds if e <= c["start_s"] + 0.01), default=None)
         if prev_word_end is None:
@@ -1256,9 +1562,54 @@ def build_output_cut_plan(
             "start_s": c["start_s"], "end_s": c["end_s"],
             "reason": c["reason"], "confidence": c["confidence"],
             "treatment": c["treatment"], "text_preview": c.get("text_preview") or "",
+            **({
+                "micro_repetition_original_span": c.get("micro_repetition_original_span"),
+                "micro_repetition_expanded_span": c.get("micro_repetition_expanded_span"),
+                "micro_repetition_crossfade_frames": c.get("micro_repetition_crossfade_frames"),
+                "micro_repetition_audio_crossfade_ms": c.get("micro_repetition_audio_crossfade_ms"),
+                "micro_repair_overlap_class": c.get("micro_repair_overlap_class"),
+                "micro_repair_overlap_duration_s": c.get("micro_repair_overlap_duration_s"),
+                "micro_repair_pause_consumed": c.get("micro_repair_pause_consumed"),
+                "micro_repair_padding_shrunk": c.get("micro_repair_padding_shrunk"),
+                "micro_repair_acceptance_reason": c.get("micro_repair_acceptance_reason"),
+            } if str(c.get("reason") or "").startswith("micro_repetition_repair:") else {}),
         }
         for c in accepted
     ]
+    accepted_micro = [
+        c for c in accepted
+        if str(c.get("reason") or "").startswith("micro_repetition_repair:")
+    ]
+    plan["micro_repetition_repairs_applied"] = len(accepted_micro)
+    plan["micro_repetition_original_span"] = [
+        c.get("micro_repetition_original_span") for c in accepted_micro
+    ]
+    plan["micro_repetition_expanded_span"] = [
+        c.get("micro_repetition_expanded_span") for c in accepted_micro
+    ]
+    plan["micro_repair_overlap_class"] = [
+        c.get("micro_repair_overlap_class") for c in accepted_micro
+    ]
+    plan["micro_repair_overlap_duration_s"] = [
+        c.get("micro_repair_overlap_duration_s") for c in accepted_micro
+    ]
+    plan["micro_repair_pause_consumed"] = [
+        c.get("micro_repair_pause_consumed") for c in accepted_micro
+    ]
+    plan["micro_repair_padding_shrunk"] = [
+        c.get("micro_repair_padding_shrunk") for c in accepted_micro
+    ]
+    plan["micro_repair_acceptance_reason"] = [
+        c.get("micro_repair_acceptance_reason") for c in accepted_micro
+    ]
+    if accepted_micro:
+        plan["micro_repetition_crossfade_frames"] = max(
+            int(c.get("micro_repetition_crossfade_frames") or 0) for c in accepted_micro
+        )
+        plan["micro_repetition_audio_crossfade_ms"] = max(
+            int(c.get("micro_repetition_audio_crossfade_ms") or 0) for c in accepted_micro
+        )
+        plan["micro_repetition_skip_reason"] = ""
     plan["keep_segments"] = keep_segments
     plan["total_cut_seconds"] = round(total, 3)
     plan["final_duration_after_cuts"] = round(max(0.0, duration - total), 3)

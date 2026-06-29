@@ -201,17 +201,72 @@ def _build_final_output_truth(
             entity_relation = "single_valid_artifact"
     except Exception:
         entity_relation = "unknown"
+    physical_probe = _probe_media_info(final_path_obj) if final_path_obj.exists() else {}
+    physical_streams = physical_probe.get("streams") if isinstance(physical_probe, dict) else []
+    physical_streams = physical_streams if isinstance(physical_streams, list) else []
+    physical_format = physical_probe.get("format") if isinstance(physical_probe.get("format"), dict) else {}
+    physical_video_stream = next(
+        (s for s in physical_streams if isinstance(s, dict) and s.get("codec_type") == "video"),
+        {},
+    )
+    physical_audio_stream = next(
+        (s for s in physical_streams if isinstance(s, dict) and s.get("codec_type") == "audio"),
+        {},
+    )
+    physical_video_stream_ok = bool(
+        physical_video_stream
+        and int(physical_video_stream.get("width") or 0) > 0
+        and int(physical_video_stream.get("height") or 0) > 0
+    )
+    physical_audio_stream_ok = bool(physical_audio_stream)
+    try:
+        physical_duration = float(
+            physical_format.get("duration")
+            or physical_video_stream.get("duration")
+            or physical_audio_stream.get("duration")
+            or 0.0
+        )
+    except Exception:
+        physical_duration = 0.0
+    physical_file_size = int(selected_truth.get("size_bytes") or 0)
+    physical_probe_ok = bool(
+        selected_truth.get("exists")
+        and physical_file_size > 0
+        and physical_video_stream_ok
+        and physical_duration > 0.0
+    )
     final_output_verified = bool(
-        _merge_truth_value(
-            final_contract.get("final_output_verified"),
-            final_contract.get("final_output_verified") is True,
+        physical_probe_ok
+        and (
+            physical_audio_stream_ok
+            or not bool(final_contract.get("has_audio") or final_contract.get("final_audio_stream_ok"))
         )
     )
-    final_probe_ok = bool(_merge_truth_value(final_contract.get("final_probe_ok"), final_contract.get("probe_ok")))
-    final_video_stream_ok = bool(_merge_truth_value(final_contract.get("final_video_stream_ok"), final_contract.get("video_stream_ok")))
-    final_audio_stream_ok = bool(_merge_truth_value(final_contract.get("final_audio_stream_ok"), final_contract.get("audio_stream_ok")))
-    final_duration = _merge_truth_value(final_contract.get("final_duration"), final_contract.get("duration"))
-    final_file_size = _merge_truth_value(final_contract.get("final_file_size"), final_contract.get("file_size"))
+    final_probe_ok = bool(physical_probe_ok)
+    final_video_stream_ok = bool(physical_video_stream_ok)
+    final_audio_stream_ok = bool(physical_audio_stream_ok)
+    final_duration = physical_duration or _merge_truth_value(final_contract.get("final_duration"), final_contract.get("duration"))
+    final_file_size = physical_file_size or _merge_truth_value(final_contract.get("final_file_size"), final_contract.get("file_size"))
+    if physical_probe_ok:
+        logger.info(
+            "VPI_FINAL_CONTRACT_PHYSICAL_PROBE task_id=%s path=%s duration=%.3f video=%s audio=%s",
+            task_id,
+            str(final_path_obj),
+            float(final_duration or 0.0),
+            str(final_video_stream_ok).lower(),
+            str(final_audio_stream_ok).lower(),
+        )
+    else:
+        logger.warning(
+            "VPI_FINAL_CONTRACT_PHYSICAL_INVALID task_id=%s path=%s exists=%s size=%d duration=%.3f video=%s audio=%s",
+            task_id,
+            str(final_path_obj),
+            str(bool(selected_truth.get("exists"))).lower(),
+            int(physical_file_size or 0),
+            float(physical_duration or 0.0),
+            str(final_video_stream_ok).lower(),
+            str(final_audio_stream_ok).lower(),
+        )
     return {
         "task_id": str(task_id or ""),
         "final_output_path": str(final_path_obj if final_path_obj else selected_final_output_path or task_scoped_output_path or durable_output_path or ""),
@@ -224,10 +279,14 @@ def _build_final_output_truth(
         "final_file_size": int(selected_truth.get("size_bytes") or 0),
         "final_mtime": float(selected_truth.get("mtime") or 0.0),
         "final_duration": float(final_duration or 0.0),
+        "physical_duration_s": float(final_duration or 0.0),
         "final_probe_ok": bool(final_probe_ok),
         "final_video_stream_ok": bool(final_video_stream_ok),
         "final_audio_stream_ok": bool(final_audio_stream_ok),
         "final_output_verified": bool(final_output_verified),
+        "physical_readable": bool(final_probe_ok),
+        "physical_video_stream_valid": bool(final_video_stream_ok),
+        "physical_audio_stream_valid": bool(final_audio_stream_ok),
         "final_output_entity_relation": entity_relation,
         "final_mp4_contract": dict(final_contract),
     }
@@ -855,7 +914,28 @@ def _normalize_rendered_clip_result(value: Any) -> Optional[Dict[str, Any]]:
     return result or None
 
 
-def _find_valid_temp_finish_mp4(task_id: str, clip_order: int) -> Optional[Path]:
+def _segment_identity_tokens(segment: Optional[Dict[str, Any]]) -> List[str]:
+    """Build filename window identity tokens (e.g. '6m05s_6m38s') from a segment."""
+    tokens: List[str] = []
+    if not isinstance(segment, dict):
+        return tokens
+    for st_key, en_key in (("start_time", "end_time"), ("refined_start_time", "refined_end_time")):
+        st = segment.get(st_key)
+        en = segment.get(en_key)
+        if not st or not en:
+            continue
+        try:
+            ss = parse_timestamp_to_seconds(str(st))
+            ee = parse_timestamp_to_seconds(str(en))
+            tok = f"{int(ss // 60)}m{int(ss % 60):02d}s_{int(ee // 60)}m{int(ee % 60):02d}s"
+            if tok not in tokens:
+                tokens.append(tok.lower())
+        except Exception:
+            continue
+    return tokens
+
+
+def _find_valid_temp_finish_mp4(task_id: str, clip_order: int, segment: Optional[Dict[str, Any]] = None) -> Optional[Path]:
     """Search for a valid temp MP4 in fallback stage order.
     
     Fallback stage order (most preferred first):
@@ -883,20 +963,53 @@ def _find_valid_temp_finish_mp4(task_id: str, clip_order: int) -> Optional[Path]
         "ep_",
         "vpi_",
     ]
+    # OUTPUT-RECOVERY-27: a recovered artifact MUST belong to THIS clip. Identity is the
+    # source window token (e.g. "6m05s_6m38s") and/or candidate id embedded in the temp
+    # filename. Never fall back to an arbitrary task-level temp file (that bound the same
+    # MP4 to multiple clips). If no identity-matching artifact exists, return None so the
+    # clip fails cleanly instead of being substituted by another clip's media.
+    identity_tokens = _segment_identity_tokens(segment) if isinstance(segment, dict) else []
+    candidate_id = ""
+    if isinstance(segment, dict):
+        candidate_id = str(segment.get("candidate_id") or segment.get("selected_clip_id") or segment.get("clip_id") or "")
     order_token = f"_{clip_order}_"
+
+    def _matches_identity(name: str) -> bool:
+        low = name.lower()
+        if any(tok and tok in low for tok in identity_tokens):
+            return True
+        if candidate_id and candidate_id.lower() in low:
+            return True
+        return False
+
+    have_identity = bool(identity_tokens or candidate_id)
     for prefix in stage_prefixes:
         candidates = sorted(
             temp_dir.glob(f"{prefix}*.mp4"),
             key=lambda p: (p.stat().st_mtime if p.exists() else 0.0, p.name),
             reverse=True,
         )
-        ordered_candidates = [p for p in candidates if order_token in p.name] + [p for p in candidates if order_token not in p.name]
-        for candidate in ordered_candidates:
+        for candidate in candidates:
             if not candidate.exists():
+                continue
+            if have_identity:
+                if not _matches_identity(candidate.name):
+                    continue
+            elif order_token not in candidate.name:
+                # No segment identity available: require at least the order token; never
+                # accept an arbitrary file.
                 continue
             ok, _, _ = _deadline_safe_technical_gate(candidate)
             if ok:
+                logger.info(
+                    "VPI_MEDIA_BINDING_VERIFIED task_id=%s clip_order=%s file=%s identity_tokens=%s",
+                    task_id, clip_order, candidate.name, identity_tokens or [order_token],
+                )
                 return candidate
+    logger.warning(
+        "VPI_MEDIA_BINDING_REJECTED task_id=%s clip_order=%s reason=no_identity_match identity_tokens=%s candidate_id=%s",
+        task_id, clip_order, identity_tokens, candidate_id or "-",
+    )
     return None
 
 
@@ -1026,6 +1139,33 @@ def _apply_output_basic_caption_safety_net(
     }
 
 
+# OUTPUT-PREMIUM-36: premium-edit stage markers, most-edited first. A timed-out render
+# recovered from one of these intermediates genuinely carries the premium layers; one
+# recovered from a bare base segment (no marker) is a raw fallback that must NOT be served
+# silently as premium. Classification is by physical filename prefix (the real artifact),
+# never by planned metadata.
+_PREMIUM_EDIT_STAGE_MARKERS = (
+    "finish_", "mastered_", "music_", "trans_", "vfx_",
+    "ass_", "editpunch_", "emotional_hook_", "silence_",
+)
+
+
+def _classify_recovered_premium_tier(name: str) -> Tuple[bool, str]:
+    """Return (is_premium_edited, tier) for a recovered temp-finish filename.
+
+    `output_basic_*` and bare `ep_*`/`vpi_*` base segments are NOT premium-edited.
+    Any name carrying a premium edit-stage marker (ass/editpunch/emotional_hook/silence/
+    finish/mastered/music/trans/vfx) is premium-edited.
+    """
+    low = (name or "").lower()
+    if low.startswith("output_basic"):
+        return False, "output_basic"
+    for marker in _PREMIUM_EDIT_STAGE_MARKERS:
+        if marker in low:
+            return True, marker.rstrip("_")
+    return False, "raw_base"
+
+
 def _build_recovered_clip_info_from_path(
     *,
     recovered_path: Path,
@@ -1067,7 +1207,44 @@ def _build_recovered_clip_info_from_path(
         "hook_type": str(segment.get("hook_type") or ""),
         "editorial_type": str(segment.get("editorial_type") or ""),
         "recovered_from_temp_final": True,
+        # OUTPUT-RECOVERY-27: artifact identity binding (recovery is now identity-verified).
+        "media_binding_task_id": str(task_id or ""),
+        "media_binding_clip_order": int(clip_order),
+        "media_binding_candidate_id": str(segment.get("candidate_id") or segment.get("selected_clip_id") or segment.get("clip_id") or ""),
+        "media_binding_source_start": str(segment.get("refined_start_time") or segment.get("start_time") or ""),
+        "media_binding_source_end": str(segment.get("refined_end_time") or segment.get("end_time") or ""),
+        "media_binding_transcript_hash": __import__("hashlib").sha256(str(segment.get("text") or "").encode("utf-8", "ignore")).hexdigest()[:16],
+        "recovered_artifact_path": str(recovered_path),
+        "recovered_artifact_identity_verified": True,
     }
+    # OUTPUT-PREMIUM-36: classify the recovered artifact by its real stage prefix (replaces
+    # the old substring heuristic that both missed raw `vpi_*` bases and false-flagged fully
+    # edited `ass_editpunch_emotional_hook_silence_*` clips). A raw-base recovery after a
+    # render timeout must be an EXPLICIT premium fallback routed to NEEDS_REVIEW, never a
+    # silent "premium" clip.
+    _is_premium_edited, _premium_tier = _classify_recovered_premium_tier(recovered_path.name)
+    result["recovered_premium_tier"] = _premium_tier
+    result["recovered_low_edit"] = not _is_premium_edited
+    if _is_premium_edited:
+        result["premium_fallback"] = False
+        result["premium_route_confirmed"] = True
+        logger.info(
+            "VPI_PREMIUM_ROUTE_CONFIRMED task_id=%s clip_order=%s tier=%s file=%s",
+            task_id, clip_order, _premium_tier, recovered_path.name,
+        )
+        logger.info(
+            "VPI_PREMIUM_PHASE_PHYSICAL_VERIFIED task_id=%s clip_order=%s tier=%s source=physical_filename",
+            task_id, clip_order, _premium_tier,
+        )
+    else:
+        result["premium_fallback"] = True
+        result["premium_fallback_reason"] = "render_timeout_raw_recovery"
+        result["premium_publishable"] = False
+        result["premium_missing_critical_phases"] = ["rhythm", "hook", "captions_premium"]
+        logger.warning(
+            "VPI_PREMIUM_FALLBACK_TRIGGERED task_id=%s clip_order=%s tier=%s reason=render_timeout_raw_recovery file=%s",
+            task_id, clip_order, _premium_tier, recovered_path.name,
+        )
     # H7.7: Preserve StageRecorder diagnostic data through fallback recovery
     if stage_recorder is not None:
         result["stage_recorder"] = stage_recorder
@@ -1152,8 +1329,57 @@ def _build_clip_technical_qc(
     }
 
 
+def _reconciled_physical_duration(clip_info: Dict[str, Any]) -> Tuple[float, str]:
+    """OUTPUT-DURATION-RECONCILIATION-54A.
+
+    The persisted (`generated_clips.duration`) and API-exposed duration of a clip MUST be the
+    physical duration of the final served master (ffprobe), never the editorial selection
+    window (candidate end-start / planned / pre-silence-cut / intermediate value).
+
+    Source-of-truth order:
+      1) technical_qc.meta.duration — the ffprobe of the actual served file already computed
+         for this clip by `_build_clip_technical_qc`.
+      2) the reconciled physical duration carried on the final MP4 contract
+         (`physical_duration_s` / `final_duration`).
+      3) editorial selection duration (`clip_info["duration"]`) — used ONLY when no physical
+         probe is available; never invents 0 and reports its provenance to the caller.
+
+    Returns ``(duration_seconds, provenance)``. The editorial selection window is intentionally
+    left untouched on ``clip_info`` (it is preserved separately as
+    ``selection_window_duration`` on the manifest/final contract and in ``variants_json``).
+    """
+    ci = clip_info if isinstance(clip_info, dict) else {}
+
+    def _pos_float(value: Any) -> float:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        return v if v > 0.0 else 0.0
+
+    # 1) physical ffprobe from the technical-QC meta (probe of the actual served file)
+    tq_dur = _pos_float(_as_dict(_as_dict(ci.get("technical_qc")).get("meta")).get("duration"))
+    if tq_dur > 0.0:
+        return tq_dur, "technical_qc_physical_probe"
+
+    # 2) reconciled physical duration on the final MP4 contract / output truth
+    contract = _as_dict(ci.get("final_mp4_contract"))
+    for key, src in (
+        ("physical_duration_s", "final_contract_physical_duration"),
+        ("final_duration", "final_contract_final_duration"),
+    ):
+        v = _pos_float(ci.get(key)) or _pos_float(contract.get(key))
+        if v > 0.0:
+            return v, src
+
+    # 3) editorial selection fallback (no physical probe available)
+    return _pos_float(ci.get("duration")), "editorial_selection_fallback"
+
+
 def _derive_editorial_qc(publishable_qc: Dict[str, Any]) -> Dict[str, Any]:
     strict_reasons = [str(x) for x in (_safe_list(publishable_qc.get("strict_publishable_reasons"))) if str(x)]
+    if bool(publishable_qc.get("non_standalone_opening")) and "non_standalone_opening" not in strict_reasons:
+        strict_reasons.append("non_standalone_opening")
     strict_ok = bool(publishable_qc.get("strict_publishable"))
     warnings = strict_reasons if strict_reasons else []
     return {
@@ -1252,6 +1478,208 @@ def _has_complete_idea_evidence(
     return bool((complete_pass and boundary_pass) or (complete_score is not None and complete_score >= 0.75) or semantic_shape_ok) and not too_short
 
 
+def _detect_non_standalone_opening(
+    text: str,
+    segment: Dict[str, Any],
+    clip_info: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Detect openings that clearly depend on a prior sentence.
+
+    This is deliberately narrower than a first-word blacklist: it requires either an existing
+    boundary signal or a syntactic dependency shape near the first clause. Valid rhetorical
+    openers such as "Porque nadie te explica esto..." should not match.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return {"failed": True, "reason": "empty_opening"}
+    normalized = _normalize_text_hard(raw)
+    first_words = normalized.split()[:8]
+    first_clause = " ".join(first_words)
+    starts_cleanly = segment.get("starts_cleanly")
+    if starts_cleanly is None:
+        starts_cleanly = clip_info.get("starts_cleanly")
+    standalone_after_boundary = _as_float(segment.get("standalone_after_boundary_score"))
+    if standalone_after_boundary is None:
+        standalone_after_boundary = _as_float(clip_info.get("standalone_after_boundary_score"))
+    first_second_strength = _as_float(segment.get("first_second_strength"))
+    if first_second_strength is None:
+        first_second_strength = _as_float(clip_info.get("first_second_strength"))
+
+    dependency_shapes = (
+        normalized.startswith("organiza por que ")
+        or normalized.startswith("organiza porque ")
+        or normalized.startswith("por que espera ")
+        or normalized.startswith("porque espera ")
+        or normalized.startswith("que tipo de ")
+        or normalized.startswith("y ")
+        or normalized.startswith("o ")
+        or normalized.startswith("pero ")
+        or normalized.startswith("tambien ")
+        or normalized.startswith("ademas ")
+    )
+    prior_reference = any(token in first_clause for token in (" eso ", " esto ", " esa ", " ese ", " aquella ", " aquel "))
+    boundary_signal_failed = (
+        starts_cleanly is False
+        or (standalone_after_boundary is not None and standalone_after_boundary < 0.45)
+        or (first_second_strength is not None and first_second_strength < 0.35)
+    )
+    if dependency_shapes and (boundary_signal_failed or raw[:1].islower()):
+        return {
+            "failed": True,
+            "reason": "dependent_opening_clause",
+            "evidence": raw[:180],
+            "first_clause": first_clause,
+        }
+    if prior_reference and boundary_signal_failed and not normalized.startswith(("esto ", "esta ", "este ")):
+        return {
+            "failed": True,
+            "reason": "unresolved_opening_reference",
+            "evidence": raw[:180],
+            "first_clause": first_clause,
+        }
+    return {
+        "failed": False,
+        "reason": "",
+        "evidence": raw[:180],
+        "first_clause": first_clause,
+    }
+
+
+# ── OUTPUT-DELIVERY-GATE-52E: single, explicit non-deliverable taxonomy ──
+# A clip carrying any of these GENUINE hard-reject signals must never be inserted as
+# deliverable nor reach the frontend, no matter how good its hook/motion/punch/captions are.
+#
+# IMPORTANT (verified against the live DB): `rejected_technical` and `final_qc_severe` /
+# `final_qc_failed` are NOT reliable hard-reject signals — they are advisory labels the premium
+# classifier stamps on the MAJORITY of clips (290/466 carry final_qc_severe; the known-good
+# reference clips 20572881 complete_idea 0.8 and 116fe6db both carry qc_status=rejected_technical
+# identical to the bad 690c9c9c clip). Gating on them would suppress legitimately-delivered
+# clips. So they are intentionally EXCLUDED from the live trigger set; the real separators are the
+# concrete editorial/technical reasons below (backstage, disfluency, incomplete idea, duplicate,
+# render/physical/media failures).
+HARD_REJECT_QC_STATUSES = frozenset({
+    "rejected",  # an explicit hard reject (distinct from the advisory "rejected_technical")
+})
+HARD_REJECT_REASON_TOKENS = frozenset({
+    "rejected_incomplete_final_idea",
+    "non_standalone_opening",
+    "backstage_detected",
+    "backstage_contamination_too_high",
+    "backstage_phrase_detected",
+    "disfluency_hard_fail",
+    "editorial_integrity_failed",
+    "render_safety_failed",
+    "physical_contract_failed",
+    "duplicate_rejected",
+    "cross_task_duplicate_rejected",
+    "rejected_cross_task_duplicate",
+    "recovery_raw",
+    "corrupted_output",
+    "missing_media_binding",
+})
+# Advisory labels that look alarming but are systemic noise — never a live hard-reject trigger.
+ADVISORY_NOISE_STATES = frozenset({"rejected_technical", "final_qc_severe", "final_qc_failed"})
+
+
+def classify_final_delivery_decision(qc_status: Any, qc_reasons: Any) -> Dict[str, Any]:
+    """OUTPUT-DELIVERY-GATE-52E: the single final delivery decision.
+
+    Returns READY | REVIEW | REJECT. A REJECT is irreversible by later layers: it carries
+    excluded_from_frontend=True and final_publishable=False. needs_review -> REVIEW (still
+    deliverable as REVIEW_BEFORE_UPLOAD); ready/publishable -> READY. The advisory-noise labels
+    (rejected_technical / final_qc_severe) are ignored — only concrete hard-reject signals reject.
+    """
+    status = str(qc_status or "").strip().lower()
+    reasons = [str(r).strip().lower() for r in (qc_reasons or []) if str(r).strip()]
+    hard_hits = []
+    if status in HARD_REJECT_QC_STATUSES:
+        hard_hits.append(f"status:{status}")
+    for r in reasons:
+        if r in HARD_REJECT_REASON_TOKENS:
+            hard_hits.append(f"reason:{r}")
+    if hard_hits:
+        return {
+            "delivery_decision": "REJECT",
+            "delivery_decision_reason": status or hard_hits[0],
+            "delivery_hard_reject_reasons": list(dict.fromkeys(hard_hits)),
+            "excluded_from_frontend": True,
+            "final_publishable": False,
+        }
+    if status in {"needs_review", "review"}:
+        return {
+            "delivery_decision": "REVIEW",
+            "delivery_decision_reason": status,
+            "delivery_hard_reject_reasons": [],
+            "excluded_from_frontend": False,
+            "final_publishable": True,
+        }
+    return {
+        "delivery_decision": "READY",
+        "delivery_decision_reason": status or "ready",
+        "delivery_hard_reject_reasons": [],
+        "excluded_from_frontend": False,
+        "final_publishable": True,
+    }
+
+
+def _materialize_final_qc_state(
+    *,
+    editorial_passed: bool,
+    technical_passed: bool,
+    delivery_decision: Any,
+    final_publishable: bool,
+    provisional_qc_status: Any,
+    provisional_qc_reasons: Any,
+    delivery_hard_reject_reasons: Any = None,
+) -> Dict[str, Any]:
+    """OUTPUT-FINAL-QC-STATE-MATERIALIZATION-54D — the single, deterministic materialization of
+    the PUBLIC qc state, derived from the FINAL reconciled delivery decision (52E) plus the final
+    editorial/technical QC. Pure: no I/O, no gate re-run, invents no reasons.
+
+    Why: `classify_premium_output_quality` runs BEFORE the final contract reconciles and can leave
+    a stale advisory `rejected_technical` (with `final_qc_failed`/`final_qc_severe`) on `qc_status`
+    even though the reconciled contract is `final_publishable=true, blocking=[]` and delivery=READY.
+    Persisting that stale value yields the QC-54C contradiction (READY + rejected_technical).
+
+    Rules (deterministic order):
+      B. real technical failure or a hard delivery REJECT -> rejected_technical / concrete reject.
+      C. editorial failure or delivery REVIEW (technical ok) -> needs_review (never rejected_technical).
+      A. delivery READY + final_publishable + editorial&technical pass -> ready, advisory dropped
+         from qc_reasons (kept separately as advisory metadata).
+    """
+    decision = str(delivery_decision or "").strip().upper()
+    reasons = [str(r) for r in (provisional_qc_reasons or []) if str(r)]
+    advisory = [r for r in reasons if str(r).strip().lower() in ADVISORY_NOISE_STATES]
+    real_reasons = [r for r in reasons if str(r).strip().lower() not in ADVISORY_NOISE_STATES]
+    hard_reject = [str(r) for r in (delivery_hard_reject_reasons or []) if str(r)]
+    prov_status = str(provisional_qc_status or "").strip().lower()
+
+    # B. Real technical failure / hard delivery reject (preserve real rejects).
+    if (not technical_passed) or decision == "REJECT":
+        if decision == "REJECT":
+            status = prov_status if prov_status in HARD_REJECT_QC_STATUSES else "rejected"
+            final_reasons = list(dict.fromkeys(hard_reject + real_reasons)) or hard_reject
+        else:
+            status = "rejected_technical"
+            final_reasons = list(dict.fromkeys(real_reasons))  # concrete technical reasons only
+        return {"qc_status": status, "qc_reasons": final_reasons, "do_not_upload": True,
+                "ready": False, "advisory_qc_reasons": advisory}
+
+    # C. Editorial failure / delivery REVIEW (technical ok) -> editorial review, NOT rejected_technical.
+    if (not editorial_passed) or decision == "REVIEW":
+        return {"qc_status": "needs_review", "qc_reasons": list(dict.fromkeys(real_reasons)),
+                "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory}
+
+    # A. Publishable: delivery READY + reconciled publishable contract + gates passed.
+    if decision == "READY" and bool(final_publishable):
+        return {"qc_status": "ready", "qc_reasons": [], "do_not_upload": False,
+                "ready": True, "advisory_qc_reasons": advisory}
+
+    # Conservative fallback (ambiguous final state) -> review, never silent ready.
+    return {"qc_status": "needs_review", "qc_reasons": list(dict.fromkeys(real_reasons)),
+            "do_not_upload": False, "ready": False, "advisory_qc_reasons": advisory}
+
+
 def classify_premium_output_quality(
     final_contract: Dict[str, Any],
     *,
@@ -1305,6 +1733,10 @@ def classify_premium_output_quality(
 
     warnings: List[str] = []
     positive_evidence: List[str] = []
+    # OUTPUT-PREMIUM-36: a clip recovered from a raw base after a render timeout is an
+    # explicit premium fallback, never a silent "ready" premium clip -> NEEDS_REVIEW.
+    if bool(clip.get("premium_fallback")) or bool(clip.get("recovered_low_edit")):
+        warnings.append("premium_render_fallback_raw_recovery")
     evidence = _as_dict(contract.get("evidence_sources"))
     premium_layers = [str(x).lower() for x in _safe_list(evidence.get("premium_layers_applied"))]
     broll_items = [x for x in _safe_list(clip.get("editorial_broll")) if isinstance(x, dict)]
@@ -3175,6 +3607,20 @@ _BACKSTAGE_WEAK_WORDS = (
     "espera", "esperate", "pausa", "seguimos", "terminamos", "corta",
 )
 
+# OUTPUT-DELIVERY-GATE-52E: conservative, unambiguous production / meta-reading phrases that
+# mean the speaker broke character (reading aloud, addressing the crew, asking to re-shoot/edit).
+# A delivered clip whose FINAL transcript contains any of these is backstage-contaminated and
+# is a HARD_REJECT — even if the MP4 plays and the hook/motion/punch/captions are perfect.
+# Deliberately narrower than _BACKSTAGE_PHRASES (no ambiguous "otra vez"/"ya esta") so it never
+# suppresses a legitimately-delivered clip. Verified: matches 690c9c9c but not 20572881/116fe6db.
+_BACKSTAGE_HARD_DELIVERY_PHRASES = (
+    "estoy leyendo", "se ve que estoy leyendo", "no se ve que",
+    "no grabes", "esto no sale", "fuera de camara", "detras de camaras",
+    "luego lo corto", "esta grabando", "estamos grabando",
+    "lo repito", "repite eso", "quita eso", "editalo", "quitalo", "corten",
+    "no salio", "vamos de nuevo", "baja un poquito",
+)
+
 
 _EXTRA_VALUE_STEMS = (
     "proteg", "asegur", "contrat", "tranquilidad", "ahorr", "client", "asesor",
@@ -4184,7 +4630,33 @@ def _apply_narrative_opening_planner(
     connector_start = any(
         head_norm.startswith(ph) for ph in _NARRATIVE_WEAK_START_CONNECTORS
     ) and first_norm not in ("yo",)
-    weak_start = lowercase_start or midsentence_before or connector_start
+    # OUTPUT-BOUNDARY-53: a grammatically clean sentence can still be semantically
+    # context-dependent — e.g. "El seguro de Decesos es uno de ellos" opens with a
+    # dangling anaphora ("ellos") whose antecedent is in the prior sentence. The
+    # scorer flags this via incomplete_viral_window_detected / complete_idea_score,
+    # but the opening planner only saw grammatical weakness, so the antecedent was
+    # never pulled in. Treat a scorer-flagged incomplete window whose opening clause
+    # carries a backward-referring pronoun/demonstrative as a weak start, so the
+    # existing guarded backward-extension (sentence-start + backstage block + 8.5s
+    # cap, run before the caption contract) brings the antecedent into the window.
+    _anaphora_tokens = {
+        "ellos", "ellas", "esos", "esas", "eso", "esto", "esa", "ese",
+        "estos", "estas", "ello", "aquello", "aquellos", "aquellas",
+    }
+    _head8 = [_normalize_text_hard(w["t"]) for w in in_window[:8]]
+    _has_dangling_anaphora = any(tok in _anaphora_tokens for tok in _head8)
+    _scorer_incomplete = bool(segment.get("incomplete_viral_window_detected")) or (
+        float(segment.get("complete_idea_score") or 1.0) < 0.70
+    )
+    anaphora_context_start = bool(_has_dangling_anaphora and _scorer_incomplete)
+    weak_start = lowercase_start or midsentence_before or connector_start or anaphora_context_start
+    if anaphora_context_start:
+        segment["opening_anaphora_context_detected"] = True
+        logger.info(
+            "VPI_OUTPUT_NARRATIVE_OPENING_ANAPHORA_CONTEXT task_id=%s clip_order=%s head=%s complete_idea=%.2f",
+            task_id, clip_order, " ".join(_head8[:6]),
+            float(segment.get("complete_idea_score") or 0.0),
+        )
 
     logger.info(
         "VPI_OUTPUT_SELECTION_10B_HARD_NORMALIZER_APPLIED screens=classify_line|s6_tail|s6_forward|closure_tail|closure_zone|opening_zone"
@@ -4415,6 +4887,16 @@ def _build_post_trim_caption_contract(
     )
 
 
+# OUTPUT-QC-GATE-52A: hard floor for the final editorial complete-idea score. A clip whose
+# post-cut complete_idea_score is below this is genuinely incomplete (mid-thought / no payoff)
+# and is NEVER publishable — physical validity cannot turn an incomplete idea into a complete one.
+# This is a HARD reject floor, distinct from the softer "review band" (the editorial scorer flags
+# `incomplete_idea` below 0.75, which remains an advisory). The accepted production baseline clip
+# 116fe6db scored 0.45, so the floor sits below it (0.35) to reject the egregious cases (e.g. 0.15)
+# without regressing reviewed-but-acceptable clips.
+MIN_FINAL_COMPLETE_IDEA = 0.35
+
+
 def _build_publishable_qc(
     segment: Dict[str, Any],
     clip_info: Dict[str, Any],
@@ -4576,6 +5058,24 @@ def _build_publishable_qc(
         and (_has_content_terms(text) or str(segment.get("editorial_type") or "") not in {"weak_intro", ""})
     )
     no_mid_sentence_cut = _is_sentence_end(text) or (len(words) >= 20 and duration >= 18.0)
+    non_standalone_opening_result = _detect_non_standalone_opening(text, segment, clip_info)
+    non_standalone_opening = bool(non_standalone_opening_result.get("failed"))
+    # OUTPUT-QC-GATE-52A: the real post-cut editorial completeness score (not the crude word-count
+    # `complete_idea` heuristic above). When present and below the hard floor the clip is genuinely
+    # incomplete and must be hard-failed regardless of strict_mode / daily non-blocking QC.
+    final_complete_idea_score = _as_float(
+        clip_info.get("complete_idea_score")
+        if clip_info.get("complete_idea_score") is not None
+        else final_render_contract.get("complete_idea_score")
+        if final_render_contract.get("complete_idea_score") is not None
+        else final_contract.get("complete_idea_score")
+        if final_contract.get("complete_idea_score") is not None
+        else segment.get("complete_idea_score")
+    )
+    final_idea_hard_incomplete = (
+        final_complete_idea_score is not None
+        and final_complete_idea_score < MIN_FINAL_COMPLETE_IDEA
+    )
     hook_score_first3 = int(hook_plan.get("hook_first3_score") or 0)
     hook_score_first4 = int(hook_plan.get("hook_first_4s_score") or 0)
     hook_score_first3_planned = int(hook_plan.get("hook_first3_score_planned") or 0)
@@ -4962,12 +5462,18 @@ def _build_publishable_qc(
         visual_support_status = "none"
 
     qc = {
-        "complete_idea": "pass" if complete_idea else "fail",
+        "complete_idea": "fail" if final_idea_hard_incomplete else ("pass" if complete_idea else "fail"),
+        "complete_idea_score": final_complete_idea_score,
+        "rejected_incomplete_final_idea": bool(final_idea_hard_incomplete),
         "hook_first_3s": "pass" if hook_ok else "fail",
         "subtitles_present": "pass" if subtitles_present else "fail",
         "bgm_status": bgm_status,
         "visual_support_status": visual_support_status,
         "no_mid_sentence_cut": "pass" if no_mid_sentence_cut else "fail",
+        "standalone_opening": "fail" if non_standalone_opening else "pass",
+        "non_standalone_opening": non_standalone_opening,
+        "non_standalone_opening_reason": str(non_standalone_opening_result.get("reason") or ""),
+        "non_standalone_opening_evidence": str(non_standalone_opening_result.get("evidence") or ""),
         "final_output_exists": "pass" if final_exists else "fail",
         "final_output_is_latest_stage": "pass" if (final_contract_ok and final_exists) else "fail",
         "duration_valid": "pass" if (10.0 <= duration <= 90.0) else "fail",
@@ -5011,6 +5517,8 @@ def _build_publishable_qc(
         strict_reasons.append("complete_idea_failed")
     if qc["no_mid_sentence_cut"] != "pass":
         strict_reasons.append("mid_sentence_cut")
+    if non_standalone_opening:
+        strict_reasons.append("non_standalone_opening")
     if qc["final_output_is_latest_stage"] != "pass":
         strict_reasons.append("final_output_not_latest_stage")
 
@@ -5062,9 +5570,12 @@ def _build_publishable_qc(
     hard_fail = (
         qc["final_output_exists"] == "fail"
         or qc["no_mid_sentence_cut"] == "fail"
+        or non_standalone_opening
         or qc["hook_first_3s"] == "fail"
         or qc["subtitles_present"] == "fail"
         or qc["final_output_is_latest_stage"] == "fail"
+        # OUTPUT-QC-GATE-52A: incomplete final idea is a hard fail in every mode.
+        or final_idea_hard_incomplete
     )
     if strict_mode:
         qc["publishable"] = (not hard_fail) and bool(qc["strict_publishable"])
@@ -5277,6 +5788,18 @@ def _h1413_apply_render_replacement_dedupe(
 
 _H1415_OVERLAP_THRESHOLD = 0.65
 _H1415_TEXT_SIM_THRESHOLD = 0.50
+# OUTPUT-PUBLISH-49: symmetric IoU undercounts a short clip fully inside a long one
+# (e.g. the last 13s of a 30s clip -> IoU 0.43 but 100% contained). Detect containment
+# as intersection / min(duration) so a contained duplicate is rejected (keep the longer).
+_H1415_CONTAINMENT_THRESHOLD = 0.85
+
+
+def _h1415_window_containment_ratio(seg_a: Dict[str, Any], seg_b: Dict[str, Any]) -> float:
+    a_start, a_end = _h1415_refined_window_seconds(seg_a)
+    b_start, b_end = _h1415_refined_window_seconds(seg_b)
+    inter = max(0.0, min(a_end, b_end) - max(a_start, b_start))
+    shorter = min(a_end - a_start, b_end - b_start)
+    return (inter / shorter) if shorter > 0 else 0.0
 
 
 def _h1415_refined_window_seconds(seg: Dict[str, Any]) -> Tuple[float, float]:
@@ -5397,14 +5920,17 @@ def _h1415_apply_post_refinement_dedupe(
         for (a_idx, a_text, a_hash) in accepted:
             a_seg = segments_to_render[a_idx]
             overlap = _h1415_window_overlap_ratio(seg, a_seg)
+            # OUTPUT-PUBLISH-49: also treat asymmetric containment as a duplicate window.
+            containment = _h1415_window_containment_ratio(seg, a_seg)
             if text_hash and a_hash and text_hash == a_hash:
                 text_sim = 1.0
                 caption_dup = True
             else:
                 text_sim = _h1415_text_similarity(normalized, a_text)
                 caption_dup = False
-            if overlap > _H1415_OVERLAP_THRESHOLD and text_sim >= _H1415_TEXT_SIM_THRESHOLD:
-                dup = (a_idx, overlap, text_sim, caption_dup)
+            window_dup = overlap > _H1415_OVERLAP_THRESHOLD or containment >= _H1415_CONTAINMENT_THRESHOLD
+            if window_dup and text_sim >= _H1415_TEXT_SIM_THRESHOLD:
+                dup = (a_idx, max(overlap, containment), text_sim, caption_dup)
                 break
 
         if dup is None:
@@ -5476,6 +6002,61 @@ def _h1415_apply_post_refinement_dedupe(
         task_id, len(successful), len(rejected_indices),
     )
     return new_render_results, info
+
+
+def _qc49_final_sentence_truncated(text: str) -> bool:
+    """OUTPUT-PUBLISH-49: detect a physically incomplete closure where the clip ends
+    on a dangling single-word fragment (e.g. "...estar presente. Trabajar.").
+
+    `_is_sentence_end` already passes such text because the ASR put a period after the
+    lone word, so this reuses the same text with a narrow, high-precision rule: the FINAL
+    sentence is a 1-word fragment while at least one prior complete sentence exists. A
+    short-but-complete clip (multi-word final sentence) is never flagged.
+    """
+    t = str(text or "").strip()
+    if not t:
+        return False
+    sentences = [s.strip() for s in re.split(r"[.!?]+", t) if s.strip()]
+    if len(sentences) < 2:
+        return False
+    last_words = [w for w in re.split(r"\s+", sentences[-1]) if w.strip(".,;:¿?¡!\"'()…")]
+    return len(last_words) <= 1
+
+
+def _qc49_reject_incomplete_closures(
+    task_id: str,
+    segments_to_render: List[Dict[str, Any]],
+    render_results: List[Tuple[int, Optional[Dict[str, Any]], float]],
+) -> Tuple[List[Tuple[int, Optional[Dict[str, Any]], float]], Dict[str, Any]]:
+    """Drop, before persistence/serving, any rendered clip whose spoken closure is
+    physically incomplete (dangling single-word final fragment). Narrow and always-on
+    (independent of editorial_qc_blocking). Never blocks short-but-complete closures."""
+    info: Dict[str, Any] = {"removed_details": []}
+    kept: List[Tuple[int, Optional[Dict[str, Any]], float]] = []
+    for (idx, clip_info, elapsed) in render_results:
+        if not clip_info:
+            kept.append((idx, clip_info, elapsed))
+            continue
+        seg = segments_to_render[idx] if idx < len(segments_to_render) else {}
+        text = str(clip_info.get("text") or seg.get("text") or "")
+        if _qc49_final_sentence_truncated(text):
+            seg["rejected_for_reason"] = "incomplete_closure_dangling_fragment"
+            _tail = re.split(r"[.!?]+", text.strip())
+            _frag = (_tail[-2] if (_tail and not _tail[-1].strip()) else _tail[-1]).strip()[:40] if _tail else ""
+            info["removed_details"].append({
+                "clip_index": idx + 1,
+                "start_time": seg.get("refined_start_time") or seg.get("start_time"),
+                "end_time": seg.get("refined_end_time") or seg.get("end_time"),
+                "stage": "incomplete_closure",
+                "reason": f"final_sentence_dangling_fragment:{_frag!r}",
+            })
+            logger.warning(
+                "VPI_PUBLISH_INCOMPLETE_CLOSURE_REJECTED task_id=%s clip_order=%d fragment=%r",
+                task_id, idx + 1, _frag,
+            )
+            continue
+        kept.append((idx, clip_info, elapsed))
+    return kept, info
 
 
 class TaskService:
@@ -6145,6 +6726,130 @@ class TaskService:
                 len(pre_render_pool),
                 num_clips,
             )
+
+            # ── OUTPUT-SELECTION-52B: same-source delivered-window anti-repeat ──
+            # Runs AFTER the same-task dedupe (pre_render_pool) and BEFORE the
+            # editorial quality gate / render. A new task on an already-used
+            # source must not re-deliver a window a previous task already served.
+            # Repeated candidates are tagged `rejected_cross_task_duplicate`,
+            # removed from the pool (so the gate promotes the next valid
+            # candidate) but kept in an audit list; they never render and never
+            # consume a clip slot. No randomness, no threshold changes, and no
+            # automatic repeat when alternatives are exhausted.
+            _cross_task_dup_rejections: List[Dict[str, Any]] = []
+            _cross_task_canonical_id: str = ""
+            _cross_task_history_count: int = 0
+            try:
+                from .vpi_source_window_history import (
+                    canonical_source_id as _canonical_source_id,
+                    youtube_video_id_for as _youtube_video_id_for,
+                    build_delivered_window_history as _build_delivered_window_history,
+                    evaluate_candidate_against_history as _evaluate_candidate_against_history,
+                )
+
+                _cross_task_canonical_id, _cross_task_canonical_type = _canonical_source_id(
+                    url,
+                    physical_hash=cache_policy.get("source_video_hash"),
+                )
+                logger.info(
+                    "VPI_CANONICAL_SOURCE_IDENTIFIED task_id=%s canonical_source_id=%s "
+                    "canonical_source_type=%s url=%s",
+                    task_id, _cross_task_canonical_id, _cross_task_canonical_type, url,
+                )
+                _yt_id = _youtube_video_id_for(url)
+                if _yt_id:
+                    _url_like = f"%{_yt_id}%"
+                elif _cross_task_canonical_type == "url":
+                    _url_like = (url or "").strip()
+                else:
+                    _url_like = "%"
+                _raw_history_rows = await self.clip_repo.get_delivered_windows_for_source(
+                    self.db,
+                    url_like=_url_like,
+                    exclude_task_id=task_id,
+                    # Fetch a generous slice of raw delivered rows; the Python
+                    # layer collapses them to the last 20 DISTINCT windows. A
+                    # heavily reused source can have many repeated rows, so a
+                    # small raw cap would starve the distinct-window lookback.
+                    limit=300,
+                )
+                _delivered_history = _build_delivered_window_history(
+                    _raw_history_rows, _cross_task_canonical_id,
+                )
+                _cross_task_history_count = len(_delivered_history)
+                logger.info(
+                    "VPI_DELIVERED_WINDOW_HISTORY_LOADED task_id=%s canonical_source_id=%s "
+                    "history_windows=%d raw_rows=%d",
+                    task_id, _cross_task_canonical_id, _cross_task_history_count,
+                    len(_raw_history_rows),
+                )
+                if _delivered_history and pre_render_pool:
+                    _kept_pool: List[Dict[str, Any]] = []
+                    for _cand in pre_render_pool:
+                        _dup = _evaluate_candidate_against_history(_cand, _delivered_history)
+                        if _dup is None:
+                            _kept_pool.append(_cand)
+                            continue
+                        _cand["cross_task_duplicate_detected"] = True
+                        _cand["rejected_cross_task_duplicate"] = True
+                        _cand["cross_task_duplicate_reason"] = "|".join(_dup["reasons"])
+                        _cand["previous_task_id"] = _dup["previous_task_id"]
+                        _cand["previous_clip_order"] = _dup["previous_clip_order"]
+                        _cand["previous_window"] = _dup["previous_window"]
+                        _cand["current_window"] = _dup["current_window"]
+                        _cand["temporal_overlap_ratio"] = _dup["temporal_overlap_ratio"]
+                        _cand["transcript_similarity"] = _dup["transcript_similarity"]
+                        _cross_task_dup_rejections.append(
+                            {
+                                "candidate_rank": _cand.get("_pre_render_pool_rank"),
+                                "current_window": _dup["current_window"],
+                                "previous_task_id": _dup["previous_task_id"],
+                                "previous_clip_order": _dup["previous_clip_order"],
+                                "previous_window": _dup["previous_window"],
+                                "reasons": _dup["reasons"],
+                                "temporal_overlap_ratio": _dup["temporal_overlap_ratio"],
+                                "transcript_similarity": _dup["transcript_similarity"],
+                            }
+                        )
+                        logger.info(
+                            "VPI_CROSS_TASK_DUPLICATE_REJECTED task_id=%s canonical_source_id=%s "
+                            "candidate_rank=%s current_window=%s previous_task_id=%s "
+                            "previous_clip_order=%s overlap=%.4f transcript_similarity=%.4f "
+                            "reasons=%s decision=rejected_cross_task_duplicate",
+                            task_id, _cross_task_canonical_id,
+                            _cand.get("_pre_render_pool_rank"), _dup["current_window"],
+                            _dup["previous_task_id"], _dup["previous_clip_order"],
+                            _dup["temporal_overlap_ratio"], _dup["transcript_similarity"],
+                            "|".join(_dup["reasons"]),
+                        )
+                    if _cross_task_dup_rejections:
+                        pre_render_pool = _kept_pool
+                        for _idx, _seg in enumerate(pre_render_pool):
+                            _seg["_pre_render_pool_rank"] = _idx + 1
+                        if pre_render_pool:
+                            _promoted = pre_render_pool[0]
+                            logger.info(
+                                "VPI_CANDIDATE_PROMOTED_AFTER_HISTORY task_id=%s "
+                                "canonical_source_id=%s promoted_window=%s-%s rejected_count=%d "
+                                "remaining_pool=%d decision=promoted",
+                                task_id, _cross_task_canonical_id,
+                                _promoted.get("start_time"), _promoted.get("end_time"),
+                                len(_cross_task_dup_rejections), len(pre_render_pool),
+                            )
+                        else:
+                            logger.warning(
+                                "VPI_NO_NEW_PUBLISHABLE_WINDOWS task_id=%s canonical_source_id=%s "
+                                "rejected_count=%d remaining_pool=0 "
+                                "decision=no_new_publishable_windows_for_source",
+                                task_id, _cross_task_canonical_id,
+                                len(_cross_task_dup_rejections),
+                            )
+            except Exception as _xtask_e:
+                logger.warning(
+                    "VPI_CROSS_TASK_DEDUPE_SKIPPED task_id=%s reason=%s",
+                    task_id, _xtask_e,
+                )
+
             if deadline_safe_mode:
                 _base_segments = [x for x in (segments_to_render or pre_render_pool) if isinstance(x, dict)]
                 segments_to_render = _base_segments[:num_clips]
@@ -6573,33 +7278,59 @@ class TaskService:
                         task_id,
                         len(_pre_reasons),
                     )
+                    # OUTPUT-SELECTION-52B: when the empty pool is (at least
+                    # partly) the result of excluding windows this source has
+                    # already delivered, this is not a pipeline failure — it is
+                    # an honest "no new publishable window" outcome. Surface it
+                    # as such instead of the generic editing-zero error, and
+                    # never auto-repeat a previously served window to fill quota.
+                    _xtask_rejected = locals().get("_cross_task_dup_rejections") or []
+                    if _xtask_rejected:
+                        _ff_error_code = "NO_NEW_PUBLISHABLE_WINDOWS"
+                        _ff_reason = "no_new_publishable_windows_for_source"
+                        _ff_message = (
+                            "No new publishable window: every fresh candidate either "
+                            "repeats a previously delivered window for this source or "
+                            f"failed editorial QC ({_reason_preview[:300]})"
+                        )
+                        logger.warning(
+                            "VPI_NO_NEW_PUBLISHABLE_WINDOWS task_id=%s canonical_source_id=%s "
+                            "delivered=0 requested=%d cross_task_rejected=%d "
+                            "remaining_failed_qc=%d decision=no_new_publishable_windows_for_source",
+                            task_id, locals().get("_cross_task_canonical_id") or "",
+                            num_clips, len(_xtask_rejected), len(_pre_reasons),
+                        )
+                    else:
+                        _ff_error_code = "FAST_FAIL_EDITING_ZERO"
+                        _ff_reason = "pre_render_qc_all_failed"
+                        _ff_message = f"Pre-render editorial QC rejected all candidates: {_reason_preview[:420]}"
                     await self.task_repo.update_task_failure_details(
                         self.db,
                         task_id,
-                        error_code="FAST_FAIL_EDITING_ZERO",
-                        error_message=f"Pre-render editorial QC rejected all candidates: {_reason_preview[:420]}",
-                        progress_message="fast_fail_editing_zero",
+                        error_code=_ff_error_code,
+                        error_message=_ff_message,
+                        progress_message=_ff_reason,
                         progress=100,
                     )
-                    stage_timings["delivery_status"] = "fast_fail_editing_zero"
-                    stage_timings["delivery_shortage_reason"] = "pre_render_qc_all_failed"
+                    stage_timings["delivery_status"] = _ff_reason
+                    stage_timings["delivery_shortage_reason"] = _ff_reason
                     await self.task_repo.update_task_runtime_metadata(
                         self.db,
                         task_id,
                         completed_at=datetime.now(timezone.utc),
                         stage_timings_json=json.dumps(_normalize_json_for_context(task_id, "delivery_summary", stage_timings)),
-                        error_code="FAST_FAIL_EDITING_ZERO",
+                        error_code=_ff_error_code,
                     )
                     if progress_callback:
-                        await progress_callback(100, "fast_fail_editing_zero", "error")
+                        await progress_callback(100, _ff_reason, "error")
                     return {
                         "task_id": task_id,
                         "clips_count": 0,
                         "segments": [],
                         "summary": result.get("summary"),
                         "key_topics": result.get("key_topics"),
-                        "error": "fast_fail_editing_zero",
-                        "reason": "pre_render_qc_all_failed",
+                        "error": _ff_reason,
+                        "reason": _ff_reason,
                     }
                 _pipeline_result_count = len(result.get("segments_to_render") or []) if isinstance(result, dict) else 0
                 _actual_render_input_count = len(segments_to_render)
@@ -6817,10 +7548,16 @@ class TaskService:
                 async with _render_sem:
                     t0 = perf_counter()
                     info = None
+                    # OUTPUT-PREMIUM-36: the daily-mode 420s budget intermittently expired
+                    # before the premium editing layers (rhythm/hook/punch/captions) were
+                    # written, so timeout recovery grabbed a raw base clip. Raising the daily
+                    # budget to match the standard 900s lets the premium render reach the
+                    # edited stage deterministically; recovery (if still needed) then finds an
+                    # edited intermediate instead of a raw base.
                     _render_timeout_s = float(
                         os.environ.get(
                             "VPI_RENDER_CLIP_TIMEOUT_S",
-                            "420" if vpi_daily_mode_enabled else "900",
+                            "900" if vpi_daily_mode_enabled else "900",
                         )
                     )
                     try:
@@ -6896,7 +7633,7 @@ class TaskService:
                             info["segment_source_path"] = str(segment_source)
                             info["segment_source_mode"] = source_resolve_reason
                         if not info or not Path(str(info.get("path") or "")).exists():
-                            _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1)
+                            _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1, segment=segment)
                             if _recovered_temp is not None:
                                 logger.warning(
                                     "VPI_RENDER_RESULT_FALLBACK_TEMP_FINISH_USED task_id=%s clip_order=%d path=%s",
@@ -6932,7 +7669,7 @@ class TaskService:
                         )
                         info = None
                     except asyncio.TimeoutError as clip_timeout:
-                        _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1)
+                        _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1, segment=segment)
                         if _recovered_temp is not None:
                             logger.warning(
                                 "VPI_RENDER_RESULT_FALLBACK_TEMP_FINISH_USED task_id=%s clip_order=%d path=%s reason=timeout",
@@ -6978,7 +7715,7 @@ class TaskService:
                             f"({segment.get('start_time')} → {segment.get('end_time')}): {clip_error}",
                             exc_info=True
                         )
-                        _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1)
+                        _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1, segment=segment)
                         if _recovered_temp is not None:
                             logger.warning(
                                 "VPI_RENDER_RESULT_FALLBACK_TEMP_FINISH_USED task_id=%s clip_order=%d path=%s reason=%s",
@@ -7514,6 +8251,63 @@ class TaskService:
             # not silently shrink the delivered count.
             for _dedupe_detail in (_h1415_dedupe_info.get("removed_details") or []):
                 clip_failure_details.append(dict(_dedupe_detail))
+            # OUTPUT-PUBLISH-49: suppress clips with a physically incomplete closure
+            # (dangling single-word final fragment) BEFORE persistence/serving. Always-on,
+            # independent of editorial_qc_blocking; never blocks short-but-complete clips.
+            render_results, _qc49_closure_info = _qc49_reject_incomplete_closures(
+                task_id, segments_to_render, render_results,
+            )
+            for _closure_detail in (_qc49_closure_info.get("removed_details") or []):
+                clip_failure_details.append(dict(_closure_detail))
+
+            # OUTPUT-RECOVERY-27: physical media dedupe (SHA-256). The window/text dedupe
+            # above is content-based and does NOT catch DIFFERENT segments bound to the SAME
+            # physical file by a bad recovery. Hash the real media and reject duplicates.
+            try:
+                import hashlib as _r27_hashlib
+                _r27_seen_sha: Dict[str, int] = {}
+                _r27_deduped: List[Tuple[int, Optional[Dict[str, Any]], float]] = []
+                for _r27_idx, _r27_info, _r27_el in render_results:
+                    if not _r27_info:
+                        _r27_deduped.append((_r27_idx, _r27_info, _r27_el))
+                        continue
+                    _r27_path = str(_r27_info.get("path") or "")
+                    _r27_sha = ""
+                    try:
+                        if _r27_path and Path(_r27_path).exists():
+                            _r27_h = _r27_hashlib.sha256()
+                            with open(_r27_path, "rb") as _r27_fh:
+                                for _r27_chunk in iter(lambda: _r27_fh.read(1 << 20), b""):
+                                    _r27_h.update(_r27_chunk)
+                            _r27_sha = _r27_h.hexdigest()
+                    except Exception:
+                        _r27_sha = ""
+                    if _r27_sha:
+                        _r27_info["media_sha256"] = _r27_sha
+                        logger.info(
+                            "VPI_PHYSICAL_DEDUPE_HASHED task_id=%s clip_order=%s sha=%s",
+                            task_id, _r27_idx + 1, _r27_sha[:16],
+                        )
+                        if _r27_sha in _r27_seen_sha:
+                            logger.warning(
+                                "VPI_PHYSICAL_DUPLICATE_REJECTED task_id=%s clip_order=%s duplicate_of_clip_order=%s sha=%s",
+                                task_id, _r27_idx + 1, _r27_seen_sha[_r27_sha] + 1, _r27_sha[:16],
+                            )
+                            _r27_seg = segments_to_render[_r27_idx] if _r27_idx < len(segments_to_render) else {}
+                            clip_failure_details.append({
+                                "clip_index": _r27_idx + 1,
+                                "start_time": (_r27_seg or {}).get("start_time"),
+                                "end_time": (_r27_seg or {}).get("end_time"),
+                                "stage": "physical_dedupe",
+                                "reason": "duplicate_physical_media",
+                            })
+                            _r27_deduped.append((_r27_idx, None, _r27_el))
+                            continue
+                        _r27_seen_sha[_r27_sha] = _r27_idx
+                    _r27_deduped.append((_r27_idx, _r27_info, _r27_el))
+                render_results = _r27_deduped
+            except Exception as _r27_e:
+                logger.warning("VPI_PHYSICAL_DEDUPE_SKIPPED task_id=%s reason=%s", task_id, _r27_e)
 
             # ── VPI Premium Productive Hardening: First Clip Probe ──────────
             # When render_first_clip_probe is enabled in premium_productive mode,
@@ -7638,7 +8432,7 @@ class TaskService:
                 clip_render_times[i + 1] = elapsed
 
                 if clip_info is None:
-                    _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1)
+                    _recovered_temp = _find_valid_temp_finish_mp4(task_id, i + 1, segment=segment)
                     if _recovered_temp is not None:
                         logger.warning(
                             "VPI_POST_RENDER_RECOVERED_WITH_VALID_MP4 task_id=%s clip_order=%d path=%s",
@@ -8067,6 +8861,82 @@ class TaskService:
                 _publishable_status = str(clip_info.get("publishable_status") or "").lower()
                 _upload_recommendation = str(clip_info.get("upload_recommendation") or "").lower()
                 _discard_recommended = bool(clip_info.get("discard_recommended"))
+                # OUTPUT-RECOVERY-29: backstage hard gate. A clip whose REAL speech density is
+                # far below normal narration is behind-the-scenes / dead-air dominant, not a
+                # publishable clip. Reject it regardless of QC-blocking mode (the non-blocking
+                # override + deadline_safe path previously let backstage ship as "final").
+                try:
+                    _bg_text = str(clip_info.get("text") or segment.get("text") or "")
+                    _bg_dur = float(clip_info.get("duration") or segment.get("duration") or 0.0)
+                    _bg_words = len([w for w in _bg_text.split() if w.strip()])
+                    _bg_wps = (_bg_words / _bg_dur) if _bg_dur > 0 else 0.0
+                    # OUTPUT-DELIVERY-GATE-52E: phrase-based backstage hard reject. The legacy
+                    # gate below only caught low speech density (dead air); it missed a clip that
+                    # is densely spoken but where the speaker broke character (e.g. "...es que
+                    # estoy leyendo..."). Such a clip is NOT publishable however good its
+                    # hook/motion/punch/captions are — visual editing cannot rescue backstage.
+                    _bg_norm = _normalize_text_hard(_bg_text)
+                    _bg_phrase_hit = next(
+                        (p for p in _BACKSTAGE_HARD_DELIVERY_PHRASES if p in _bg_norm), "",
+                    )
+                    if _bg_phrase_hit:
+                        _bg_reason = f"backstage_phrase_detected:{_bg_phrase_hit}"
+                        clip_info["delivery_decision"] = "REJECT"
+                        clip_info["delivery_decision_reason"] = "backstage_detected"
+                        clip_info["delivery_hard_reject_reasons"] = ["backstage_detected", f"phrase:{_bg_phrase_hit}"]
+                        clip_info["excluded_from_frontend"] = True
+                        clip_info["final_publishable"] = False
+                        clip_info["backstage_rejection_reason"] = _bg_reason
+                        logger.warning(
+                            "VPI_BACKSTAGE_PHRASE_REJECTED task_id=%s clip_order=%d phrase=%s "
+                            "excluded_from_frontend=true final_publishable=false decision=REJECT",
+                            task_id, i + 1, _bg_phrase_hit,
+                        )
+                        rejected_candidate_reasons.append({
+                            "clip_index": i + 1,
+                            "start_time": segment.get("start_time"),
+                            "end_time": segment.get("end_time"),
+                            "reason": _bg_reason,
+                            "publishable_status": "backstage_rejected",
+                        })
+                        clip_failure_details.append({
+                            "clip_index": i + 1,
+                            "start_time": segment.get("start_time"),
+                            "end_time": segment.get("end_time"),
+                            "stage": "backstage_phrase_detected",
+                            "reason": _bg_reason[:240],
+                        })
+                        logger.info("[clip-count] rejected index=%d reason=%s", i + 1, _bg_reason)
+                        continue
+                    if _bg_dur >= 10.0 and _bg_wps < 0.8:
+                        _bg_reason = f"backstage_low_speech_density:words={_bg_words},dur={_bg_dur:.1f},wps={_bg_wps:.2f}"
+                        clip_info["delivery_decision"] = "REJECT"
+                        clip_info["delivery_decision_reason"] = "backstage_detected"
+                        clip_info["delivery_hard_reject_reasons"] = ["backstage_detected", "low_speech_density"]
+                        clip_info["excluded_from_frontend"] = True
+                        clip_info["final_publishable"] = False
+                        clip_info["backstage_rejection_reason"] = _bg_reason
+                        logger.warning(
+                            "VPI_BACKSTAGE_REJECTED task_id=%s clip_order=%d wps=%.2f words=%d dur=%.1f",
+                            task_id, i + 1, _bg_wps, _bg_words, _bg_dur,
+                        )
+                        rejected_candidate_reasons.append({
+                            "clip_index": i + 1,
+                            "start_time": segment.get("start_time"),
+                            "end_time": segment.get("end_time"),
+                            "reason": _bg_reason,
+                            "publishable_status": "backstage_rejected",
+                        })
+                        clip_failure_details.append({
+                            "clip_index": i + 1,
+                            "start_time": segment.get("start_time"),
+                            "end_time": segment.get("end_time"),
+                            "stage": "backstage_low_speech_density",
+                            "reason": _bg_reason[:240],
+                        })
+                        continue
+                except Exception as _bg_e:
+                    logger.warning("VPI_BACKSTAGE_GATE_SKIPPED task_id=%s clip_order=%d reason=%s", task_id, i + 1, _bg_e)
                 if (
                     (not deadline_safe_mode)
                     and bool(editorial_qc_blocking)
@@ -8190,6 +9060,35 @@ class TaskService:
                     _publishable_qc.get("bgm_status"),
                     _publishable_qc.get("visual_support_status"),
                 )
+                # OUTPUT-QC-GATE-52A: a genuinely-incomplete final idea is a HARD editorial reject —
+                # it must never be delivered, even in daily non-blocking QC mode (editorial_qc_blocking
+                # is for soft advisories, not for shipping a mid-thought/no-payoff clip). Physical
+                # validity cannot complete an incomplete idea.
+                if bool(_publishable_qc.get("rejected_incomplete_final_idea")):
+                    _incomplete_reason = (
+                        "rejected_incomplete_final_idea:"
+                        f"complete_idea_score={_publishable_qc.get('complete_idea_score')}"
+                    )
+                    rejected_candidate_reasons.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "reason": _incomplete_reason,
+                        "publishable_status": "rejected_incomplete_final_idea",
+                    })
+                    clip_failure_details.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "stage": "rejected_incomplete_final_idea",
+                        "reason": _incomplete_reason[:240],
+                    })
+                    logger.warning(
+                        "VPI_FINAL_EDITORIAL_HARD_REJECT_INCOMPLETE_IDEA task_id=%s clip_order=%d complete_idea_score=%s threshold=%.2f excluded_from_frontend=true",
+                        task_id, i + 1, _publishable_qc.get("complete_idea_score"), MIN_FINAL_COMPLETE_IDEA,
+                    )
+                    logger.info("[clip-count] rejected index=%d reason=%s", i + 1, _incomplete_reason)
+                    continue
                 _signals = _publishable_qc.get("real_editing_signals") or {}
                 logger.info(
                     "REAL_EDITING_SIGNALS task_id=%s clip_order=%d hook=%s broll=%s overlay=%s bgm=%s sfx=%s rhythm=%s motion=%s transition=%s retention=%s",
@@ -8332,6 +9231,74 @@ class TaskService:
                     )
                     clip_info.setdefault("publishable_warnings", []).append(_reject_reason[:180])
                     clip_info["qc_status"] = "needs_review"
+
+                _delivery_decision = classify_final_delivery_decision(
+                    clip_info.get("qc_status"),
+                    clip_info.get("qc_reasons"),
+                )
+                clip_info["final_delivery_decision"] = _delivery_decision["delivery_decision"]
+                clip_info["delivery_decision"] = _delivery_decision["delivery_decision"]
+                clip_info["delivery_decision_reason"] = _delivery_decision["delivery_decision_reason"]
+                clip_info["delivery_hard_reject_reasons"] = list(_delivery_decision.get("delivery_hard_reject_reasons") or [])
+                clip_info["excluded_from_frontend"] = bool(_delivery_decision.get("excluded_from_frontend"))
+                clip_info["final_publishable"] = bool(_delivery_decision.get("final_publishable"))
+                if clip_info["final_delivery_decision"] == "REJECT":
+                    _reject_reason = (
+                        "final_delivery_reject:"
+                        + "|".join(clip_info["delivery_hard_reject_reasons"] or [clip_info["delivery_decision_reason"]])
+                    )
+                    rejected_candidate_reasons.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "reason": _reject_reason,
+                        "publishable_status": "final_delivery_reject",
+                    })
+                    clip_failure_details.append({
+                        "clip_index": i + 1,
+                        "start_time": segment.get("start_time"),
+                        "end_time": segment.get("end_time"),
+                        "stage": "final_delivery_decision",
+                        "reason": _reject_reason[:240],
+                    })
+                    logger.warning(
+                        "VPI_FINAL_DELIVERY_REJECTED_BEFORE_PERSIST task_id=%s clip_order=%d reason=%s excluded_from_frontend=true final_publishable=false",
+                        task_id,
+                        i + 1,
+                        _reject_reason[:240],
+                    )
+                    logger.info("[clip-count] rejected index=%d reason=%s", i + 1, _reject_reason)
+                    continue
+
+                # OUTPUT-FINAL-QC-STATE-MATERIALIZATION-54D: single canonical materialization of the
+                # public qc state from the FINAL reconciled delivery decision (52E) + final QC. This
+                # overwrites the provisional/stale qc_status produced earlier by
+                # classify_premium_output_quality (which can read a pre-reconciliation contract and
+                # leave an advisory rejected_technical), so the persisted/served state is coherent.
+                # REJECT clips already `continue`d above; technical-failed clips were dropped earlier,
+                # so here delivery is READY/REVIEW with technical_qc passed.
+                _final_qc_state = _materialize_final_qc_state(
+                    editorial_passed=bool(_editorial_qc.get("passed")),
+                    technical_passed=bool(_technical_qc.get("passed")),
+                    delivery_decision=clip_info.get("final_delivery_decision"),
+                    final_publishable=bool(clip_info.get("final_publishable")),
+                    provisional_qc_status=clip_info.get("qc_status"),
+                    provisional_qc_reasons=clip_info.get("qc_reasons"),
+                    delivery_hard_reject_reasons=clip_info.get("delivery_hard_reject_reasons"),
+                )
+                if _final_qc_state.get("advisory_qc_reasons"):
+                    clip_info["qc_advisory_reasons"] = list(dict.fromkeys(
+                        list(clip_info.get("qc_advisory_reasons") or []) + _final_qc_state["advisory_qc_reasons"]))
+                clip_info["qc_status"] = _final_qc_state["qc_status"]
+                clip_info["qc_reasons"] = _final_qc_state["qc_reasons"]
+                clip_info["do_not_upload"] = bool(_final_qc_state["do_not_upload"])
+                clip_info["ready"] = bool(_final_qc_state["ready"])
+                logger.info(
+                    "VPI_FINAL_QC_STATE_MATERIALIZED task_id=%s clip_order=%d qc_status=%s ready=%s do_not_upload=%s delivery=%s advisory=%s",
+                    task_id, i + 1, clip_info["qc_status"], str(clip_info["ready"]).lower(),
+                    str(clip_info["do_not_upload"]).lower(), clip_info.get("delivery_decision"),
+                    "|".join(clip_info.get("qc_advisory_reasons") or []) or "none",
+                )
 
                 _hook_plan = _as_dict(clip_info.get("hook_plan")) or _as_dict(_as_dict(clip_info.get("editing_plan")).get("hook_plan"))
                 _hook_contract_type = "none"
@@ -8560,6 +9527,12 @@ class TaskService:
                         "qc_status": clip_info.get("qc_status"),
                         "qc_reasons": clip_info.get("qc_reasons", []),
                         "qc_warnings": clip_info.get("qc_warnings", []),
+                        "final_delivery_decision": clip_info.get("final_delivery_decision"),
+                        "delivery_decision": clip_info.get("delivery_decision"),
+                        "delivery_decision_reason": clip_info.get("delivery_decision_reason"),
+                        "delivery_hard_reject_reasons": list(clip_info.get("delivery_hard_reject_reasons") or []),
+                        "excluded_from_frontend": bool(clip_info.get("excluded_from_frontend")),
+                        "final_publishable": bool(clip_info.get("final_publishable")),
                         "metadata_consistency_ok": bool(clip_info.get("metadata_consistency_ok")),
                         "metadata_consistency_errors": list(clip_info.get("metadata_consistency_errors") or []),
                         "metadata_consistency_warnings": list(clip_info.get("metadata_consistency_warnings") or []),
@@ -8632,6 +9605,16 @@ class TaskService:
                     if _merged_variants else None
                 )
 
+                # OUTPUT-DURATION-RECONCILIATION-54A: persist the PHYSICAL master duration
+                # (ffprobe of the served file), not the editorial selection window. The
+                # editorial window stays available via selection_window_duration (manifest /
+                # final contract) and variants_json.
+                _persist_duration, _persist_duration_source = _reconciled_physical_duration(clip_info)
+                logger.info(
+                    "VPI_CLIP_DURATION_PERSISTED task_id=%s clip_order=%d persisted=%.3f source=%s editorial_selection=%s",
+                    task_id, i + 1, float(_persist_duration or 0.0), _persist_duration_source,
+                    str(clip_info.get("duration")),
+                )
                 # Save to DB immediately so SSE can deliver it
                 clip_id = await self.clip_repo.create_clip(
                     self.db,
@@ -8640,7 +9623,7 @@ class TaskService:
                     file_path=clip_info["path"],
                     start_time=clip_info["start_time"],
                     end_time=clip_info["end_time"],
-                    duration=clip_info["duration"],
+                    duration=_persist_duration,
                     text=clip_info.get("text", ""),
                     relevance_score=clip_info.get("relevance_score", 0.0),
                     reasoning=clip_info.get("reasoning", ""),
@@ -8683,6 +9666,12 @@ class TaskService:
                             "qc_status": clip_info.get("qc_status", "ready"),
                             "qc_reasons": list(clip_info.get("qc_reasons") or []),
                             "qc_warnings": list(clip_info.get("qc_warnings") or []),
+                            "final_delivery_decision": clip_info.get("final_delivery_decision"),
+                            "delivery_decision": clip_info.get("delivery_decision"),
+                            "delivery_decision_reason": clip_info.get("delivery_decision_reason"),
+                            "delivery_hard_reject_reasons": list(clip_info.get("delivery_hard_reject_reasons") or []),
+                            "excluded_from_frontend": bool(clip_info.get("excluded_from_frontend")),
+                            "final_publishable": bool(clip_info.get("final_publishable")),
                             "technical_qc": clip_info.get("technical_qc") or {},
                             "editorial_qc": clip_info.get("editorial_qc") or {},
                         },
@@ -9113,6 +10102,13 @@ class TaskService:
                             clip_index=i,
                         )
                         if b_info:
+                            # OUTPUT-DURATION-RECONCILIATION-54A: physical master duration for the B-variant too.
+                            _b_persist_duration, _b_persist_duration_source = _reconciled_physical_duration(b_info)
+                            logger.info(
+                                "VPI_CLIP_DURATION_PERSISTED task_id=%s clip_order=%d variant=B persisted=%.3f source=%s editorial_selection=%s",
+                                task_id, i + 1, float(_b_persist_duration or 0.0), _b_persist_duration_source,
+                                str(b_info.get("duration")),
+                            )
                             b_clip_id = await self.clip_repo.create_clip(
                                 self.db,
                                 task_id=task_id,
@@ -9120,7 +10116,7 @@ class TaskService:
                                 file_path=b_info["path"],
                                 start_time=b_info["start_time"],
                                 end_time=b_info["end_time"],
-                                duration=b_info["duration"],
+                                duration=_b_persist_duration,
                                 text=b_info.get("text", ""),
                                 relevance_score=b_info.get("relevance_score", 0.0),
                                 reasoning=b_info.get("reasoning", "") + " [Variant B]",
@@ -9521,6 +10517,14 @@ class TaskService:
                         _publishable_metadata_e,
                     )
                     _h4_empirical_metadata = {}
+                if bool(_final_contract.get("final_contract_reconciled")) and _h4_empirical_metadata.get("incomplete_viral_window_detected") is True:
+                    _h4_empirical_metadata["selection_incomplete_viral_window_detected"] = True
+                    _h4_empirical_metadata["incomplete_viral_window_detected"] = False
+                    logger.info(
+                        "VPI_FINAL_CONTRACT_STALE_FIELD_IGNORED task_id=%s clip_order=%d field=incomplete_viral_window_detected reason=post_render_truth",
+                        task_id,
+                        _ri + 1,
+                    )
                 _rinfo.update(_h4_empirical_metadata)
                 _final_contract.update(_h4_empirical_metadata)
                 logger.info(
@@ -9602,6 +10606,16 @@ class TaskService:
                     rehydrated_clip_briefs.append(_rehydrated_clip_brief)
                 _rinfo["clip_brief"] = dict(_rehydrated_clip_brief)
                 _final_contract["clip_brief"] = dict(_rehydrated_clip_brief)
+                if bool(_final_contract.get("final_contract_reconciled")) and _final_contract.get("incomplete_viral_window_detected") is True:
+                    _final_contract["selection_incomplete_viral_window_detected"] = True
+                    _final_contract["incomplete_viral_window_detected"] = False
+                    _rinfo["selection_incomplete_viral_window_detected"] = True
+                    _rinfo["incomplete_viral_window_detected"] = False
+                    logger.info(
+                        "VPI_FINAL_CONTRACT_STALE_FIELD_IGNORED task_id=%s clip_order=%d field=incomplete_viral_window_detected source=clip_brief reason=post_render_truth",
+                        task_id,
+                        _ri + 1,
+                    )
                 logger.info(
                     "VPI_CLIP_BRIEF_REHYDRATED_FROM_FINAL_CONTRACT task_id=%s clip_order=%d boundary_confidence=%s complete_idea_score=%s incomplete_viral_window_detected=%s",
                     task_id,
@@ -10502,11 +11516,27 @@ class TaskService:
 
             if delivered_count_for_completion < num_clips:
                 _shortage_reasons = []
-                if clip_failure_details:
-                    _shortage_reasons = [str(x.get("stage") or x.get("reason") or "unknown") for x in clip_failure_details[:6]]
-                elif rejected_candidate_reasons:
-                    _shortage_reasons = [str(x.get("reason") or "candidate_rejected") for x in rejected_candidate_reasons[:6]]
-                _shortage_reason = ",".join(_shortage_reasons) if _shortage_reasons else "insufficient_deliverable_candidates"
+                # OUTPUT-SELECTION-52B: when the shortage is because every new
+                # candidate repeated a window already delivered for this source,
+                # surface the honest reason and never auto-repeat a prior window.
+                _xtask_rejected = locals().get("_cross_task_dup_rejections") or []
+                if _xtask_rejected and delivered_count_for_completion == 0:
+                    _shortage_reason = "no_new_publishable_windows_for_source"
+                    logger.warning(
+                        "VPI_NO_NEW_PUBLISHABLE_WINDOWS task_id=%s canonical_source_id=%s "
+                        "delivered=0 requested=%d cross_task_rejected=%d "
+                        "decision=no_new_publishable_windows_for_source",
+                        task_id, locals().get("_cross_task_canonical_id") or "",
+                        num_clips, len(_xtask_rejected),
+                    )
+                else:
+                    if clip_failure_details:
+                        _shortage_reasons = [str(x.get("stage") or x.get("reason") or "unknown") for x in clip_failure_details[:6]]
+                    elif rejected_candidate_reasons:
+                        _shortage_reasons = [str(x.get("reason") or "candidate_rejected") for x in rejected_candidate_reasons[:6]]
+                    elif _xtask_rejected:
+                        _shortage_reasons = ["no_new_publishable_windows_for_source"]
+                    _shortage_reason = ",".join(_shortage_reasons) if _shortage_reasons else "insufficient_deliverable_candidates"
                 stage_timings["delivery_status"] = "shortage"
                 stage_timings["delivery_shortage_reason"] = _shortage_reason
                 _progress_message = f"completed_with_shortage:{delivered_count_for_completion}/{num_clips}"
@@ -10808,6 +11838,7 @@ class TaskService:
         clips = await self.clip_repo.get_clips_by_task(self.db, task_id)
         task["clips"] = clips
         task["clips_count"] = len(clips)
+        task["generated_clips_ids"] = [str(c.get("id")) for c in clips if c.get("id")]
         # --- TASK STATUS SEMANTICS HARDENING: Recovery logic ---
         # Only recover from error to completed if the error_code is NOT a semantic failure
         # (FAILED_RENDER, FAILED_PROCESSING, POST_RENDER_DELIVERY_FAILED)
@@ -11023,6 +12054,13 @@ class TaskService:
 
         clip_ids = []
         for i, clip_info in enumerate(clips_info):
+            # OUTPUT-DURATION-RECONCILIATION-54A: physical master duration on resume/rebuild too.
+            _persist_duration, _persist_duration_source = _reconciled_physical_duration(clip_info)
+            logger.info(
+                "VPI_CLIP_DURATION_PERSISTED task_id=%s clip_order=%d source=%s persisted=%.3f editorial_selection=%s",
+                task_id, i + 1, _persist_duration_source, float(_persist_duration or 0.0),
+                str(clip_info.get("duration")),
+            )
             clip_id = await self.clip_repo.create_clip(
                 self.db,
                 task_id=task_id,
@@ -11030,7 +12068,7 @@ class TaskService:
                 file_path=clip_info["path"],
                 start_time=clip_info["start_time"],
                 end_time=clip_info["end_time"],
-                duration=clip_info["duration"],
+                duration=_persist_duration,
                 text=clip_info.get("text") or "",
                 relevance_score=clip_info.get("relevance_score", 0.5),
                 reasoning=clip_info.get("reasoning")

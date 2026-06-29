@@ -366,7 +366,35 @@ class ClipRepository:
                 }
             )
 
-        return clips
+        # OUTPUT-DELIVERY-GATE-52E: frontend defense-in-depth. Only suppress a clip that the
+        # delivery decision explicitly marked excluded_from_frontend. We do NOT gate on the raw
+        # creative_meta `qc_status` here: that field is a noisy systemic label (essentially every
+        # delivered clip carries qc_status="rejected_technical" from the advisory final contract),
+        # so filtering on it would suppress legitimately-delivered READY/REVIEW clips.
+        visible_clips: List[Dict[str, Any]] = []
+        for _c in clips:
+            if bool(_c.get("excluded_from_frontend")):
+                logger.info(
+                    "VPI_FRONTEND_CLIP_EXCLUDED task_id=%s clip_order=%s reason=excluded_from_frontend",
+                    task_id, _c.get("clip_order"),
+                )
+                continue
+            _decision = str(_c.get("final_delivery_decision") or _c.get("delivery_decision") or "").upper()
+            if _decision and _decision not in {"READY", "REVIEW"}:
+                logger.info(
+                    "VPI_FRONTEND_CLIP_EXCLUDED task_id=%s clip_order=%s reason=final_delivery_decision:%s",
+                    task_id, _c.get("clip_order"), _decision,
+                )
+                continue
+            if _c.get("final_publishable") is False:
+                logger.info(
+                    "VPI_FRONTEND_CLIP_EXCLUDED task_id=%s clip_order=%s reason=final_publishable:false",
+                    task_id, _c.get("clip_order"),
+                )
+                continue
+            visible_clips.append(_c)
+
+        return visible_clips
 
     @staticmethod
     def _unpack_creative_meta(json_str: Optional[str]) -> Dict[str, Any]:
@@ -427,6 +455,54 @@ class ClipRepository:
         deleted_count = result.rowcount
         logger.info(f"Deleted {deleted_count} clips for task {task_id}")
         return deleted_count
+
+    @staticmethod
+    async def get_delivered_windows_for_source(
+        db: AsyncSession,
+        *,
+        url_like: str,
+        exclude_task_id: str,
+        limit: int = 60,
+    ) -> List[Dict[str, Any]]:
+        """OUTPUT-SELECTION-52B: raw delivered windows for a source.
+
+        Returns delivered clips (a `generated_clips` row exists only for a clip
+        that was actually delivered) from OTHER tasks whose source URL matches
+        `url_like` (ILIKE-narrowed, e.g. by YouTube video id), newest first.
+        Final canonical-source confirmation happens in vpi_source_window_history.
+        """
+        try:
+            result = await db.execute(
+                sa_text(
+                    """
+                    SELECT gc.task_id AS task_id,
+                           gc.clip_order AS clip_order,
+                           gc.start_time AS start_time,
+                           gc.end_time AS end_time,
+                           gc.duration AS duration,
+                           gc.text AS text,
+                           gc.filename AS filename,
+                           gc.created_at AS created_at,
+                           s.url AS source_url
+                    FROM generated_clips gc
+                    JOIN tasks t ON gc.task_id = t.id
+                    LEFT JOIN sources s ON t.source_id = s.id
+                    WHERE gc.task_id <> :exclude_task_id
+                      AND s.url ILIKE :url_like
+                    ORDER BY gc.created_at DESC
+                    LIMIT :limit
+                    """
+                ),
+                {
+                    "exclude_task_id": exclude_task_id,
+                    "url_like": url_like,
+                    "limit": int(limit),
+                },
+            )
+        except Exception:
+            await db.rollback()
+            return []
+        return [dict(r._mapping) for r in result.fetchall()]
 
     @staticmethod
     async def count_path_reuse_in_other_tasks(

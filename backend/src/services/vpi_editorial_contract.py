@@ -619,10 +619,16 @@ def build_vpi_output_manifest(
             "final_probe_ok": bool(final_contract_clip.get("final_probe_ok") if final_contract_clip.get("final_probe_ok") is not None else clip.get("final_probe_ok", False)),
             "final_output_verified": bool(final_contract_clip.get("final_output_verified") if final_contract_clip.get("final_output_verified") is not None else clip.get("final_output_verified", False)),
             "final_duration": float(final_contract_clip.get("final_duration") or clip.get("final_duration") or clip.get("duration") or 0.0),
+            "physical_duration_s": float(final_contract_clip.get("physical_duration_s") or final_contract_clip.get("final_duration") or clip.get("final_duration") or 0.0),
+            "selection_window_duration": float(final_contract_clip.get("selection_window_duration") or clip.get("duration") or 0.0),
             "final_file_size": int(final_contract_clip.get("final_file_size") or clip.get("final_file_size") or 0),
             "boundary_confidence": float(final_contract_clip.get("boundary_confidence") or clip.get("boundary_confidence") or 0.0),
             "complete_idea_score": float(final_contract_clip.get("complete_idea_score") or clip.get("complete_idea_score") or 0.0),
+            "selection_complete_idea_score": float(final_contract_clip.get("selection_complete_idea_score") or clip.get("complete_idea_score") or 0.0),
             "incomplete_viral_window_detected": bool(final_contract_clip.get("incomplete_viral_window_detected") or clip.get("incomplete_viral_window_detected") or False),
+            "selection_incomplete_viral_window_detected": bool(final_contract_clip.get("selection_incomplete_viral_window_detected") if final_contract_clip.get("selection_incomplete_viral_window_detected") is not None else clip.get("incomplete_viral_window_detected", False)),
+            "final_contract_reconciled": bool(final_contract_clip.get("final_contract_reconciled")),
+            "reconciliation_reason": str(final_contract_clip.get("reconciliation_reason") or ""),
             "final_publishable": bool(final_contract_clip.get("final_publishable") if final_contract_clip.get("final_publishable") is not None else clip.get("final_publishable", False)),
             "final_needs_review": bool(final_contract_clip.get("final_needs_review") if final_contract_clip.get("final_needs_review") is not None else clip.get("final_needs_review", False)),
             "blocking": list(_safe_list(final_contract_clip.get("final_blocking_reasons") or clip.get("final_blocking_reasons"))),
@@ -690,7 +696,9 @@ def build_vpi_output_manifest(
             "clip_id": clip.get("clip_id") or clip.get("clip_order") or idx + 1,
             "file_path": clip_output_path,
             "filename": str(Path(str(clip_output_path or clip.get("filename") or "")).name),
-            "duration": float(clip.get("duration") or 0.0),
+            "duration": float(final_contract_clip.get("final_duration") or clip.get("final_duration") or clip.get("duration") or 0.0),
+            "selection_window_duration": float(final_contract_clip.get("selection_window_duration") or clip.get("duration") or 0.0),
+            "physical_duration_s": float(final_contract_clip.get("physical_duration_s") or final_contract_clip.get("final_duration") or clip.get("final_duration") or 0.0),
             "original_start_time": str(clip.get("original_start_time") or clip.get("start_time") or ""),
             "original_end_time": str(clip.get("original_end_time") or clip.get("end_time") or ""),
             "refined_start_time": str(clip.get("refined_start_time") or clip.get("start_time") or ""),
@@ -734,6 +742,16 @@ def build_vpi_output_manifest(
         # per-clip editing plan carried in the render result, with top-level
         # render-result keys as fallback.
         _vf_plan = clip.get("editing_plan") if isinstance(clip.get("editing_plan"), dict) else {}
+        _clip_filename_for_object = str(Path(str(clip_output_path or clip.get("filename") or "")).name)
+        _object_contract_plan = final_contract_clip.get("object_2d") if isinstance(final_contract_clip.get("object_2d"), dict) else {}
+        _object_edit_plan = _vf_plan.get("object_2d") if isinstance(_vf_plan.get("object_2d"), dict) else {}
+        _visual_fallback_looks_like_object = (
+            bool(clip.get("visual_fallback_rendered") or final_contract_clip.get("visual_fallback_rendered") or _vf_plan.get("visual_fallback_rendered"))
+            and str(clip.get("visual_fallback_type") or final_contract_clip.get("visual_fallback_type") or _vf_plan.get("visual_fallback_type") or "").upper()
+            in {"INTERNAL_EDITORIAL_VISUAL_CARD", "SEMANTIC_ICON_CARD", "OBJECT_2D"}
+            and bool(clip.get("visual_fallback_icon_resolved") or final_contract_clip.get("visual_fallback_icon_resolved") or _vf_plan.get("visual_fallback_icon_resolved"))
+        )
+        _object_filename_rendered = _clip_filename_for_object.startswith("object2d_") or "_object2d_" in _clip_filename_for_object
         for _vf_key, _vf_default in (
             ("visual_fallback_planned", False),
             ("visual_fallback_rendered", False),
@@ -786,10 +804,62 @@ def build_vpi_output_manifest(
             ("editorial_sfx_priority", 0),
             ("editorial_sfx_collision_reason", ""),
             ("editorial_sfx_confidence", 0.0),
+            # OUTPUT-VISUALS-40B: live semantic 2D object contract.
+            ("object_2d", {}),
+            ("object_2d_selected", False),
+            ("object_2d_render_applied", False),
+            ("object_2d_visible_verified", False),
+            ("object_2d_verification_status", "none"),
+            ("object_2d_asset", ""),
+            ("object_2d_intent", ""),
+            ("object_2d_start_s", 0.0),
+            ("object_2d_end_s", 0.0),
+            ("object_2d_phrase", ""),
+            ("object_2d_position", ""),
+            ("object_2d_card_width", 0),
+            ("object_2d_semantic_score", 0.0),
+            ("object_2d_threshold", 0.0),
+            ("object_2d_repetition_blocked", False),
+            ("object_2d_replacement_asset", ""),
+            ("daily_2d_object_override", False),
+            ("daily_2d_object_override_reason", ""),
         ):
             _vf_value = clip.get(_vf_key)
             if _vf_value is None:
                 _vf_value = _vf_plan.get(_vf_key, _vf_default)
+            if _vf_key.startswith("object_2d") or _vf_key.startswith("daily_2d"):
+                if (_vf_value is None or _vf_value == _vf_default) and _vf_key in _object_edit_plan:
+                    _vf_value = _object_edit_plan.get(_vf_key, _vf_default)
+                if (_vf_value is None or _vf_value == _vf_default) and _vf_key in _object_contract_plan:
+                    _vf_value = _object_contract_plan.get(_vf_key, _vf_default)
+                if _vf_value is None or _vf_value == _vf_default:
+                    if _vf_key == "object_2d_selected" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = True
+                    elif _vf_key == "object_2d_render_applied" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = True
+                    elif _vf_key == "object_2d_visible_verified" and _visual_fallback_looks_like_object:
+                        _vf_value = bool(clip.get("visual_fallback_icon_visibility_probe") or final_contract_clip.get("visual_fallback_icon_visibility_probe") or _vf_plan.get("visual_fallback_icon_visibility_probe"))
+                    elif _vf_key == "object_2d_verification_status" and _visual_fallback_looks_like_object:
+                        _vf_value = "verified" if bool(clip_entry.get("object_2d_visible_verified")) else "deferred"
+                    elif _vf_key == "object_2d_asset" and _visual_fallback_looks_like_object:
+                        _vf_value = str(clip.get("visual_fallback_icon_resolved") or final_contract_clip.get("visual_fallback_icon_resolved") or _vf_plan.get("visual_fallback_icon_resolved") or clip.get("visual_fallback_icon") or final_contract_clip.get("visual_fallback_icon") or _vf_plan.get("visual_fallback_icon") or "")
+                    elif _vf_key == "object_2d_intent" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = str(clip.get("visual_fallback_intent") or final_contract_clip.get("visual_fallback_intent") or _vf_plan.get("visual_fallback_intent") or clip.get("campaign_intent") or campaign_meta.get("campaign_intent") or "")
+                    elif _vf_key == "object_2d_start_s" and _visual_fallback_looks_like_object:
+                        _vf_value = float(clip.get("visual_fallback_start_s") or final_contract_clip.get("visual_fallback_start_s") or _vf_plan.get("visual_fallback_start_s") or 0.0)
+                    elif _vf_key == "object_2d_end_s" and _visual_fallback_looks_like_object:
+                        _vf_value = float(clip.get("visual_fallback_end_s") or final_contract_clip.get("visual_fallback_end_s") or _vf_plan.get("visual_fallback_end_s") or 0.0)
+                    elif _vf_key == "object_2d_position" and _visual_fallback_looks_like_object:
+                        _vf_value = str(clip.get("visual_fallback_icon_position") or final_contract_clip.get("visual_fallback_icon_position") or _vf_plan.get("visual_fallback_icon_position") or "")
+                    elif _vf_key == "object_2d" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = {
+                            "object_2d_render_applied": True,
+                            "object_2d_source": "visual_fallback_metadata" if _visual_fallback_looks_like_object else "object2d_filename_physical_evidence",
+                        }
+                    elif _vf_key == "daily_2d_object_override" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = True
+                    elif _vf_key == "daily_2d_object_override_reason" and (_visual_fallback_looks_like_object or _object_filename_rendered):
+                        _vf_value = "manifest_rehydrated_from_visual_support"
             clip_entry[_vf_key] = _vf_value
         clips.append(_json_safe(clip_entry))
 

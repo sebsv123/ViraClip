@@ -52,8 +52,39 @@ def _asset_root() -> Path:
     return Path(os.environ.get("LOCAL_BROLL_ASSET_DIR", _DEFAULT_ASSET_DIR))
 
 
+# OUTPUT-AUDIO-BROLL-51B: in production the asset dir (/app/assets) is bind-mounted
+# READ-ONLY, so every record_use().save() failed with "[Errno 30] Read-only file
+# system" and the cross-task memory was frozen — which is the real reason the same
+# B-roll (family_relief_pexels_001) was re-selected in every task: no task could ever
+# record a use, so recency penalties never accumulated. When the canonical dir is not
+# writable we fall back to a writable, host-persistent location (under /app/outputs)
+# and seed it from the canonical read-only file so existing history carries over.
+_FALLBACK_MEMORY_DIR = os.environ.get("BROLL_ASSET_MEMORY_FALLBACK_DIR", "/app/outputs/asset_memory")
+
+
+def _dir_is_writable(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        probe = directory / ".write_probe"
+        probe.write_text("x", encoding="utf-8")
+        probe.unlink()
+        return True
+    except Exception:
+        return False
+
+
+def _canonical_memory_path() -> Path:
+    return _asset_root() / _MEMORY_FILENAME
+
+
 def default_memory_path() -> Path:
-    return Path(os.environ.get("BROLL_ASSET_MEMORY_PATH", str(_asset_root() / _MEMORY_FILENAME)))
+    env = os.environ.get("BROLL_ASSET_MEMORY_PATH")
+    if env:
+        return Path(env)
+    canonical = _canonical_memory_path()
+    if _dir_is_writable(canonical.parent):
+        return canonical
+    return Path(_FALLBACK_MEMORY_DIR) / _MEMORY_FILENAME
 
 
 def _now_iso() -> str:
@@ -122,6 +153,25 @@ class AssetUsageMemory:
 
     def _load(self) -> Dict[str, Any]:
         if not self.path.exists():
+            # OUTPUT-AUDIO-BROLL-51B: when running off the writable fallback path, seed
+            # from the canonical (possibly read-only) memory file so prior cross-task
+            # history is preserved on the first persisted write.
+            seed = _canonical_memory_path()
+            if seed != self.path and seed.exists():
+                try:
+                    data = json.loads(seed.read_text(encoding="utf-8"))
+                    if isinstance(data, dict):
+                        data.setdefault("records", {})
+                        data.setdefault("fingerprints", {})
+                        data.setdefault("quality_flags", {})
+                        data.setdefault("recent", [])
+                        logger.info(
+                            "[asset-memory] seeded records=%d from canonical=%s path=%s",
+                            len(data.get("records", {})), seed, self.path,
+                        )
+                        return data
+                except Exception as exc:
+                    logger.warning("[asset-memory] seed failed from=%s error=%s", seed, exc)
             logger.info("[asset-memory] loaded records=0 path=%s", self.path)
             return self._empty()
         try:
